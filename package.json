@@ -1,6 +1,6 @@
 {
   "name": "hyperpanes",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A terminal workspace: one window of tiled, labeled, color-framed terminal panes.",
   "author": "",
   "license": "MIT",
@@ -37,13 +37,20 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/uuid": "^10.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
-    "electron-vite": "^2.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^42.3.3",
+    "electron-builder": "^26.8.1",
+    "electron-vite": "^5.0.0",
     "png-to-ico": "^3.0.1",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "vite": "^7.3.5",
+    "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "@electron/asar": "^4.2.0",
+    "@electron/get": "^5.0.0",
+    "temp": {
+      "rimraf": "^6.0.0"
+    }
   }
 }
