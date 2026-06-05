@@ -13,7 +13,7 @@
     "test": "vitest run",
     "make:icon": "node scripts/make-icon.mjs",
     "make:repo-assets": "node scripts/make-repo-assets.mjs",
-    "pack:win": "electron-vite build && electron-builder --win nsis",
+    "pack:win": "electron-vite build && electron-builder --win nsis --publish never",
     "bench": "node bench/run.mjs",
     "bench:detect": "node bench/detect.mjs"
   },
