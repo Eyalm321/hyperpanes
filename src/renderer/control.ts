@@ -29,6 +29,9 @@ export function buildControlPayload(groups: Group[], activeId: string): ControlW
         id: p.id,
         sessionUid: p.sessionUid,
         label: p.label,
+        // Surface subtitle so /state can read back what rename_pane set (it
+        // applies live + reports it, but was previously absent from the payload).
+        ...(p.subtitle ? { subtitle: p.subtitle } : {}),
         color: p.color,
         command: p.command,
         cwd: p.cwd,
@@ -96,7 +99,15 @@ export function applyControlCommand(cmd: ControlCommand): unknown {
     case 'setMeta': {
       const patch = metaPatch(cmd.meta);
       if (paneId && patch) ws.setPaneMeta(paneId, patch);
-      break;
+      // Echo the TRUE merged meta straight from the store as the command result
+      // (mirrors newPane → id, D). The bridge must NOT re-read /state to learn the
+      // merge: that read races the renderer's debounced control-publish and returns
+      // a pre-merge snapshot (the #7 echo race). `ws` was captured before the
+      // mutation, so re-read fresh state. {} (not undefined) for a fully-cleared
+      // pane so the echo is always an object; undefined only if the pane is gone.
+      if (!paneId) break;
+      const pane = useWorkspace.getState().groups.flatMap((g) => g.panes).find((p) => p.id === paneId);
+      return pane ? (pane.meta ?? {}) : undefined;
     }
     case 'newPane': {
       const pane = (cmd.pane ?? {}) as Record<string, unknown>;

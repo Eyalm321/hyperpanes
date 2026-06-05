@@ -17,10 +17,64 @@ recursive **CEO → manager → workers** tree. This builds on the control API (
 - **Phase C** — clean output (G: `?strip=1`), advisory write lock (H: `POST/DELETE
   /panes/:id/lock` gating `send_input`).
 
-The live socket round-trip (app running + control enabled + MCP connected) is still
-**unverified** — everything is static + unit-tested only. The meaningful end-to-end smoke:
-spawn a pane, watch its `activity` flip to `idle`, read its `meta`; then mint a scoped token,
-launch a scoped child via `open_pane` env, and exchange messages parent↔child.
+**Live socket round-trip — SMOKE-VERIFIED 2026-06-05** (first time over a real socket).
+Driven against the packaged build (`Hyperpanes.exe` v0.1.2; control on loopback;
+`control-settings.json = {enabled:true, allowInput:true}`) with the MCP bridge running *inside*
+a pane — so `whoami` self-identification was exercised with **real injected env, not a
+simulation** (it correctly reported its own paneId from `HYPERPANES_PANE_ID`). All three layers
+(raw HTTP/WS · MCP tools · orchestration) passed, and all five prior-flagged risk predictions
+were confirmed:
+- **D · `open_pane`→paneId (fix #2):** the `/command` round-trip returns the new paneId both raw
+  (`{ok, result}`) and via MCP `open_pane` (a real id, never `undefined`).
+- **B · activity (fix #1):** `activity` frames fire on `/events` in BOTH directions (busy↔idle),
+  per-pane, on the flip (idle threshold = `idleAlertSeconds`, default 10s); the flip reaches
+  `list_panes`. The bridge→client `resources/list_changed` notification is the only async hop
+  not observable from a tool-call harness; its functional effect (refetch shows new activity)
+  holds.
+- **F · scoping:** a scoped token's `/state` is filtered to its subtree (1 pane vs 8),
+  out-of-scope command → 403, escalation mint → 403, narrower sub-mint → ok, and a scoped
+  `/events` stream received ZERO sibling frames (no leak).
+- **Scoped-token env suppression:** a child spawned with `HYPERPANES_CONTROL_TOKEN` in env gets
+  `PANE_ID` + `CONTROL_TOKEN` + `CONTROL_PORT` but NOT `HYPERPANES_CONTROL_FILE` — it cannot
+  read the master token. Scoping is meaningful end-to-end.
+- **E · messaging:** durable inbox, monotonic `seq`, cursor reads (`after=`) return only newer.
+- **G · strip / H · lock:** `?strip=1` returns clean text; an advisory lock refuses a non-owner
+  `send_input` ("locked by <owner>"), allows the owner, releases on unlock.
+
+**One real bug found (live-only — units didn't catch it) — FIXED 2026-06-05:** `set_meta`'s
+read-back echo was **racy**. The bridge re-read `/state` immediately after the `setMeta` command,
+which raced the renderer's *debounced* control-publish, so the echo returned the **pre-merge**
+snapshot (missing the just-set keys) — the merge itself was correct (the keys appeared in `/state`
+a few hundred ms later). This violated fix #7's "echo the TRUE merged meta" promise under normal
+timing. **Fix (mirrors `newPane` → id, D/fix #2):** `applyControlCommand`'s `case 'setMeta'` now
+returns the merged meta straight from the store as the command result; MCP `set_meta` echoes
+`res.result` instead of re-reading `/state` (also drops an HTTP round-trip). Regression tests
+added on the app side (`control.test.ts`: merged-keys echo, `{}` on full-clear, `undefined` for a
+missing pane). The user-facing tool description is unchanged (it still returns the TRUE merged meta).
+
+Minor live findings — both FIXED 2026-06-05:
+- `/state` didn't surface `subtitle` though `rename_pane` reports it. **Fix:** `subtitle` added to
+  `ControlPaneInfo`/`buildControlPayload` (app) and `ControlPane`/`list_panes` (MCP), omitted when
+  unset; test added.
+- `send_input` with a bare `\n` did **not** submit on cmd.exe/conpty (needs `\r`). **Fix:** the
+  control-server input handler normalizes newlines to CR on Windows via `submitNewlines`
+  (`control-input.ts`, pure + unit-tested), so `\n` now submits on both platforms; the tool doc's
+  "append \n/\r" is accurate again.
+
+Still open (by-design heuristic, already under Risks): **spawning a pane re-tiles the layout,
+resizing every pty → repaint output → all idle siblings briefly read `busy` for ~10s** — a
+manager watching `activity` right after spawning a worker can be transiently misled.
+
+**Fixes verified on the LOCAL build 2026-06-05** (isolated `electron out/main/index.js
+--user-data-dir=…` alongside the packaged app; fresh local MCP `dist`). `set_meta` now returns
+the TRUE merged meta **synchronously** as the `setMeta` command `result` (raw `/command` and
+through the rebuilt MCP `set_meta`, incl. `null`-delete) — no `/state`-re-read race; `/state` +
+`list_panes` surface `subtitle`; a bare `\n` submits on cmd.exe (newline normalized to CR). Also
+ran a **real Claude agent in a pane** wired to the local MCP: it `whoami`'d its own paneId,
+`read_messages` from its inbox, and `send_to_parent` a structured report that landed in the
+parent's inbox — the full manager↔worker loop on local code. (The agent's `-p` TUI restored the
+alternate screen on exit, wiping the pane scrollback — a textbook case of why the structured
+message bus beats output scraping.)
 
 **Design decisions taken during the B/C build** (the plan's open questions, resolved):
 - *Message delivery* → **durable per-pane inbox, at-least-once, monotonic-seq cursor reads +

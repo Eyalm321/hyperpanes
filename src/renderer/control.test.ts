@@ -60,6 +60,16 @@ describe('buildControlPayload', () => {
     expect(payload.tabs[0].panes[0].meta).toEqual({ role: 'ceo' });
     expect('meta' in payload.tabs[0].panes[1]).toBe(false);
   });
+
+  it('surfaces pane subtitle, omitting the key when unset', () => {
+    reset();
+    const target = activeGroup(useWorkspace.getState()).panes[0];
+    useWorkspace.getState().renamePane(target.id, 'api', 'feature/x');
+    const s = useWorkspace.getState();
+    const payload = buildControlPayload(s.groups, s.activeId);
+    expect(payload.tabs[0].panes[0].subtitle).toBe('feature/x');
+    expect('subtitle' in payload.tabs[0].panes[1]).toBe(false);
+  });
 });
 
 describe('applyControlCommand', () => {
@@ -157,6 +167,33 @@ describe('applyControlCommand', () => {
     const after = activeGroup(useWorkspace.getState()).panes.find((p) => p.id === target.id)!;
     // A fully-cleared pane matches a never-set one (no `meta`).
     expect(after.meta).toBeUndefined();
+  });
+
+  it('setMeta returns the TRUE merged meta as the command result, incl. just-set keys (#7 echo race)', () => {
+    reset();
+    const target = activeGroup(useWorkspace.getState()).panes[0];
+    // Seed spawn-time meta, then patch it. The bridge echoes this return value
+    // instead of re-reading /state, so the merge must be reflected synchronously.
+    applyControlCommand({ type: 'setMeta', paneId: target.id, meta: { role: 'worker', task: 'layer1' } });
+    const result = applyControlCommand({
+      type: 'setMeta',
+      paneId: target.id,
+      meta: { status: 'active', task: 'layer2' }
+    });
+    expect(result).toEqual({ role: 'worker', status: 'active', task: 'layer2' });
+  });
+
+  it('setMeta returns {} once the last key is cleared, and undefined for a missing pane (#7)', () => {
+    reset();
+    const target = activeGroup(useWorkspace.getState()).panes[0];
+    applyControlCommand({ type: 'setMeta', paneId: target.id, meta: { role: 'worker' } });
+    const cleared = applyControlCommand({
+      type: 'setMeta',
+      paneId: target.id,
+      meta: { role: null } as unknown as Record<string, string>
+    });
+    expect(cleared).toEqual({});
+    expect(applyControlCommand({ type: 'setMeta', paneId: 'nope', meta: { a: 'b' } })).toBeUndefined();
   });
 
   it('ignores unknown command types', () => {

@@ -8,6 +8,7 @@ import { app } from 'electron';
 import { MessageInbox } from './control-inbox';
 import { PaneLocks } from './control-lock';
 import { stripAnsi } from './ansi-strip';
+import { submitNewlines } from './control-input';
 import {
   paneInScope,
   windowInScope,
@@ -520,7 +521,8 @@ export class ControlServer {
           const owner = typeof body?.owner === 'string' ? body.owner : null;
           const holder = this.locks.holder(paneId, Date.now());
           if (holder && holder !== owner) return send(423, { error: 'pane locked', owner: holder });
-          this.deps.sendInput(found.pane.sessionUid, data);
+          // On Windows conpty a bare "\n" types but doesn't submit; normalize to CR.
+          this.deps.sendInput(found.pane.sessionUid, submitNewlines(data));
           send(200, { ok: true });
         });
       }
