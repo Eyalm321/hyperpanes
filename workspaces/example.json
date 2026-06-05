@@ -1,0 +1,10 @@
+{
+  "name": "demo",
+  "layout": "main-stack",
+  "panes": [
+    { "label": "shell", "color": "#3b82f6" },
+    { "label": "watch", "color": "#f5a623", "command": "ping -t 127.0.0.1" },
+    { "label": "sysinfo", "color": "#30a46c", "command": "echo %USERNAME%@%COMPUTERNAME% && ver" },
+    { "label": "files", "color": "#a855f7", "command": "dir" }
+  ]
+}
