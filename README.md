@@ -4,7 +4,7 @@
 
 <h1 align="center">Hyperpanes</h1>
 
-> **Tiling terminal panes — named, color‑framed, tabbed, and tear‑off‑able — in one frameless window.**
+> **An agent‑first tiling terminal workspace — name, color‑frame, and tear off panes into windows, then watch and drive your AI agents from one frameless app.**
 
 <!-- Add a screenshot or GIF: drop the file at docs/screenshot.png and replace the block below with
      ![Hyperpanes](docs/screenshot.png) — a tiled, multi-pane layout shows the app off best. -->
@@ -20,12 +20,25 @@ It's tmux's power (tiling, zoom) on a modern GPU renderer (xterm.js + real shell
 first‑class named, color‑framed, command‑driven panes and a browser‑like tab/window model. Frameless,
 with its window controls built into an icon‑only top bar.
 
+And it's **agent‑first**: AI panes glow when their agent goes quiet, and an opt‑in **Control API /
+MCP** lets an agent — or a whole recursive agent org — watch and drive your panes (see
+[Agents & the Control API](#agents--the-control-api-mcp)).
+
 > [!NOTE]
 > **Status: early days (v0.1.1).** Every feature documented below is implemented; some of the newer
 > window/drag features have been verified statically and still want a thorough manual pass. Expect
 > rough edges, and please file issues.
 
 ## Features
+
+### Agents & automation
+- **Idle‑agent glow** — panes running an agent CLI (claude, aider, codex, gemini, …) pulse when the
+  agent goes quiet at its prompt, so you can see at a glance which one is waiting on you (effect
+  styles under [Appearance](#customization-preferences)).
+- **Control API (MCP)** — an opt‑in loopback HTTP/WebSocket API that lets an agent or a companion
+  MCP server read pane structure & output, stream activity/exit events, exchange messages between
+  panes, and (after a second opt‑in) drive panes. Off by default, token‑authenticated, with
+  capability‑scoped sub‑tokens. See [Agents & the Control API](#agents--the-control-api-mcp).
 
 ### Panes
 - **Tiled panes** that stay mounted — switching layouts only restyles, so shells and scrollback
@@ -86,12 +99,6 @@ with its window controls built into an icon‑only top bar.
   next launch.
 - **CLI launch** — open a `.json`, or describe panes inline with `-c`/`--label`/`--color`/… (see
   below).
-
-### Agents & automation
-- **Control API (MCP)** — an opt‑in loopback HTTP/WebSocket API that lets an agent or a companion
-  MCP server read pane structure & output, stream activity/exit events, exchange messages between
-  panes, and (after a second opt‑in) drive panes. Off by default, token‑authenticated, with
-  capability‑scoped sub‑tokens. See [Agents & the Control API](#agents--the-control-api-mcp).
 
 ### Customization (Preferences)
 - **Keybindings** — every shortcut is rebindable with live conflict detection and per‑key / reset‑all.
