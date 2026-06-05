@@ -1,11 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
 
 // session.ts pulls in electron + the native node-pty at import time; stub both so
 // the pure spawn-target logic (buildArgs / resolveSpawn) runs under plain Node.
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp' } }));
 vi.mock('node-pty', () => ({ spawn: vi.fn() }));
 
-import { buildArgs, resolveSpawn } from './session';
+import { buildArgs, resolveSpawn, resolveWindowsCommand } from './session';
 
 describe('buildArgs', () => {
   it('wraps a command for PowerShell / pwsh', () => {
@@ -26,6 +27,18 @@ describe('buildArgs', () => {
 });
 
 describe('resolveSpawn (P4a)', () => {
+  let statSyncSpy: any;
+
+  beforeEach(() => {
+    statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+  });
+
+  afterEach(() => {
+    statSyncSpy.mockRestore();
+  });
+
   it('with command + non-empty args, spawns the command DIRECTLY — no shell, verbatim argv', () => {
     expect(
       resolveSpawn('powershell.exe', 'claude', ['--append-system-prompt', 'be a pirate, matey'])
@@ -57,5 +70,76 @@ describe('resolveSpawn (P4a)', () => {
   it('with no command, spawns the interactive shell (args, if any, go to the shell)', () => {
     expect(resolveSpawn('pwsh')).toEqual({ file: 'pwsh', args: [] });
     expect(resolveSpawn('/bin/bash', undefined, ['-l'])).toEqual({ file: '/bin/bash', args: ['-l'] });
+  });
+});
+
+describe('resolveWindowsCommand', () => {
+  let statSyncSpy: any;
+
+  beforeEach(() => {
+    statSyncSpy = vi.spyOn(fs, 'statSync');
+  });
+
+  afterEach(() => {
+    statSyncSpy.mockRestore();
+  });
+
+  it('resolves absolute path exactly if it exists', () => {
+    const target = 'C:\\Program Files\\MyTool\\tool.exe';
+    statSyncSpy.mockImplementation((p: any) => {
+      if (p === target) {
+        return { isFile: () => true } as any;
+      }
+      throw new Error('ENOENT');
+    });
+
+    expect(resolveWindowsCommand(target, 'C:\\', {})).toBe(target);
+  });
+
+  it('resolves relative path with extension in cwd', () => {
+    const cwd = 'C:\\myproj';
+    const target = '.\\bin\\tool';
+    const expected = 'C:\\myproj\\bin\\tool.exe';
+    statSyncSpy.mockImplementation((p: any) => {
+      if (p === expected) {
+        return { isFile: () => true } as any;
+      }
+      throw new Error('ENOENT');
+    });
+
+    expect(resolveWindowsCommand(target, cwd, { PATHEXT: '.EXE;.CMD' })).toBe(expected);
+  });
+
+  it('searches cwd first then PATH', () => {
+    const cwd = 'C:\\myproj';
+    const env = {
+      PATH: 'C:\\bin;C:\\Windows\\system32',
+      PATHEXT: '.EXE;.CMD'
+    };
+
+    // Case 1: exists in cwd
+    statSyncSpy.mockImplementation((p: any) => {
+      if (p === 'C:\\myproj\\tool.cmd') {
+        return { isFile: () => true } as any;
+      }
+      throw new Error('ENOENT');
+    });
+    expect(resolveWindowsCommand('tool', cwd, env)).toBe('C:\\myproj\\tool.cmd');
+
+    // Case 2: exists in PATH (C:\Windows\system32)
+    statSyncSpy.mockImplementation((p: any) => {
+      if (p === 'C:\\Windows\\system32\\tool.exe') {
+        return { isFile: () => true } as any;
+      }
+      throw new Error('ENOENT');
+    });
+    expect(resolveWindowsCommand('tool', cwd, env)).toBe('C:\\Windows\\system32\\tool.exe');
+  });
+
+  it('falls back to verbatim command if not found', () => {
+    statSyncSpy.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+    expect(resolveWindowsCommand('unknowncmd', 'C:\\', { PATH: 'C:\\bin' })).toBe('unknowncmd');
   });
 });
