@@ -114,3 +114,71 @@ describe('detectAwaitingInput', () => {
     expect(detectAwaitingInput('\n\n   \n')).toBe(false);
   });
 });
+
+// P4b — regression fixtures over REALISTIC rendered screens (the kind a
+// mode:"screen" read produces). The gold test only ever exercised the `false`
+// (idle/working) path because the cwd auto-trusted at boot, so the positive
+// (blocked-on-a-decision) path went unverified live. These lock in both sides and
+// the intended semantics: `awaitingInput` means "blocked on a decision a human
+// must answer", NOT merely "idle at a prompt box".
+describe('detectAwaitingInput — realistic rendered-screen fixtures (P4b)', () => {
+  // The first-run trust dialog — the canonical blocking prompt. Its footer line
+  // ("Enter to confirm …") is the last non-empty line.
+  const TRUST_DIALOG = [
+    '╭──────────────────────────────────────────────────────────╮',
+    '│ Do you trust the files in this folder?                     │',
+    '│                                                            │',
+    '│ C:\\hyperpanes                                              │',
+    '│                                                            │',
+    '│ ❯ 1. Yes, proceed                                          │',
+    '│   2. No, exit                                              │',
+    '│                                                            │',
+    '╰──────────────────────────────────────────────────────────╯',
+    '   Enter to confirm · Esc to exit',
+    ''
+  ].join('\n');
+
+  // An idle claude session: an empty input box (with the ❯ caret INSIDE it) and a
+  // status hint as the last visible line. The ❯ is not the last non-empty line, so
+  // — correctly — this does NOT read as blocked.
+  const IDLE_PROMPT = [
+    '╭──────────────────────────────────────────────────────────╮',
+    '│ ❯ Try "edit src/main/session.ts"                           │',
+    '╰──────────────────────────────────────────────────────────╯',
+    '  ⏵⏵ accept edits on (shift+tab to cycle)',
+    ''
+  ].join('\n');
+
+  // Mid-turn: the agent is actively working (spinner + token counter). Not blocked.
+  const WORKING = [
+    '● Reading session.ts…',
+    '  ⎿ 173 lines',
+    '',
+    '✶ Crafting response… (12s · ↑ 2.1k tokens)',
+    ''
+  ].join('\n');
+
+  // A selection menu whose last visible line IS the cursored option (no footer):
+  // a genuine "blocked on a decision" state the ❯ caret is meant to catch.
+  const MENU_TAIL = ['Select a model:', '  1. Opus', '❯ 2. Sonnet'].join('\n');
+
+  it('flags the blocking trust dialog (the previously-unverified positive path)', () => {
+    expect(detectAwaitingInput(TRUST_DIALOG)).toBe(true);
+  });
+
+  it('flags a cursored menu selection awaiting a choice', () => {
+    expect(detectAwaitingInput(MENU_TAIL)).toBe(true);
+  });
+
+  it('flags an inline confirm at the bottom of a transcript', () => {
+    expect(detectAwaitingInput('Applied 3 edits across 2 files.\nRun the tests now? (y/n)')).toBe(true);
+  });
+
+  it('does NOT flag the idle prompt box — idle is not "blocked on a decision"', () => {
+    expect(detectAwaitingInput(IDLE_PROMPT)).toBe(false);
+  });
+
+  it('does NOT flag an agent that is mid-turn / working', () => {
+    expect(detectAwaitingInput(WORKING)).toBe(false);
+  });
+});

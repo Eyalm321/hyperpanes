@@ -70,6 +70,20 @@ describe('buildControlPayload', () => {
     expect(payload.tabs[0].panes[0].subtitle).toBe('feature/x');
     expect('subtitle' in payload.tabs[0].panes[1]).toBe(false);
   });
+
+  it('surfaces a pane\'s direct-spawn args, omitting the key when unset (P4a)', () => {
+    reset();
+    const id = applyControlCommand({
+      type: 'newPane',
+      pane: { label: 'persona', command: 'claude', args: ['--model', 'opus'] }
+    });
+    const s = useWorkspace.getState();
+    const payload = buildControlPayload(s.groups, s.activeId);
+    const withArgs = payload.tabs[0].panes.find((p) => p.id === id)!;
+    expect(withArgs.args).toEqual(['--model', 'opus']);
+    // The seeded panes were opened without args → no `args` key at all.
+    expect('args' in payload.tabs[0].panes[0]).toBe(false);
+  });
 });
 
 describe('applyControlCommand', () => {
@@ -117,6 +131,35 @@ describe('applyControlCommand', () => {
     expect(created).toBeDefined();
     expect(created.label).toBe('worker');
     expect(created.meta).toEqual({ role: 'worker', parent: 'p0' });
+  });
+
+  it('newPane carries a direct-spawn args array verbatim (P4a)', () => {
+    reset();
+    const id = applyControlCommand({
+      type: 'newPane',
+      pane: { label: 'persona', command: 'claude', args: ['--append-system-prompt', 'be a pirate, matey'] }
+    });
+    const created = activeGroup(useWorkspace.getState()).panes.find((p) => p.id === id)!;
+    expect(created.command).toBe('claude');
+    expect(created.args).toEqual(['--append-system-prompt', 'be a pirate, matey']);
+  });
+
+  it('newPane coerces args: drops non-string entries, omits an empty result (P4a)', () => {
+    reset();
+    const id = applyControlCommand({
+      type: 'newPane',
+      pane: { label: 'w', command: 'tool', args: ['--flag', 7, null, 'value'] as unknown as string[] }
+    });
+    const withArgs = activeGroup(useWorkspace.getState()).panes.find((p) => p.id === id)!;
+    expect(withArgs.args).toEqual(['--flag', 'value']);
+
+    // A non-array (or all-dropped) args yields no args at all.
+    const id2 = applyControlCommand({
+      type: 'newPane',
+      pane: { label: 'w2', command: 'tool', args: 'nope' as unknown as string[] }
+    });
+    const noArgs = activeGroup(useWorkspace.getState()).panes.find((p) => p.id === id2)!;
+    expect(noArgs.args).toBeUndefined();
   });
 
   it('setMeta shallow-merges metadata (new keys win, untouched keys kept)', () => {

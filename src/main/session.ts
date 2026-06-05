@@ -48,6 +48,12 @@ class DataBatcher extends EventEmitter {
 export interface SpawnOptions {
   uid: string;
   shell?: string;
+  // The program's literal argv. Its meaning depends on `command` (see resolveSpawn,
+  // interactive-pane-driving plan P4a):
+  //   • with `command` → run `command` DIRECTLY as the executable with these args,
+  //     bypassing the shell (no re-parse) — the robust path for args containing
+  //     spaces/quotes a shell would mangle;
+  //   • without `command` → bare args handed to the interactive shell.
   args?: string[];
   command?: string;
   cwd?: string;
@@ -68,7 +74,7 @@ export function defaultShell(): string {
 // real exit code flows back via pty.onExit (powers pane status + restart). The
 // invocation flag is keyed off the shell, not the platform, so a custom shell
 // (e.g. pwsh, or git-bash on Windows) is launched with the right switch.
-function buildArgs(shell: string, command?: string, baseArgs?: string[]): string[] {
+export function buildArgs(shell: string, command?: string, baseArgs?: string[]): string[] {
   if (!command) return baseArgs ?? [];
   const lower = shell.toLowerCase();
   // Check PowerShell first — 'powershell' also ends in 'sh', so the POSIX test
@@ -84,6 +90,27 @@ function buildArgs(shell: string, command?: string, baseArgs?: string[]): string
   return ['-c', command];
 }
 
+// Resolve the actual pty spawn target — the executable file and its argv — from a
+// pane's shell/command/args (interactive-pane-driving plan P4a). Three shapes:
+//   • `command` + a non-empty `args` → spawn `command` DIRECTLY with `args` as its
+//     verbatim argv: NO shell, NO re-parse. node-pty applies the correct
+//     per-platform quoting to each arg, so a value containing spaces or quotes
+//     (e.g. `--append-system-prompt "…long persona…"`) survives intact instead of
+//     being re-split by cmd.exe (the P4a bug). The caller owns making `command`
+//     spawnable as-is (an absolute path, or a name the OS launches directly).
+//   • `command` alone → run it through the shell (`shell -c "command"` etc.) so the
+//     exit code + shell features (pipes, &&) work, exactly as before.
+//   • no `command` → an interactive shell, with any `args` handed to it verbatim.
+// Pure (string-only), so it's unit-tested without spawning anything.
+export function resolveSpawn(
+  shell: string,
+  command?: string,
+  args?: string[]
+): { file: string; args: string[] } {
+  if (command && args && args.length > 0) return { file: command, args };
+  return { file: shell, args: buildArgs(shell, command, args) };
+}
+
 export class Session extends EventEmitter {
   readonly uid: string;
   private pty: IPty | null = null;
@@ -96,7 +123,9 @@ export class Session extends EventEmitter {
     this.uid = opts.uid;
 
     const shell = opts.shell || defaultShell();
-    const args = buildArgs(shell, opts.command, opts.args);
+    // file is the shell (command-via-shell / interactive), or the command itself
+    // when an explicit argv was given (direct spawn, no re-parse — P4a).
+    const { file, args } = resolveSpawn(shell, opts.command, opts.args);
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ...opts.env,
@@ -119,7 +148,7 @@ export class Session extends EventEmitter {
       env.HYPERPANES_CONTROL_FILE = join(app.getPath('userData'), 'control.json');
     }
 
-    this.pty = pty.spawn(shell, args, {
+    this.pty = pty.spawn(file, args, {
       name: 'xterm-256color',
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,

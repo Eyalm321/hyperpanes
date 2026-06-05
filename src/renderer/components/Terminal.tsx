@@ -32,6 +32,7 @@ interface TerminalProps {
   paneId: string;
   sessionUid: string;
   command?: string;
+  args?: string[]; // direct-spawn argv (with command): verbatim, no shell re-parse (P4a)
   cwd?: string;
   shell?: string; // pty shell override; falls back to the default-shell setting
   env?: Record<string, string>; // extra pty env (e.g. a scoped control token, agent-orchestration F)
@@ -48,7 +49,7 @@ interface TerminalProps {
   onInput?: (data: string) => void;
 }
 
-function TerminalImpl({ paneId, sessionUid, command, cwd, shell, env, focused, visible, onExit, onTitle, onInput }: TerminalProps) {
+function TerminalImpl({ paneId, sessionUid, command, args, cwd, shell, env, focused, visible, onExit, onTitle, onInput }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -373,6 +374,7 @@ function TerminalImpl({ paneId, sessionUid, command, cwd, shell, env, focused, v
         paneId, // injected into the pty env as HYPERPANES_PANE_ID (pane self-awareness)
         shell: effectiveShell,
         command,
+        args, // with command: a direct, no-shell spawn of `command` with this argv (P4a)
         cwd,
         env, // extra env (e.g. a scoped control token) injected into the pty (F)
         cols: term.cols,
@@ -419,13 +421,15 @@ function TerminalImpl({ paneId, sessionUid, command, cwd, shell, env, focused, v
       fitRef.current = null;
       searchRef.current = null;
     };
-    // Re-spawn the pty only when an identity/spawn field changes. `env` and
-    // `paneId` are intentionally omitted (#4): a live pty's env is fixed at spawn
-    // and can't change in place, and a pane MOVE is a full remount (props are read
-    // fresh), so there's no stale-capture to chase — adding them would only force
-    // a needless teardown+respawn (killing the shell) on an env change we can't
-    // actually apply. A moved pane therefore keeps its spawn-time scoped token.
-  }, [sessionUid, command, cwd, shell]);
+    // Re-spawn the pty only when an identity/spawn field changes. `args` is part
+    // of the spawn target (P4a), so a change respawns just like command/cwd/shell;
+    // a pane's `args` reference is stable across renders, so listing it can't churn.
+    // `env` and `paneId` are intentionally omitted (#4): a live pty's env is fixed
+    // at spawn and can't change in place, and a pane MOVE is a full remount (props
+    // are read fresh), so there's no stale-capture to chase — adding them would only
+    // force a needless teardown+respawn (killing the shell) on an env change we
+    // can't actually apply. A moved pane therefore keeps its spawn-time scoped token.
+  }, [sessionUid, command, args, cwd, shell]);
 
   useEffect(() => {
     if (focused) termRef.current?.focus();
@@ -531,12 +535,21 @@ function TerminalImpl({ paneId, sessionUid, command, cwd, shell, env, focused, v
   );
 }
 
+// Shallow argv equality — the direct-spawn `args` is a small string[] (P4a), so an
+// element-wise compare keeps a re-render (and possible respawn) keyed to a real change.
+function argsEqual(a?: string[], b?: string[]): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
+
 export const Terminal = memo(
   TerminalImpl,
   (a, b) =>
     a.paneId === b.paneId &&
     a.sessionUid === b.sessionUid &&
     a.command === b.command &&
+    argsEqual(a.args, b.args) &&
     a.cwd === b.cwd &&
     a.shell === b.shell &&
     a.focused === b.focused &&

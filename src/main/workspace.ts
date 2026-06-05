@@ -6,6 +6,7 @@ export interface PaneSpec {
   label?: string;
   color?: string;
   command?: string;
+  args?: string[]; // literal argv for a direct (no-shell) spawn with `command` (P4a)
   cwd?: string;
   shell?: string;
   fontSize?: number;

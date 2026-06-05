@@ -20,6 +20,7 @@ export interface SpawnOptions {
   paneId?: string; // forwarded to main; injected into the pty env as HYPERPANES_PANE_ID
   shell?: string;
   command?: string;
+  args?: string[]; // direct-spawn argv (with command): verbatim, no shell re-parse (P4a)
   cwd?: string;
   env?: Record<string, string>; // extra pty env (e.g. a scoped control token, agent-orchestration F)
   cols?: number;
@@ -31,6 +32,7 @@ type PaneSpec = {
   subtitle?: string;
   color?: string;
   command?: string;
+  args?: string[];
   cwd?: string;
   shell?: string;
   fontSize?: number;

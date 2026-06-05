@@ -47,6 +47,7 @@ export interface ControlPaneInfo {
   label: string;
   color: string;
   command?: string;
+  args?: string[]; // direct-spawn argv, if this pane was opened with one (P4a)
   cwd?: string;
   shell?: string;
   status: 'running' | 'exited';

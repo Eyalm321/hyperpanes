@@ -258,6 +258,7 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
             paneId={pane.id}
             sessionUid={pane.sessionUid}
             command={pane.command}
+            args={pane.args}
             cwd={pane.cwd}
             shell={pane.shell}
             env={pane.env}

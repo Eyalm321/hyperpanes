@@ -6,7 +6,8 @@ How to make the control API good at **driving and observing an interactive TUI a
 ([`agent-orchestration-plan.md`](agent-orchestration-plan.md)); the MCP that drives it lives at
 `C:\hyperpanes-mcp`.
 
-**Status (2026-06-05): BUILT (Phases 1–3).** Born from the first live interactive
+**Status (2026-06-05): BUILT (Phases 1–3, + Phase 4 follow-ups P4a/P4b — see the last
+section).** Born from the first live interactive
 conversation with a real `claude` agent running in a pane (orchestrator drove it via
 `send_input` + read-back). The chat worked end to end — the agent even used `whoami`/`list_panes`
 to be self-aware — but three rough edges showed up, plus a handful of smaller lessons. This doc
@@ -141,3 +142,35 @@ A second live chat with a pane-agent that needs **zero** PowerShell and **one** 
 (`prompt_pane`), with clean, readable transcripts (`mode:"screen"`), and the orchestrator
 correctly detecting a blocked prompt via `awaitingInput`. Both repos green
 (`typecheck && test && build`); MCP zod kept in lockstep.
+
+## Gold-test results & Phase 4 follow-ups (2026-06-05)
+
+Re-ran the live `claude`-in-a-pane chat on **app v0.1.4 + the new MCP**, driven entirely through
+the new primitives — **PASSED**: `prompt_pane` did each turn in one call; `read_pane({mode:
+"screen"})` round-tripped a box-drawing table, unicode/RTL/emoji, a code fence, and long lines
+(the exact content the raw scrape used to mangle); `read_pane({waitForIdle})` removed every
+PowerShell sleep; `send_input({submit:false})` + a bare `send_keys(["enter"])` submitted a line
+("key landed ✅"); `send_keys(["shift+tab"])` cycled the permission mode. Two gaps surfaced:
+
+- **P4a — `open_pane` arg quoting (real bug/limitation). BUILT.** A `command` with complex quoted
+  args (e.g. `claude --append-system-prompt "…long persona…"`) is **mangled**: the `command` string
+  is handed to the pane's shell (cmd.exe), which splits on spaces, so the flag value truncates and
+  stray tokens leak as positional args — in the gold test a stray `"are"` became claude's first
+  prompt and the persona never applied. **Fix (shipped):** an **`args?: string[]`** form. With
+  `command` set, a non-empty `args` runs `command` **directly** as the executable with that argv —
+  no shell, no re-parse — so values with spaces/quotes survive intact; `command` alone keeps the
+  shell path (back-compat). *App:* `resolveSpawn` pure core (`session.ts`, tested) chooses
+  file+argv; threaded through `PaneSpec`/`Pane`/`HpSpawnOptions`, `addPane`, `groupFromSpec`/
+  `specFromGroup` (round-trip), `Terminal.tsx` (prop + respawn dep + memo), the `newPane` control
+  command (`strArray`/`argvOf` coercion), and surfaced on `/state` + `buildControlPayload`. *MCP:*
+  `open_pane` schema + tool, `PaneSpecSchema`, `compile-cli` (flagged JSON-only/lossy), `list_panes`
+  display. The caller owns making `command` spawnable as-is (absolute path / a name the OS launches
+  directly), since there is no shell to resolve `.cmd`/PATHEXT shims.
+- **P4b — `awaitingInput:true` is unverified live. BUILT (regression fixtures).** The gold test
+  never hit a blocking y/n: the cwd **auto-trusted** at boot (no startup dialog) and tool calls
+  **auto-ran**, so only the `false` (idle/working) path was exercised. Added **deterministic
+  rendered-screen fixtures** to `control-output.test.ts` over the pure `detectAwaitingInput` core:
+  the real **trust dialog** (footer "Enter to confirm …") and a cursored **menu selection** →
+  `true` (the positive path, now locked in); the **idle `❯` prompt box** (caret inside the box, a
+  status hint as the last line) and a **mid-turn working** screen → `false`. Confirms the chosen
+  semantics: `awaitingInput` means "blocked on a decision", not "idle".

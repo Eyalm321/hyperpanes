@@ -121,6 +121,7 @@ export function specFromGroup(g: Group): GroupSpec {
       ...(p.subtitle ? { subtitle: p.subtitle } : {}),
       color: p.color,
       ...(p.command ? { command: p.command } : {}),
+      ...(p.args && p.args.length ? { args: p.args } : {}),
       ...(p.cwd ? { cwd: p.cwd } : {}),
       ...(p.shell ? { shell: p.shell } : {}),
       ...(p.fontSize ? { fontSize: p.fontSize } : {}),
@@ -169,6 +170,15 @@ function seededGroup(seq: number): Group {
 // safe and upholds the invariant (#5).
 const stripPaneEnv = ({ env: _env, ...pane }: Pane): Pane => pane;
 
+// Coerce a spec's direct-spawn args (P4a) into a clean string[] | undefined: specs
+// come from disk / an agent, so keep only string entries and drop an empty result.
+// Mirrors control.ts's strArray so both spawn paths validate identically.
+const argvOf = (v: unknown): string[] | undefined => {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.filter((x): x is string => typeof x === 'string');
+  return out.length ? out : undefined;
+};
+
 // Remove a pane from a group, fixing up sizes/focus/zoom (no session kill).
 function withoutPane(g: Group, paneId: string): Group {
   const index = g.panes.findIndex((p) => p.id === paneId);
@@ -199,6 +209,7 @@ function groupFromSpec(spec: GroupSpec, fallbackTitle: string): Group {
       // palette's current value for its slot; custom colors pass through.
       color: p.color ? remapColor(p.color, palette) : nextColor(seq - 1, palette),
       command: p.command || undefined,
+      args: argvOf(p.args), // direct-spawn argv (P4a), defensively coerced
       cwd: p.cwd || undefined,
       shell: p.shell || undefined,
       status: 'running' as const,
@@ -569,6 +580,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
             subtitle: partial?.subtitle,
             color: partial?.color ?? nextColor(seq - 1, useSettings.getState().framePalette),
             command: partial?.command,
+            args: partial?.args,
             cwd: partial?.cwd,
             shell: partial?.shell,
             status: 'running',

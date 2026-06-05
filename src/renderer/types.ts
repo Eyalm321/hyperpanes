@@ -10,6 +10,10 @@ export interface Pane {
   subtitle?: string; // optional secondary line shown under the label
   color: string; // frame color
   command?: string; // run via `shell -c`; absent = interactive shell
+  // Literal argv for a DIRECT spawn (no shell, no re-parse): with `command` set,
+  // runs `command` with exactly these args, so values containing spaces/quotes
+  // survive intact (interactive-pane-driving plan P4a). Absent = the shell path.
+  args?: string[];
   cwd?: string;
   shell?: string; // pty shell override (e.g. 'pwsh'); absent = the default shell
   status: 'running' | 'exited';
@@ -30,6 +34,7 @@ export interface PaneSpec {
   subtitle?: string;
   color?: string;
   command?: string;
+  args?: string[]; // literal argv for a direct (no-shell) spawn with `command` (P4a)
   cwd?: string;
   shell?: string;
   fontSize?: number;
@@ -96,6 +101,7 @@ export interface ControlPaneInfo {
   subtitle?: string; // secondary header line; omitted when unset (rename_pane sets it)
   color: string;
   command?: string;
+  args?: string[]; // direct-spawn argv, if this pane was opened with one (P4a)
   cwd?: string;
   shell?: string;
   status: 'running' | 'exited';

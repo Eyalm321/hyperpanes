@@ -35,6 +35,7 @@ export function buildControlPayload(groups: Group[], activeId: string): ControlW
         ...(p.subtitle ? { subtitle: p.subtitle } : {}),
         color: p.color,
         command: p.command,
+        ...(p.args && p.args.length ? { args: p.args } : {}),
         cwd: p.cwd,
         shell: p.shell,
         status: p.status,
@@ -47,6 +48,15 @@ export function buildControlPayload(groups: Group[], activeId: string): ControlW
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+
+// Coerce an untrusted value (from an agent over /command) into a non-empty
+// string[], dropping non-string entries; undefined for a non-array / empty result.
+// Used for a pane's direct-spawn argv (P4a) — same defensive posture as metaRecord.
+const strArray = (v: unknown): string[] | undefined => {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.filter((x): x is string => typeof x === 'string');
+  return out.length ? out : undefined;
+};
 
 // Coerce an untrusted value (from an agent over /command) into a string→string
 // map, dropping non-string values. Returns undefined for a non-object / empty
@@ -118,6 +128,8 @@ export function applyControlCommand(cmd: ControlCommand): unknown {
       return ws.addPane({
         label: str(pane.label),
         command: str(pane.command),
+        // Verbatim argv → a direct, no-shell spawn of `command` (P4a).
+        args: strArray(pane.args),
         cwd: str(pane.cwd),
         shell: str(pane.shell),
         color: str(pane.color),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeGroup, useWorkspace } from './useWorkspace';
+import { activeGroup, specFromGroup, useWorkspace } from './useWorkspace';
 import { PALETTES } from '../theme';
 
 const panes = () => activeGroup(useWorkspace.getState()).panes;
@@ -42,6 +42,61 @@ describe('useWorkspace pane subtitle', () => {
 
     useWorkspace.getState().renamePane(id, 'a4', '   '); // blank → clears
     expect(panes()[0].subtitle).toBeUndefined();
+  });
+});
+
+describe('useWorkspace pane args (direct-spawn argv, P4a)', () => {
+  it('addPane stores a direct-spawn args array', () => {
+    useWorkspace.getState().loadWorkspace({ panes: [{ label: 'seed' }] });
+    const id = useWorkspace.getState().addPane({
+      label: 'persona',
+      command: 'claude',
+      args: ['--append-system-prompt', 'be a pirate, matey']
+    });
+    const created = panes().find((p) => p.id === id)!;
+    expect(created.command).toBe('claude');
+    expect(created.args).toEqual(['--append-system-prompt', 'be a pirate, matey']);
+  });
+
+  it('round-trips args through specFromGroup → loadSession, dropping it when empty/absent', () => {
+    useWorkspace.getState().loadSession({
+      groups: [
+        {
+          title: 't',
+          layout: 'auto',
+          panes: [
+            { label: 'persona', command: 'claude', args: ['--model', 'opus'] },
+            { label: 'plain', command: 'top' } // no args
+          ]
+        }
+      ],
+      active: 0
+    });
+    const spec = specFromGroup(activeGroup(useWorkspace.getState()));
+    expect(spec.panes[0]).toMatchObject({ command: 'claude', args: ['--model', 'opus'] });
+    // A pane without args carries no `args` key (so saved files stay terse).
+    expect('args' in spec.panes[1]).toBe(false);
+  });
+
+  it('groupFromSpec validates args defensively: drops a non-array or non-string entries', () => {
+    useWorkspace.getState().loadSession({
+      groups: [
+        {
+          title: 't',
+          panes: [
+            { label: 'bad-type', command: 'x', args: 'nope' as unknown as string[] },
+            { label: 'mixed', command: 'y', args: ['--flag', 7 as unknown as string, 'value'] },
+            { label: 'empty', command: 'z', args: [] }
+          ]
+        }
+      ],
+      active: 0
+    });
+    const [badType, mixed, empty] = panes();
+    expect(badType.args).toBeUndefined();
+    // Non-string entries are filtered, the survivors kept in order.
+    expect(mixed.args).toEqual(['--flag', 'value']);
+    expect(empty.args).toBeUndefined();
   });
 });
 

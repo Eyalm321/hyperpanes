@@ -17,6 +17,7 @@ declare global {
     paneId?: string; // injected into the pty env as HYPERPANES_PANE_ID (pane self-awareness)
     shell?: string;
     command?: string;
+    args?: string[]; // direct-spawn argv (with command): verbatim, no shell re-parse (P4a)
     cwd?: string;
     env?: Record<string, string>; // extra pty env (e.g. a scoped control token, agent-orchestration F)
     cols?: number;
