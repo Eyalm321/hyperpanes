@@ -13,6 +13,8 @@ import { comboMatches } from '../keybindings';
 import { DEFAULT_FONT_FAMILY, TERMINAL_THEMES } from './terminal-themes';
 import { cellFromIndex, extractPathCandidates } from './pathLinks';
 import { incWebglContexts, decWebglContexts } from '../perf';
+import { serializeTerminal } from '../screen';
+import { paneScreens } from '../paneScreens';
 
 // An imperative handle onto a mounted pane terminal. The right-click menus live
 // outside the xterm host (on the pane header / taskbar), so they reach a pane's
@@ -117,6 +119,11 @@ function TerminalImpl({ paneId, sessionUid, command, cwd, shell, env, focused, v
 
     // Expose this terminal to the context menus (copy/paste/clear/search).
     paneTerminals.set(paneId, { term, openSearch: () => setSearchOpen(true) });
+    // Expose a clean-text serializer of this pane's buffer to the control bridge
+    // (read_pane mode:"screen"). The buffer stays faithful even on a hidden tab
+    // (output is written to term regardless of visibility), so screen reads work
+    // off-screen too. Unregistered on unmount below.
+    paneScreens.set(paneId, () => serializeTerminal(term));
 
     // GPU rendering, attached ONLY while the pane is on screen. Each WebGL renderer
     // is a real GPU context, and Chromium force-loses the oldest once a process
@@ -388,6 +395,7 @@ function TerminalImpl({ paneId, sessionUid, command, cwd, shell, env, focused, v
     return () => {
       disposed = true;
       paneTerminals.delete(paneId);
+      paneScreens.delete(paneId);
       useIdle.getState().forget(paneId);
       ro.disconnect();
       host.removeEventListener('wheel', onWheel, { capture: true } as EventListenerOptions);

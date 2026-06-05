@@ -1,5 +1,6 @@
 import { useWorkspace, type Group } from './store/useWorkspace';
 import { useIdle } from './store/useIdle';
+import { paneScreens } from './paneScreens';
 import type { ControlCommand, ControlWindowPayload } from './types';
 
 // Bridge between this window's store and the main-process control API (M2).
@@ -123,6 +124,14 @@ export function applyControlCommand(cmd: ControlCommand): unknown {
         meta: metaRecord(pane.meta),
         env: metaRecord(pane.env)
       });
+    }
+    case 'readScreen': {
+      // Rendered-screen read (interactive-pane-driving plan C1): serialize this
+      // pane's live xterm buffer to clean text and return it as the command
+      // result. Returns undefined if the pane isn't mounted here (no registered
+      // serializer) — the server then falls back to the raw replay.
+      if (!paneId) return undefined;
+      return paneScreens.get(paneId)?.();
     }
     case 'focusTab':
       if (str(cmd.tabId)) ws.setActiveGroup(str(cmd.tabId)!);

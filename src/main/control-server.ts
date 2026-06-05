@@ -8,7 +8,15 @@ import { app } from 'electron';
 import { MessageInbox } from './control-inbox';
 import { PaneLocks } from './control-lock';
 import { stripAnsi } from './ansi-strip';
-import { submitNewlines } from './control-input';
+import { submitNewlines, keysToBytes, SUBMIT_DELAY_MS } from './control-input';
+import {
+  waitDecision,
+  nextPollDelay,
+  sliceSince,
+  detectAwaitingInput,
+  DEFAULT_SETTLE_MS,
+  DEFAULT_WAIT_TIMEOUT_MS
+} from './control-output';
 import {
   paneInScope,
   windowInScope,
@@ -156,6 +164,14 @@ export class ControlServer {
   // Durable per-pane message bus + advisory write locks (agent-orchestration E/H).
   private inbox = new MessageInbox();
   private locks = new PaneLocks();
+  // Per-session output tracking for the interactive read path (interactive-pane-
+  // driving plan B1/B2): the ms epoch of the pane's last pty batch (waitForIdle
+  // quiescence) and a monotonic count of ALL bytes ever emitted (the `since`
+  // delta cursor). Fed by emitOutput on every batch — crucially BEFORE the
+  // streaming-clients guard — so a waitable / delta read works with no /events
+  // subscriber attached. Keyed by sessionUid.
+  private lastOutputAt = new Map<string, number>();
+  private outputBytes = new Map<string, number>();
   private settings: ControlSettings;
   private stateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -278,9 +294,133 @@ export class ControlServer {
   }
 
   emitOutput(sessionUid: string, data: string): void {
+    // Liveness + delta tracking runs unconditionally — a waitForIdle / since read
+    // must work even when nobody is streaming (this is the no-clients hot path).
+    this.noteOutput(sessionUid, data.length);
     if (!this.hasClients()) return;
     const paneId = this.paneIdForUid(sessionUid);
     this.broadcastForPane(paneId, { type: 'output', sessionUid, paneId, data });
+  }
+
+  // Record a pane's output batch: bump its byte cursor and stamp "last output at".
+  private noteOutput(sessionUid: string, len: number): void {
+    this.outputBytes.set(sessionUid, (this.outputBytes.get(sessionUid) ?? 0) + len);
+    this.lastOutputAt.set(sessionUid, Date.now());
+  }
+
+  // Build the `/panes/:id/output` body, dispatching to the rendered-screen path
+  // (mode:"screen", C1) or the raw replay path. Async because a screen read
+  // round-trips to the renderer to serialize the xterm buffer.
+  private async buildOutputBody(
+    paneId: string,
+    sessionUid: string,
+    params: URLSearchParams
+  ): Promise<Record<string, unknown>> {
+    if (params.get('mode') === 'screen') return this.buildScreenBody(paneId, sessionUid, params);
+    return this.readOutputBody(paneId, sessionUid, params);
+  }
+
+  // Rendered-screen body: ask the pane's renderer to serialize its live xterm
+  // buffer to clean text (no overdraw / spinner spam / mangled spacing — the raw
+  // stream's failure mode, #3). Falls back to the raw replay if the round-trip
+  // can't produce a screen (pane unmounted, renderer wedged), flagging that so a
+  // caller isn't misled. `cursor` still tracks the byte total for continuity.
+  private async buildScreenBody(
+    paneId: string,
+    sessionUid: string,
+    params: URLSearchParams
+  ): Promise<Record<string, unknown>> {
+    const found = this.findPane(paneId);
+    const cursor = this.outputBytes.get(sessionUid) ?? 0;
+    const fallback = () => ({
+      ...this.readOutputBody(paneId, sessionUid, params),
+      mode: 'raw' as const,
+      screenUnavailable: true
+    });
+    if (!found) return fallback();
+    let result: { ok: boolean; result?: unknown };
+    try {
+      result = await this.deps.dispatchCommand(found.windowId, { type: 'readScreen', paneId });
+    } catch {
+      return fallback();
+    }
+    if (!result.ok || typeof result.result !== 'string') return fallback();
+    const full = result.result;
+    // Prompt detection (C2) runs on the FULL rendered screen so a `tail` that
+    // clips above the prompt line doesn't hide that the pane is blocked.
+    const awaitingInput = detectAwaitingInput(full);
+    let text = full;
+    const tail = Number(params.get('tail'));
+    if (Number.isFinite(tail) && tail > 0) text = text.split('\n').slice(-tail).join('\n');
+    return { paneId, status: found.pane.status, mode: 'screen', output: text, cursor, awaitingInput };
+  }
+
+  // Build the raw `/panes/:id/output` JSON body. `since` (a byte cursor) returns
+  // only the delta since that point; otherwise the full retained replay. `cursor`
+  // is ALWAYS returned (the pane's current byte total) so a caller can start a
+  // delta read from here. strip (SGR) and tail (last N lines) apply to the text.
+  private readOutputBody(
+    paneId: string,
+    sessionUid: string,
+    params: URLSearchParams
+  ): Record<string, unknown> {
+    const raw = this.deps.readOutput(sessionUid) ?? '';
+    const totalBytes = this.outputBytes.get(sessionUid) ?? raw.length;
+    const since = nonNegNum(params.get('since'));
+    let text = raw;
+    let cursor = totalBytes;
+    let truncated = false;
+    if (since !== undefined) {
+      const sliced = sliceSince(raw, totalBytes, since);
+      text = sliced.output;
+      cursor = sliced.cursor;
+      truncated = sliced.truncated;
+    }
+    const strip = params.get('strip') === '1';
+    if (strip) text = stripAnsi(text); // clean output mode (G)
+    const tail = Number(params.get('tail'));
+    if (Number.isFinite(tail) && tail > 0) text = text.split('\n').slice(-tail).join('\n');
+    return {
+      paneId,
+      status: this.findPane(paneId)?.pane.status ?? 'exited',
+      stripped: strip,
+      output: text,
+      cursor,
+      ...(since !== undefined ? { since, truncated } : {})
+    };
+  }
+
+  // Resolve once the pane has been output-quiet for settleMs (or timeoutMs runs
+  // out). Pure decisions (waitDecision / nextPollDelay) drive an adaptive poll
+  // over the live tracking maps. `since`, when given, holds the wait open until
+  // output advances past the cursor, so a type→read turn can't settle on the
+  // pre-prompt screen (interactive-pane-driving plan B1).
+  private waitForQuiet(
+    sessionUid: string,
+    settleMs: number,
+    timeoutMs: number,
+    since: number | undefined
+  ): Promise<{ settled: boolean; timedOut: boolean }> {
+    const start = Date.now();
+    return new Promise((resolve) => {
+      const tick = () => {
+        const now = Date.now();
+        const lastOutputAt = this.lastOutputAt.get(sessionUid);
+        const verdict = waitDecision({
+          lastOutputAt,
+          totalBytes: this.outputBytes.get(sessionUid) ?? 0,
+          since,
+          now,
+          start,
+          settleMs,
+          timeoutMs
+        });
+        if (verdict === 'settled') return resolve({ settled: true, timedOut: false });
+        if (verdict === 'timeout') return resolve({ settled: false, timedOut: true });
+        setTimeout(tick, nextPollDelay({ lastOutputAt, now, start, settleMs, timeoutMs }));
+      };
+      tick();
+    });
   }
 
   emitExit(sessionUid: string, code: number): void {
@@ -434,6 +574,8 @@ export class ControlServer {
     this.token = null;
     // Minted tokens die with the server (a new run mints a fresh master token).
     this.scopedTokens.clear();
+    this.lastOutputAt.clear();
+    this.outputBytes.clear();
     this.removeDiscovery();
   }
 
@@ -503,26 +645,61 @@ export class ControlServer {
       const kind = paneMatch[2];
 
       if (kind === 'output' && req.method === 'GET') {
-        const raw = this.deps.readOutput(found.pane.sessionUid) ?? '';
-        const strip = url.searchParams.get('strip') === '1';
-        const cleaned = strip ? stripAnsi(raw) : raw; // clean output mode (G)
-        const tail = Number(url.searchParams.get('tail'));
-        const output =
-          Number.isFinite(tail) && tail > 0 ? cleaned.split('\n').slice(-tail).join('\n') : cleaned;
-        return send(200, { paneId, status: found.pane.status, stripped: strip, output });
+        const uid = found.pane.sessionUid;
+        // waitForIdle (B1): block server-side until the pane's output has been
+        // quiet for settleMs (or timeoutMs elapses), THEN read — removing the
+        // client-side Start-Sleep dance. `since` makes the wait turn-aware (it
+        // won't settle until output advances past the cursor; see waitDecision).
+        if (url.searchParams.get('waitForIdle') === '1') {
+          const settleMs = posNum(url.searchParams.get('settleMs')) ?? DEFAULT_SETTLE_MS;
+          const timeoutMs = posNum(url.searchParams.get('timeoutMs')) ?? DEFAULT_WAIT_TIMEOUT_MS;
+          const since = nonNegNum(url.searchParams.get('since'));
+          void this.waitForQuiet(uid, settleMs, timeoutMs, since).then(async (w) =>
+            send(200, { ...(await this.buildOutputBody(paneId, uid, url.searchParams)), waited: true, ...w })
+          );
+          return;
+        }
+        void this.buildOutputBody(paneId, uid, url.searchParams).then((body) => send(200, body));
+        return;
       }
 
       if (kind === 'input' && req.method === 'POST') {
         if (!this.settings.allowInput) return send(403, { error: 'input not allowed' });
         return this.readBody(req, (body) => {
-          const data = typeof body?.data === 'string' ? body.data : null;
-          if (data == null) return send(400, { error: 'expected { data: string }' });
+          const hasData = typeof body?.data === 'string';
+          const hasKeys = Array.isArray(body?.keys);
+          if (!hasData && !hasKeys) {
+            return send(400, { error: 'expected { data: string } or { keys: string[] }' });
+          }
           // Advisory write lock (H): if someone else holds it, refuse this write.
           const owner = typeof body?.owner === 'string' ? body.owner : null;
           const holder = this.locks.holder(paneId, Date.now());
           if (holder && holder !== owner) return send(423, { error: 'pane locked', owner: holder });
+          const uid = found.pane.sessionUid;
+
+          if (hasKeys) {
+            // Named keys → raw VT bytes (interactive-pane-driving plan A2). NOT run
+            // through submitNewlines: these are already the exact bytes (e.g.
+            // `enter` IS the CR a Windows conpty submits on). Same gate as `data`.
+            const keys = (body!.keys as unknown[]).filter((k): k is string => typeof k === 'string');
+            const r = keysToBytes(keys);
+            if (!r.ok) return send(400, { error: 'unknown key(s)', unknown: r.unknown });
+            this.deps.sendInput(uid, r.bytes);
+            return send(200, { ok: true, keys });
+          }
+
           // On Windows conpty a bare "\n" types but doesn't submit; normalize to CR.
-          this.deps.sendInput(found.pane.sessionUid, submitNewlines(data));
+          this.deps.sendInput(uid, submitNewlines(body!.data as string));
+          // submit (A1): write a bare CR as a SEPARATE pty write a beat later, so a
+          // TUI with bracketed-paste on reads it as Enter, not pasted content. The
+          // inter-write gap is what defeats the paste-vs-submit ambiguity.
+          if (body?.submit === true) {
+            const delay =
+              typeof body.submitDelayMs === 'number' && body.submitDelayMs >= 0
+                ? body.submitDelayMs
+                : SUBMIT_DELAY_MS;
+            setTimeout(() => this.deps.sendInput(uid, '\r'), delay);
+          }
           send(200, { ok: true });
         });
       }
@@ -760,4 +937,20 @@ export class ControlServer {
       console.error('failed to write control-settings.json', err);
     }
   }
+}
+
+// Parse a query param as a strictly-positive number (settleMs/timeoutMs), or
+// undefined when absent / malformed / <= 0 so the caller falls back to a default.
+function posNum(v: string | null): number | undefined {
+  if (v == null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+// Parse a query param as a non-negative number (the `since` cursor — 0 is a valid
+// "from the start" cursor), or undefined when absent / malformed / negative.
+function nonNegNum(v: string | null): number | undefined {
+  if (v == null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
