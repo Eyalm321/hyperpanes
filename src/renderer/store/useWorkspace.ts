@@ -10,7 +10,7 @@ import type {
 } from '../types';
 import { nextColor, remapColor, type PaletteName } from '../theme';
 import { useSettings } from './useSettings';
-import { equalSizes, insertSize, removeSize } from '../layout/sizes';
+import { clampFraction, equalSizes, insertSize, isEqualSplit, normalize, removeSize } from '../layout/sizes';
 import { computeTiles, effectiveLayout } from '../layout/presets';
 import { neighborIndex } from '../layout/navigate';
 
@@ -84,6 +84,7 @@ interface WorkspaceState {
   removePane: (id: string) => void;
   renamePane: (id: string, label: string, subtitle?: string) => void; // subtitle: '' clears, undefined leaves as-is
   recolorPane: (id: string, color: string) => void;
+  setPaneMeta: (id: string, patch: Record<string, string | null>) => void; // merge org metadata; null value deletes a key (agent-orchestration C)
   remapPalette: (to: PaletteName) => void; // re-slot every pane's color into a palette
   restartPane: (id: string) => void;
   zoomPane: (id: string, delta: number) => void;
@@ -108,6 +109,10 @@ export const activeGroup = (s: WorkspaceState): Group =>
   s.groups.find((g) => g.id === s.activeId) ?? s.groups[0];
 
 export function specFromGroup(g: Group): GroupSpec {
+  // Emit the sizing/focus/zoom fields only when they differ from the defaults,
+  // so ordinary tabs stay terse; groupFromSpec restores the defaults otherwise.
+  const focusedIndex = g.panes.findIndex((p) => p.id === g.focusedId);
+  const zoomedIndex = g.zoomedId ? g.panes.findIndex((p) => p.id === g.zoomedId) : -1;
   return {
     title: g.title,
     layout: g.layout,
@@ -118,8 +123,15 @@ export function specFromGroup(g: Group): GroupSpec {
       ...(p.command ? { command: p.command } : {}),
       ...(p.cwd ? { cwd: p.cwd } : {}),
       ...(p.shell ? { shell: p.shell } : {}),
-      ...(p.fontSize ? { fontSize: p.fontSize } : {})
-    }))
+      ...(p.fontSize ? { fontSize: p.fontSize } : {}),
+      ...(p.meta && Object.keys(p.meta).length ? { meta: p.meta } : {})
+    })),
+    ...(g.panes.length > 1 && !isEqualSplit(g.sizes) ? { sizes: g.sizes } : {}),
+    ...(g.layout === 'main-stack' && Math.abs(g.mainFraction - 0.6) > 1e-6
+      ? { mainFraction: g.mainFraction }
+      : {}),
+    ...(focusedIndex > 0 ? { focused: focusedIndex } : {}),
+    ...(zoomedIndex >= 0 ? { zoomed: zoomedIndex } : {})
   };
 }
 
@@ -149,6 +161,13 @@ function seededGroup(seq: number): Group {
   };
   return { ...base, panes: [pane], sizes: equalSizes(1), focusedId: pane.id, seq: 1 };
 }
+
+// A torn-off pane's `env` (a scoped control token) must not travel into another
+// window's store — env is runtime-only and never leaves the window that spawned
+// the pane (see Pane.env in types.ts). The live pty keeps its own env and a
+// re-attach ignores env anyway, so dropping it from the handed-off record is
+// safe and upholds the invariant (#5).
+const stripPaneEnv = ({ env: _env, ...pane }: Pane): Pane => pane;
 
 // Remove a pane from a group, fixing up sizes/focus/zoom (no session kill).
 function withoutPane(g: Group, paneId: string): Group {
@@ -183,21 +202,42 @@ function groupFromSpec(spec: GroupSpec, fallbackTitle: string): Group {
       cwd: p.cwd || undefined,
       shell: p.shell || undefined,
       status: 'running' as const,
-      fontSize: p.fontSize || undefined
+      fontSize: p.fontSize || undefined,
+      meta: p.meta && Object.keys(p.meta).length ? p.meta : undefined
     };
   });
   // A spec with no (or invalid) layout defaults to auto; an explicit saved
   // layout — including 'columns' — passes through untouched (no migration, Q6).
   const layout = spec.layout && VALID_LAYOUTS.includes(spec.layout) ? spec.layout : 'auto';
+
+  // Optional sizing / focus / zoom, all defensively validated (specs come from
+  // disk or an agent). A bad / mismatched value silently falls back to default.
+  const n = panes.length;
+  const validIndex = (i: unknown): i is number =>
+    typeof i === 'number' && Number.isInteger(i) && i >= 0 && i < n;
+  const sizesOk =
+    Array.isArray(spec.sizes) &&
+    spec.sizes.length === n &&
+    spec.sizes.every((s) => typeof s === 'number' && Number.isFinite(s) && s > 0);
+  // Auto layout is always an equal split (see withoutPane), so custom sizes only
+  // apply to an explicit layout.
+  const sizes = layout !== 'auto' && sizesOk ? normalize(spec.sizes!) : equalSizes(n);
+  const mainFraction =
+    typeof spec.mainFraction === 'number' && Number.isFinite(spec.mainFraction)
+      ? clampFraction(spec.mainFraction)
+      : 0.6;
+  const focusedId = validIndex(spec.focused) ? panes[spec.focused].id : (panes[0]?.id ?? null);
+  const zoomedId = validIndex(spec.zoomed) ? panes[spec.zoomed].id : null;
+
   return {
     id: uuid(),
     title: spec.title || fallbackTitle,
     panes,
     layout,
-    focusedId: panes[0]?.id ?? null,
-    zoomedId: null,
-    sizes: equalSizes(panes.length),
-    mainFraction: 0.6,
+    focusedId,
+    zoomedId,
+    sizes,
+    mainFraction,
     seq
   };
 }
@@ -430,7 +470,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         payload = {
           ...emptyGroup(groupSeq),
           title: pane.label,
-          panes: [pane],
+          panes: [stripPaneEnv(pane)], // env stays in this window (#5)
           sizes: equalSizes(1),
           focusedId: pane.id
         };
@@ -464,8 +504,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       set((s) => {
         const index = s.groups.findIndex((g) => g.id === groupId);
         if (index < 0) return s;
-        payload = s.groups[index];
-        payload.panes.forEach((p) => movingSessions.add(p.sessionUid));
+        const src = s.groups[index];
+        src.panes.forEach((p) => movingSessions.add(p.sessionUid));
+        // Hand off the live group with each pane's env stripped (#5).
+        payload = { ...src, panes: src.panes.map(stripPaneEnv) };
         let groups = s.groups.filter((g) => g.id !== groupId);
         let groupSeq = s.groupSeq;
         let activeId = s.activeId;
@@ -529,7 +571,9 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
             command: partial?.command,
             cwd: partial?.cwd,
             shell: partial?.shell,
-            status: 'running'
+            status: 'running',
+            meta: partial?.meta,
+            env: partial?.env
           };
           return {
             ...g,
@@ -586,6 +630,28 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         groups: mapPaneGroup(s, id, (g) => ({
           ...g,
           panes: g.panes.map((p) => (p.id === id ? { ...p, color } : p))
+        }))
+      })),
+
+    // Merge a free-form metadata PATCH onto a pane (agent-orchestration C): a
+    // string value sets/overwrites a key, an explicit `null` deletes it (so a
+    // stale key — e.g. `task` — can be cleared, #6); untouched keys are kept. The
+    // meta object is dropped entirely once empty, so a cleared pane matches a
+    // never-set one (no `meta` in the control payload). Surfaced to the control
+    // plane via buildControlPayload so an orchestrator can read the org's shape.
+    setPaneMeta: (id, patch) =>
+      set((s) => ({
+        groups: mapPaneGroup(s, id, (g) => ({
+          ...g,
+          panes: g.panes.map((p) => {
+            if (p.id !== id) return p;
+            const meta = { ...(p.meta ?? {}) };
+            for (const [k, v] of Object.entries(patch)) {
+              if (v === null) delete meta[k];
+              else meta[k] = v;
+            }
+            return { ...p, meta: Object.keys(meta).length ? meta : undefined };
+          })
         }))
       })),
 

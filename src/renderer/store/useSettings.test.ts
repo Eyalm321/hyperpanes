@@ -55,4 +55,11 @@ describe('useSettings persistence', () => {
     expect(saved().showFrame).toBe(false);
     expect(saved().showDot).toBe(false);
   });
+
+  it('persists the chosen idle glow effect', () => {
+    expect(useSettings.getState().idleEffect).toBe('firefly');
+    useSettings.getState().setIdleEffect('blink');
+    expect(useSettings.getState().idleEffect).toBe('blink');
+    expect(saved().idleEffect).toBe('blink');
+  });
 });

@@ -11,22 +11,22 @@ export interface Rect {
 }
 
 // Default window size; shared by window.ts (creation) and ipc.ts (drag-follow).
-export const WINDOW_WIDTH = 1280;
-export const WINDOW_HEIGHT = 820;
+export const WINDOW_WIDTH = 1024;
+export const WINDOW_HEIGHT = 680;
 
 // Height of the "tab bar" band at the top of a window's CONTENT area. The tab
-// strip lives INSIDE the 40px top bar (CSS `.hp-topbar` height), so the dock zone
+// strip lives INSIDE the 32px top bar (CSS `.hp-topbar` height), so the dock zone
 // is just that bar — anything below is pane area. ipc.ts hit-tests the cursor
 // against this band to decide whether to dock the dragged tab into that window's
 // strip (Chrome-style mid-drag dock). Keep in sync with `.hp-topbar` in styles.css.
-export const DOCK_BAND_HEIGHT = 40;
+export const DOCK_BAND_HEIGHT = 32;
 
 // Offsets from the drop point to the window's top-left, so the cursor lands over a
-// tab in the top bar. Tabs are 28px tall, bottom-aligned in the 40px bar (≈y 11–39,
-// center ≈25); `x≈120` clears the menu/layout controls onto the first tabs.
+// tab in the top bar. Tabs are 28px tall, bottom-aligned in the 32px bar (≈y 3–31,
+// center ≈17); `x≈120` clears the menu/layout controls onto the first tabs.
 // Purely cosmetic (where a torn-off / followed window sits under the cursor).
 export const GRAB_OFFSET_X = 120;
-export const GRAB_OFFSET_Y = 25;
+export const GRAB_OFFSET_Y = 17;
 
 /**
  * Top-left origin for a `size` window so the drop point `at` lands over the tab

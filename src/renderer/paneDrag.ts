@@ -10,13 +10,18 @@ const SPRING_DELAY_MS = 450;
 
 // Begin a pane drag (header pulled past the threshold). Capture is moved to <html>
 // so the drag survives the source pane's tab being hidden when a tab springs open;
-// a global ghost (useUI.paneGhost) follows the cursor. Each move hit-tests the
-// cursor:
+// a global ghost (useUI.paneGhost) follows the cursor. Only a sibling pane's EDGE,
+// a tab, or the strip keep the pane docked; everything else tears it off live.
+// Each move hit-tests the cursor:
 //   • over a tab        → highlight it and, after a hold, switch to it (spring);
 //   • over the +/strip  → mark a "new tab" drop;
-//   • over a pane in ANOTHER tab's layout → show an insert indicator at the slot;
-//   • outside the window → hand off to the live tear-off (new window).
-// On release the corresponding move runs.
+//   • near a sibling pane's EDGE → show an insert indicator at that slot;
+//   • anywhere else (the pane's own tile — incl. dragging onto itself or down its
+//     own body — another pane's dead centre, a gap, or outside the window) → tear
+//     off NOW into a following window (live), like a tab pulled off its strip.
+//     Main then re-docks/re-stitches it over a strip or pane edge.
+// On release the docked target's move runs; a tear-off has already happened live,
+// so its release is owned by the float (settles as a new window).
 export function beginPaneDrag(
   pointerId: number,
   paneId: string,
@@ -67,22 +72,9 @@ export function beginPaneDrag(
     u.setPaneGhost({ x: e.clientX, y: e.clientY, label });
 
     const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-    if (!el) {
-      // Left the window → pop the pane into its own following window.
-      cleanup();
-      const ws = useWorkspace.getState();
-      const src = ws.groups.find((g) => g.id === sourceGroupId);
-      if (ws.groups.length === 1 && src && src.panes.length === 1) {
-        startLiveTearOff(pointerId, src, { moveWindow: true });
-      } else {
-        const payload = ws.extractPaneAsGroup(paneId);
-        if (payload) startLiveTearOff(pointerId, payload);
-      }
-      return;
-    }
 
-    // Over a tab → highlight + spring-load after a hold.
-    const tabEl = el.closest('.hp-tab[data-group-id]') as HTMLElement | null;
+    // Over a tab → highlight + spring-load after a hold (stays docked).
+    const tabEl = el?.closest('.hp-tab[data-group-id]') as HTMLElement | null;
     if (tabEl) {
       const gid = tabEl.getAttribute('data-group-id')!;
       u.setPaneDropTarget(gid);
@@ -99,31 +91,44 @@ export function beginPaneDrag(
     }
     clearSpring();
 
-    if (el.closest('.hp-tab-new') || el.closest('.hp-tabstrip')) {
+    // Over the +/strip → "new tab" drop (stays docked).
+    if (el && (el.closest('.hp-tab-new') || el.closest('.hp-tabstrip'))) {
       u.setPaneDropTarget('new');
       u.setLayoutDrop(null);
       return;
     }
 
-    // Over a pane (a sibling in this layout, or a target pane after a spring) → an
-    // insert indicator on the near edge. Excludes the dragged pane itself.
-    const slot = stitchSlotAt(e.clientX, e.clientY, paneId);
+    // Near a sibling pane's EDGE → insert indicator at that slot (stays docked).
+    // stitchSlotAt only fires near the sides; a pane's centre returns null.
+    const slot = el ? stitchSlotAt(e.clientX, e.clientY, paneId) : null;
     if (slot) {
       u.setLayoutDrop(slot);
       u.setPaneDropTarget(null);
       return;
     }
 
-    // Over the body of a tab we sprang INTO (not a specific pane) → append there.
-    // (Only after a spring — over the source tab's own body this falls to cancel.)
     const ws = useWorkspace.getState();
-    if (ws.activeId !== sourceGroupId) {
+
+    // Over the body of a tab we sprang INTO (not a specific pane) → append there.
+    if (el && ws.activeId !== sourceGroupId) {
       u.setPaneDropTarget(ws.activeId);
       u.setLayoutDrop(null);
       return;
     }
-    u.setPaneDropTarget(null);
-    u.setLayoutDrop(null);
+
+    // Anywhere else with no drop target — the pane's OWN tile (incl. dragging onto
+    // itself or straight down its own body), another pane's dead centre, a gap, or
+    // outside the window. Tear off NOW into a following window (live); main
+    // re-docks/re-stitches over a strip or a pane edge, and a release here settles
+    // it as its own window. Only a sibling EDGE / a tab / the strip keep it docked.
+    cleanup();
+    const src = ws.groups.find((g) => g.id === sourceGroupId);
+    if (ws.groups.length === 1 && src && src.panes.length === 1) {
+      startLiveTearOff(pointerId, src, { moveWindow: true });
+    } else {
+      const payload = ws.extractPaneAsGroup(paneId);
+      if (payload) startLiveTearOff(pointerId, payload);
+    }
   };
 
   const onUp = (e: PointerEvent) => {
@@ -141,7 +146,9 @@ export function beginPaneDrag(
     } else if (dropTarget) {
       ws.movePaneToGroup(paneId, dropTarget);
     }
-    // else: released over empty body → cancel.
+    // else: defensive no-op. A release without a docked target only happens if a
+    // move never registered a target; any dead-zone move (incl. the pane's own
+    // tile) already tore off live in onMove, so it never reaches here.
   };
 
   const onCancel = (e: PointerEvent) => {

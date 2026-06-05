@@ -1,13 +1,24 @@
-import type { GroupPayload, WorkspaceFile } from './types';
+import type {
+  ControlCommand,
+  ControlStatus,
+  ControlWindowPayload,
+  GroupPayload,
+  GroupSpec,
+  MetricsSnapshot,
+  WindowSpec,
+  WorkspaceFile
+} from './types';
 
 export {};
 
 declare global {
   interface HpSpawnOptions {
     uid: string;
+    paneId?: string; // injected into the pty env as HYPERPANES_PANE_ID (pane self-awareness)
     shell?: string;
     command?: string;
     cwd?: string;
+    env?: Record<string, string>; // extra pty env (e.g. a scoped control token, agent-orchestration F)
     cols?: number;
     rows?: number;
   }
@@ -26,6 +37,7 @@ declare global {
     write(uid: string, data: string): void;
     resize(uid: string, cols: number, rows: number): void;
     kill(uid: string): void;
+    metrics(): Promise<MetricsSnapshot>;
     paths: {
       resolve(cwd: string | undefined, tokens: string[]): Promise<HpPathResolveResult[]>;
       open(
@@ -41,7 +53,19 @@ declare global {
       getInitial(): Promise<WorkspaceFile | null>;
       open(): Promise<WorkspaceFile | null>;
       save(data: WorkspaceFile): Promise<boolean>;
-      saveLast(data: WorkspaceFile): void;
+      publishSession(payload: { active: number; groups: GroupSpec[] }): void;
+    };
+    control: {
+      getStatus(): Promise<ControlStatus>;
+      setEnabled(enabled: boolean): Promise<ControlStatus>;
+      setAllowInput(allow: boolean): Promise<ControlStatus>;
+      publishState(payload: ControlWindowPayload): void;
+      onActive(cb: (active: boolean) => void): () => void;
+      onCommand(cb: (command: ControlCommand) => void): () => void;
+      commandResult(
+        correlationId: string,
+        reply: { ok: boolean; result?: unknown; error?: string }
+      ): void;
     };
     win: {
       minimize(): void;
@@ -51,11 +75,16 @@ declare global {
       onMaximizeChange(cb: (maximized: boolean) => void): () => void;
       setFullScreen(on: boolean): void;
       onFullScreenChange(cb: (fullscreen: boolean) => void): () => void;
-      getSeed(): Promise<{ seed: GroupPayload | null; primary: boolean }>;
+      getSeed(): Promise<{
+        seed: GroupPayload | null;
+        windowSpec?: WindowSpec | null;
+        primary: boolean;
+      }>;
       spawnGroupWindow(group: GroupPayload): Promise<{ ok: boolean }>;
       dragDetach(group: GroupPayload, moveWindow?: boolean): Promise<{ id: number }>;
       dragDrop(): Promise<{ action: 'docked' | 'stitched' | 'detached' | 'none' }>;
       dragCancel(): Promise<{ action: 'docked' | 'stitched' | 'detached' | 'none' }>;
+      reportStitchHit(valid: boolean): void;
       onReceiveTab(cb: (group: GroupPayload, x?: number) => void): () => void;
       onTabPreview(cb: (preview: { x: number; title: string } | null) => void): () => void;
       onPaneStitchPreview(cb: (at: { x: number; y: number } | null) => void): () => void;

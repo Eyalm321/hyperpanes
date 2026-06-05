@@ -65,6 +65,7 @@ export function PaneArea({ group, active }: PaneAreaProps) {
               pane={pane}
               rect={tile.rect}
               visible={tile.visible}
+              active={active}
               focused={active && pane.id === focusedId}
             />
           );

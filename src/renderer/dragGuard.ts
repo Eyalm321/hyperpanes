@@ -10,11 +10,16 @@
 // capture has been moved to <html> or the gesture has been handed to a torn-off
 // window, so the class can't get stuck on.
 export function beginDragGuard(): void {
-  if (document.body.classList.contains('hp-dragging')) return;
-  document.body.classList.add('hp-dragging');
+  // Class goes on <html> (documentElement), not <body>: the drag moves pointer
+  // capture onto <html>, and while capture is active the cursor is resolved from
+  // the capturing element — so the grab cursor must be set there too, not just on
+  // body's descendants.
+  const root = document.documentElement;
+  if (root.classList.contains('hp-dragging')) return;
+  root.classList.add('hp-dragging');
   window.getSelection?.()?.removeAllRanges();
   const end = () => {
-    document.body.classList.remove('hp-dragging');
+    root.classList.remove('hp-dragging');
     window.removeEventListener('pointerup', end, true);
     window.removeEventListener('pointercancel', end, true);
   };

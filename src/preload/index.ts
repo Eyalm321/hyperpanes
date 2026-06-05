@@ -1,36 +1,51 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { GroupPayload } from '../renderer/types';
+import type {
+  ControlCommand,
+  ControlStatus,
+  ControlWindowPayload,
+  GroupPayload,
+  MetricsSnapshot,
+  WindowSpec
+} from '../renderer/types';
 
-// What main reports when a window asks for its launch seed (Stage 2 tear-off).
+// What main reports when a window asks for its launch seed.
 export interface SeedInfo {
-  seed: GroupPayload | null; // a group torn off into this (new) window, if any
+  seed: GroupPayload | null; // a live group torn off into this (new) window, if any
+  windowSpec?: WindowSpec | null; // a launch-time window spec (tabs to materialize), if any
   primary: boolean; // the session-of-record window (owns last-workspace.json)
 }
 
 export interface SpawnOptions {
   uid: string;
+  paneId?: string; // forwarded to main; injected into the pty env as HYPERPANES_PANE_ID
   shell?: string;
   command?: string;
   cwd?: string;
+  env?: Record<string, string>; // extra pty env (e.g. a scoped control token, agent-orchestration F)
   cols?: number;
   rows?: number;
 }
 
 type PaneSpec = {
   label?: string;
+  subtitle?: string;
   color?: string;
   command?: string;
   cwd?: string;
   shell?: string;
   fontSize?: number;
+  meta?: Record<string, string>;
 };
+
+type GroupSpec = { title?: string; layout?: string; panes: PaneSpec[] };
 
 export interface WorkspaceFile {
   name?: string;
   layout?: string;
-  panes: PaneSpec[];
-  groups?: Array<{ title?: string; layout?: string; panes: PaneSpec[] }>;
+  panes?: PaneSpec[];
+  groups?: GroupSpec[];
   active?: number;
+  windows?: Array<{ title?: string; active?: number; bounds?: unknown; groups: GroupSpec[] }>;
 }
 
 // One ipcRenderer listener per channel, fanned out to N per-pane subscribers, so
@@ -60,6 +75,9 @@ const api = {
     ipcRenderer.send('session:resize', { uid, cols, rows }),
 
   kill: (uid: string): void => ipcRenderer.send('session:kill', { uid }),
+
+  // Diagnostics: a memory/process/startup snapshot for "Performance: Dump metrics".
+  metrics: (): Promise<MetricsSnapshot> => ipcRenderer.invoke('metrics:get'),
 
   // Clickable file paths: verify candidate tokens against the pane's cwd, and
   // open a verified path in the configured editor / OS default handler.
@@ -109,7 +127,39 @@ const api = {
     getInitial: (): Promise<WorkspaceFile | null> => ipcRenderer.invoke('workspace:getInitial'),
     open: (): Promise<WorkspaceFile | null> => ipcRenderer.invoke('workspace:open'),
     save: (data: WorkspaceFile): Promise<boolean> => ipcRenderer.invoke('workspace:save', data),
-    saveLast: (data: WorkspaceFile): void => ipcRenderer.send('workspace:saveLast', data)
+    // Per-window session snapshot for multi-window autosave; main aggregates by
+    // window and writes the combined `windows[]` last session.
+    publishSession: (payload: { active: number; groups: GroupSpec[] }): void =>
+      ipcRenderer.send('workspace:windowSession', payload)
+  },
+
+  // Local control API (M2). Preferences reads/sets the toggles; while active each
+  // window publishes its structure and listens for forwarded commands.
+  control: {
+    getStatus: (): Promise<ControlStatus> => ipcRenderer.invoke('control:getStatus'),
+    setEnabled: (enabled: boolean): Promise<ControlStatus> =>
+      ipcRenderer.invoke('control:setEnabled', enabled),
+    setAllowInput: (allow: boolean): Promise<ControlStatus> =>
+      ipcRenderer.invoke('control:setAllowInput', allow),
+    publishState: (payload: ControlWindowPayload): void =>
+      ipcRenderer.send('control:publishState', payload),
+    onActive: (cb: (active: boolean) => void): (() => void) => {
+      const listener = (_e: unknown, active: boolean) => cb(active);
+      ipcRenderer.on('control:active', listener);
+      return () => ipcRenderer.removeListener('control:active', listener);
+    },
+    onCommand: (cb: (command: ControlCommand) => void): (() => void) => {
+      const listener = (_e: unknown, command: ControlCommand) => cb(command);
+      ipcRenderer.on('control:command', listener);
+      return () => ipcRenderer.removeListener('control:command', listener);
+    },
+    // Reply to a dispatched command (matched by correlationId) with its outcome —
+    // `{ ok:true, result? }` or `{ ok:false, error }` — so main can resolve the
+    // awaiting /command HTTP response with the right status (D, #2/#3).
+    commandResult: (
+      correlationId: string,
+      reply: { ok: boolean; result?: unknown; error?: string }
+    ): void => ipcRenderer.send('control:commandResult', { correlationId, ...reply })
   },
 
   win: {
@@ -156,6 +206,12 @@ const api = {
       ipcRenderer.invoke('drag:drop'),
     dragCancel: (): Promise<{ action: 'docked' | 'stitched' | 'detached' | 'none' }> =>
       ipcRenderer.invoke('drag:cancel'),
+
+    // While a single-pane float hovers this window's body, main feeds us the cursor
+    // (onPaneStitchPreview) and we report back whether it's near a pane edge (a real
+    // slot). Main uses it to decide whether to reveal the dropline (hide the float)
+    // or keep the float detached over the pane's dead centre. One-way for low cost.
+    reportStitchHit: (valid: boolean): void => ipcRenderer.send('drag:stitchHit', valid),
 
     // A group docked into this window (from another window's tab being dragged
     // onto its strip). `x` is the window-relative cursor x of the drop slot.

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { DEFAULT_PALETTE, type PaletteName } from '../theme';
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeName } from '../components/terminal-themes';
+import { DEFAULT_IDLE_EFFECT, type IdleEffectName } from '../components/idle-effects';
 
 const STORAGE_KEY = 'hp.settings.v1';
 
@@ -38,9 +39,12 @@ export interface Settings {
   // Command template used to open a clicked path. Empty = auto-detect VS Code,
   // else the OS default handler. Placeholders: {path} {line} {col}.
   editorCommand: string;
-  // Whether AI/agent panes glow (a soft firefly pulse on the frame) once they've
-  // been quiet for idleAlertSeconds — i.e. the agent finished and is waiting.
+  // Whether AI/agent panes glow (a soft pulse on the frame) once they've been
+  // quiet for idleAlertSeconds — i.e. the agent finished and is waiting.
   idleAlert: boolean;
+  // Which glow effect plays when a pane goes idle (firefly / pulse / blink /
+  // solid) — see components/idle-effects.
+  idleEffect: IdleEffectName;
   // Seconds of pty silence before an AI pane is considered idle and starts to
   // glow. A bit longer avoids false alarms while the agent briefly pauses.
   idleAlertSeconds: number;
@@ -57,6 +61,7 @@ const DEFAULTS: Settings = {
   clickablePaths: true,
   editorCommand: '',
   idleAlert: true,
+  idleEffect: DEFAULT_IDLE_EFFECT,
   idleAlertSeconds: 10
 };
 
@@ -93,6 +98,7 @@ const pick = (s: SettingsState): Settings => ({
   clickablePaths: s.clickablePaths,
   editorCommand: s.editorCommand,
   idleAlert: s.idleAlert,
+  idleEffect: s.idleEffect,
   idleAlertSeconds: s.idleAlertSeconds
 });
 
@@ -109,6 +115,7 @@ interface SettingsState extends Settings {
   setClickablePaths: (on: boolean) => void;
   setEditorCommand: (cmd: string) => void;
   setIdleAlert: (on: boolean) => void;
+  setIdleEffect: (effect: IdleEffectName) => void;
   setIdleAlertSeconds: (seconds: number) => void;
 }
 
@@ -164,6 +171,11 @@ export const useSettings = create<SettingsState>((set) => ({
     set((s) => {
       persist(pick({ ...s, idleAlert }));
       return { idleAlert };
+    }),
+  setIdleEffect: (idleEffect) =>
+    set((s) => {
+      persist(pick({ ...s, idleEffect }));
+      return { idleEffect };
     }),
   setIdleAlertSeconds: (seconds) =>
     set((s) => {

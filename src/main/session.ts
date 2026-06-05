@@ -1,5 +1,7 @@
 import { EventEmitter } from 'events';
 import os from 'os';
+import { join } from 'node:path';
+import { app } from 'electron';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
 
@@ -52,6 +54,9 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  // The owning pane's stable id. Injected as HYPERPANES_PANE_ID so an MCP-capable
+  // agent launched in this pane knows which pane it is (agent-orchestration A).
+  paneId?: string;
 }
 
 export function defaultShell(): string {
@@ -101,6 +106,17 @@ export class Session extends EventEmitter {
     // Electron injects a default GOOGLE_API_KEY; don't leak it to the shell.
     if (env.GOOGLE_API_KEY && process.env.GOOGLE_API_KEY === env.GOOGLE_API_KEY) {
       delete env.GOOGLE_API_KEY;
+    }
+    // Pane self-awareness (agent-orchestration A): an agent running in this pane
+    // reads its own id and how to reach the control plane straight from env.
+    if (opts.paneId) env.HYPERPANES_PANE_ID = opts.paneId;
+    // HYPERPANES_CONTROL_FILE mirrors ControlServer.discoveryPath() (set even
+    // though control is off by default — the file may not exist yet, so a reader
+    // checks first). But a pane handed a SCOPED control token via env (F) must
+    // NOT also be able to read the master token from control.json — so only point
+    // at the discovery file when no scoped token was injected.
+    if (!env.HYPERPANES_CONTROL_TOKEN) {
+      env.HYPERPANES_CONTROL_FILE = join(app.getPath('userData'), 'control.json');
     }
 
     this.pty = pty.spawn(shell, args, {

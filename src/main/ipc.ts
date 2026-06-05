@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { SessionManager } from './session-manager';
 import { resolvePaths, openResolvedPath } from './paths';
 import type { SpawnOptions } from './session';
@@ -9,19 +9,36 @@ import {
   openWorkspaceDialog,
   saveWorkspaceDialog,
   writeLast,
-  type WorkspaceFile
+  type WorkspaceFile,
+  type WindowSpec,
+  type WindowBounds,
+  type GroupSpec
 } from './workspace';
+import { ControlServer, type ControlWindowPayload } from './control-server';
+import { collectMetrics } from './metrics';
+
+// Per-window spawn options. `windowSpec`/`bounds`/`cascadeIndex` drive launch-time
+// windows (M0); `inactive` is the live-drag float.
+export interface SpawnWindowOpts {
+  inactive?: boolean;
+  windowSpec?: WindowSpec; // launch seed: tabs to materialize in this window
+  bounds?: WindowBounds; // explicit on-screen bounds (from a workspace file)
+  cascadeIndex?: number; // nth boundless launch window → stagger so they don't stack
+}
 
 export interface IpcHandle {
   manager: SessionManager;
+  /** The loopback control API (M2). Off until enabled; shut down on quit. */
+  control: ControlServer;
   /**
-   * Open a window, optionally seeded with a torn-off group (Stage 2), positioned
-   * at a drop point `at` (else OS-centered), and shown without focus (`inactive`).
+   * Open a window, optionally seeded with a torn-off group (Stage 2) or a
+   * launch-time window spec (M0), positioned at a drop point `at` (else
+   * OS-centered / bounds), and shown without focus (`inactive`).
    */
   spawnWindow: (
     seed?: GroupPayload,
     at?: { x: number; y: number },
-    opts?: { inactive?: boolean }
+    opts?: SpawnWindowOpts
   ) => BrowserWindow;
 }
 
@@ -37,9 +54,76 @@ export interface IpcHandle {
  * wraps it with the session-ownership bookkeeping below.
  */
 export function registerIpc(
-  buildWindow: (at?: { x: number; y: number }, opts?: { inactive?: boolean }) => BrowserWindow
+  buildWindow: (
+    at?: { x: number; y: number },
+    opts?: { inactive?: boolean; bounds?: WindowBounds; cascadeIndex?: number }
+  ) => BrowserWindow
 ): IpcHandle {
   const manager = new SessionManager();
+
+  // In-flight control commands awaiting their renderer reply (D). A monotonic
+  // correlationId keys each; the renderer echoes it on control:commandResult.
+  // `windowId` is the window we dispatched to, so only that window may answer
+  // this correlationId (#10).
+  type DispatchResult = { ok: boolean; result?: unknown; timedOut?: boolean; error?: string };
+  const pendingCommands = new Map<
+    string,
+    { resolve: (r: DispatchResult) => void; timer: ReturnType<typeof setTimeout>; windowId: number }
+  >();
+  let commandSeq = 0;
+  const COMMAND_TIMEOUT_MS = 2000;
+
+  // The control API reads/writes ptys through the manager and forwards structural
+  // commands to a window's renderer. `send` (defined below) broadcasts the
+  // active-state toggle so renderers know when to publish their structure.
+  const control = new ControlServer({
+    readOutput: (uid) => manager.get(uid)?.getReplay() ?? null,
+    sendInput: (uid, data) => manager.write(uid, data),
+    // Forward a command to a window and wait for its reply (carrying any result,
+    // e.g. a new pane id). Resolves {ok:false} if the window is gone, or
+    // {ok:false, timedOut:true} if the renderer never answers within the timeout
+    // — so a wedged renderer surfaces as a failure (not a phantom success) and
+    // can't hang the HTTP request forever. A genuine reply carries {ok, result}
+    // or {ok:false, error} when the store action threw (#2/#3).
+    dispatchCommand: (windowId, command) => {
+      const win = BrowserWindow.fromId(windowId);
+      if (!win || win.isDestroyed()) return Promise.resolve({ ok: false });
+      const correlationId = String(++commandSeq);
+      return new Promise<DispatchResult>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingCommands.delete(correlationId);
+          resolve({ ok: false, timedOut: true });
+        }, COMMAND_TIMEOUT_MS);
+        pendingCommands.set(correlationId, { resolve, timer, windowId });
+        win.webContents.send('control:command', { ...command, correlationId });
+      });
+    },
+    onActiveChange: (active) => send('control:active', active)
+  });
+
+  // The renderer's reply to a dispatched command — resolve the pending promise.
+  // Only the window the command was dispatched to may answer this correlationId
+  // (#10): a stray reply from another window (guessable sequential id) is ignored.
+  ipcMain.on(
+    'control:commandResult',
+    (
+      e,
+      {
+        correlationId,
+        ok,
+        result,
+        error
+      }: { correlationId: string; ok?: boolean; result?: unknown; error?: string }
+    ) => {
+      const pending = pendingCommands.get(correlationId);
+      if (!pending) return; // unknown / already timed out
+      const sender = BrowserWindow.fromWebContents(e.sender);
+      if (!sender || sender.id !== pending.windowId) return; // not the dispatched window
+      clearTimeout(pending.timer);
+      pendingCommands.delete(correlationId);
+      pending.resolve({ ok: ok !== false, result, ...(error ? { error } : {}) });
+    }
+  );
 
   // Which window each live session belongs to (BrowserWindow.id). Updated on
   // every spawn/attach, so a session re-attached by a different window is now
@@ -47,6 +131,8 @@ export function registerIpc(
   const owner = new Map<string, number>();
   // A group waiting for its freshly-opened window to pull it via window:getSeed.
   const pendingSeed = new Map<number, GroupPayload>();
+  // A launch-time window spec (tabs to materialize) waiting to be pulled the same way.
+  const pendingWindowSpec = new Map<number, WindowSpec>();
   // The session-of-record window — the only one that persists last-workspace.json.
   let primaryWindowId: number | null = null;
   // The in-flight live tear-off (Chrome-style). `floatWinId` is the real seeded
@@ -58,7 +144,8 @@ export function registerIpc(
     timer: ReturnType<typeof setInterval>;
     floatWinId: number;
     previewWinId: number | null; // window showing a tab dock-preview (strip), or null
-    stitchWinId: number | null; // window showing a pane stitch-preview (body), or null
+    stitchWinId: number | null; // window whose body is under the cursor (single-pane float), or null
+    stitchValid: boolean; // the target renderer reports the cursor is near a pane edge (a real slot)
     moveWindow: boolean; // floatWin IS the source window (sole-tab drag), not a copy
   } | null = null;
   const FOLLOW_INTERVAL_MS = 16;
@@ -92,7 +179,10 @@ export function registerIpc(
       } else if (floatWin && !floatWin.isDestroyed()) floatWin.destroy();
       return { action: 'docked' };
     }
-    if (ds.stitchWinId != null) {
+    // Only stitch when the cursor was near a pane EDGE at release (the renderer
+    // reported a real slot). Over a pane's dead centre the float stayed visible,
+    // so it settles as its own window instead of stitching.
+    if (ds.stitchWinId != null && ds.stitchValid) {
       const target = BrowserWindow.fromId(ds.stitchWinId);
       if (target && !target.isDestroyed()) {
         const b = target.getContentBounds();
@@ -108,6 +198,10 @@ export function registerIpc(
       floatWin.show();
       floatWin.focus();
     }
+    // Settled as a free-floating window — clear any preview left on the last
+    // hovered target (a dock ghost or a stitch dropline).
+    if (ds.previewWinId != null) BrowserWindow.fromId(ds.previewWinId)?.webContents.send('tab:preview', null);
+    if (ds.stitchWinId != null) BrowserWindow.fromId(ds.stitchWinId)?.webContents.send('pane:preview', null);
     return { action: 'detached' };
   };
 
@@ -128,19 +222,74 @@ export function registerIpc(
     }
   };
 
+  // ---- Multi-window session persistence ----
+  // Each window publishes its tabs (workspace:windowSession); we key them by
+  // window id and write the combined `windows[]` last session, so a relaunch
+  // restores every window. `quitting` flips in before-quit so windows cascading
+  // closed during a quit don't each rewrite a shrinking session.
+  const sessionSpecs = new Map<number, { active: number; groups: GroupSpec[] }>();
+  let quitting = false;
+  let writeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const windowBounds = (win: BrowserWindow): WindowBounds => {
+    const b = win.getNormalBounds(); // restored bounds, even while maximized
+    return { x: b.x, y: b.y, width: b.width, height: b.height, maximized: win.isMaximized() };
+  };
+
+  // Write the live windows (in creation/z order) to last-workspace.json. Skips an
+  // empty result so closing the final window never wipes the saved session.
+  const writeSession = () => {
+    const windows: WindowSpec[] = [];
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      const spec = sessionSpecs.get(win.id);
+      if (!spec) continue;
+      windows.push({ active: spec.active, groups: spec.groups, bounds: windowBounds(win) });
+    }
+    if (windows.length === 0) return;
+    writeLast({ windows });
+  };
+
+  const scheduleWrite = () => {
+    if (writeTimer) clearTimeout(writeTimer);
+    writeTimer = setTimeout(() => {
+      writeTimer = null;
+      writeSession();
+    }, 400);
+  };
+
+  // Capture the full multi-window session before windows start closing on quit.
+  app.on('before-quit', () => {
+    quitting = true;
+    if (writeTimer) {
+      clearTimeout(writeTimer);
+      writeTimer = null;
+    }
+    writeSession();
+  });
+
   const spawnWindow = (
     seed?: GroupPayload,
     at?: { x: number; y: number },
-    opts?: { inactive?: boolean }
+    opts?: SpawnWindowOpts
   ): BrowserWindow => {
-    const win = buildWindow(at, opts);
+    const win = buildWindow(at, {
+      inactive: opts?.inactive,
+      bounds: opts?.bounds,
+      cascadeIndex: opts?.cascadeIndex
+    });
     if (primaryWindowId === null) primaryWindowId = win.id;
     if (seed) pendingSeed.set(win.id, seed);
+    if (opts?.windowSpec) pendingWindowSpec.set(win.id, opts.windowSpec);
     win.on('closed', () => {
       pendingSeed.delete(win.id);
+      pendingWindowSpec.delete(win.id);
+      control.dropWindow(win.id);
+      sessionSpecs.delete(win.id);
       reap(win.id);
-      // If the session-of-record window went away, hand the role to a survivor
-      // so the session keeps autosaving (getAllWindows excludes the closed one).
+      // If the session-of-record window went away, hand the role to a survivor.
+      // (Persistence is now per-window; primary only gates a seedless window's
+      // getInitial fallback — see App's getSeed handler.)
       if (primaryWindowId === win.id) {
         primaryWindowId = null;
         const next = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
@@ -149,6 +298,9 @@ export function registerIpc(
           next.webContents.send('window:primary');
         }
       }
+      // Closing one window (the app staying up) drops it from the saved session;
+      // during a quit we leave the before-quit snapshot intact.
+      if (!quitting) writeSession();
     });
     return win;
   };
@@ -164,15 +316,25 @@ export function registerIpc(
     // against the renderer's await: any live output that streamed in while the
     // terminal was wiring up is already in this buffer, so the terminal drops
     // that pre-attach output and renders the replay instead — no duplicated seam.
+    //
+    // `opts.env` is intentionally NOT applied here: a live pty's environment is
+    // fixed at spawn and can't be changed in place, so a moved pane keeps the
+    // scoped token (agent-orchestration F) it was spawned with. Refreshing a
+    // moved worker's token would require respawning the shell (losing its state);
+    // rotation-on-move is deferred to the Phase B scope design, not patched here (#4).
     const existing = manager.get(opts.uid);
     if (existing) {
       return { uid: opts.uid, attached: true, replay: existing.getReplay() };
     }
     manager.create(opts, {
-      onData: (uid, data) => send('session:data', { uid, data }),
+      onData: (uid, data) => {
+        send('session:data', { uid, data });
+        control.emitOutput(uid, data); // tee to the /events stream (no-op if no clients)
+      },
       onExit: (uid, code) => {
         send('session:exit', { uid, code });
         owner.delete(uid);
+        control.emitExit(uid, code);
       }
     });
     return { uid: opts.uid, attached: false };
@@ -237,10 +399,12 @@ export function registerIpc(
   // ---- Multi-window: tear-off seed + tab drop (Stage 2) ----
   ipcMain.handle('window:getSeed', (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win) return { seed: null, primary: false };
+    if (!win) return { seed: null, windowSpec: null, primary: false };
     const seed = pendingSeed.get(win.id) ?? null;
+    const windowSpec = pendingWindowSpec.get(win.id) ?? null;
     pendingSeed.delete(win.id);
-    return { seed, primary: win.id === primaryWindowId };
+    pendingWindowSpec.delete(win.id);
+    return { seed, windowSpec, primary: win.id === primaryWindowId };
   });
 
   // Move to New Window (tab menu): open a fresh window seeded with an already-
@@ -306,12 +470,19 @@ export function registerIpc(
       const p = screen.getCursorScreenPoint();
       const win = windowAtPoint(p, ds.floatWinId);
       // Over a window's tab bar → dock preview; over its body with a single pane →
-      // stitch preview; otherwise the float just follows the cursor.
+      // a CANDIDATE stitch (only confirmed near a pane edge, via the renderer's
+      // drag:stitchHit report — over a dead centre the float keeps following);
+      // otherwise the float just follows the cursor. A sole-pane window-move
+      // (moveWindow) is stitch-eligible too: hideFloat dims it via setOpacity(0) to
+      // keep the capture, and finalizeDrag's stitch branch closes the source window
+      // after re-homing the pane — the pane equivalent of docking a window's last
+      // tab into another window (T12). Only a single-pane group can stitch; a
+      // multi-pane group can only dock as a tab (strip).
       let mode: 'strip' | 'stitch' | 'float' = 'float';
       if (win) {
         const b = win.getContentBounds();
         if (p.y < b.y + DOCK_BAND_HEIGHT) mode = 'strip';
-        else if (ds.group.panes.length === 1 && !ds.moveWindow) mode = 'stitch';
+        else if (ds.group.panes.length === 1) mode = 'stitch';
       }
       if (mode === 'float') {
         if (ds.previewWinId != null) { sendTo(ds.previewWinId, 'tab:preview', null); ds.previewWinId = null; }
@@ -324,23 +495,39 @@ export function registerIpc(
         float.setPosition(o.x, o.y);
         return;
       }
-      // strip or stitch → tuck the float away and show the target's preview.
-      hideFloat();
-      const b = win!.getContentBounds();
+      // strip → tuck the float away and show the dock ghost in the target strip.
       if (mode === 'strip') {
-        if (ds.stitchWinId != null) { sendTo(ds.stitchWinId, 'pane:preview', null); ds.stitchWinId = null; }
+        if (ds.stitchWinId != null) { sendTo(ds.stitchWinId, 'pane:preview', null); ds.stitchWinId = null; ds.stitchValid = false; }
         if (ds.previewWinId !== win!.id) {
           sendTo(ds.previewWinId, 'tab:preview', null);
           ds.previewWinId = win!.id;
         }
+        hideFloat();
+        const b = win!.getContentBounds();
         win!.webContents.send('tab:preview', { x: p.x - b.x, title: ds.group.title });
+        return;
+      }
+      // stitch (single pane over a body): feed the cursor to the target so it can
+      // compute the slot and report back (drag:stitchHit) whether we're near a
+      // pane EDGE. Only then tuck the float away to reveal the dropline — over a
+      // pane's dead centre the float stays visible (detached) and keeps following.
+      if (ds.previewWinId != null) { sendTo(ds.previewWinId, 'tab:preview', null); ds.previewWinId = null; }
+      if (ds.stitchWinId !== win!.id) {
+        sendTo(ds.stitchWinId, 'pane:preview', null);
+        ds.stitchWinId = win!.id;
+        ds.stitchValid = false; // re-evaluated from the new target's next report
+      }
+      const sb = win!.getContentBounds();
+      win!.webContents.send('pane:preview', { x: p.x - sb.x, y: p.y - sb.y });
+      if (ds.stitchValid) {
+        hideFloat();
       } else {
-        if (ds.previewWinId != null) { sendTo(ds.previewWinId, 'tab:preview', null); ds.previewWinId = null; }
-        if (ds.stitchWinId !== win!.id) {
-          sendTo(ds.stitchWinId, 'pane:preview', null);
-          ds.stitchWinId = win!.id;
-        }
-        win!.webContents.send('pane:preview', { x: p.x - b.x, y: p.y - b.y });
+        showFloat();
+        const o = originForDrop(p, screen.getDisplayNearestPoint(p).workArea, {
+          width: WINDOW_WIDTH,
+          height: WINDOW_HEIGHT
+        });
+        float.setPosition(o.x, o.y);
       }
     }, FOLLOW_INTERVAL_MS);
     dragState = {
@@ -349,6 +536,7 @@ export function registerIpc(
       floatWinId: float.id,
       previewWinId: null,
       stitchWinId: null,
+      stitchValid: false,
       moveWindow: !!moveWindow
     };
     float.on('closed', () => {
@@ -364,6 +552,14 @@ export function registerIpc(
   ipcMain.handle('drag:drop', () => finalizeDrag());
   ipcMain.handle('drag:cancel', () => finalizeDrag());
 
+  // A stitch target reports, per follow tick, whether the cursor is near a pane
+  // EDGE (a real slot). Gates whether the float hides to reveal the dropline and
+  // whether a release commits a stitch — over a pane's dead centre it stays a
+  // detached float. One-way (no await) to keep the per-tick feedback cheap.
+  ipcMain.on('drag:stitchHit', (_e, valid: boolean) => {
+    if (dragState) dragState.stitchValid = !!valid;
+  });
+
   // ---- Workspace persistence (dialogs parent to the calling window) ----
   ipcMain.handle('workspace:getInitial', () => getInitialWorkspace());
   ipcMain.handle('workspace:open', (e) =>
@@ -372,9 +568,31 @@ export function registerIpc(
   ipcMain.handle('workspace:save', (e, data: WorkspaceFile) =>
     saveWorkspaceDialog(BrowserWindow.fromWebContents(e.sender), data)
   );
-  ipcMain.on('workspace:saveLast', (_e, data: WorkspaceFile) => writeLast(data));
+  ipcMain.on(
+    'workspace:windowSession',
+    (e, payload: { active: number; groups: GroupSpec[] }) => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (!win) return;
+      sessionSpecs.set(win.id, payload);
+      scheduleWrite();
+    }
+  );
 
-  return { manager, spawnWindow };
+  // ---- Control API (M2): renderers publish their structure; Preferences toggles ----
+  ipcMain.on('control:publishState', (e, payload: ControlWindowPayload) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win) control.setWindowState(win.id, payload);
+  });
+  ipcMain.handle('control:getStatus', () => control.status());
+  ipcMain.handle('control:setEnabled', (_e, enabled: boolean) => control.setEnabled(enabled));
+  ipcMain.handle('control:setAllowInput', (_e, allow: boolean) => control.setAllowInput(allow));
+  // Start listening now if it was left enabled in a prior session (default: off).
+  control.init();
+
+  // ---- Diagnostics: memory/process/startup snapshot (Performance: Dump metrics) ----
+  ipcMain.handle('metrics:get', () => collectMetrics());
+
+  return { manager, control, spawnWindow };
 }
 
 // First non-minimized window (in BrowserWindow.getAllWindows() / creation order)

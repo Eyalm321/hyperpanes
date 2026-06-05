@@ -1,6 +1,6 @@
 {
   "name": "hyperpanes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A terminal workspace: one window of tiled, labeled, color-framed terminal panes.",
   "author": "",
   "license": "MIT",
@@ -12,7 +12,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "make:icon": "node scripts/make-icon.mjs",
-    "pack:win": "electron-vite build && electron-builder --win nsis"
+    "make:repo-assets": "node scripts/make-repo-assets.mjs",
+    "pack:win": "electron-vite build && electron-builder --win nsis",
+    "bench": "node bench/run.mjs",
+    "bench:detect": "node bench/detect.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -24,11 +27,13 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uuid": "^11.0.3",
+    "ws": "^8.21.0",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/uuid": "^10.0.0",

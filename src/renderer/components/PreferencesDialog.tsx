@@ -11,6 +11,9 @@ import {
   TERMINAL_THEME_NAMES,
   type TerminalThemeName
 } from './terminal-themes';
+import { IDLE_EFFECT_LABELS, IDLE_EFFECT_NAMES, type IdleEffectName } from './idle-effects';
+import { TerminalPreview } from './TerminalPreview';
+import type { ControlStatus } from '../types';
 import {
   BINDING_DEFS,
   CATEGORY_ORDER,
@@ -47,6 +50,43 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: () => void; la
   );
 }
 
+// The appearance settings, edited as a draft inside the dialog (only the preview
+// reflects them) and applied to the real settings on Done. Mirrors the relevant
+// fields of Settings.
+interface AppearanceDraft {
+  framePalette: PaletteName;
+  terminalTheme: TerminalThemeName;
+  fontFamily: string;
+  defaultFontSize: number;
+  showFrame: boolean;
+  showDot: boolean;
+  idleAlert: boolean;
+  idleEffect: IdleEffectName;
+  idleAlertSeconds: number;
+}
+
+// Mirror useSettings' clamps so the draft shows the same bounds the setters apply.
+const clampPrefFont = (n: number) => Math.max(6, Math.min(40, Math.round(n)));
+const clampPrefSeconds = (n: number) => Math.max(2, Math.min(120, Math.round(n)));
+
+// True when the draft differs from the live settings — i.e. there are un-applied
+// appearance edits, so closing should prompt to save or discard.
+function isAppearanceDirty(draft: AppearanceDraft | null): boolean {
+  if (!draft) return false;
+  const s = useSettings.getState();
+  return (
+    draft.framePalette !== s.framePalette ||
+    draft.terminalTheme !== s.terminalTheme ||
+    draft.fontFamily !== s.fontFamily ||
+    draft.defaultFontSize !== s.defaultFontSize ||
+    draft.showFrame !== s.showFrame ||
+    draft.showDot !== s.showDot ||
+    draft.idleAlert !== s.idleAlert ||
+    draft.idleEffect !== s.idleEffect ||
+    draft.idleAlertSeconds !== s.idleAlertSeconds
+  );
+}
+
 export function PreferencesDialog() {
   const open = useUI((s) => s.preferencesOpen);
   const closePreferences = useUI((s) => s.closePreferences);
@@ -80,15 +120,72 @@ export function PreferencesDialog() {
   const setShowDot = useSettings((s) => s.setShowDot);
   const idleAlert = useSettings((s) => s.idleAlert);
   const setIdleAlert = useSettings((s) => s.setIdleAlert);
+  const idleEffect = useSettings((s) => s.idleEffect);
+  const setIdleEffect = useSettings((s) => s.setIdleEffect);
   const idleAlertSeconds = useSettings((s) => s.idleAlertSeconds);
   const setIdleAlertSeconds = useSettings((s) => s.setIdleAlertSeconds);
 
-  // Switch palettes and repaint existing panes by slot (custom colors are kept).
-  // Re-selecting the active palette is allowed: it re-applies, healing any color
-  // saved under an older palette definition.
-  const choosePalette = (name: PaletteName) => {
-    remapPalette(name);
-    setFramePalette(name);
+  // Appearance is edited as a DRAFT: the controls write here and only the preview
+  // reflects them; nothing touches the real settings (or the actual panes) until
+  // Done. `a` is the live view — the draft once the dialog has opened, else the
+  // committed values (the one frame before the open effect snapshots them).
+  const [draft, setDraft] = useState<AppearanceDraft | null>(null);
+  // The "save or discard?" prompt shown when closing with un-applied edits.
+  const [confirmClose, setConfirmClose] = useState(false);
+  // Mirror the latest draft / confirm state for the window keydown handler, whose
+  // closure is pinned to [open] and would otherwise read stale values.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const confirmCloseRef = useRef(confirmClose);
+  confirmCloseRef.current = confirmClose;
+  const committedAppearance: AppearanceDraft = {
+    framePalette,
+    terminalTheme,
+    fontFamily,
+    defaultFontSize,
+    showFrame,
+    showDot,
+    idleAlert,
+    idleEffect,
+    idleAlertSeconds
+  };
+  const a = draft ?? committedAppearance;
+  const patchAppearance = (p: Partial<AppearanceDraft>) =>
+    setDraft((d) => ({ ...(d ?? committedAppearance), ...p }));
+
+  const snapshotAppearance = (): AppearanceDraft => {
+    const s = useSettings.getState();
+    return {
+      framePalette: s.framePalette,
+      terminalTheme: s.terminalTheme,
+      fontFamily: s.fontFamily,
+      defaultFontSize: s.defaultFontSize,
+      showFrame: s.showFrame,
+      showDot: s.showDot,
+      idleAlert: s.idleAlert,
+      idleEffect: s.idleEffect,
+      idleAlertSeconds: s.idleAlertSeconds
+    };
+  };
+
+  // Apply the draft to the real settings (and repaint panes for a palette switch).
+  // Only changed fields are written. Called from Done; other closes discard it.
+  const commitAppearance = () => {
+    const d = draft;
+    if (!d) return;
+    const s = useSettings.getState();
+    if (d.framePalette !== s.framePalette) {
+      remapPalette(d.framePalette); // repaint existing panes by slot (custom kept)
+      setFramePalette(d.framePalette);
+    }
+    if (d.terminalTheme !== s.terminalTheme) setTerminalTheme(d.terminalTheme);
+    if (d.fontFamily !== s.fontFamily) setFontFamily(d.fontFamily);
+    if (d.defaultFontSize !== s.defaultFontSize) setDefaultFontSize(d.defaultFontSize);
+    if (d.showFrame !== s.showFrame) setShowFrame(d.showFrame);
+    if (d.showDot !== s.showDot) setShowDot(d.showDot);
+    if (d.idleAlert !== s.idleAlert) setIdleAlert(d.idleAlert);
+    if (d.idleEffect !== s.idleEffect) setIdleEffect(d.idleEffect);
+    if (d.idleAlertSeconds !== s.idleAlertSeconds) setIdleAlertSeconds(d.idleAlertSeconds);
   };
 
   const platform = (typeof window !== 'undefined' && window.hp?.platform) || 'win32';
@@ -104,6 +201,17 @@ export function PreferencesDialog() {
   const [conflict, setConflict] = useState<string | null>(null);
   const recordingRef = useRef<string | null>(null);
 
+  // Control API status lives in the main process (loopback server, off by
+  // default), so it's fetched on open rather than read from a store.
+  const [control, setControl] = useState<ControlStatus | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    void window.hp.control.getStatus().then(setControl);
+  }, [open]);
+  const toggleControl = () => void window.hp.control.setEnabled(!control?.enabled).then(setControl);
+  const toggleAllowInput = () =>
+    void window.hp.control.setAllowInput(!control?.allowInput).then(setControl);
+
   const stopRecording = () => {
     recordingRef.current = null;
     setRecordingId(null);
@@ -116,7 +224,15 @@ export function PreferencesDialog() {
   };
   const close = () => {
     stopRecording();
+    setConfirmClose(false);
+    setDraft(null); // discard any un-applied appearance edits
     closePreferences();
+  };
+  // Closing with un-applied appearance edits prompts to save/discard; otherwise it
+  // just closes. Used by Escape and a backdrop click.
+  const requestClose = () => {
+    if (isAppearanceDirty(draft)) setConfirmClose(true);
+    else close();
   };
 
   // While open, Preferences owns the keyboard: it records combos (when a row is
@@ -125,6 +241,7 @@ export function PreferencesDialog() {
   useEffect(() => {
     if (!open) return;
     setTab('keybindings');
+    setDraft(snapshotAppearance()); // start the appearance draft from live settings
     const onKey = (e: KeyboardEvent) => {
       const recId = recordingRef.current;
       if (recId) {
@@ -148,7 +265,11 @@ export function PreferencesDialog() {
       }
       if (e.key === 'Escape') {
         e.preventDefault();
-        close();
+        // If the prompt is already up, Escape cancels it (keep editing). Otherwise
+        // close — but route through the save/discard prompt when there are edits.
+        if (confirmCloseRef.current) setConfirmClose(false);
+        else if (isAppearanceDirty(draftRef.current)) setConfirmClose(true);
+        else close();
       }
     };
     window.addEventListener('keydown', onKey, true);
@@ -193,8 +314,18 @@ export function PreferencesDialog() {
   };
 
   return (
-    <div className="hp-modal-backdrop" onMouseDown={close}>
-      <div className="hp-prefs" onMouseDown={(e) => e.stopPropagation()}>
+    <>
+    <div
+      className="hp-modal-backdrop hp-frosted-backdrop"
+      // Only a click on the backdrop itself closes — NOT a click that bubbled up
+      // from inside the panel. (We avoid stopPropagation on the panel so in-dialog
+      // clicks still reach document, letting popovers like the color picker close
+      // on an outside click.)
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) requestClose();
+      }}
+    >
+      <div className="hp-prefs">
         <div className="hp-prefs-tabs">
           <div className="hp-prefs-title">Preferences</div>
           <button
@@ -221,6 +352,19 @@ export function PreferencesDialog() {
           <div className="hp-prefs-body">
             {tab === 'appearance' && (
               <>
+                <div className="hp-kb-group hp-prefs-preview-group">
+                  <div className="hp-kb-group-title">Preview</div>
+                  <TerminalPreview
+                    terminalTheme={a.terminalTheme}
+                    fontFamily={a.fontFamily}
+                    fontSize={a.defaultFontSize}
+                    framePalette={a.framePalette}
+                    showFrame={a.showFrame}
+                    showDot={a.showDot}
+                    idleAlert={a.idleAlert}
+                    idleEffect={a.idleEffect}
+                  />
+                </div>
                 <div className="hp-kb-group">
                   <div className="hp-kb-group-title">Frame color palette</div>
                   <div className="hp-pal-list">
@@ -228,8 +372,8 @@ export function PreferencesDialog() {
                       <button
                         key={name}
                         type="button"
-                        className={`hp-pal-opt${framePalette === name ? ' active' : ''}`}
-                        onClick={() => choosePalette(name)}
+                        className={`hp-pal-opt${a.framePalette === name ? ' active' : ''}`}
+                        onClick={() => patchAppearance({ framePalette: name })}
                       >
                         <span className="hp-pal-name">{PALETTE_LABELS[name]}</span>
                         <span className="hp-pal-chips">
@@ -237,7 +381,7 @@ export function PreferencesDialog() {
                             <span key={c} className="hp-pal-chip" style={{ background: c }} />
                           ))}
                         </span>
-                        <span className="hp-pal-check">{framePalette === name ? '✓' : ''}</span>
+                        <span className="hp-pal-check">{a.framePalette === name ? '✓' : ''}</span>
                       </button>
                     ))}
                   </div>
@@ -252,8 +396,8 @@ export function PreferencesDialog() {
                     </span>
                     <div className="hp-kb-right">
                       <Toggle
-                        on={showFrame}
-                        onToggle={() => setShowFrame(!showFrame)}
+                        on={a.showFrame}
+                        onToggle={() => patchAppearance({ showFrame: !a.showFrame })}
                         label="Show pane frame"
                       />
                     </div>
@@ -265,8 +409,8 @@ export function PreferencesDialog() {
                     </span>
                     <div className="hp-kb-right">
                       <Toggle
-                        on={showDot}
-                        onToggle={() => setShowDot(!showDot)}
+                        on={a.showDot}
+                        onToggle={() => patchAppearance({ showDot: !a.showDot })}
                         label="Show color dot"
                       />
                     </div>
@@ -280,36 +424,67 @@ export function PreferencesDialog() {
                     </span>
                     <div className="hp-kb-right">
                       <Toggle
-                        on={idleAlert}
-                        onToggle={() => setIdleAlert(!idleAlert)}
+                        on={a.idleAlert}
+                        onToggle={() => patchAppearance({ idleAlert: !a.idleAlert })}
                         label="Idle glow for AI panes"
                       />
                     </div>
                   </div>
-                  {idleAlert && (
-                    <div className="hp-kb-row">
-                      <span className="hp-kb-label">
-                        Idle after
-                        <em className="hp-kb-hint">seconds of silence before it glows</em>
-                      </span>
-                      <div className="hp-kb-right">
-                        <button
-                          className="hp-kb-act"
-                          title="Shorter"
-                          onClick={() => setIdleAlertSeconds(idleAlertSeconds - 1)}
-                        >
-                          −
-                        </button>
-                        <span className="hp-kb-combo static">{idleAlertSeconds}s</span>
-                        <button
-                          className="hp-kb-act"
-                          title="Longer"
-                          onClick={() => setIdleAlertSeconds(idleAlertSeconds + 1)}
-                        >
-                          +
-                        </button>
+                  {a.idleAlert && (
+                    <>
+                      <div className="hp-kb-row">
+                        <span className="hp-kb-label">
+                          Glow effect
+                          <em className="hp-kb-hint">how an idle pane catches your eye</em>
+                        </span>
+                        <div className="hp-kb-right">
+                          <select
+                            className="hp-select hp-prefs-select"
+                            value={a.idleEffect}
+                            onChange={(e) =>
+                              patchAppearance({ idleEffect: e.target.value as IdleEffectName })
+                            }
+                          >
+                            {IDLE_EFFECT_NAMES.map((n) => (
+                              <option key={n} value={n}>
+                                {IDLE_EFFECT_LABELS[n]}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                       </div>
-                    </div>
+                      <div className="hp-kb-row">
+                        <span className="hp-kb-label">
+                          Idle after
+                          <em className="hp-kb-hint">seconds of silence before it glows</em>
+                        </span>
+                        <div className="hp-kb-right">
+                          <button
+                            className="hp-kb-act"
+                            title="Shorter"
+                            onClick={() =>
+                              patchAppearance({
+                                idleAlertSeconds: clampPrefSeconds(a.idleAlertSeconds - 1)
+                              })
+                            }
+                          >
+                            −
+                          </button>
+                          <span className="hp-kb-combo static">{a.idleAlertSeconds}s</span>
+                          <button
+                            className="hp-kb-act"
+                            title="Longer"
+                            onClick={() =>
+                              patchAppearance({
+                                idleAlertSeconds: clampPrefSeconds(a.idleAlertSeconds + 1)
+                              })
+                            }
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    </>
                   )}
                 </div>
 
@@ -320,8 +495,10 @@ export function PreferencesDialog() {
                     <div className="hp-kb-right">
                       <select
                         className="hp-select hp-prefs-select"
-                        value={terminalTheme}
-                        onChange={(e) => setTerminalTheme(e.target.value as TerminalThemeName)}
+                        value={a.terminalTheme}
+                        onChange={(e) =>
+                          patchAppearance({ terminalTheme: e.target.value as TerminalThemeName })
+                        }
                       >
                         {TERMINAL_THEME_NAMES.map((n) => (
                           <option key={n} value={n}>
@@ -337,7 +514,10 @@ export function PreferencesDialog() {
                       <em className="hp-kb-hint">applies to all panes</em>
                     </span>
                     <div className="hp-kb-right">
-                      <FontPicker value={fontFamily} onChange={setFontFamily} />
+                      <FontPicker
+                        value={a.fontFamily}
+                        onChange={(v) => patchAppearance({ fontFamily: v })}
+                      />
                     </div>
                   </div>
                   <div className="hp-kb-row">
@@ -349,17 +529,54 @@ export function PreferencesDialog() {
                       <button
                         className="hp-kb-act"
                         title="Smaller"
-                        onClick={() => setDefaultFontSize(defaultFontSize - 1)}
+                        onClick={() =>
+                          patchAppearance({ defaultFontSize: clampPrefFont(a.defaultFontSize - 1) })
+                        }
                       >
                         −
                       </button>
-                      <span className="hp-kb-combo static">{defaultFontSize}px</span>
+                      <span className="hp-kb-combo static">{a.defaultFontSize}px</span>
                       <button
                         className="hp-kb-act"
                         title="Larger"
-                        onClick={() => setDefaultFontSize(defaultFontSize + 1)}
+                        onClick={() =>
+                          patchAppearance({ defaultFontSize: clampPrefFont(a.defaultFontSize + 1) })
+                        }
                       >
                         +
+                      </button>
+                    </div>
+                  </div>
+                  <div className="hp-kb-row">
+                    <span className="hp-kb-label">
+                      Font size (focused pane)
+                      <em className="hp-kb-hint">zoom of the active pane only</em>
+                    </span>
+                    <div className="hp-kb-right">
+                      <button
+                        className="hp-kb-act"
+                        title="Smaller"
+                        disabled={!focusedId}
+                        onClick={() => focusedId && zoomPane(focusedId, -1)}
+                      >
+                        −
+                      </button>
+                      <span className="hp-kb-combo static">{fontSize}px</span>
+                      <button
+                        className="hp-kb-act"
+                        title="Larger"
+                        disabled={!focusedId}
+                        onClick={() => focusedId && zoomPane(focusedId, 1)}
+                      >
+                        +
+                      </button>
+                      <button
+                        className="hp-kb-act"
+                        title="Reset to default"
+                        disabled={!focusedId}
+                        onClick={() => focusedId && resetPaneZoom(focusedId)}
+                      >
+                        ↺
                       </button>
                     </div>
                   </div>
@@ -370,36 +587,6 @@ export function PreferencesDialog() {
             {tab === 'general' && (
               <div className="hp-kb-group">
                 <div className="hp-kb-group-title">Terminal</div>
-                <div className="hp-kb-row">
-                  <span className="hp-kb-label">Font size (focused pane)</span>
-                  <div className="hp-kb-right">
-                    <button
-                      className="hp-kb-act"
-                      title="Smaller"
-                      disabled={!focusedId}
-                      onClick={() => focusedId && zoomPane(focusedId, -1)}
-                    >
-                      −
-                    </button>
-                    <span className="hp-kb-combo static">{fontSize}px</span>
-                    <button
-                      className="hp-kb-act"
-                      title="Larger"
-                      disabled={!focusedId}
-                      onClick={() => focusedId && zoomPane(focusedId, 1)}
-                    >
-                      +
-                    </button>
-                    <button
-                      className="hp-kb-act"
-                      title="Reset to default"
-                      disabled={!focusedId}
-                      onClick={() => focusedId && resetPaneZoom(focusedId)}
-                    >
-                      ↺
-                    </button>
-                  </div>
-                </div>
                 <div className="hp-kb-row">
                   <span className="hp-kb-label">
                     Default shell
@@ -446,6 +633,48 @@ export function PreferencesDialog() {
                     </div>
                   </div>
                 )}
+
+                <div className="hp-kb-group-title">Control API (agents / MCP)</div>
+                <div className="hp-kb-row">
+                  <span className="hp-kb-label">
+                    Allow agent control
+                    <em className="hp-kb-hint">
+                      local loopback API so an MCP server can read panes &amp; layout — off by
+                      default
+                    </em>
+                  </span>
+                  <div className="hp-kb-right">
+                    <Toggle
+                      on={!!control?.enabled}
+                      onToggle={toggleControl}
+                      label="Allow agent control"
+                    />
+                  </div>
+                </div>
+                {control?.enabled && (
+                  <>
+                    <div className="hp-kb-row">
+                      <span className="hp-kb-label">
+                        Allow sending input
+                        <em className="hp-kb-hint">
+                          lets agents type into live shells — extra risk, off by default
+                        </em>
+                      </span>
+                      <div className="hp-kb-right">
+                        <Toggle
+                          on={!!control?.allowInput}
+                          onToggle={toggleAllowInput}
+                          label="Allow sending input"
+                        />
+                      </div>
+                    </div>
+                    <div className="hp-kb-hint">
+                      {control?.running && control?.port
+                        ? `Listening on 127.0.0.1:${control.port} — token in control.json under the app's data folder.`
+                        : 'Starting…'}
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -480,12 +709,51 @@ export function PreferencesDialog() {
               </button>
             )}
             <span className="hp-spacer" />
-            <button className="hp-btn hp-btn-primary" onClick={close}>
+            <button
+              className="hp-btn hp-btn-primary"
+              onClick={() => {
+                commitAppearance();
+                close();
+              }}
+            >
               Done
             </button>
           </div>
         </div>
       </div>
     </div>
+
+    {confirmClose && (
+      <div
+        className="hp-modal-backdrop hp-confirm-backdrop"
+        onMouseDown={() => setConfirmClose(false)}
+      >
+        <div className="hp-modal" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="hp-modal-title">Unsaved appearance changes</div>
+          <p className="hp-modal-text">
+            You changed appearance settings but haven&apos;t applied them. Save the changes or
+            discard them?
+          </p>
+          <div className="hp-modal-actions">
+            <button className="hp-btn" onClick={() => setConfirmClose(false)}>
+              Keep editing
+            </button>
+            <button className="hp-btn" onClick={close}>
+              Discard
+            </button>
+            <button
+              className="hp-btn hp-btn-primary"
+              onClick={() => {
+                commitAppearance();
+                close();
+              }}
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

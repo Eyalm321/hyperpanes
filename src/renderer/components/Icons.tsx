@@ -83,11 +83,20 @@ export const IconCommands = (p: IconProps) => (
   </Svg>
 );
 
+/** Framed "+" — a tile with a plus. Reads as "add a pane" (used for New pane). */
 export const IconPlus = (p: IconProps) => (
   <Svg {...p}>
     <rect x="4" y="4" width="16" height="16" rx="2.5" />
     <line x1="12" y1="8.5" x2="12" y2="15.5" />
     <line x1="8.5" y1="12" x2="15.5" y2="12" />
+  </Svg>
+);
+
+/** Bare "+" — the universal new-tab glyph (no surrounding tile). */
+export const IconPlusBare = (p: IconProps) => (
+  <Svg {...p}>
+    <line x1="12" y1="6" x2="12" y2="18" />
+    <line x1="6" y1="12" x2="18" y2="12" />
   </Svg>
 );
 

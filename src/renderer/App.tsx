@@ -1,15 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { activeGroup, useWorkspace } from './store/useWorkspace';
 import { useUI } from './store/useUI';
+import { useIdle } from './store/useIdle';
 import { stitchSlotAt, slotToIndex } from './stitch';
 import { useKeybindings } from './store/useKeybindings';
+import { useSettings } from './store/useSettings';
+import { DEFAULT_FONT_FAMILY, TERMINAL_THEMES } from './components/terminal-themes';
 import { comboMatches } from './keybindings';
-import { serializeSession } from './workspace/serialize';
+import { serializeWindowSession } from './workspace/serialize';
+import { buildControlPayload, settleControlCommand } from './control';
 import { TopBar } from './components/TopBar';
 import { PaneArea } from './components/PaneArea';
 import { NewPaneDialog } from './components/NewPaneDialog';
 import { CommandPalette } from './components/CommandPalette';
 import { PreferencesDialog } from './components/PreferencesDialog';
+import { MetricsDialog } from './components/MetricsDialog';
 import { ContextMenu } from './components/ContextMenu';
 
 // Hold Esc this long (ms) to leave fullscreen. A deliberate hold (not a tap, which
@@ -44,22 +49,32 @@ export default function App() {
   // (with a progress bar filling over ESC_HOLD_MS).
   const [escHolding, setEscHolding] = useState(false);
   const [hintVisible, setHintVisible] = useState(false);
-
-  // Only the session-of-record (primary) window persists last-workspace.json, so
-  // extra windows don't clobber it. Set from main's getSeed; defaults to primary.
-  const primaryRef = useRef(true);
+  // The fullscreen hint adopts the terminal's look (like the per-pane toast):
+  // terminal font + foreground color, with a halo in the terminal background.
+  const terminalTheme = useSettings((s) => s.terminalTheme);
+  const fontFamily = useSettings((s) => s.fontFamily) || DEFAULT_FONT_FAMILY;
 
   useEffect(() => {
     // On launch, decide what this window shows. A window torn off from another
     // adopts its handed-over group (live shells included) and does nothing else.
     // The primary window restores the saved session (all tabs) or seeds a shell.
     let cancelled = false;
-    void window.hp.win.getSeed().then(({ seed, primary }) => {
+    void window.hp.win.getSeed().then(({ seed, windowSpec, primary }) => {
       if (cancelled) return;
-      primaryRef.current = primary;
       const s = useWorkspace.getState();
       if (seed) {
+        // A live group torn off from another window — adopt it (shells included).
         s.injectGroup(seed);
+        return;
+      }
+      if (windowSpec) {
+        // A launch-time window: materialize its tabs (this window only). Main has
+        // already split the workspace across windows, so we don't read getInitial.
+        s.loadSession({
+          name: windowSpec.title,
+          groups: windowSpec.groups,
+          active: windowSpec.active
+        });
         return;
       }
       if (!primary) return; // a seedless non-primary window keeps its empty tab
@@ -99,9 +114,14 @@ export default function App() {
     // Cross-window pane stitch: a single-pane float from another window is hovering
     // our pane area. Preview shows the insert indicator at the slot; the commit
     // adopts the pane into the targeted (active) group at that slot.
-    const offPreview = window.hp.win.onPaneStitchPreview((at) =>
-      useUI.getState().setLayoutDrop(at ? stitchSlotAt(at.x, at.y) : null)
-    );
+    const offPreview = window.hp.win.onPaneStitchPreview((at) => {
+      // Only near a pane EDGE is a real slot; a pane's centre returns null. Show
+      // the dropline accordingly AND report it back so main keeps the float visible
+      // (detached) over the dead centre instead of tucking it away to stitch.
+      const slot = at ? stitchSlotAt(at.x, at.y) : null;
+      useUI.getState().setLayoutDrop(slot);
+      window.hp.win.reportStitchHit(!!slot);
+    });
     const offStitch = window.hp.win.onPaneStitch(({ group, x, y }) => {
       const pane = group.panes[0];
       if (!pane) return;
@@ -121,27 +141,77 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // Promoted to session-of-record (the prior primary window closed): take over
-    // persistence and write the current session immediately.
-    return window.hp.win.onPrimary(() => {
-      primaryRef.current = true;
-      window.hp.workspace.saveLast(serializeSession());
-    });
-  }, []);
-
-  useEffect(() => {
-    // Persist the whole session (all tabs, debounced) so launch restores it —
-    // primary window only (see primaryRef).
+    // Persist THIS window's tabs (debounced) so launch restores it. Every window
+    // publishes its own snapshot; main keys them by window and writes the combined
+    // multi-window session, so tear-off windows come back too — not just one.
+    const publish = () => window.hp.workspace.publishSession(serializeWindowSession());
+    publish(); // initial, so a window with no further changes is still remembered
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unsub = useWorkspace.subscribe(() => {
-      if (!primaryRef.current) return;
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => window.hp.workspace.saveLast(serializeSession()), 600);
+      timer = setTimeout(publish, 600);
     });
     return () => {
       unsub();
       if (timer) clearTimeout(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    // Control API (M2): while it's active, publish this window's structure to main
+    // (immediately, then debounced on change) so `GET /state` stays current. We
+    // only subscribe to the stores while active, so a disabled server costs nothing.
+    let active = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let unsubWs: (() => void) | undefined;
+    let unsubIdle: (() => void) | undefined;
+    const publish = () => {
+      const s = useWorkspace.getState();
+      window.hp.control.publishState(buildControlPayload(s.groups, s.activeId));
+    };
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(publish, 250);
+    };
+    const start = () => {
+      if (active) return;
+      active = true;
+      publish();
+      unsubWs = useWorkspace.subscribe(schedule);
+      // Activity lives in a separate, timer-driven store (useIdle), so structure
+      // changes alone wouldn't carry an idle/busy flip — subscribe to it too, or
+      // a worker going quiet would never propagate to `GET /state` / events.
+      unsubIdle = useIdle.subscribe(schedule);
+    };
+    const stop = () => {
+      active = false;
+      unsubWs?.();
+      unsubIdle?.();
+      unsubWs = unsubIdle = undefined;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
+    void window.hp.control.getStatus().then((st) => {
+      if (st.enabled) start();
+    });
+    const offActive = window.hp.control.onActive((on) => (on ? start() : stop()));
+    return () => {
+      offActive();
+      stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    // A structural command forwarded from the control API → enact it on the store,
+    // then (if main is awaiting it) reply with the outcome so the /command HTTP
+    // response can carry e.g. a new pane id (D). settleControlCommand normalizes
+    // the result and turns a throwing store action into an error reply, so a throw
+    // can't skip the reply and hang the request to its timeout (#3/#9).
+    return window.hp.control.onCommand((cmd) => {
+      void settleControlCommand(cmd).then((reply) => {
+        if (cmd.correlationId) window.hp.control.commandResult(cmd.correlationId, reply);
+      });
+    });
   }, []);
 
   useEffect(() => {
@@ -194,8 +264,9 @@ export default function App() {
     // combos come from the keybindings store, so they reflect any user rebinds.
     const onKey = (e: KeyboardEvent) => {
       const ui = useUI.getState();
-      // Preferences owns the keyboard while open (incl. combo recording).
-      if (ui.preferencesOpen) return;
+      // Preferences owns the keyboard while open (incl. combo recording); the
+      // metrics panel owns Esc to close itself.
+      if (ui.preferencesOpen || ui.metricsData) return;
 
       const combos = useKeybindings.getState().combos;
       const consume = () => {
@@ -298,6 +369,7 @@ export default function App() {
       <NewPaneDialog />
       <CommandPalette />
       <PreferencesDialog />
+      <MetricsDialog />
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -311,23 +383,38 @@ export default function App() {
           {paneGhost.label}
         </div>
       )}
-      {fullscreenPaneId && (
-        <div
-          className={`hp-fs-hint${hintVisible || escHolding ? ' hp-fs-hint--show' : ''}${
-            escHolding ? ' hp-fs-hint--holding' : ''
-          }`}
-        >
-          <span>
-            Hold <kbd>Esc</kbd> to exit fullscreen
-          </span>
-          <div className="hp-fs-hint-track">
+      {fullscreenPaneId &&
+        (() => {
+          const tt = TERMINAL_THEMES[terminalTheme] ?? TERMINAL_THEMES.dark;
+          const fg = tt.foreground ?? '#cdd6f4';
+          return (
             <div
-              className="hp-fs-hint-fill"
-              style={{ transitionDuration: escHolding ? `${ESC_HOLD_MS}ms` : '150ms' }}
-            />
-          </div>
-        </div>
-      )}
+              className={`hp-fs-hint${hintVisible || escHolding ? ' hp-fs-hint--show' : ''}${
+                escHolding ? ' hp-fs-hint--holding' : ''
+              }`}
+              style={{
+                fontFamily,
+                color: fg,
+                // No box — a soft halo in the terminal's own bg keeps the bare
+                // text legible over whatever output sits behind it.
+                textShadow: `0 0 3px ${tt.background}, 0 0 3px ${tt.background}`
+              }}
+            >
+              <span>
+                Hold <kbd style={{ background: `${fg}24` }}>Esc</kbd> to exit fullscreen
+              </span>
+              <div className="hp-fs-hint-track" style={{ background: `${fg}24` }}>
+                <div
+                  className="hp-fs-hint-fill"
+                  style={{
+                    background: fg,
+                    transitionDuration: escHolding ? `${ESC_HOLD_MS}ms` : '150ms'
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }

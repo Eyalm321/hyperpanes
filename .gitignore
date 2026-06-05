@@ -16,3 +16,6 @@ reference/
 
 # verify-skill scratch (screenshots, harness, logs)
 .verify-*
+
+# benchmark harness output (json + report + per-run temp wrappers)
+bench/results/

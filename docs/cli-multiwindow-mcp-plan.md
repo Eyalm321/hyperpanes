@@ -25,6 +25,46 @@ local control API we expose from `main`.
 
 Sequence: **schema + single-instance → CLI → control API → MCP (P1 then P2)**.
 
+## Build status (2026-06-05)
+
+**M0, M1, M2 BUILT & static-verified** (typecheck + 108 unit tests + `electron-vite build`
+all green); **manual GUI pass still pending**. M3/M4 (the separate MCP project) not started —
+handoff doc in OS temp (`hyperpanes-mcp-handoff.md`).
+
+- **M0** — `WindowSpec` layer + `windowsOf` normalizer (`src/main/workspace.ts`,
+  `src/renderer/types.ts`); `requestSingleInstanceLock` + `second-instance` routing
+  (`src/main/index.ts`); per-window push-seed via `getSeed.windowSpec`
+  (`ipc.ts`/`window.ts`/`App.tsx`). Bounds + cascade placement honored.
+- **M1** — `parseCli` rewritten as a window→tab→pane state machine with `--window`/`--tab`
+  separators + per-pane `--cwd`/`--shell`/`--font`; back-compat legacy shape preserved
+  (`workspace.test.ts`, 16 cases).
+- **M2** — `src/main/control-server.ts`: loopback HTTP, token + `userData/control.json`
+  discovery, **off by default**, `allowInput` second gate. Renderers publish structure
+  (`control.ts` + `App.tsx`); Preferences → General has the opt-in toggles.
+- **M2b — WebSocket event stream BUILT (2026-06-05).** `/events` WebSocket on the same
+  port + token (via `?token=`), using `ws`. Pushes `{type:'output',sessionUid,paneId,data}`,
+  `{type:'exit',…,code}`, and a coalesced `{type:'state'}` re-fetch ping; greets with
+  `{type:'hello',pid,version}`. `control.json` now includes the full `events` ws URL. Output/
+  exit are teed from ipc's session handlers (no-op when no client connected); a `sessionUid→
+  paneId` reverse index (rebuilt only on structure change) keeps the per-batch path O(1).
+  Poll route `GET /panes/:id/output?tail=N` remains for the initial backlog.
+
+**Total launch granularity — DONE (2026-06-05).** `GroupSpec` gained `sizes` (per-pane
+split fractions), `mainFraction` (Main+Stack split), and `focused`/`zoomed` (pane indices),
+so a launched/restored tab reproduces its exact split + which pane is focused/maximized.
+`groupFromSpec` consumes them (defensively validated → defaults on bad input; auto layout
+stays equal); `specFromGroup` emits them only when non-default. Mirrored in the MCP schema
+(`C:\hyperpanes-mcp\src\schema.ts`) + flagged CLI-lossy in `compile-cli.ts`. JSON/file launch
+only — no CLI flags. Still not settable: nothing left on the wish-list; per-pane zoom + split
+ratios + intra-tab focus are now all expressible.
+
+**Multi-window restore — DONE (2026-06-05).** Every window now publishes its tabs to main
+(`workspace:windowSession`); main aggregates by window id, captures per-window bounds, and
+writes a `windows[]` `last-workspace.json`, so a relaunch restores all windows (with
+positions). Empty-guard prevents wiping; a `quitting` flag stops cascading closes from
+shrinking the session; closing one window (app up) drops just that window. Replaced the old
+primary-only `serializeSession`/`saveLast` path. (109 unit tests.)
+
 ## Current state (grounding)
 
 - `parseCli` (`src/main/workspace.ts`) is single-tab only: per-pane `-c`/`-l`/`--color`;

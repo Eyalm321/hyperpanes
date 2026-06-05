@@ -41,8 +41,11 @@ export const useIdle = create<IdleState>((set, get) => ({
 
   markActivity: (paneId) => {
     const s = useSettings.getState();
-    // Globally off → don't track at all (frames won't glow regardless).
-    if (!s.idleAlert) return;
+    // Tracking runs regardless of the idleAlert *visual* setting: idle/busy is
+    // also surfaced to the control plane as each pane's `activity` (agent
+    // orchestration B), and a manager needs that whether or not the glow is on.
+    // The glow itself stays gated on idleAlert in PaneFrame, so the visual is
+    // unchanged when the setting is off.
 
     // Output means "not idle right now": clear the flag if it was set.
     if (get().idle[paneId]) {

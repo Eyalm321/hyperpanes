@@ -15,6 +15,13 @@ export interface Pane {
   status: 'running' | 'exited';
   exitCode?: number;
   fontSize?: number; // per-pane terminal font size (absent = default)
+  // Free-form per-pane metadata (agent-orchestration C). Reserved keys give an
+  // agent org its shape: `role`, `parent`, `agentType`, `task` — rest is open.
+  meta?: Record<string, string>;
+  // Extra env injected into this pane's pty at spawn (agent-orchestration F):
+  // how a parent hands a child a scoped control token. Runtime-only — never
+  // persisted (would leak tokens) and never published to the control plane.
+  env?: Record<string, string>;
 }
 
 // Persisted workspace file (workspace.json) — a declarative pane set + layout.
@@ -26,13 +33,40 @@ export interface PaneSpec {
   cwd?: string;
   shell?: string;
   fontSize?: number;
+  meta?: Record<string, string>; // free-form per-pane metadata (agent-orchestration C)
 }
 
-// A single group (tab): a pane set + layout + tab title.
+// A single group (tab): a pane set + layout + tab title. The optional sizing /
+// focus / zoom fields let a launched or restored tab reproduce its exact split
+// ratios and which pane is focused / maximized; omit them for the defaults
+// (equal split, first pane focused, none maximized).
 export interface GroupSpec {
   title?: string;
   layout?: Layout;
   panes: PaneSpec[];
+  sizes?: number[]; // per-slot fractions (summed→1); length must match panes
+  mainFraction?: number; // main-stack split fraction (0<f<1)
+  focused?: number; // index of the focused pane (default 0)
+  zoomed?: number; // index of the maximized pane (default: none)
+}
+
+// One OS window: a set of tabs (groups), which one is active, and optional
+// on-screen bounds. The `windows` layer sits above tabs so a single workspace
+// file / CLI launch can describe several windows at once.
+export interface WindowBounds {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  maximized?: boolean;
+  fullscreen?: boolean;
+}
+
+export interface WindowSpec {
+  title?: string;
+  active?: number; // active tab index
+  bounds?: WindowBounds;
+  groups: GroupSpec[];
 }
 
 // A live group handed to another window during tear-off / merge (Stage 2). It
@@ -51,12 +85,78 @@ export interface GroupPayload {
   seq: number;
 }
 
-// A workspace file holds one group at the top level (back-compat) and, for the
-// full multi-tab session, the complete `groups` list with the active index.
+// ---- Control API (M2) ----
+// What a window publishes to main about its own structure when the control API is
+// active, plus the status main reports back to Preferences. Kept structurally
+// identical to the main-side copies in control-server.ts.
+export interface ControlPaneInfo {
+  id: string;
+  sessionUid: string;
+  label: string;
+  color: string;
+  command?: string;
+  cwd?: string;
+  shell?: string;
+  status: 'running' | 'exited';
+  exitCode?: number;
+  activity: 'busy' | 'idle' | 'exited'; // liveness heuristic (agent-orchestration B)
+  meta?: Record<string, string>; // free-form per-pane metadata (agent-orchestration C)
+}
+export interface ControlTabInfo {
+  id: string;
+  title: string;
+  layout: string;
+  panes: ControlPaneInfo[];
+}
+export interface ControlWindowPayload {
+  activeTabId: string | null;
+  tabs: ControlTabInfo[];
+}
+export interface ControlStatus {
+  enabled: boolean;
+  allowInput: boolean;
+  running: boolean;
+  port: number | null;
+}
+// A structural command forwarded from the control API into a window's renderer.
+export interface ControlCommand {
+  type: string;
+  paneId?: string;
+  windowId?: number;
+  correlationId?: string; // set by main; the renderer echoes it with the result (D)
+  [key: string]: unknown;
+}
+
+// ---- Performance metrics (diagnostics) ----
+// A point-in-time snapshot for the "Performance: Dump metrics" command: cold-start
+// milestones (main-process), plus per-process memory from app.getAppMetrics(). The
+// live WebGL-context count is added renderer-side (it's per-window, not in main).
+export interface MetricsProcessInfo {
+  type: string; // 'Browser' | 'GPU' | 'Tab' (renderer) | 'Utility' | …
+  pid: number;
+  memoryMB: number; // working-set size
+  cpu: number; // percentCPUUsage since the last sample
+}
+export interface MetricsSnapshot {
+  startupMs: Record<string, number>; // named cold-start marks (ms since process start)
+  windows: number;
+  totalMemoryMB: number;
+  byType: { type: string; count: number; memoryMB: number }[];
+  processes: MetricsProcessInfo[];
+}
+
+// A workspace file. Three nesting levels, each a back-compatible superset of the
+// last:
+//   • `panes` (+ `layout`)      — one tab in one window (original format)
+//   • `groups` (+ `active`)     — several tabs in one window
+//   • `windows`                 — several windows, each with its own tabs
+// A reader normalizes whichever is present into a window list (see windowsOf in
+// src/main/workspace.ts). `panes` is optional now that a file may be windows-only.
 export interface WorkspaceFile {
   name?: string;
   layout?: Layout;
-  panes: PaneSpec[];
+  panes?: PaneSpec[];
   groups?: GroupSpec[];
   active?: number;
+  windows?: WindowSpec[];
 }

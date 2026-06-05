@@ -199,3 +199,25 @@ describe('adoptPaneInto (cross-window pane stitch)', () => {
     expect(ws().groups[0].panes.map((p) => p.id)).toEqual(paneIds);
   });
 });
+
+describe('tear-off strips pane.env (scoped token never leaves the window, #5)', () => {
+  it('extractGroup hands off panes with env removed', () => {
+    ws().loadSession({ panes: [], groups: [{ title: 'g', panes: [] }] });
+    const id = ws().addPane({ label: 'worker', env: { HYPERPANES_CONTROL_TOKEN: 'secret' } });
+    // The live pane in this window keeps its env (it spawns the pty with it)…
+    expect(ws().groups[0].panes.find((p) => p.id === id)!.env).toEqual({
+      HYPERPANES_CONTROL_TOKEN: 'secret'
+    });
+    // …but the torn-off payload that travels to another window must not.
+    const payload = ws().extractGroup(ws().groups[0].id)!;
+    expect(payload.panes).toHaveLength(1);
+    expect(payload.panes[0].env).toBeUndefined();
+  });
+
+  it('extractPaneAsGroup strips env from the single torn-out pane', () => {
+    ws().loadSession({ panes: [], groups: [{ title: 'g', panes: [] }] });
+    const id = ws().addPane({ label: 'worker', env: { TOKEN: 'x' } });
+    const payload = ws().extractPaneAsGroup(id)!;
+    expect(payload.panes[0].env).toBeUndefined();
+  });
+});

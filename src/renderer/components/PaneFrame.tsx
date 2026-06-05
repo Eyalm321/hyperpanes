@@ -4,6 +4,8 @@ import { useWorkspace, type Group } from '../store/useWorkspace';
 import { useUI } from '../store/useUI';
 import { useSettings } from '../store/useSettings';
 import { useIdle, isAiPane } from '../store/useIdle';
+import { runIdleEffect } from './idle-effects';
+import { TERMINAL_THEMES } from './terminal-themes';
 import { beginPaneDrag } from '../paneDrag';
 import { useKeybindings } from '../store/useKeybindings';
 import { comboLabel } from '../keybindings';
@@ -21,11 +23,12 @@ interface PaneFrameProps {
   group: Group;
   pane: Pane;
   rect: Rect;
-  visible: boolean;
+  visible: boolean; // shown within its group's layout (drives the tile's display)
+  active: boolean; // this group is the active tab (its whole .hp-group is shown)
   focused: boolean;
 }
 
-export function PaneFrame({ group, pane, rect, visible, focused }: PaneFrameProps) {
+export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneFrameProps) {
   const focusPane = useWorkspace((s) => s.focusPane);
   const removePane = useWorkspace((s) => s.removePane);
   const renamePane = useWorkspace((s) => s.renamePane);
@@ -38,6 +41,11 @@ export function PaneFrame({ group, pane, rect, visible, focused }: PaneFrameProp
   const showFrame = useSettings((s) => s.showFrame);
   const showDot = useSettings((s) => s.showDot);
   const idleAlert = useSettings((s) => s.idleAlert);
+  const idleEffect = useSettings((s) => s.idleEffect);
+  // The active terminal background, painted on the body so its padding (and any
+  // sub-cell sliver xterm leaves) matches the terminal instead of showing the
+  // dark pane bg — most visible on a light theme.
+  const termBg = useSettings((s) => TERMINAL_THEMES[s.terminalTheme].background);
   const zoomKey = useKeybindings((s) => comboLabel(s.combos['pane.toggleZoom']));
 
   const zoomed = group.zoomedId === pane.id;
@@ -75,35 +83,18 @@ export function PaneFrame({ group, pane, rect, visible, focused }: PaneFrameProp
     isAiPane(pane, shellTitle) &&
     !(focused && winFocused);
 
-  // The soft firefly pulse. Driven imperatively via the Web Animations API on a
-  // dedicated overlay element, so it (a) survives React re-renders without being
-  // wiped, (b) never collides with the frame's inline focus box-shadow, and
-  // (c) can use genuinely random gaps — a periodic CSS loop gets tuned out by the
-  // eye, irregular blinks keep catching it.
+  // The idle glow. Driven imperatively via the Web Animations API on a dedicated
+  // overlay element, so it (a) survives React re-renders without being wiped,
+  // (b) never collides with the frame's inline focus box-shadow, and (c) can use
+  // genuinely random gaps — a periodic CSS loop gets tuned out by the eye. The
+  // chosen effect (firefly / pulse / blink / solid) is an Appearance setting; its
+  // spec lives in idle-effects and is interpreted by the scheduler below.
   const glowRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = glowRef.current;
     if (!el || !glowOn) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let anim: Animation | null = null;
-    const pulse = () => {
-      if (cancelled) return;
-      anim?.cancel();
-      anim = el.animate([{ opacity: 0 }, { opacity: 0.8, offset: 0.4 }, { opacity: 0 }], {
-        duration: 850 + Math.random() * 550,
-        easing: 'ease-in-out'
-      });
-      // Random dark gap before the next blink → irregular, firefly-like.
-      timer = setTimeout(pulse, 1700 + Math.random() * 2600);
-    };
-    timer = setTimeout(pulse, 350 + Math.random() * 500);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      anim?.cancel();
-    };
-  }, [glowOn, pane.color]);
+    return runIdleEffect(el, idleEffect);
+  }, [glowOn, pane.color, idleEffect]);
 
   // "Rename…" from this pane's context menu opens the label editor. Only the
   // targeted pane's selector flips true, so other panes don't re-render.
@@ -262,14 +253,18 @@ export function PaneFrame({ group, pane, rect, visible, focused }: PaneFrameProp
             ×
           </button>
         </div>
-        <div className="hp-pane-body">
+        <div className="hp-pane-body" style={{ background: termBg }}>
           <Terminal
             paneId={pane.id}
             sessionUid={pane.sessionUid}
             command={pane.command}
             cwd={pane.cwd}
             shell={pane.shell}
+            env={pane.env}
             focused={focused}
+            // On screen only when this tab is active AND this tile is shown — the
+            // gate for keeping a GPU context (see Terminal's `visible`).
+            visible={active && visible}
             onExit={(code) => markExited(pane.id, code)}
             onTitle={setShellTitle}
             onInput={handleInput}

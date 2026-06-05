@@ -14,6 +14,13 @@ export function normalize(sizes: number[]): number[] {
   return sizes.map((s) => s / sum);
 }
 
+// Are these sizes an (≈) equal split? Used to skip serializing default splits.
+export function isEqualSplit(sizes: number[]): boolean {
+  if (sizes.length <= 1) return true;
+  const eq = 1 / sizes.length;
+  return sizes.every((s) => Math.abs(s - eq) < 1e-6);
+}
+
 export function clampFraction(f: number): number {
   return Math.min(Math.max(f, MIN_SIZE), 1 - MIN_SIZE);
 }

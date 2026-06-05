@@ -4,6 +4,7 @@ import { useKeybindings } from '../store/useKeybindings';
 import { comboLabel } from '../keybindings';
 import { AUTO_LAYOUT, LAYOUTS } from '../layout/presets';
 import { serializeWorkspace } from '../workspace/serialize';
+import { getWebglContextCount } from '../perf';
 
 export interface Command {
   id: string;
@@ -157,6 +158,38 @@ export function buildCommands(): Command[] {
       if (file && Array.isArray(file.panes) && file.panes.length > 0) {
         useWorkspace.getState().loadWorkspace(file);
       }
+    }
+  });
+
+  // Diagnostics: shows memory / per-process / startup numbers (plus this window's
+  // live WebGL-context count) in a panel, and also logs them to the console — the
+  // before/after gauge for the visible-only-WebGL change.
+  cmds.push({
+    id: 'perf-metrics',
+    title: 'Performance: Dump metrics',
+    subtitle: 'Show memory, processes, startup, and WebGL contexts (panel + console)',
+    keywords: 'performance memory profile diagnostics webgl startup footprint',
+    run: async () => {
+      const m = await window.hp.metrics();
+      const liveCtx = getWebglContextCount();
+      const paneCount = useWorkspace.getState().groups.reduce((n, gr) => n + gr.panes.length, 0);
+      useUI.getState().openMetrics({ snap: m, liveCtx, paneCount });
+      /* eslint-disable no-console */
+      console.groupCollapsed(
+        `%chyperpanes metrics%c — ${m.totalMemoryMB} MB · ${m.processes.length} procs · ${m.windows} win`,
+        'font-weight:bold',
+        'font-weight:normal'
+      );
+      console.log('startup (ms since process start):', m.startupMs);
+      console.log(
+        `WebGL contexts live in THIS window: ${liveCtx}` +
+          ` (panes mounted across all tabs/windows: ${paneCount})`
+      );
+      console.log(`total memory: ${m.totalMemoryMB} MB across ${m.processes.length} processes`);
+      console.table(m.byType);
+      console.table(m.processes);
+      console.groupEnd();
+      /* eslint-enable no-console */
     }
   });
 

@@ -37,8 +37,20 @@ function layoutSubmenu(current: Layout, paneCount: number, pick: (l: Layout) => 
   ];
 }
 
-const colorSubmenu = (value: string, onChange: (c: string) => void): MenuItem[] => [
-  { kind: 'custom', node: <ColorSwatches value={value} onChange={onChange} /> }
+// The Change Color swatches, kept live (subscribed to the pane's color) so the
+// selected/bordered swatch tracks the current color even after you pick a new one
+// — the menu stays open, but the static menu data wouldn't otherwise update.
+function MenuColorSwatches({ paneId, groupId }: { paneId: string; groupId: string }) {
+  const color = useWorkspace((s) => {
+    const g = s.groups.find((x) => x.id === groupId);
+    return g?.panes.find((p) => p.id === paneId)?.color ?? '';
+  });
+  const recolorPane = useWorkspace((s) => s.recolorPane);
+  return <ColorSwatches value={color} onChange={(c) => recolorPane(paneId, c)} />;
+}
+
+const colorSubmenu = (paneId: string, groupId: string): MenuItem[] => [
+  { kind: 'custom', node: <MenuColorSwatches paneId={paneId} groupId={groupId} /> }
 ];
 
 // ---- Tab (workspace) menu ----
@@ -107,7 +119,7 @@ export function buildPaneMenu(
   items.push(
     { kind: 'item', label: 'New Pane…', onSelect: () => ui.openNewPane() },
     { kind: 'item', label: 'Rename…', onSelect: () => ui.requestRenamePane(paneId) },
-    { kind: 'submenu', label: 'Change Color', items: colorSubmenu(p.color, (c) => ws.recolorPane(paneId, c)) },
+    { kind: 'submenu', label: 'Change Color', items: colorSubmenu(paneId, groupId) },
     { kind: 'sep' }
   );
 

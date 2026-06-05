@@ -1,5 +1,14 @@
 import { create } from 'zustand';
 import type { MenuItem } from '../components/ContextMenu';
+import type { MetricsSnapshot } from '../types';
+
+// A captured metrics snapshot plus the per-window renderer figures, shown by the
+// "Performance: Dump metrics" command.
+export interface MetricsView {
+  snap: MetricsSnapshot;
+  liveCtx: number;
+  paneCount: number;
+}
 
 // Transient UI state that doesn't belong in the workspace model (modals, etc).
 interface UIState {
@@ -15,6 +24,12 @@ interface UIState {
   preferencesOpen: boolean;
   openPreferences: () => void;
   closePreferences: () => void;
+
+  // A captured metrics snapshot shown by the "Performance: Dump metrics" command
+  // (also logged to the console). Null = the metrics panel is closed.
+  metricsData: MetricsView | null;
+  openMetrics: (data: MetricsView) => void;
+  closeMetrics: () => void;
 
   // While a pane is being dragged, the tab-strip drop target under the cursor:
   // a group id, 'new' (the +/strip), or null. Drives the drop highlight.
@@ -71,6 +86,10 @@ export const useUI = create<UIState>((set) => ({
   preferencesOpen: false,
   openPreferences: () => set({ preferencesOpen: true }),
   closePreferences: () => set({ preferencesOpen: false }),
+
+  metricsData: null,
+  openMetrics: (data) => set({ metricsData: data }),
+  closeMetrics: () => set({ metricsData: null }),
 
   paneDropTarget: null,
   setPaneDropTarget: (target) =>

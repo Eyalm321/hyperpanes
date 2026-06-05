@@ -5,7 +5,7 @@ import { useUI } from '../store/useUI';
 import { startLiveTearOff } from '../liveTearOff';
 import { beginDragGuard } from '../dragGuard';
 import { buildTabMenu } from './contextMenus';
-import { IconPlus } from './Icons';
+import { IconPlusBare } from './Icons';
 
 // Pointer travel (px) before a tab press becomes a tear-off drag. Small enough
 // to stay over the grabbed tab (so we don't miss it before capture), large
@@ -225,7 +225,7 @@ export function TabStrip() {
         title="New tab (or drop a pane here to split it off)"
         aria-label="New tab"
       >
-        <IconPlus />
+        <IconPlusBare />
       </button>
     </div>
     </>
