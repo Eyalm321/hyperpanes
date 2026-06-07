@@ -678,16 +678,25 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
       })),
 
     // Tint a pane to a detected git project: adopt its color, turn the frame and
-    // dot on, and show the repo name as the subtitle. (projects feature seam)
+    // dot on, and show the repo name as the pane TITLE. The title only overwrites a
+    // default auto-label ('shell' / 'pane N'), never a name the user chose; any
+    // leftover subtitle that merely duplicated the repo name is cleared.
     applyProjectToPane: (id, project) =>
       set((s) => ({
         groups: mapPaneGroup(s, id, (g) => ({
           ...g,
-          panes: g.panes.map((p) =>
-            p.id === id
-              ? { ...p, color: project.color, showFrame: true, showDot: true, subtitle: project.name }
-              : p
-          )
+          panes: g.panes.map((p) => {
+            if (p.id !== id) return p;
+            const isDefaultLabel = /^(shell|pane \d+)$/i.test(p.label.trim());
+            return {
+              ...p,
+              color: project.color,
+              showFrame: true,
+              showDot: true,
+              label: isDefaultLabel ? project.name : p.label,
+              subtitle: p.subtitle === project.name ? undefined : p.subtitle
+            };
+          })
         }))
       })),
 

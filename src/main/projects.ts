@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import { basename, join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 // A git repo the app remembers from a pane cd-ing into it (sidebar projects
@@ -32,6 +32,37 @@ function colorForPath(p: string): string {
   let h = 0;
   for (let i = 0; i < p.length; i++) h = (h * 31 + p.charCodeAt(i)) >>> 0;
   return PROJECT_COLORS[h % PROJECT_COLORS.length];
+}
+
+// Parse the repository name out of a remote URL (any host), so a clone checked out
+// into a differently-named folder still shows its REAL repo name:
+//   https://github.com/owner/my-repo.git  → my-repo
+//   git@github.com:owner/my-repo.git       → my-repo
+//   ssh://git@github.com/owner/My.Repo.git → My.Repo
+export function repoNameFromUrl(url: string): string | null {
+  const u = url
+    .trim()
+    .replace(/\.git$/i, '')
+    .replace(/[\\/]+$/, '');
+  if (!u) return null;
+  const parts = u.split(/[\\/:]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+// The repo's name from its `origin` remote (e.g. the GitHub repo name), read
+// straight from .git/config — no `git` spawn. Returns null when there's no plain
+// .git directory (worktree/submodule pointer) or no origin url, and the caller
+// falls back to the folder name.
+function gitRepoName(gitRoot: string): string | null {
+  try {
+    const dotGit = join(gitRoot, '.git');
+    if (!statSync(dotGit).isDirectory()) return null;
+    const cfg = readFileSync(join(dotGit, 'config'), 'utf8');
+    const m = cfg.match(/\[remote "origin"\][^[]*?\burl\s*=\s*(.+)/);
+    return m ? repoNameFromUrl(m[1]) : null;
+  } catch {
+    return null;
+  }
 }
 
 const norm = (p: string): string => p.replace(/[\\/]+$/, '');
@@ -72,16 +103,22 @@ export function listProjects(): Project[] {
 export function upsertProjectByRoot(root: string): Project {
   const path = norm(root);
   const list = load();
+  const repo = gitRepoName(path);
   const existing = list.find((p) => norm(p.path) === path);
   if (existing) {
     existing.lastOpenedAt = Date.now();
+    // Heal an entry saved under the old folder-name logic to the real repo name —
+    // but never clobber a name the user deliberately changed.
+    if (repo && existing.name === basename(path) && existing.name !== repo) {
+      existing.name = repo;
+    }
     save(list);
     return existing;
   }
   const project: Project = {
     id: randomUUID(),
     path,
-    name: basename(path) || path,
+    name: repo || basename(path) || path,
     color: colorForPath(path),
     lastOpenedAt: Date.now()
   };
