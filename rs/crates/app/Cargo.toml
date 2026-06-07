@@ -1,0 +1,31 @@
+[package]
+name = "hyperpanes"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Standalone workspace root (the GUI binary; owns the heavy Slint/GPU deps). You OWN this
+# file — adjust deps freely. Path-deps into the core + the terminal widget.
+[workspace]
+
+[[bin]]
+name = "hyperpanes"
+path = "src/main.rs"
+
+[dependencies]
+hyperpanes-core = { path = "../core" }
+hyperpanes-terminal-widget = { path = "../terminal-widget" }
+slint = { version = "1.16", features = ["unstable-wgpu-28", "renderer-femtovg-wgpu"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# Frameless window / custom titlebar (WM_NCHITTEST + min/max/close) — lift from spike-tearoff.
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+slint-build = "1.16"
+
+# Keep the software renderer + UI smooth in dev (matches the terminal-widget profile).
+[profile.dev.package."*"]
+opt-level = 3
+[profile.dev]
+opt-level = 1
