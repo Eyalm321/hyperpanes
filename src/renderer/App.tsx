@@ -10,6 +10,7 @@ import { comboMatches } from './keybindings';
 import { serializeWindowSession } from './workspace/serialize';
 import { buildControlPayload, settleControlCommand } from './control';
 import { TopBar } from './components/TopBar';
+import { Sidebar } from './components/Sidebar';
 import { PaneArea } from './components/PaneArea';
 import { NewPaneDialog } from './components/NewPaneDialog';
 import { CommandPalette } from './components/CommandPalette';
@@ -53,6 +54,9 @@ export default function App() {
   // terminal font + foreground color, with a halo in the terminal background.
   const terminalTheme = useSettings((s) => s.terminalTheme);
   const fontFamily = useSettings((s) => s.fontFamily) || DEFAULT_FONT_FAMILY;
+  // The right-side sidebar (quick-pane + git-projects history); hidden in
+  // fullscreen so only the terminal shows.
+  const showSidebar = useSettings((s) => s.showSidebar);
 
   useEffect(() => {
     // On launch, decide what this window shows. A window torn off from another
@@ -215,6 +219,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Git-project tint: when a pane's cwd enters a known repo, main emits the
+    // project keyed by the pane's live sessionUid. Find that pane and tint it
+    // (adopt the project color, turn on frame/dot, show the repo name).
+    return window.hp.projects.onPaneProject((uid, project) => {
+      const ws = useWorkspace.getState();
+      for (const g of ws.groups) {
+        const pane = g.panes.find((p) => p.sessionUid === uid);
+        if (pane) {
+          ws.applyProjectToPane(pane.id, project);
+          return;
+        }
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     // Reflect pane-fullscreen into (simple) OS fullscreen. Entering also hides the
     // top bar via the conditional render below. Simple fullscreen is app-driven —
     // exit is via the ⛶ button or Esc (see the keydown handler), never the OS — so
@@ -355,16 +375,19 @@ export default function App() {
   return (
     <div className="hp-app">
       {!fullscreenPaneId && <TopBar />}
-      <div className="hp-groups">
-        {groups.map((g) => (
-          <div
-            key={g.id}
-            className="hp-group"
-            style={{ display: g.id === activeId ? 'flex' : 'none' }}
-          >
-            <PaneArea group={g} active={g.id === activeId} />
-          </div>
-        ))}
+      <div className="hp-body">
+        <div className="hp-groups">
+          {groups.map((g) => (
+            <div
+              key={g.id}
+              className="hp-group"
+              style={{ display: g.id === activeId ? 'flex' : 'none' }}
+            >
+              <PaneArea group={g} active={g.id === activeId} />
+            </div>
+          ))}
+        </div>
+        {!fullscreenPaneId && showSidebar && <Sidebar />}
       </div>
       <NewPaneDialog />
       <CommandPalette />

@@ -48,6 +48,9 @@ export interface Settings {
   // Seconds of pty silence before an AI pane is considered idle and starts to
   // glow. A bit longer avoids false alarms while the agent briefly pauses.
   idleAlertSeconds: number;
+  // Whether the right-side sidebar (quick-pane button + git-projects history) is
+  // shown. Hidden when a pane is fullscreen regardless of this.
+  showSidebar: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -62,7 +65,8 @@ const DEFAULTS: Settings = {
   editorCommand: '',
   idleAlert: true,
   idleEffect: DEFAULT_IDLE_EFFECT,
-  idleAlertSeconds: 10
+  idleAlertSeconds: 10,
+  showSidebar: true
 };
 
 function load(): Settings {
@@ -99,7 +103,8 @@ const pick = (s: SettingsState): Settings => ({
   editorCommand: s.editorCommand,
   idleAlert: s.idleAlert,
   idleEffect: s.idleEffect,
-  idleAlertSeconds: s.idleAlertSeconds
+  idleAlertSeconds: s.idleAlertSeconds,
+  showSidebar: s.showSidebar
 });
 
 const clampFont = (n: number) => Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, Math.round(n)));
@@ -117,6 +122,7 @@ interface SettingsState extends Settings {
   setIdleAlert: (on: boolean) => void;
   setIdleEffect: (effect: IdleEffectName) => void;
   setIdleAlertSeconds: (seconds: number) => void;
+  setShowSidebar: (show: boolean) => void;
 }
 
 export const useSettings = create<SettingsState>((set) => ({
@@ -182,5 +188,10 @@ export const useSettings = create<SettingsState>((set) => ({
       const idleAlertSeconds = Math.max(2, Math.min(120, Math.round(seconds)));
       persist(pick({ ...s, idleAlertSeconds }));
       return { idleAlertSeconds };
+    }),
+  setShowSidebar: (showSidebar) =>
+    set((s) => {
+      persist(pick({ ...s, showSidebar }));
+      return { showSidebar };
     })
 }));

@@ -33,13 +33,19 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
   const removePane = useWorkspace((s) => s.removePane);
   const renamePane = useWorkspace((s) => s.renamePane);
   const recolorPane = useWorkspace((s) => s.recolorPane);
+  const setPaneFrame = useWorkspace((s) => s.setPaneFrame);
+  const setPaneDot = useWorkspace((s) => s.setPaneDot);
   const markExited = useWorkspace((s) => s.markExited);
   const toggleZoom = useWorkspace((s) => s.toggleZoom);
   const toggleFullscreenPane = useUI((s) => s.toggleFullscreenPane);
   // Insert indicator while another pane is being dragged over this one's layout.
   const layoutDrop = useUI((s) => s.layoutDrop);
-  const showFrame = useSettings((s) => s.showFrame);
-  const showDot = useSettings((s) => s.showDot);
+  const globalShowFrame = useSettings((s) => s.showFrame);
+  const globalShowDot = useSettings((s) => s.showDot);
+  // Effective per-pane values: an explicit per-pane override wins, otherwise the
+  // pane inherits the global Appearance setting. New panes default both off.
+  const frameOn = pane.showFrame ?? globalShowFrame;
+  const dotOn = pane.showDot ?? globalShowDot;
   const idleAlert = useSettings((s) => s.idleAlert);
   const idleEffect = useSettings((s) => s.idleEffect);
   // The active terminal background, painted on the body so its padding (and any
@@ -149,9 +155,9 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
   // it off the pane falls back to a neutral border and an accent focus ring, so
   // focus is still visible without the per-pane color.
   const paneStyle: CSSProperties = {
-    borderColor: showFrame ? pane.color : undefined,
+    borderColor: frameOn ? pane.color : undefined,
     boxShadow: focused
-      ? showFrame
+      ? frameOn
         ? `0 0 0 1px ${pane.color}, 0 0 16px ${pane.color}40`
         : '0 0 0 1px var(--hp-accent)'
       : 'none'
@@ -179,7 +185,7 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
         )}
         <div
           className="hp-pane-header"
-          style={{ background: showFrame ? `${pane.color}1a` : undefined }}
+          style={{ background: frameOn ? `${pane.color}1a` : undefined }}
           title="Drag to another tab, or out of the window to open a new one"
           onPointerDown={onHeaderPointerDown}
           onPointerMove={onHeaderPointerMove}
@@ -191,7 +197,7 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
             useUI.getState().openContextMenu(e.clientX, e.clientY, buildPaneMenu(pane.id, group.id));
           }}
         >
-          {showDot && (
+          {dotOn && (
             <button
               ref={dotRef}
               className="hp-pane-dot"
@@ -278,6 +284,10 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
           anchor={dotRef.current.getBoundingClientRect()}
           value={pane.color}
           onChange={(c) => recolorPane(pane.id, c)}
+          frameOn={frameOn}
+          dotOn={dotOn}
+          onToggleFrame={(on) => setPaneFrame(pane.id, on)}
+          onToggleDot={(on) => setPaneDot(pane.id, on)}
           onClose={() => setColorOpen(false)}
         />
       )}
