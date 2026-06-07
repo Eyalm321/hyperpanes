@@ -1,3 +1,5 @@
-//! Workspace file model. Phase 1 / this fan-out lands the serde `model` types
-//! (the workspace.json shape) consumed by the CLI parser. Frozen map.
+//! Workspace. The serde `model` (done) plus `io` (read/write + resolveCwds) and
+//! `launch` (resolveLaunchWorkspace / getInitialWindows), this wave. Frozen map.
 pub mod model;
+pub mod io;
+pub mod launch;

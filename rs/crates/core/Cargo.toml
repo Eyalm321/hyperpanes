@@ -5,10 +5,30 @@ edition = "2021"
 rust-version = "1.85"
 publish = false
 
-# Dependencies are PRE-DECLARED by the fan-out scaffold so that no track ever needs
-# to edit this file — editing Cargo.toml in parallel worktrees would collide at
-# merge. If you genuinely need a new crate, that is a checkpoint with the
-# orchestrator, not a unilateral edit.
+# Dependencies are PRE-DECLARED by the fan-out scaffold so no track edits this file
+# (a parallel Cargo.toml edit would collide at merge). Need another crate or feature?
+# STOP and ask the orchestrator — it's a checkpoint, not a unilateral edit.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# --- Wave 1: live backend ---
+# session-engine: PTY + terminal model
+portable-pty = "0.9"
+alacritty_terminal = "0.26"
+# async runtime (ai scheduler/client; the live core broadly)
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "io-util", "macros", "process", "fs"] }
+# ai: Ollama HTTP client (rustls to avoid an OpenSSL build dep on Windows)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# persistence-cli: userData dir + ids
+directories = "5"
+uuid = { version = "1", features = ["v4"] }
+# platform: single-instance (named mutex + named-pipe argv handoff)
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_System_Pipes",
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  "Win32_System_IO",
+] }

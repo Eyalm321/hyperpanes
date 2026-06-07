@@ -1,3 +1,4 @@
-//! CLI argument parsing. Phase 1 / this fan-out lands the pure `parse` state
-//! machine; launch routing comes later. Frozen map.
+//! CLI. The pure `parse` state machine (done) plus launch `routing` (this wave).
+//! Frozen map.
 pub mod parse;
+pub mod routing;
