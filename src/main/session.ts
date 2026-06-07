@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { app } from 'electron';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
+import { integrationFor, shellIntegrationDir, parseOsc7 } from './shell-integration';
 
 // Max duration / size to batch pty output before flushing to the renderer.
 // Mirrors vercel/hyper's DataBatcher: collapses many tiny pty chunks into one
@@ -206,6 +207,8 @@ export class Session extends EventEmitter {
   private batcher = new DataBatcher();
   private ended = false;
   private replay = ''; // recent output, for re-attach
+  private osc7Carry = ''; // partial OSC 7 sequence split across pty chunks
+  private lastCwd: string | null = null; // de-dupe: emit 'cwd' only on change
 
   constructor(opts: SpawnOptions) {
     super();
@@ -215,9 +218,26 @@ export class Session extends EventEmitter {
     // file is the shell (command-via-shell / interactive), or the command itself
     // when an explicit argv was given (direct spawn, no re-parse — P4a).
     const { file, args } = resolveSpawn(shell, opts.command, opts.args, opts.cwd, opts.env);
+
+    // Shell integration: ONLY on the interactive branch (no `command`). Loads our
+    // init script so the shell reports its cwd (OSC 7) and turns on history
+    // autocomplete. Strictly additive — `integrationFor` returns null for
+    // cmd/other/missing-script, leaving a plain interactive shell. cmd/other still
+    // get their cwd seeded from opts.cwd via the pty `cwd` option below.
+    let finalArgs = args;
+    let integrationEnv: Record<string, string> = {};
+    if (!opts.command) {
+      const integration = integrationFor(shell, shellIntegrationDir());
+      if (integration) {
+        finalArgs = [...integration.args, ...args];
+        integrationEnv = integration.env;
+      }
+    }
+
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       ...opts.env,
+      ...integrationEnv,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor'
     };
@@ -237,7 +257,7 @@ export class Session extends EventEmitter {
       env.HYPERPANES_CONTROL_FILE = join(app.getPath('userData'), 'control.json');
     }
 
-    this.pty = pty.spawn(file, args, {
+    this.pty = pty.spawn(file, finalArgs, {
       name: 'xterm-256color',
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
@@ -247,6 +267,14 @@ export class Session extends EventEmitter {
 
     this.pty.onData((chunk) => {
       if (this.ended) return;
+      // Tap the RAW chunk for OSC 7 before batching. xterm consumes OSC 7 silently,
+      // so passing it through unchanged renders nothing; we only sniff the cwd out.
+      const { cwd, carry } = parseOsc7(this.osc7Carry, chunk);
+      this.osc7Carry = carry;
+      if (cwd && cwd !== this.lastCwd) {
+        this.lastCwd = cwd;
+        this.emit('cwd', cwd); // SessionCwd contract — projects track consumes this
+      }
       this.batcher.write(chunk);
     });
     this.batcher.on('flush', (data: string) => {

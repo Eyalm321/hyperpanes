@@ -22,6 +22,13 @@ files:
 asarUnpack:
   - "**/node_modules/node-pty/**"
 
+# Shell-integration init scripts are read by the EXTERNAL shell at spawn time, so
+# they must sit on real disk (not inside the asar / app bundle graph). Copy them
+# verbatim to process.resourcesPath/shell-integration (see shellIntegrationDir).
+extraResources:
+  - from: resources/shell-integration
+    to: shell-integration
+
 win:
   target:
     - target: nsis
