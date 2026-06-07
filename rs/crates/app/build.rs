@@ -15,6 +15,14 @@ fn main() {
     let cfg = slint_build::CompilerConfiguration::new().with_library_paths(libs);
     slint_build::compile_with_config("ui/app.slint", cfg).expect("slint compile failed");
 
-    println!("cargo:rerun-if-changed=ui/app.slint");
+    for f in [
+        "ui/app.slint",
+        "ui/topbar.slint",
+        "ui/paneview.slint",
+        "ui/theme.slint",
+        "ui/types.slint",
+    ] {
+        println!("cargo:rerun-if-changed={f}");
+    }
     println!("cargo:rerun-if-changed={}", widget.display());
 }

@@ -1,0 +1,392 @@
+// The hyperpanes top bar — ported 1:1 from the Electron app's TopBar/TabStrip:
+//
+//   [☰ menu]  [ Chrome-style tab strip … (empty area drags the window) ]  | [_ ▢ ✕]
+//
+// 32px tall, Catppuccin Mocha. The hamburger opens the application menu; tabs are
+// Chrome-style (active tab adopts the pane-area background so it reads connected);
+// window controls sit flush in the right corner.
+
+import { Theme } from "theme.slint";
+import { TabItem, LayoutOption } from "types.slint";
+
+// ---- stroked icons (match the Electron SVGs: 1.7px rounded strokes) ----
+
+component HamburgerIcon inherits Rectangle {
+    in property <color> ink;
+    width: 16px;
+    height: 12px;
+    Rectangle { y: 0;    width: 100%; height: 1.7px; border-radius: 1px; background: ink; }
+    Rectangle { y: 5px;  width: 100%; height: 1.7px; border-radius: 1px; background: ink; }
+    Rectangle { y: 10px; width: 100%; height: 1.7px; border-radius: 1px; background: ink; }
+}
+
+component PlusIcon inherits Rectangle {
+    in property <color> ink;
+    width: 14px;
+    height: 14px;
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.6px; height: 11px; border-radius: 1px; background: ink; }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.6px; width: 11px; border-radius: 1px; background: ink; }
+}
+
+component MinIcon inherits Rectangle {
+    in property <color> ink;
+    width: 16px;
+    height: 16px;
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 10px; height: 1.4px; border-radius: 1px; background: ink; }
+}
+
+component MaxIcon inherits Rectangle {
+    in property <color> ink;
+    width: 16px;
+    height: 16px;
+    Rectangle {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        width: 10px; height: 10px;
+        border-width: 1.4px; border-color: ink; border-radius: 1.5px; background: transparent;
+    }
+}
+
+component CloseIcon inherits Path {
+    in property <color> ink;
+    in property <length> sz: 16px;
+    width: root.sz;
+    height: root.sz;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    stroke: ink;
+    stroke-width: 1.5px;
+    fill: transparent;
+    commands: "M 3.5 3.5 L 12.5 12.5 M 12.5 3.5 L 3.5 12.5";
+}
+
+// ---- one Chrome-style tab ----
+
+component TabChip inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    in property <bool> editing;
+    callback select();
+    callback close();
+    callback begin-rename();
+    callback commit-rename(string);
+
+    min-width: 96px;
+    max-width: 200px;
+    horizontal-stretch: 0;
+    // active tab adopts the pane-area bg (reads connected); hover lifts to surface.
+    background: root.active ? Theme.bg : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.border;
+
+    ta := TouchArea {
+        clicked => { root.select(); }
+        double-clicked => { root.begin-rename(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                root.close();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        spacing: 6px;
+
+        Text {
+            text: root.title;
+            color: (root.active || ta.has-hover || xa.has-hover) ? Theme.text : Theme.subtext;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            visible: !root.editing;
+        }
+
+        // close affordance: hidden until hover/active (Electron behaviour)
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: xa.has-hover ? Theme.surface2 : transparent;
+            // include xa.has-hover: hovering the × itself steals hover from the
+            // chip's TouchArea, which would otherwise hide the × mid-hover.
+            opacity: (root.active || ta.has-hover || xa.has-hover) ? 1.0 : 0.0;
+            visible: !root.editing;
+            animate opacity { duration: 90ms; }
+            CloseIcon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                sz: 12px;
+                ink: xa.has-hover ? Theme.text : Theme.subtext;
+            }
+            xa := TouchArea { clicked => { root.close(); } }
+        }
+    }
+
+    // inline rename editor (absolute overlay → never reflows the strip)
+    if root.editing : Rectangle {
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+        width: 150px;
+        height: 20px;
+        background: Theme.bg;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Theme.accent;
+        ti := TextInput {
+            x: 5px;
+            width: parent.width - 10px;
+            height: parent.height;
+            text: root.title;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            single-line: true;
+            init => { ti.select-all(); ti.focus(); }
+            accepted => { root.commit-rename(self.text); }
+        }
+    }
+}
+
+// ---- a row in the application menu ----
+
+component MenuItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked: false;
+    in property <bool> show-check: false;
+    in property <bool> indent: false;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: ta.has-hover ? Theme.surface2 : transparent;
+    HorizontalLayout {
+        padding-left: root.indent ? 26px : 11px;
+        padding-right: 11px;
+        spacing: 9px;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: (root.show-check && root.checked) ? "✓" : "";
+            color: Theme.accent;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component TopBar inherits Rectangle {
+    in property <[TabItem]> tabs;
+    in property <int> editing-tab: -1;
+    in property <[LayoutOption]> layouts;
+    in property <bool> zoomed: false;
+    in property <bool> fullscreen: false;
+
+    callback select-tab(int);
+    callback close-tab(int);
+    callback new-tab();
+    callback begin-rename(int);
+    callback rename-tab(int, string);
+    callback set-layout(int);
+    callback new-pane();
+    callback toggle-zoom();
+    callback toggle-fullscreen();
+    callback start-drag();
+    callback min-window();
+    callback max-window();
+    callback close-window();
+
+    height: 32px;
+    background: Theme.mantle;
+    // bottom hairline
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        spacing: 8px;
+
+        // ===== hamburger menu =====
+        VerticalLayout {
+            alignment: center;
+            menu-btn := Rectangle {
+                width: 30px;
+                height: 26px;
+                border-radius: 6px;
+                background: mta.has-hover ? Theme.surface2 : transparent;
+                HamburgerIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: mta.has-hover ? Theme.text : Theme.subtext;
+                }
+                mta := TouchArea { clicked => { menu-popup.show(); } }
+            }
+        }
+
+        // ===== tab strip (fills the bar; empty area drags the window) =====
+        Rectangle {
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                padding-top: 4px;          // bottom-align tabs (28px in the 32px bar)
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 2px;
+
+                for tab[idx] in root.tabs : TabChip {
+                    title: tab.title;
+                    active: tab.active;
+                    editing: root.editing-tab == idx;
+                    select => { root.select-tab(idx); }
+                    close => { root.close-tab(idx); }
+                    begin-rename => { root.begin-rename(idx); }
+                    commit-rename(t) => { root.rename-tab(idx, t); }
+                }
+
+                // new tab
+                VerticalLayout {
+                    alignment: center;
+                    new-btn := Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 6px;
+                        background: nta.has-hover ? Theme.surface2 : transparent;
+                        PlusIcon {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            ink: nta.has-hover ? Theme.text : Theme.subtext;
+                        }
+                        nta := TouchArea { clicked => { root.new-tab(); } }
+                    }
+                }
+
+                // empty trailing area → drags the window (move only on actual drag)
+                Rectangle {
+                    horizontal-stretch: 1;
+                    drag := TouchArea {
+                        moved => { if (self.pressed) { root.start-drag(); } }
+                        double-clicked => { root.max-window(); }
+                    }
+                }
+            }
+        }
+
+        // ===== window controls (flush right corner) =====
+        Rectangle {
+            width: 1px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            background: Theme.border;
+        }
+        HorizontalLayout {
+            WinBtn := Rectangle {
+                width: 44px;
+                background: minh.has-hover ? Theme.surface2 : transparent;
+                MinIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: minh.has-hover ? Theme.text : Theme.subtext;
+                }
+                minh := TouchArea { clicked => { root.min-window(); } }
+            }
+            Rectangle {
+                width: 44px;
+                background: maxh.has-hover ? Theme.surface2 : transparent;
+                MaxIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: maxh.has-hover ? Theme.text : Theme.subtext;
+                }
+                maxh := TouchArea { clicked => { root.max-window(); } }
+            }
+            Rectangle {
+                width: 44px;
+                background: closh.has-hover ? Theme.danger : transparent;
+                CloseIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: closh.has-hover ? #ffffff : Theme.subtext;
+                }
+                closh := TouchArea { clicked => { root.close-window(); } }
+            }
+        }
+    }
+
+    // ===== application (hamburger) menu =====
+    menu-popup := PopupWindow {
+        x: 8px;
+        y: 36px;
+        width: 230px;
+        height: 372px;
+
+        Rectangle {
+            background: Theme.mantle;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 40px;
+            drop-shadow-color: Theme.scrim;
+            drop-shadow-offset-y: 14px;
+
+            VerticalLayout {
+                padding: 5px;
+                spacing: 1px;
+
+                MenuItem {
+                    label: "New pane";
+                    clicked => { root.new-pane(); menu-popup.close(); }
+                }
+                MenuItem {
+                    label: "New tab";
+                    clicked => { root.new-tab(); menu-popup.close(); }
+                }
+                Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
+
+                // Layout section
+                Text {
+                    text: "Layout";
+                    color: Theme.subtext;
+                    font-size: 10px;
+                    font-weight: 700;
+                    horizontal-alignment: left;
+                    height: 18px;
+                    vertical-alignment: center;
+                    x: 11px;
+                }
+                for opt[i] in root.layouts : MenuItem {
+                    label: opt.label;
+                    checked: opt.active;
+                    show-check: true;
+                    indent: true;
+                    clicked => { root.set-layout(opt.id); menu-popup.close(); }
+                }
+                Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
+
+                MenuItem {
+                    label: "Zoom pane";
+                    checked: root.zoomed;
+                    show-check: true;
+                    clicked => { root.toggle-zoom(); menu-popup.close(); }
+                }
+                MenuItem {
+                    label: "Fullscreen";
+                    checked: root.fullscreen;
+                    show-check: true;
+                    clicked => { root.toggle-fullscreen(); menu-popup.close(); }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+}

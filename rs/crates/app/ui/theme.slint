@@ -1,0 +1,27 @@
+// Shared theme tokens + small reusable chrome widgets for the hyperpanes shell.
+// Palette is Catppuccin Mocha — matched 1:1 to the Electron app's `:root` vars so
+// the native top bar reads identically.
+
+export global Theme {
+    // surfaces
+    out property <color> bg: #11111b;        // --hp-bg (pane area + active tab)
+    out property <color> mantle: #181825;    // --hp-mantle (top bar)
+    out property <color> surface: #1e1e2e;   // --hp-surface (tab hover)
+    out property <color> surface2: #313244;  // --hp-surface2 (hover / chips)
+    out property <color> border: #313244;    // --hp-border
+    // ink
+    out property <color> text: #cdd6f4;       // --hp-text
+    out property <color> subtext: #9399b2;    // --hp-subtext
+    out property <color> faint: #6c7086;
+    // accent
+    out property <color> accent: #89b4fa;     // --hp-accent
+    out property <color> danger: #e5484d;     // window close hover
+    out property <color> scrim: #0000008c;
+
+    // ---- aliases kept for the rest of the UI (paneview/app) ----
+    out property <color> brand: self.accent;
+    out property <color> ink: self.text;
+    out property <color> ink-dim: self.subtext;
+    out property <color> ink-faint: self.faint;
+    out property <color> hover: self.surface2;
+}

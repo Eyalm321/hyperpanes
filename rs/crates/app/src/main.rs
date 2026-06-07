@@ -1,438 +1,317 @@
-//! `hyperpanes` — the native Slint GUI (Phase 2: single-window MVP).
+//! `hyperpanes` — the native Slint GUI (Phase 3, Wave 1: multi-tab workspace).
 //!
-//! Assembles the finished pieces into a launchable, usable tiled terminal:
-//!   * a frameless window + custom icon-only top bar (Win32: strip `WS_CAPTION`, drag via the
-//!     `HTCAPTION` trick, min/max/close) — lifted from `rs/spikes/tearoff`;
-//!   * a small central workspace state (the MVP subset of `useWorkspace.ts`): the pane list
-//!     (each → a `session_manager` uid + label + accent), the active `Layout`, split `sizes`,
-//!     `main_fraction`, and the `focused` index;
-//!   * `core::layout::compute_tiles` → absolute logical-px rects → one
-//!     `terminal_widget::TerminalPane` per visible tile, each bound to a real shell via
-//!     `core::session_manager`;
-//!   * key routing to the focused pane + a minimal set of Ctrl-Shift app shortcuts.
+//! This file is the thin **controller**: it owns the runtime + session manager,
+//! realizes the frameless window, and wires every Slint callback to a
+//! [`command::Command`] dispatched against the central [`state::State`]. All the
+//! interesting logic lives in the modules:
 //!
-//! Renderer: software (`SoftwareRenderer`) for every pane — always available, no wgpu-device
-//! capture timing to get right. The widget keeps the GPU path one `set_renderer` away.
+//!   * [`state`]    — the central workspace state (tabs/panes/layout/zoom) and its
+//!                    mutate-then-resync API (**Seam #1**);
+//!   * [`command`]  — the `Command` enum + `dispatch` (**Seam #2**);
+//!   * [`paneview`] — resync (State → Slint models) + the per-frame pump;
+//!   * [`theme`]    — palette, layout metadata, font loading;
+//!   * [`window`]   — Win32 frameless / fullscreen glue.
+//!
+//! The `.slint` views carry an empty overlay slot (**Seam #3**) for Wave-2 panels.
+//! See `ARCHITECTURE.md`.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod command;
+mod paneview;
+mod state;
+mod theme;
+mod window;
+
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use hyperpanes_core::layout::navigate::{neighbor_index, Direction};
-use hyperpanes_core::layout::presets::{compute_tiles, effective_layout, Layout};
-use hyperpanes_core::layout::sizes::{insert_size, remove_size};
-use hyperpanes_core::session_manager::{SessionEvent, SessionManager, SpawnOptions};
-use hyperpanes_terminal_widget::{
-    cells_for_px, encode_key, Font, RenderOpts, SoftwareRenderer, TerminalPane,
-};
+use hyperpanes_core::layout::navigate::Direction;
+use hyperpanes_core::layout::presets::DividerKind;
+use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
+use hyperpanes_terminal_widget::encode_key;
 
 use slint::platform::Key;
-use slint::{Color, ComponentHandle, Image, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::mpsc::unbounded_channel;
+
+use command::{dispatch, set_layout_from_id, Command, Effect};
+use paneview::Ui;
+use state::{EscOutcome, State};
 
 slint::include_modules!();
 
-/// Accent palette assigned to panes in creation order (Tokyo-Night-ish).
-const PALETTE: [(u8, u8, u8); 6] = [
-    (0x7a, 0xa2, 0xf7), // blue
-    (0x9e, 0xce, 0x6a), // green
-    (0xbb, 0x9a, 0xf7), // purple
-    (0xe0, 0xaf, 0x68), // amber
-    (0xf7, 0x76, 0x8e), // red
-    (0x7d, 0xcf, 0xff), // cyan
-];
-
-/// The cycle the layout button / Ctrl-Shift-L walks through.
-const LAYOUT_CYCLE: [Layout; 5] = [
-    Layout::Auto,
-    Layout::Columns,
-    Layout::Rows,
-    Layout::Grid,
-    Layout::MainStack,
-];
-
-fn layout_name(l: Layout) -> &'static str {
-    match l {
-        Layout::Auto => "auto",
-        Layout::Single => "single",
-        Layout::Columns => "columns",
-        Layout::Rows => "rows",
-        Layout::Grid => "grid",
-        Layout::MainStack => "main-stack",
+/// Append a line to the debug log when `HYPERPANES_DEBUG` is set. The path is
+/// printed once at startup. Used to trace the divider/command paths.
+pub fn dbg_log(msg: &str) {
+    use std::io::Write;
+    if std::env::var_os("HYPERPANES_DEBUG").is_none() {
+        return;
+    }
+    let path = std::env::temp_dir().join("hyperpanes-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{msg}");
     }
 }
 
-/// One pane's controller-side state.
-struct PaneState {
-    uid: String,
-    title: SharedString,
-    accent: Color,
-    pane: TerminalPane,
-    /// Cell dims currently applied to the bound session (to detect a real reflow).
-    applied: (usize, usize),
-    /// The latest rendered terminal image (kept so the model always has a surface).
-    surface: Image,
-    /// Placement in logical px, recomputed on relayout.
-    rect: (f32, f32, f32, f32),
-    visible: bool,
-    /// Whether the shell has produced its first output yet (gate the startup write).
-    started: bool,
-    startup: Option<String>,
+/// Shared controller handles threaded through every callback.
+struct Ctx {
+    state: Rc<RefCell<Option<State>>>,
+    mgr: Rc<SessionManager>,
+    app: slint::Weak<AppWindow>,
+    hwnd: Rc<RefCell<isize>>,
+    saved: Rc<RefCell<Option<window::SavedPlacement>>>,
 }
 
-/// The whole window's workspace state — the MVP subset of `useWorkspace.ts`.
-struct State {
-    font: Font,
-    panes: Vec<PaneState>,
-    layout: Layout,
-    sizes: Vec<f64>,
-    main_fraction: f64,
-    focused: usize,
-    next_uid: usize,
-    last_blink: Instant,
-    cursor_on: bool,
-    /// Signature of the last applied layout — when it changes we recompute all rects.
-    last_sig: String,
-    frames: u32,
-    last_hud: Instant,
-}
-
-impl State {
-    fn accent_for(i: usize) -> Color {
-        let (r, g, b) = PALETTE[i % PALETTE.len()];
-        Color::from_rgb_u8(r, g, b)
-    }
-
-    /// Spawn a new pane + its shell session, append it, and focus it.
-    fn add_pane(&mut self, mgr: &SessionManager) {
-        let uid = format!("pane-{}", self.next_uid);
-        self.next_uid += 1;
-
-        // Spawn at a placeholder grid; the next relayout reflows it to its real tile.
-        let (cols, rows) = (80u16, 24u16);
-        if let Err(e) = mgr.create(SpawnOptions {
-            uid: uid.clone(),
-            cols: Some(cols),
-            rows: Some(rows),
-            pane_id: Some(uid.clone()),
-            ..Default::default()
-        }) {
-            eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
-            return;
-        }
-
-        let idx = self.panes.len();
-        self.sizes = insert_size(&self.sizes, idx);
-        self.panes.push(PaneState {
-            uid,
-            title: format!("{}", idx + 1).into(),
-            accent: Self::accent_for(idx),
-            pane: TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new())),
-            applied: (cols as usize, rows as usize),
-            surface: Image::default(),
-            rect: (0.0, 0.0, 0.0, 0.0),
-            visible: true,
-            started: false,
-            startup: None,
-        });
-        self.focused = idx;
-        self.last_sig.clear(); // force relayout
-    }
-
-    /// Close pane `idx`. Returns `false` if it was the last pane (caller decides to quit).
-    fn close_pane(&mut self, idx: usize, mgr: &SessionManager) -> bool {
-        if idx >= self.panes.len() {
-            return true;
-        }
-        if self.panes.len() <= 1 {
-            return false;
-        }
-        let ps = self.panes.remove(idx);
-        mgr.kill(&ps.uid);
-        self.sizes = remove_size(&self.sizes, idx);
-
-        if self.focused >= self.panes.len() {
-            self.focused = self.panes.len() - 1;
-        } else if idx < self.focused {
-            self.focused -= 1;
-        }
-        // Re-label + recolor so titles/accents stay 1..N in order.
-        for (i, p) in self.panes.iter_mut().enumerate() {
-            p.title = format!("{}", i + 1).into();
-            p.accent = Self::accent_for(i);
-        }
-        self.last_sig.clear();
-        true
-    }
-
-    /// Move focus to the neighbour in `dir` (no-op if there is none).
-    fn focus_dir(&mut self, dir: Direction) {
-        let n = self.panes.len();
-        let eff = effective_layout(self.layout, n);
-        let tiles = compute_tiles(eff, n, &self.sizes, self.main_fraction, self.focused as i32);
-        if let Some(next) = neighbor_index(&tiles, self.focused, dir) {
-            self.focused = next;
-            self.last_sig.clear();
-        }
-    }
-
-    fn cycle_layout(&mut self) {
-        let cur = LAYOUT_CYCLE.iter().position(|l| *l == self.layout).unwrap_or(0);
-        self.layout = LAYOUT_CYCLE[(cur + 1) % LAYOUT_CYCLE.len()];
-        self.last_sig.clear();
-    }
-}
-
-/// All the Win32 glue for the frameless window. Lifted from `spike-tearoff`.
-#[cfg(windows)]
-mod win32 {
-    use core::ffi::c_void;
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
-    use windows::Win32::UI::WindowsAndMessaging::*;
-
-    fn hwnd(raw: isize) -> HWND {
-        HWND(raw as *mut c_void)
-    }
-
-    /// Pull the native HWND (as isize) out of a Slint window. 0 until the native window is
-    /// realized by the event loop (callers retry).
-    pub fn hwnd_of(win: &slint::Window) -> isize {
-        let sh = win.window_handle();
-        match HasWindowHandle::window_handle(&sh) {
-            Ok(h) => match h.as_raw() {
-                RawWindowHandle::Win32(h) => h.hwnd.get(),
-                _ => 0,
-            },
-            Err(_) => 0,
-        }
-    }
-
-    /// Strip the OS title bar (`WS_CAPTION`) while keeping the resize border + min/max/sysmenu,
-    /// so our Slint top bar is the only chrome. Native maximize/restore still behave correctly.
-    pub fn make_frameless(raw: isize) {
-        unsafe {
-            let h = hwnd(raw);
-            let style = GetWindowLongPtrW(h, GWL_STYLE);
-            let new = style & !(WS_CAPTION.0 as isize);
-            SetWindowLongPtrW(h, GWL_STYLE, new);
-            let _ = SetWindowPos(
-                h,
-                HWND::default(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-            );
-        }
-    }
-
-    /// Begin a system move-drag (the standard frameless "drag the custom bar" trick).
-    pub fn start_drag(raw: isize) {
-        unsafe {
-            let h = hwnd(raw);
-            let _ = ReleaseCapture();
-            SendMessageW(h, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as usize), LPARAM(0));
-        }
-    }
-
-    pub fn minimize(raw: isize) {
-        unsafe {
-            let _ = ShowWindow(hwnd(raw), SW_MINIMIZE);
-        }
-    }
-
-    pub fn toggle_max(raw: isize) {
-        unsafe {
-            let h = hwnd(raw);
-            if IsZoomed(h).as_bool() {
-                let _ = ShowWindow(h, SW_RESTORE);
-            } else {
-                let _ = ShowWindow(h, SW_MAXIMIZE);
+impl Ctx {
+    /// Run a command against the state and apply its [`Effect`] (window-level).
+    fn run(&self, cmd: Command) {
+        dbg_log(&format!("cmd {cmd:?}"));
+        let eff = {
+            let mut g = self.state.borrow_mut();
+            match g.as_mut() {
+                Some(st) => dispatch(st, cmd, &self.mgr),
+                None => return,
+            }
+        };
+        dbg_log(&format!("  -> effect {eff:?}"));
+        match eff {
+            Effect::None => {}
+            Effect::Quit => {
+                if let Some(a) = self.app.upgrade() {
+                    let _ = a.window().hide();
+                }
+            }
+            Effect::SetFullscreen(on) => {
+                let raw = *self.hwnd.borrow();
+                if on {
+                    *self.saved.borrow_mut() = window::enter_fullscreen(raw);
+                } else if let Some(s) = self.saved.borrow_mut().take() {
+                    window::exit_fullscreen(raw, s);
+                }
+                // Show the "hold Esc to exit" toast on entry; auto-hide after a beat.
+                if let Some(a) = self.app.upgrade() {
+                    a.set_fullscreen_hint(on);
+                    if on {
+                        let w = self.app.clone();
+                        slint::Timer::single_shot(Duration::from_millis(2500), move || {
+                            if let Some(a) = w.upgrade() {
+                                a.set_fullscreen_hint(false);
+                            }
+                        });
+                    }
+                }
             }
         }
-    }
-
-    pub fn close(raw: isize) {
-        unsafe {
-            let _ = PostMessageW(hwnd(raw), WM_CLOSE, WPARAM(0), LPARAM(0));
-        }
-    }
-}
-
-#[cfg(not(windows))]
-mod win32 {
-    pub fn hwnd_of(_win: &slint::Window) -> isize {
-        0
-    }
-    pub fn make_frameless(_raw: isize) {}
-    pub fn start_drag(_raw: isize) {}
-    pub fn minimize(_raw: isize) {}
-    pub fn toggle_max(_raw: isize) {}
-    pub fn close(_raw: isize) {}
-}
-
-fn load_font(scale: f32) -> Font {
-    let px = (14.0 * scale).round().max(8.0);
-    let candidates = [
-        "C:/Windows/Fonts/CascadiaMono.ttf",
-        "C:/Windows/Fonts/CascadiaCode.ttf",
-        "C:/Windows/Fonts/consola.ttf",
-    ];
-    let path = candidates
-        .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .copied()
-        .unwrap_or("C:/Windows/Fonts/consola.ttf");
-    Font::from_path(path, px).expect("load monospace font")
-}
-
-/// Build a model row for pane `i`.
-fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
-    let (x, y, w, h) = ps.rect;
-    PaneItem {
-        surface: ps.surface.clone(),
-        title: ps.title.clone(),
-        accent: ps.accent,
-        x,
-        y,
-        w,
-        h,
-        visible: ps.visible,
-        focused,
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // tokio runtime that drives the SessionManager's per-session driver tasks.
+    // Capture any panic to a crash log (the windowed subsystem has no console).
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("hyperpanes-crash.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "PANIC: {info}");
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(f, "{bt}");
+        }
+    }));
+
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
-    // session manager + its event stream.
     let (etx, erx) = unbounded_channel::<SessionEvent>();
     let mgr = Rc::new(SessionManager::new(etx));
     let erx = Rc::new(RefCell::new(erx));
 
     let app = AppWindow::new()?;
-    let model: Rc<VecModel<PaneItem>> = Rc::new(VecModel::default());
-    app.set_panes(ModelRc::from(model.clone()));
+
+    // The UI models the controller owns.
+    let ui = Rc::new(Ui {
+        panes: Rc::new(VecModel::default()),
+        tabs: Rc::new(VecModel::default()),
+        dividers: Rc::new(VecModel::default()),
+        layouts: Rc::new(VecModel::default()),
+    });
+    app.set_panes(ModelRc::from(ui.panes.clone()));
+    app.set_tabs(ModelRc::from(ui.tabs.clone()));
+    app.set_dividers(ModelRc::from(ui.dividers.clone()));
+    app.set_layouts(ModelRc::from(ui.layouts.clone()));
 
     let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
     let area: Rc<RefCell<(f32, f32)>> = Rc::new(RefCell::new((0.0, 0.0)));
     let hwnd: Rc<RefCell<isize>> = Rc::new(RefCell::new(0));
+    let saved: Rc<RefCell<Option<window::SavedPlacement>>> = Rc::new(RefCell::new(None));
 
-    // ---- area geometry ----
+    let ctx = Rc::new(Ctx {
+        state: state.clone(),
+        mgr: mgr.clone(),
+        app: app.as_weak(),
+        hwnd: hwnd.clone(),
+        saved: saved.clone(),
+    });
+
+    // ---- area geometry (resize → relayout) ----
     {
         let area = area.clone();
-        app.on_area_resized(move |w, h| *area.borrow_mut() = (w, h));
-    }
-
-    // ---- click-to-focus ----
-    {
         let state = state.clone();
-        app.on_focus_pane(move |idx| {
+        app.on_area_resized(move |w, h| {
+            *area.borrow_mut() = (w, h);
             if let Some(st) = state.borrow_mut().as_mut() {
-                let idx = idx as usize;
-                if idx < st.panes.len() && st.focused != idx {
-                    st.focused = idx;
-                    st.last_sig.clear();
-                }
+                st.dirty = true;
             }
         });
     }
 
-    // ---- key routing: app shortcuts first, else encode to the focused pane's pty ----
+    // ---- pane callbacks ----
     {
+        let ctx = ctx.clone();
+        app.on_focus_pane(move |idx| ctx.run(Command::FocusPane(idx as usize)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_new_pane(move || ctx.run(Command::NewPane));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_close_focused(move || ctx.run(Command::CloseFocused));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_toggle_zoom(move || ctx.run(Command::ToggleZoom));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_toggle_fullscreen(move || ctx.run(Command::ToggleFullscreen));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_set_layout(move |id| ctx.run(set_layout_from_id(id)));
+    }
+    // Pane-header buttons act on that pane: focus it first, then run the action.
+    {
+        let ctx = ctx.clone();
+        app.on_pane_zoom(move |i| {
+            ctx.run(Command::FocusPane(i as usize));
+            ctx.run(Command::ToggleZoom);
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_pane_fullscreen(move |i| {
+            ctx.run(Command::FocusPane(i as usize));
+            ctx.run(Command::ToggleFullscreen);
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_pane_close(move |i| ctx.run(Command::ClosePane(i as usize)));
+    }
+
+    // ---- tab callbacks ----
+    {
+        let ctx = ctx.clone();
+        app.on_new_tab(move || ctx.run(Command::NewTab));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_select_tab(move |i| ctx.run(Command::SwitchTab(i as usize)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_close_tab(move |i| ctx.run(Command::CloseTab(i as usize)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_begin_rename(move |i| ctx.run(Command::BeginRename(i)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_rename_tab(move |i, t| ctx.run(Command::RenameTab(i, t.to_string())));
+    }
+
+    // ---- divider drag: cursor offset from seam centre → size-fraction delta ----
+    {
+        let ctx = ctx.clone();
+        let area = area.clone();
+        app.on_divider_drag(move |index, main, vertical, dx, dy| {
+            let (aw, ah) = *area.borrow();
+            let delta = if vertical {
+                if aw > 0.0 { (dx / aw) as f64 } else { 0.0 }
+            } else if ah > 0.0 {
+                (dy / ah) as f64
+            } else {
+                0.0
+            };
+            dbg_log(&format!(
+                "divider-drag index={index} main={main} vertical={vertical} dx={dx:.1} dy={dy:.1} area=({aw:.0}x{ah:.0}) -> delta={delta:.4}"
+            ));
+            if delta == 0.0 {
+                return;
+            }
+            let kind = if main { DividerKind::Main } else { DividerKind::Size };
+            ctx.run(Command::ResizeDivider { kind, index, delta });
+        });
+    }
+
+    // ---- key routing: app shortcuts first, else encode to the focused pane ----
+    {
+        let ctx = ctx.clone();
         let state = state.clone();
         let mgr = mgr.clone();
-        let app_weak = app.as_weak();
         app.on_key(move |idx, msg: KeyMsg| {
             let idx = idx as usize;
-            // Ctrl+Shift app shortcuts (intercepted; never forwarded to the shell).
+            dbg_log(&format!(
+                "KEY idx={idx} ctrl={} shift={} alt={} text={:?} cp={:?}",
+                msg.control,
+                msg.shift,
+                msg.alt,
+                msg.text.as_str(),
+                msg.text.chars().map(|c| c as u32).collect::<Vec<_>>()
+            ));
+            // F11 → toggle OS fullscreen (app-reserved; never forwarded).
+            if is_key(&msg.text, Key::F11) {
+                ctx.run(Command::ToggleFullscreen);
+                return;
+            }
             if msg.control && msg.shift {
-                let is = |k: Key| -> bool {
-                    let s: SharedString = k.into();
-                    msg.text == s
-                };
-                let mut handled = true;
-                if let Some(st) = state.borrow_mut().as_mut() {
-                    if is(Key::LeftArrow) {
-                        st.focus_dir(Direction::Left);
-                    } else if is(Key::RightArrow) {
-                        st.focus_dir(Direction::Right);
-                    } else if is(Key::UpArrow) {
-                        st.focus_dir(Direction::Up);
-                    } else if is(Key::DownArrow) {
-                        st.focus_dir(Direction::Down);
-                    } else {
-                        let c = msg.text.chars().next().map(|c| c.to_ascii_lowercase());
-                        match c {
-                            Some('t') => st.add_pane(&mgr),
-                            Some('l') => st.cycle_layout(),
-                            Some('w') => {
-                                let f = st.focused;
-                                if !st.close_pane(f, &mgr) {
-                                    if let Some(a) = app_weak.upgrade() {
-                                        let _ = a.window().hide();
-                                    }
-                                }
-                            }
-                            _ => handled = false,
-                        }
-                    }
+                // Ctrl+Shift is app-reserved: run the mapped command (if any) and
+                // ALWAYS swallow — never forward to the shell. (Each chord can also
+                // emit a phantom control-char event; swallowing stops it leaking.)
+                if let Some(cmd) = shortcut(&msg) {
+                    ctx.run(cmd);
                 }
-                if handled {
-                    return;
+                return;
+            }
+            // Escape: a tap goes to the shell; HOLDING it in fullscreen exits
+            // fullscreen (the auto-repeat tail is swallowed).
+            if is_key(&msg.text, Key::Escape) {
+                let outcome = state.borrow_mut().as_mut().map(|st| st.note_esc());
+                match outcome {
+                    Some(EscOutcome::Exit) => {
+                        ctx.run(Command::ToggleFullscreen);
+                        return;
+                    }
+                    Some(EscOutcome::Ignore) | None => return,
+                    Some(EscOutcome::Forward) => {} // fall through to forward it
                 }
             }
-
-            // Otherwise: forward to that pane's shell.
+            // Drop bare modifiers (Slint reports Shift/Ctrl/Alt as U+0010..0012),
+            // F-keys, and other non-text special keys so they never leak into the
+            // shell. Only real text + the special keys we translate get forwarded.
+            if !forwardable(&msg.text) {
+                dbg_log(&format!(
+                    "drop key codepoints {:?}",
+                    msg.text.chars().map(|c| c as u32).collect::<Vec<_>>()
+                ));
+                return;
+            }
             if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
                 if let Some(st) = state.borrow().as_ref() {
-                    if let Some(ps) = st.panes.get(idx) {
+                    if let Some(ps) = st.active_tab().panes.get(idx) {
                         mgr.write(&ps.uid, &String::from_utf8_lossy(&bytes));
-                    }
-                }
-            }
-        });
-    }
-
-    // ---- top-bar tools ----
-    {
-        let state = state.clone();
-        let mgr = mgr.clone();
-        app.on_new_pane(move || {
-            if let Some(st) = state.borrow_mut().as_mut() {
-                st.add_pane(&mgr);
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let app_weak = app.as_weak();
-        app.on_cycle_layout(move || {
-            if let Some(st) = state.borrow_mut().as_mut() {
-                st.cycle_layout();
-                if let Some(a) = app_weak.upgrade() {
-                    a.set_layout_name(layout_name(st.layout).into());
-                }
-            }
-        });
-    }
-    {
-        let state = state.clone();
-        let mgr = mgr.clone();
-        let app_weak = app.as_weak();
-        app.on_close_focused(move || {
-            if let Some(st) = state.borrow_mut().as_mut() {
-                let f = st.focused;
-                if !st.close_pane(f, &mgr) {
-                    if let Some(a) = app_weak.upgrade() {
-                        let _ = a.window().hide();
                     }
                 }
             }
@@ -442,21 +321,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---- window controls (Win32) ----
     {
         let hwnd = hwnd.clone();
-        app.on_start_drag(move || win32::start_drag(*hwnd.borrow()));
+        app.on_start_drag(move || {
+            dbg_log("start-drag");
+            window::start_drag(*hwnd.borrow());
+        });
     }
     {
         let hwnd = hwnd.clone();
-        app.on_min_window(move || win32::minimize(*hwnd.borrow()));
+        app.on_min_window(move || window::minimize(*hwnd.borrow()));
     }
     {
         let hwnd = hwnd.clone();
-        app.on_max_window(move || win32::toggle_max(*hwnd.borrow()));
+        app.on_max_window(move || {
+            dbg_log("max-window");
+            window::toggle_max(*hwnd.borrow());
+        });
     }
     {
         let hwnd = hwnd.clone();
         let app_weak = app.as_weak();
         app.on_close_window(move || {
-            win32::close(*hwnd.borrow());
+            window::close(*hwnd.borrow());
             if let Some(a) = app_weak.upgrade() {
                 let _ = a.window().hide();
             }
@@ -470,7 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let area = area.clone();
         let hwnd = hwnd.clone();
-        let model = model.clone();
+        let ui = ui.clone();
         let mgr = mgr.clone();
         let erx = erx.clone();
         move || {
@@ -484,37 +369,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 let mut h = hwnd.borrow_mut();
                 if *h == 0 {
-                    let raw = win32::hwnd_of(app.window());
+                    let raw = window::hwnd_of(app.window());
                     if raw != 0 {
-                        win32::make_frameless(raw);
+                        window::make_frameless(raw);
                         *h = raw;
                     }
                 }
             }
 
-            // Lazy init: wait for the first real area layout, then spawn pane 0.
+            let (aw, ah) = *area.borrow();
+
+            // Lazy init: wait for the first real area layout, then seed tab 0.
             if state.borrow().is_none() {
-                let (aw, ah) = *area.borrow();
                 if aw <= 1.0 || ah <= 1.0 {
                     return;
                 }
-                let mut st = State {
-                    font: load_font(scale),
-                    panes: Vec::new(),
-                    layout: Layout::Auto,
-                    sizes: Vec::new(),
-                    main_fraction: 0.6,
-                    focused: 0,
-                    next_uid: 0,
-                    last_blink: Instant::now(),
-                    cursor_on: true,
-                    last_sig: String::new(),
-                    frames: 0,
-                    last_hud: Instant::now(),
-                };
+                let mut st = State::new(theme::load_font(scale));
                 st.add_pane(&mgr);
+                if std::env::var_os("HYPERPANES_DEMO").is_some() {
+                    demo_seed(&mut st, &mgr);
+                }
                 *state.borrow_mut() = Some(st);
-                app.set_layout_name(layout_name(Layout::Auto).into());
             }
 
             let mut guard = state.borrow_mut();
@@ -522,138 +397,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(s) => s,
                 None => return,
             };
-
-            // ---- drain session events into the panes ----
-            {
-                let mut rx = erx.borrow_mut();
-                while let Ok(ev) = rx.try_recv() {
-                    match ev {
-                        SessionEvent::Data { uid, data } => {
-                            if let Some(i) = st.panes.iter().position(|p| p.uid == uid) {
-                                let pc = &mut st.panes[i];
-                                pc.pane.feed(&data);
-                                let replies = pc.pane.take_replies();
-                                if !replies.is_empty() {
-                                    mgr.write(&uid, &String::from_utf8_lossy(&replies));
-                                }
-                                if !pc.started {
-                                    pc.started = true;
-                                    if let Some(cmd) = pc.startup.take() {
-                                        mgr.write(&uid, &cmd);
-                                    }
-                                }
-                            }
-                        }
-                        SessionEvent::Exit { uid, .. } => {
-                            // The driver removes the session; drop the pane from the workspace.
-                            if let Some(i) = st.panes.iter().position(|p| p.uid == uid) {
-                                if st.panes.len() > 1 {
-                                    st.close_pane(i, &mgr);
-                                }
-                            }
-                        }
-                        SessionEvent::Cwd { .. } => {}
-                    }
-                }
-            }
-
-            let (aw, ah) = *area.borrow();
-            let n = st.panes.len();
-
-            // ---- relayout (only when the layout signature changes) ----
-            let eff = effective_layout(st.layout, n);
-            let sizes_sig: String = st.sizes.iter().map(|s| format!("{:.3},", s)).collect();
-            let sig = format!(
-                "{}|{}|{}|{}|{:.0}x{:.0}|{}",
-                st.layout as u8, eff as u8, n, st.focused, aw, ah, sizes_sig
-            );
-            if sig != st.last_sig {
-                st.last_sig = sig;
-                let tiles =
-                    compute_tiles(eff, n, &st.sizes, st.main_fraction, st.focused as i32);
-                let cw = st.font.cell_w;
-                let ch = st.font.cell_h;
-                // Reset placement.
-                for p in st.panes.iter_mut() {
-                    p.visible = false;
-                }
-                for t in &tiles {
-                    let i = t.index;
-                    let x = (t.rect.x * aw as f64) as f32;
-                    let y = (t.rect.y * ah as f64) as f32;
-                    let w = (t.rect.w * aw as f64) as f32;
-                    let h = (t.rect.h * ah as f64) as f32;
-                    st.panes[i].rect = (x, y, w, h);
-                    st.panes[i].visible = t.visible;
-                    if t.visible {
-                        let (cols, rows) =
-                            cells_for_px(w * scale, h * scale, cw, ch);
-                        if (cols, rows) != st.panes[i].applied {
-                            if st.panes[i].pane.resize(cols, rows) {
-                                mgr.resize(&st.panes[i].uid, cols as u16, rows as u16);
-                            }
-                            st.panes[i].applied = (cols, rows);
-                        }
-                    }
-                }
-
-                // Sync the model length, then write every row with its fresh rect.
-                while model.row_count() > n {
-                    model.remove(model.row_count() - 1);
-                }
-                while model.row_count() < n {
-                    model.push(pane_item(&st.panes[model.row_count()], false));
-                }
-                let focused = st.focused;
-                for i in 0..n {
-                    model.set_row_data(i, pane_item(&st.panes[i], i == focused));
-                }
-            }
-
-            // ---- cursor blink (~530 ms) ----
-            let blink_changed = if st.last_blink.elapsed() >= Duration::from_millis(530) {
-                st.cursor_on = !st.cursor_on;
-                st.last_blink = Instant::now();
-                true
-            } else {
-                false
-            };
-            let opts = RenderOpts {
-                cursor_on: st.cursor_on,
-            };
-
-            // ---- render dirty (visible) panes → model ----
-            let focused = st.focused;
-            let State { font, panes, .. } = &mut *st;
-            let mut rendered = false;
-            for (i, ps) in panes.iter_mut().enumerate() {
-                if !ps.visible {
-                    let _ = ps.pane.take_dirty(); // keep the flag from piling up
-                    continue;
-                }
-                let focus_blink = i == focused && blink_changed;
-                if !ps.pane.take_dirty() && !focus_blink {
-                    continue;
-                }
-                ps.surface = ps.pane.render(font, &opts);
-                if i < model.row_count() {
-                    model.set_row_data(i, pane_item(ps, i == focused));
-                }
-                rendered = true;
-            }
-            if rendered {
-                st.frames += 1;
-            }
-
-            // ---- HUD ----
-            if st.last_hud.elapsed() >= Duration::from_millis(500) {
-                let fps = st.frames as f32 / st.last_hud.elapsed().as_secs_f32();
-                app.set_hud(
-                    format!("{} · {} panes · {:.0} fps", layout_name(st.layout), n, fps).into(),
-                );
-                app.set_tab_title(format!("shell · {n}").into());
-                st.frames = 0;
-                st.last_hud = Instant::now();
+            let mut rx = erx.borrow_mut();
+            let alive = paneview::pump(&app, st, &ui, (aw, ah), scale, &mgr, &mut rx);
+            drop(rx);
+            drop(guard);
+            if !alive {
+                let _ = app.window().hide();
             }
         }
     });
@@ -661,4 +410,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.run()?;
     mgr.kill_all();
     Ok(())
+}
+
+/// Seed a richer workspace (2 tabs, several panes, non-default layouts) so a
+/// screenshot exercises the Wave-1 surface. Gated by `HYPERPANES_DEMO`.
+fn demo_seed(st: &mut State, mgr: &SessionManager) {
+    use hyperpanes_core::layout::presets::Layout;
+    // tab 0: 3 panes in main-stack (shows the main divider + focus ring)
+    dispatch(st, Command::NewPane, mgr);
+    dispatch(st, Command::NewPane, mgr);
+    dispatch(st, Command::SetLayout(Layout::MainStack), mgr);
+    // tab 1: 2 panes in columns (a vertical divider)
+    dispatch(st, Command::NewTab, mgr);
+    dispatch(st, Command::NewPane, mgr);
+    dispatch(st, Command::SetLayout(Layout::Columns), mgr);
+    // land on tab 0
+    dispatch(st, Command::SwitchTab(0), mgr);
+}
+
+/// Whether `text` is the Slint special key `k`.
+fn is_key(text: &str, k: Key) -> bool {
+    let s: SharedString = k.into();
+    text == s.as_str()
+}
+
+/// Whether a key event should reach the shell at all. Drops bare modifiers
+/// (Slint reports Shift/Ctrl/Alt/Meta as low control codepoints), F-keys, and
+/// other special keys Slint delivers as control/private-use codepoints that
+/// `encode_key` would otherwise pass through as garbage bytes.
+fn forwardable(text: &str) -> bool {
+    // Special keys we explicitly translate to terminal sequences (encode_key).
+    const ALLOWED: [Key; 13] = [
+        Key::UpArrow,
+        Key::DownArrow,
+        Key::LeftArrow,
+        Key::RightArrow,
+        Key::Home,
+        Key::End,
+        Key::PageUp,
+        Key::PageDown,
+        Key::Delete,
+        Key::Return,
+        Key::Backspace,
+        Key::Tab,
+        Key::Escape,
+    ];
+    if ALLOWED.iter().any(|k| {
+        let s: SharedString = (*k).into();
+        text == s.as_str()
+    }) {
+        return true;
+    }
+    // Otherwise only forward normal printable text. Bare modifiers (U+0010..0012)
+    // and other control chars, DEL (U+007F), and private-use special keys
+    // (U+E000..F8FF: F-keys, Insert, Menu, …) are dropped.
+    text.chars().next().is_some_and(|c| {
+        let u = c as u32;
+        u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
+    })
+}
+
+/// Map a Ctrl+Shift chord to a command (the Wave-1 keyboard surface).
+fn shortcut(msg: &KeyMsg) -> Option<Command> {
+    let is = |k: Key| -> bool {
+        let s: SharedString = k.into();
+        msg.text == s
+    };
+    if is(Key::LeftArrow) {
+        return Some(Command::FocusDir(Direction::Left));
+    }
+    if is(Key::RightArrow) {
+        return Some(Command::FocusDir(Direction::Right));
+    }
+    if is(Key::UpArrow) {
+        return Some(Command::FocusDir(Direction::Up));
+    }
+    if is(Key::DownArrow) {
+        return Some(Command::FocusDir(Direction::Down));
+    }
+    // With Ctrl held, Slint reports `text` as the control char (Ctrl+A = U+0001
+    // … Ctrl+Z = U+001A), not the letter — map it back. Plain letters (no ctrl
+    // remap) are lowercased so the chord matches regardless of Shift.
+    let letter = msg.text.chars().next().map(|c| {
+        let u = c as u32;
+        if (1..=26).contains(&u) {
+            (b'a' + (u as u8) - 1) as char
+        } else {
+            c.to_ascii_lowercase()
+        }
+    });
+    match letter {
+        Some('t') => Some(Command::NewTab),
+        Some('n') => Some(Command::NewPane),
+        Some('w') => Some(Command::CloseFocused),
+        Some('l') => Some(Command::CycleLayout),
+        Some('z') => Some(Command::ToggleZoom),
+        Some('f') => Some(Command::ToggleFullscreen),
+        _ => None,
+    }
 }

@@ -1,0 +1,234 @@
+// The pane area: absolutely-positions the active tab's `TerminalPane`s at the
+// rects the Rust controller computes, draws the focus ring + draggable resize
+// dividers over them, and reserves an overlay slot for Wave-2 panels.
+
+import { Theme } from "theme.slint";
+import { PaneItem, DividerItem } from "types.slint";
+import { TerminalPane, KeyMsg } from "@widgets";
+
+// A draggable resize seam. Reports the cursor's offset from the seam centre each
+// move; the controller converts that to a size-fraction delta and re-tiles, which
+// re-centres the handle under the cursor (so the drag is self-correcting).
+component DividerHandle inherits Rectangle {
+    in property <DividerItem> desc;
+    callback drag(int, bool, bool, length, length);
+
+    x: desc.x;
+    y: desc.y;
+    width: desc.w;
+    height: desc.h;
+
+    // hairline, brightens on hover/drag
+    Rectangle {
+        width: desc.vertical ? 1px : parent.width;
+        height: desc.vertical ? parent.height : 1px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: ta.has-hover || ta.pressed ? Theme.brand : #ffffff14;
+        animate background { duration: 90ms; }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: desc.vertical ? ew-resize : ns-resize;
+        moved => {
+            root.drag(desc.index, desc.main, desc.vertical,
+                      self.mouse-x - root.width / 2, self.mouse-y - root.height / 2);
+        }
+    }
+}
+
+// Vector pane-header icons (font-independent, so they always render).
+component IconZoom inherits Path {
+    in property <color> ink;
+    width: 14px; height: 14px;
+    viewbox-width: 16; viewbox-height: 16;
+    stroke: ink; stroke-width: 1.6px; fill: transparent;
+    // diagonal double-headed arrow (⤢ maximize-in-window)
+    commands: "M 5 11 L 11 5 M 7.5 5 L 11 5 L 11 8.5 M 8.5 11 L 5 11 L 5 7.5";
+}
+
+component IconFull inherits Path {
+    in property <color> ink;
+    width: 14px; height: 14px;
+    viewbox-width: 16; viewbox-height: 16;
+    stroke: ink; stroke-width: 1.6px; fill: transparent;
+    // corner brackets (⛶ fullscreen)
+    commands: "M 4 7 L 4 4 L 7 4 M 9 4 L 12 4 L 12 7 M 12 9 L 12 12 L 9 12 M 7 12 L 4 12 L 4 9";
+}
+
+component IconX inherits Path {
+    in property <color> ink;
+    width: 14px; height: 14px;
+    viewbox-width: 16; viewbox-height: 16;
+    stroke: ink; stroke-width: 1.6px; fill: transparent;
+    commands: "M 5 5 L 11 11 M 11 5 L 5 11";
+}
+
+// A pane-header button (`.hp-pane-btn`). kind: 0 zoom · 1 fullscreen · 2 close.
+component PaneBtn inherits Rectangle {
+    in property <int> kind;
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    callback clicked;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: root.active ? Theme.accent
+              : ta.has-hover ? (root.danger ? #f38ba833 : Theme.surface2)
+              : transparent;
+    property <color> ink: root.active ? #11111b
+             : (ta.has-hover && root.danger) ? #f38ba8
+             : ta.has-hover ? Theme.text
+             : Theme.subtext;
+
+    if root.kind == 0 : IconZoom {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
+    }
+    if root.kind == 1 : IconFull {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
+    }
+    if root.kind == 2 : IconX {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
+    }
+
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component PaneView inherits Rectangle {
+    in property <[PaneItem]> panes;
+    in property <[DividerItem]> dividers;
+    in property <bool> zoomed: false;
+    in property <bool> fullscreen: false;
+    // Wave-2 overlay/panel slot (command palette / prefs / sidebar mount here).
+    in property <bool> overlay-visible: false;
+
+    callback key(int, KeyMsg);
+    callback focus-pane(int);
+    callback area-resized(length, length);
+    callback divider-drag(int, bool, bool, length, length);
+    callback pane-zoom(int);
+    callback pane-fullscreen(int);
+    callback pane-close(int);
+
+    background: Theme.bg;
+    clip: true;
+
+    area := Rectangle {
+        changed width => { root.area-resized(self.width, self.height); }
+        changed height => { root.area-resized(self.width, self.height); }
+
+        // Electron `.hp-pane`: 7px radius, 1px border (accent when focused), the
+        // pane bg, no drop shadow — a 26px header bar (title + zoom/fullscreen/
+        // close) over a padded body that holds the chrome-off terminal surface.
+        for pane[idx] in root.panes : Rectangle {
+            x: pane.x;
+            y: pane.y;
+            width: pane.w;
+            height: pane.h;
+            visible: pane.visible;
+            background: Theme.bg;
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: pane.focused ? Theme.accent : Theme.border;
+            clip: true;
+
+            VerticalLayout {
+                // ---- header (.hp-pane-header) ----
+                Rectangle {
+                    height: 26px;
+                    // bottom hairline
+                    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
+                    // header click focuses the pane (sits under the buttons)
+                    TouchArea { clicked => { root.focus-pane(idx); tp.focus(); } }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: pane.title;
+                            color: pane.focused ? Theme.text : Theme.subtext;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        // each wrapped so it centres vertically against the title
+                        VerticalLayout {
+                            alignment: center;
+                            PaneBtn {
+                                kind: 0;
+                                active: root.zoomed && pane.focused;
+                                clicked => { root.pane-zoom(idx); }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            PaneBtn {
+                                kind: 1;
+                                active: root.fullscreen && pane.focused;
+                                clicked => { root.pane-fullscreen(idx); }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            PaneBtn {
+                                kind: 2;
+                                danger: true;
+                                clicked => { root.pane-close(idx); }
+                            }
+                        }
+                    }
+                }
+
+                // ---- body (.hp-pane-body, padding 2 0 2 4) ----
+                Rectangle {
+                    vertical-stretch: 1;
+                    tp := TerminalPane {
+                        x: 4px;
+                        y: 2px;
+                        width: parent.width - 4px;
+                        height: parent.height - 4px;
+                        surface: pane.surface;
+                        accent: pane.accent;
+                        chrome: false;
+                        key(m) => { root.key(idx, m); }
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.focus-pane(idx);
+                            tp.focus();
+                        }
+                    }
+                }
+            }
+        }
+
+        // resize seams, drawn over the panes
+        for d in root.dividers : DividerHandle {
+            desc: d;
+            drag(i, main, vert, dx, dy) => { root.divider-drag(i, main, vert, dx, dy); }
+        }
+
+        // empty-state hint
+        if root.panes.length == 0 : Text {
+            text: "starting shell…";
+            color: #44444f;
+            font-size: 14px;
+        }
+    }
+
+    // ===== Wave-2 overlay/panel slot =====
+    // A full-area scrim + centred container that future features (command palette,
+    // preferences dialog, sidebar) mount into. Empty + hidden in Wave 1; toggled by
+    // `overlay-visible` and dispatched commands. Kept here so the slot exists in the
+    // tree and Wave-2 work never has to touch the pane-area layout.
+    if root.overlay-visible : Rectangle {
+        background: #00000080;
+        TouchArea { /* eat clicks behind the panel */ }
+        overlay-slot := Rectangle {
+            // Wave-2 panels populate this container.
+        }
+    }
+}
