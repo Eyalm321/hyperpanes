@@ -1,5 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  AiConfigPatch,
+  AiPanePublish,
+  AiStatus,
   ControlCommand,
   ControlStatus,
   ControlWindowPayload,
@@ -191,6 +194,22 @@ const api = {
       correlationId: string,
       reply: { ok: boolean; result?: unknown; error?: string }
     ): void => ipcRenderer.send('control:commandResult', { correlationId, ...reply })
+  },
+
+  // Ambient AI (local Gemma via Ollama): Preferences reads/sets the toggle + config;
+  // each window publishes its panes (paneId↔sessionUid + mute) and listens for status.
+  ai: {
+    getStatus: (): Promise<AiStatus> => ipcRenderer.invoke('ai:getStatus'),
+    setEnabled: (enabled: boolean): Promise<AiStatus> =>
+      ipcRenderer.invoke('ai:setEnabled', enabled),
+    configure: (patch: AiConfigPatch): Promise<AiStatus> =>
+      ipcRenderer.invoke('ai:configure', patch),
+    publishPanes: (panes: AiPanePublish[]): void => ipcRenderer.send('ai:publishPanes', panes),
+    onStatus: (cb: (status: AiStatus) => void): (() => void) => {
+      const listener = (_e: unknown, status: AiStatus) => cb(status);
+      ipcRenderer.on('ai:status', listener);
+      return () => ipcRenderer.removeListener('ai:status', listener);
+    }
   },
 
   win: {

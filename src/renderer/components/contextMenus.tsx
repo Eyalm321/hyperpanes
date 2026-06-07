@@ -142,6 +142,8 @@ export function buildPaneMenu(
     { kind: 'submenu', label: 'Change Color', items: colorSubmenu(paneId, groupId) },
     { kind: 'item', label: 'Show Frame', checked: frameOn, onSelect: () => ws.setPaneFrame(paneId, !frameOn) },
     { kind: 'item', label: 'Show Dot', checked: dotOn, onSelect: () => ws.setPaneDot(paneId, !dotOn) },
+    // Ambient AI: a check means this pane is muted (no AI summary line).
+    { kind: 'item', label: 'Mute AI Summary', checked: ui.aiMuted.has(paneId), onSelect: () => ui.toggleAiMute(paneId) },
     { kind: 'sep' }
   );
 

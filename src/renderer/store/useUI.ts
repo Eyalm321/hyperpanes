@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { MenuItem } from '../components/ContextMenu';
-import type { MetricsSnapshot } from '../types';
+import type { AiStatus, MetricsSnapshot } from '../types';
 
 // A captured metrics snapshot plus the per-window renderer figures, shown by the
 // "Performance: Dump metrics" command.
@@ -71,6 +71,14 @@ interface UIState {
   requestRenameTab: (id: string | null) => void;
   renamePaneRequest: string | null;
   requestRenamePane: (id: string | null) => void;
+
+  // Ambient AI: latest status (drives the indicator + Preferences), and the set
+  // of paneIds the user muted from AI summaries. Both transient — mute resets on
+  // restart by design, and status is re-fetched on mount.
+  aiStatus: AiStatus | null;
+  setAiStatus: (status: AiStatus | null) => void;
+  aiMuted: Set<string>;
+  toggleAiMute: (paneId: string) => void;
 }
 
 export const useUI = create<UIState>((set) => ({
@@ -123,5 +131,16 @@ export const useUI = create<UIState>((set) => ({
   renameTabRequest: null,
   requestRenameTab: (id) => set({ renameTabRequest: id }),
   renamePaneRequest: null,
-  requestRenamePane: (id) => set({ renamePaneRequest: id })
+  requestRenamePane: (id) => set({ renamePaneRequest: id }),
+
+  aiStatus: null,
+  setAiStatus: (aiStatus) => set({ aiStatus }),
+  aiMuted: new Set<string>(),
+  toggleAiMute: (paneId) =>
+    set((s) => {
+      const next = new Set(s.aiMuted);
+      if (next.has(paneId)) next.delete(paneId);
+      else next.add(paneId);
+      return { aiMuted: next };
+    })
 }));

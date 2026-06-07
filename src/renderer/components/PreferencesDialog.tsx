@@ -13,7 +13,7 @@ import {
 } from './terminal-themes';
 import { IDLE_EFFECT_LABELS, IDLE_EFFECT_NAMES, type IdleEffectName } from './idle-effects';
 import { TerminalPreview } from './TerminalPreview';
-import type { ControlStatus } from '../types';
+import type { AiStatus, ControlStatus } from '../types';
 import {
   BINDING_DEFS,
   CATEGORY_ORDER,
@@ -211,6 +211,32 @@ export function PreferencesDialog() {
   const toggleControl = () => void window.hp.control.setEnabled(!control?.enabled).then(setControl);
   const toggleAllowInput = () =>
     void window.hp.control.setAllowInput(!control?.allowInput).then(setControl);
+
+  // Ambient AI status also lives in main (ai-settings.json, off by default). Fetch
+  // on open; subscribe to live status (online/offline) while the dialog is shown.
+  // endpoint/model are local drafts (committed on blur/Enter) so typing isn't
+  // overwritten by an incoming status push.
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const [aiEndpoint, setAiEndpoint] = useState('');
+  const [aiModel, setAiModel] = useState('');
+  useEffect(() => {
+    if (!open) return;
+    void window.hp.ai.getStatus().then((st) => {
+      setAi(st);
+      setAiEndpoint(st.endpoint);
+      setAiModel(st.model);
+    });
+    return window.hp.ai.onStatus(setAi);
+  }, [open]);
+  const toggleAi = () => void window.hp.ai.setEnabled(!ai?.enabled).then(setAi);
+  const commitAiEndpoint = () => {
+    if (ai && aiEndpoint.trim() && aiEndpoint.trim() !== ai.endpoint)
+      void window.hp.ai.configure({ endpoint: aiEndpoint.trim() }).then(setAi);
+  };
+  const commitAiModel = () => {
+    if (ai && aiModel.trim() && aiModel.trim() !== ai.model)
+      void window.hp.ai.configure({ model: aiModel.trim() }).then(setAi);
+  };
 
   const stopRecording = () => {
     recordingRef.current = null;
@@ -672,6 +698,70 @@ export function PreferencesDialog() {
                       {control?.running && control?.port
                         ? `Listening on 127.0.0.1:${control.port} — token in control.json under the app's data folder.`
                         : 'Starting…'}
+                    </div>
+                  </>
+                )}
+
+                <div className="hp-kb-group-title">Local AI (Ollama)</div>
+                <div className="hp-kb-row">
+                  <span className="hp-kb-label">
+                    Ambient pane summaries
+                    <em className="hp-kb-hint">
+                      a local Gemma watches each pane &amp; writes a high-level subtitle — off by
+                      default
+                    </em>
+                  </span>
+                  <div className="hp-kb-right">
+                    <Toggle on={!!ai?.enabled} onToggle={toggleAi} label="Ambient pane summaries" />
+                  </div>
+                </div>
+                {ai?.enabled && (
+                  <>
+                    <div className="hp-kb-row">
+                      <span className="hp-kb-label">
+                        Ollama endpoint
+                        <em className="hp-kb-hint">e.g. your Mac mini over Tailscale</em>
+                      </span>
+                      <div className="hp-kb-right">
+                        <input
+                          className="hp-input"
+                          type="text"
+                          spellCheck={false}
+                          placeholder="http://host:11434"
+                          style={{ width: 260 }}
+                          value={aiEndpoint}
+                          onChange={(e) => setAiEndpoint(e.target.value)}
+                          onBlur={commitAiEndpoint}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitAiEndpoint();
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div className="hp-kb-row">
+                      <span className="hp-kb-label">Model</span>
+                      <div className="hp-kb-right">
+                        <input
+                          className="hp-input"
+                          type="text"
+                          spellCheck={false}
+                          placeholder="gemma3:4b"
+                          style={{ width: 160 }}
+                          value={aiModel}
+                          onChange={(e) => setAiModel(e.target.value)}
+                          onBlur={commitAiModel}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitAiModel();
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div className="hp-kb-hint">
+                      {ai?.online
+                        ? `Connected to ${ai.endpoint} (${ai.model}).`
+                        : `Offline — can't reach ${ai?.endpoint}. Retrying…${
+                            ai?.lastError ? ` (${ai.lastError})` : ''
+                          }`}
                     </div>
                   </>
                 )}

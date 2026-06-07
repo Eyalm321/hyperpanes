@@ -1,4 +1,7 @@
 import type {
+  AiConfigPatch,
+  AiPanePublish,
+  AiStatus,
   ControlCommand,
   ControlStatus,
   ControlWindowPayload,
@@ -67,6 +70,13 @@ declare global {
         correlationId: string,
         reply: { ok: boolean; result?: unknown; error?: string }
       ): void;
+    };
+    ai: {
+      getStatus(): Promise<AiStatus>;
+      setEnabled(enabled: boolean): Promise<AiStatus>;
+      configure(patch: AiConfigPatch): Promise<AiStatus>;
+      publishPanes(panes: AiPanePublish[]): void;
+      onStatus(cb: (status: AiStatus) => void): () => void;
     };
     win: {
       minimize(): void;

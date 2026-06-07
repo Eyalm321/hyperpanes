@@ -922,6 +922,13 @@ body {
   text-overflow: ellipsis;
 }
 
+/* The ambient-AI summary line: dimmer + italic, with a ✦ marker, so it reads as
+   machine-generated and distinct from a user-set subtitle. */
+.hp-pane-subtitle-ai {
+  font-style: italic;
+  opacity: 0.75;
+}
+
 /* Inline editor wrapping the title + subtitle inputs (and the "add" button). */
 .hp-label-edit {
   display: inline-flex;

@@ -214,6 +214,9 @@ export function PaneFrame({ group, pane, rect, visible, active, focused }: PaneF
             ref={labelRef}
             value={pane.label}
             subtitle={pane.subtitle}
+            // Ambient-AI line (meta['ai.subtitle']) shows only when the user hasn't
+            // set a subtitle by hand — a manual subtitle always wins.
+            aiSubtitle={pane.meta?.['ai.subtitle']?.trim() || undefined}
             shellTitle={shellTitle}
             onCommit={(label, subtitle) => renamePane(pane.id, label, subtitle)}
           />

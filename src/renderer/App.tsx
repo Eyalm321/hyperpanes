@@ -219,6 +219,64 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Ambient AI (local Gemma): while enabled, mirror this window's panes to main
+    // (paneId↔sessionUid + label + mute) so it can map output back to a pane and
+    // push the generated subtitle into pane meta. Also keep useUI.aiStatus current
+    // for the indicator + Preferences. Like the control publish, the store
+    // subscriptions only run while AI is enabled.
+    let active = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let unsubWs: (() => void) | undefined;
+    let unsubUi: (() => void) | undefined;
+    const publish = () => {
+      const s = useWorkspace.getState();
+      const muted = useUI.getState().aiMuted;
+      window.hp.ai.publishPanes(
+        s.groups
+          .flatMap((g) => g.panes)
+          .map((p) => ({
+            paneId: p.id,
+            sessionUid: p.sessionUid,
+            label: p.label,
+            muted: muted.has(p.id)
+          }))
+      );
+    };
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(publish, 250);
+    };
+    const start = () => {
+      if (active) return;
+      active = true;
+      publish();
+      unsubWs = useWorkspace.subscribe(schedule);
+      unsubUi = useUI.subscribe(schedule); // mute toggles live here
+    };
+    const stop = () => {
+      active = false;
+      unsubWs?.();
+      unsubUi?.();
+      unsubWs = unsubUi = undefined;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
+    void window.hp.ai.getStatus().then((st) => {
+      useUI.getState().setAiStatus(st);
+      if (st.enabled) start();
+    });
+    const off = window.hp.ai.onStatus((st) => {
+      useUI.getState().setAiStatus(st);
+      if (st.enabled) start();
+      else stop();
+    });
+    return () => {
+      off();
+      stop();
+    };
+  }, []);
+
+  useEffect(() => {
     // Git-project tint: when a pane's cwd enters a known repo, main emits the
     // project keyed by the pane's live sessionUid. Find that pane and tint it
     // (adopt the project color, turn on frame/dot, show the repo name).

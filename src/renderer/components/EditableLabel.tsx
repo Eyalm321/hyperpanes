@@ -2,7 +2,8 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 
 interface EditableLabelProps {
   value: string;
-  subtitle?: string;
+  subtitle?: string; // user-set subtitle: editable, always wins, seeds the editor
+  aiSubtitle?: string; // ambient-AI line: shown (dimmed, marked) ONLY when no user subtitle
   shellTitle?: string; // the shell's reported title (label stays locked; shown only as tooltip)
   onCommit: (value: string, subtitle: string) => void;
 }
@@ -14,7 +15,7 @@ export interface EditableLabelHandle {
 }
 
 export const EditableLabel = forwardRef<EditableLabelHandle, EditableLabelProps>(function EditableLabel(
-  { value, subtitle, shellTitle, onCommit },
+  { value, subtitle, aiSubtitle, shellTitle, onCommit },
   ref
 ) {
   const [editing, setEditing] = useState(false);
@@ -108,7 +109,15 @@ export const EditableLabel = forwardRef<EditableLabelHandle, EditableLabelProps>
       onDoubleClick={start}
     >
       <span className="hp-pane-label">{value}</span>
-      {subtitle && <span className="hp-pane-subtitle">{subtitle}</span>}
+      {subtitle ? (
+        <span className="hp-pane-subtitle">{subtitle}</span>
+      ) : (
+        aiSubtitle && (
+          <span className="hp-pane-subtitle hp-pane-subtitle-ai" title="AI summary of this pane">
+            ✦ {aiSubtitle}
+          </span>
+        )
+      )}
     </span>
   );
 });

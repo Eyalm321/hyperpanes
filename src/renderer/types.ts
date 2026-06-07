@@ -153,6 +153,32 @@ export interface ControlCommand {
   [key: string]: unknown;
 }
 
+// ---- Ambient AI (local Gemma via Ollama) ----
+// Current state of the local-AI watcher, surfaced to Preferences + the indicator.
+export interface AiStatus {
+  enabled: boolean;
+  online: boolean; // last reachability/summary result for the Ollama endpoint
+  endpoint: string;
+  model: string;
+  lastError?: string;
+}
+// Live-updatable AI config (everything but the master enable).
+export interface AiConfigPatch {
+  endpoint?: string;
+  model?: string;
+  settleMs?: number;
+  maxStalenessSec?: number;
+  concurrency?: number;
+}
+// What a window publishes for each watched pane (ai:publishPanes). The owning
+// windowId is stamped by main from the sender, not sent by the renderer.
+export interface AiPanePublish {
+  paneId: string;
+  sessionUid: string;
+  label: string;
+  muted: boolean;
+}
+
 // ---- Performance metrics (diagnostics) ----
 // A point-in-time snapshot for the "Performance: Dump metrics" command: cold-start
 // milestones (main-process), plus per-process memory from app.getAppMetrics(). The

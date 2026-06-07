@@ -14,7 +14,7 @@ import {
   type WindowBounds,
   type GroupSpec
 } from './workspace';
-import { ControlServer, type ControlWindowPayload } from './control-server';
+import { ControlServer, type ControlWindowPayload, type ControlCommand } from './control-server';
 import { collectMetrics } from './metrics';
 import { findGitRoot } from './git';
 import {
@@ -24,6 +24,8 @@ import {
   renameProject,
   removeProject
 } from './projects';
+import { join } from 'node:path';
+import { AiService, type AiPanePublish } from './ai/ai-service';
 
 // Per-window spawn options. `windowSpec`/`bounds`/`cascadeIndex` drive launch-time
 // windows (M0); `inactive` is the live-drag float.
@@ -81,31 +83,38 @@ export function registerIpc(
   let commandSeq = 0;
   const COMMAND_TIMEOUT_MS = 2000;
 
+  // Forward a command to a window and wait for its reply (carrying any result,
+  // e.g. a new pane id). Resolves {ok:false} if the window is gone, or
+  // {ok:false, timedOut:true} if the renderer never answers within the timeout
+  // — so a wedged renderer surfaces as a failure (not a phantom success) and
+  // can't hang the HTTP request forever. A genuine reply carries {ok, result}
+  // or {ok:false, error} when the store action threw (#2/#3). Shared by the
+  // control API and the ambient-AI service (which pushes generated subtitles
+  // into pane meta the same way).
+  const dispatchToWindow = (
+    windowId: number,
+    command: ControlCommand
+  ): Promise<DispatchResult> => {
+    const win = BrowserWindow.fromId(windowId);
+    if (!win || win.isDestroyed()) return Promise.resolve({ ok: false });
+    const correlationId = String(++commandSeq);
+    return new Promise<DispatchResult>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingCommands.delete(correlationId);
+        resolve({ ok: false, timedOut: true });
+      }, COMMAND_TIMEOUT_MS);
+      pendingCommands.set(correlationId, { resolve, timer, windowId });
+      win.webContents.send('control:command', { ...command, correlationId });
+    });
+  };
+
   // The control API reads/writes ptys through the manager and forwards structural
   // commands to a window's renderer. `send` (defined below) broadcasts the
   // active-state toggle so renderers know when to publish their structure.
   const control = new ControlServer({
     readOutput: (uid) => manager.get(uid)?.getReplay() ?? null,
     sendInput: (uid, data) => manager.write(uid, data),
-    // Forward a command to a window and wait for its reply (carrying any result,
-    // e.g. a new pane id). Resolves {ok:false} if the window is gone, or
-    // {ok:false, timedOut:true} if the renderer never answers within the timeout
-    // — so a wedged renderer surfaces as a failure (not a phantom success) and
-    // can't hang the HTTP request forever. A genuine reply carries {ok, result}
-    // or {ok:false, error} when the store action threw (#2/#3).
-    dispatchCommand: (windowId, command) => {
-      const win = BrowserWindow.fromId(windowId);
-      if (!win || win.isDestroyed()) return Promise.resolve({ ok: false });
-      const correlationId = String(++commandSeq);
-      return new Promise<DispatchResult>((resolve) => {
-        const timer = setTimeout(() => {
-          pendingCommands.delete(correlationId);
-          resolve({ ok: false, timedOut: true });
-        }, COMMAND_TIMEOUT_MS);
-        pendingCommands.set(correlationId, { resolve, timer, windowId });
-        win.webContents.send('control:command', { ...command, correlationId });
-      });
-    },
+    dispatchCommand: dispatchToWindow,
     onActiveChange: (active) => send('control:active', active)
   });
 
@@ -219,6 +228,26 @@ export function registerIpc(
     }
   };
 
+  // Ambient AI (local Gemma via Ollama): taps pane output, summarizes it, and
+  // writes a high-level "what you're doing" line into pane meta['ai.subtitle'].
+  // Independent of the control server (its own enable + own settings file).
+  const aiPushMeta = (windowId: number, paneId: string, meta: Record<string, string>) => {
+    const win = BrowserWindow.fromId(windowId);
+    if (win && !win.isDestroyed()) {
+      void dispatchToWindow(windowId, { type: 'setMeta', paneId, meta });
+    } else {
+      // Unknown/stale window: broadcast; applyControlCommand no-ops where the pane
+      // is absent, so only the owning window acts on it.
+      send('control:command', { type: 'setMeta', paneId, meta });
+    }
+  };
+  const ai = new AiService({
+    settingsPath: join(app.getPath('userData'), 'ai-settings.json'),
+    memoryPath: join(app.getPath('userData'), 'ai-memory.json'),
+    pushMeta: aiPushMeta,
+    onStatus: (status) => send('ai:status', status)
+  });
+
   // Kill every session a (closing) window still owns. Sessions that moved to
   // another window were re-owned on re-attach, so they're spared here.
   const reap = (windowId: number) => {
@@ -274,6 +303,7 @@ export function registerIpc(
       writeTimer = null;
     }
     writeSession();
+    ai.shutdown(); // flush ai-memory.json
   });
 
   const spawnWindow = (
@@ -293,6 +323,7 @@ export function registerIpc(
       pendingSeed.delete(win.id);
       pendingWindowSpec.delete(win.id);
       control.dropWindow(win.id);
+      ai.dropWindow(win.id);
       sessionSpecs.delete(win.id);
       reap(win.id);
       // If the session-of-record window went away, hand the role to a survivor.
@@ -338,6 +369,7 @@ export function registerIpc(
       onData: (uid, data) => {
         send('session:data', { uid, data });
         control.emitOutput(uid, data); // tee to the /events stream (no-op if no clients)
+        ai.onData(uid, data); // tee to the ambient-AI tail (no-op if disabled)
       },
       // Live cwd (OSC 7 shell integration): forward it, and if it's inside a git
       // repo, remember the project and tell the renderer to tint the pane.
@@ -348,12 +380,16 @@ export function registerIpc(
           const project = upsertProjectByRoot(root);
           send('session:project', { uid, project });
           send('projects:changed', listProjects());
+          ai.onCwd(uid, cwd, { path: project.path, name: project.name });
+        } else {
+          ai.onCwd(uid, cwd, null);
         }
       },
       onExit: (uid, code) => {
         send('session:exit', { uid, code });
         owner.delete(uid);
         control.emitExit(uid, code);
+        ai.onSessionExit(uid);
       }
     });
     return { uid: opts.uid, attached: false };
@@ -628,6 +664,36 @@ export function registerIpc(
   ipcMain.handle('control:setAllowInput', (_e, allow: boolean) => control.setAllowInput(allow));
   // Start listening now if it was left enabled in a prior session (default: off).
   control.init();
+
+  // ---- Ambient AI (local Gemma): status, toggle, config, per-window pane publish ----
+  ipcMain.handle('ai:getStatus', () => ai.status());
+  ipcMain.handle('ai:setEnabled', (_e, enabled: boolean) => {
+    ai.setEnabled(enabled);
+    return ai.status();
+  });
+  ipcMain.handle(
+    'ai:configure',
+    (
+      _e,
+      patch: Partial<{
+        endpoint: string;
+        model: string;
+        settleMs: number;
+        maxStalenessSec: number;
+        concurrency: number;
+      }>
+    ) => {
+      ai.configure(patch);
+      return ai.status();
+    }
+  );
+  // Each window publishes only its own panes; main stamps the window id from the sender.
+  ipcMain.on('ai:publishPanes', (e, panes: AiPanePublish[]) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win) ai.onPaneContext(win.id, panes);
+  });
+  // Load persisted AI settings + memory; start watching if left enabled (default: off).
+  ai.init();
 
   // ---- Diagnostics: memory/process/startup snapshot (Performance: Dump metrics) ----
   ipcMain.handle('metrics:get', () => collectMetrics());
