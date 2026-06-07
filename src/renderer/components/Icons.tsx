@@ -100,6 +100,13 @@ export const IconPlusBare = (p: IconProps) => (
   </Svg>
 );
 
+/** Folder — the projects-history toggle in the sidebar. */
+export const IconFolder = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h3.6a1.5 1.5 0 0 1 1.06.44l1 1a1.5 1.5 0 0 0 1.06.44H19A1.5 1.5 0 0 1 20.5 9.4v7.6A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17Z" />
+  </Svg>
+);
+
 
 // ---- Window controls ----
 export const IconMinimize = (p: IconProps) => (

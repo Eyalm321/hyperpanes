@@ -541,44 +541,89 @@ body {
   display: flex;
 }
 
-/* ---- Right sidebar: quick-pane button + git-projects history ---- */
+/* ---- Right sidebar: a slim icon rail (quick-pane + git-projects history) ---- */
 .hp-sidebar {
-  width: 220px;
+  position: relative;
+  width: 44px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  gap: 4px;
   min-height: 0;
   background: var(--hp-mantle);
   border-left: 1px solid var(--hp-border);
-  padding: 8px;
-  gap: 8px;
+  padding: 6px 0;
 }
 
-.hp-sidebar-newpane {
+.hp-sidebar-icon {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--hp-border);
-  border-radius: 6px;
-  background: var(--hp-surface);
-  color: var(--hp-text);
-  font: inherit;
-  font-size: 13px;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  font-size: 18px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--hp-subtext);
   cursor: pointer;
 }
 
-.hp-sidebar-newpane:hover {
+.hp-sidebar-icon:hover {
   background: var(--hp-surface2);
-  border-color: var(--hp-accent);
+  color: var(--hp-text);
 }
 
-.hp-sidebar-sep {
-  height: 1px;
-  background: var(--hp-border);
+.hp-sidebar-icon.active {
+  background: var(--hp-surface2);
+  color: var(--hp-accent);
 }
 
-.hp-sidebar-projects {
+.hp-sidebar-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  background: var(--hp-accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* Projects history: a flyout opening to the LEFT of the slim rail, over the panes. */
+.hp-sidebar-flyout {
+  position: absolute;
+  top: 6px;
+  right: calc(100% + 6px);
+  width: 224px;
+  max-height: calc(100% - 12px);
+  display: flex;
+  flex-direction: column;
+  background: var(--hp-surface);
+  border: 1px solid var(--hp-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  padding: 8px;
+  z-index: 40;
+}
+
+.hp-flyout-head {
+  padding: 2px 4px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--hp-subtext);
+}
+
+.hp-flyout-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
