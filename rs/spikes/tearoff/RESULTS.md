@@ -1,8 +1,10 @@
 # Spike B — cross-window live tear-off · RESULTS
 
 **Track:** `spike-tearoff` · **Phase 0 go/no-go** · Windows 11, Slint 1.16, `windows` 0.58
-**Status:** harness BUILT + launches clean + two-window reparent logic wired.
-**Recommendation:** **GO** (provisional — pending your live-drag smoothness confirmation; see *HITL* at bottom).
+**Status:** harness BUILT + launches clean + two-window reparent logic wired +
+**live-drag confirmed by user (2026-06-07): smooth across the gap and over the second
+window, no stutter/flicker/lost grab, card reparents on drop.**
+**Recommendation:** **GO** — confirmed.
 
 ---
 
@@ -94,9 +96,10 @@ The design removes the usual stutter/flicker sources by construction:
   never steals focus or activation from the Slint windows;
 - no lost-capture path exists because we never rely on capture.
 
-I have **statically + smoke-verified** this (compiles, launches, windows + ghost created,
-logic wired). The one criterion I **cannot self-verify** is the *felt* smoothness of a
-live human drag across the second window — that needs a hand on the mouse. → **HITL below.**
+Statically + smoke-verified (compiles, launches, windows + ghost created, logic wired),
+and **the felt smoothness of a live human drag across the second window was confirmed by
+the user on 2026-06-07: smooth, no stutter/flicker/lost grab, card reparents on drop.**
+The predicted "no jank by construction" held in practice.
 
 ## Plan B (only if live drag is NOT smooth)
 
@@ -120,8 +123,8 @@ the ghost follow the cursor and Window B highlight green when you're over it.
 
 ---
 
-### HITL — go/no-go needs your eyes
-The only open question is live-drag *feel*. Please run it and drag a card across to the
-other window. **GO** if the ghost follows the cursor smoothly across the gap and over the
-second window with no stutter / flicker / lost grab, and the card moves on drop. If it's
-janky, that's the NO-GO signal → Plan B above.
+### HITL — resolved
+Live-drag test performed by the user on 2026-06-07. Verdict: **GO — smooth.** Ghost
+follows the cursor smoothly across the gap and over the second window with no stutter /
+flicker / lost grab; the card reparents on drop. Plan B not needed. The signature
+tear-off interaction is proven viable in Slint + Win32.
