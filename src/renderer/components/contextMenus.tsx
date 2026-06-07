@@ -1,5 +1,6 @@
 import { useWorkspace } from '../store/useWorkspace';
 import { useUI } from '../store/useUI';
+import { useSettings } from '../store/useSettings';
 import { useKeybindings } from '../store/useKeybindings';
 import { comboLabel } from '../keybindings';
 import { AUTO_LAYOUT, LAYOUTS, effectiveLayout } from '../layout/presets';
@@ -116,10 +117,17 @@ export function buildPaneMenu(
     items.push({ kind: 'item', label: 'Show', onSelect: () => ws.focusPane(paneId) }, { kind: 'sep' });
   }
 
+  // Effective frame/dot: a per-pane override wins, otherwise the global setting.
+  const settings = useSettings.getState();
+  const frameOn = p.showFrame ?? settings.showFrame;
+  const dotOn = p.showDot ?? settings.showDot;
+
   items.push(
     { kind: 'item', label: 'New Pane…', onSelect: () => ui.openNewPane() },
     { kind: 'item', label: 'Rename…', onSelect: () => ui.requestRenamePane(paneId) },
     { kind: 'submenu', label: 'Change Color', items: colorSubmenu(paneId, groupId) },
+    { kind: 'item', label: 'Show Frame', checked: frameOn, onSelect: () => ws.setPaneFrame(paneId, !frameOn) },
+    { kind: 'item', label: 'Show Dot', checked: dotOn, onSelect: () => ws.setPaneDot(paneId, !dotOn) },
     { kind: 'sep' }
   );
 

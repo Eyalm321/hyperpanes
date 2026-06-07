@@ -14,15 +14,20 @@ export function NewPaneDialog() {
 
   const [label, setLabel] = useState('');
   const [color, setColor] = useState(nextColor(seq));
+  const [showFrame, setShowFrame] = useState(false);
+  const [showDot, setShowDot] = useState(false);
   const [command, setCommand] = useState('');
   const [cwd, setCwd] = useState('');
   const [shell, setShell] = useState('');
 
   // Reset the form each time it opens, defaulting the color to the next in rotation.
+  // Frame and dot both start off — a fresh pane is clean unless you opt in.
   useEffect(() => {
     if (open) {
       setLabel('');
       setColor(nextColor(activeGroup(useWorkspace.getState()).seq));
+      setShowFrame(false);
+      setShowDot(false);
       setCommand('');
       setCwd('');
       setShell('');
@@ -35,6 +40,8 @@ export function NewPaneDialog() {
     addPane({
       label: label.trim() || `pane ${activeGroup(useWorkspace.getState()).seq + 1}`,
       color,
+      showFrame,
+      showDot,
       command: command.trim() || undefined,
       cwd: cwd.trim() || undefined,
       shell: shell.trim() || undefined
@@ -64,8 +71,26 @@ export function NewPaneDialog() {
         </label>
 
         <div className="hp-field">
-          <span>Frame color</span>
+          <span>Color</span>
           <ColorSwatches value={color} onChange={setColor} />
+        </div>
+
+        <div className="hp-field">
+          <span>Show</span>
+          <div style={{ display: 'flex', gap: '16px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={showFrame}
+                onChange={(e) => setShowFrame(e.target.checked)}
+              />
+              Frame color
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+              <input type="checkbox" checked={showDot} onChange={(e) => setShowDot(e.target.checked)} />
+              Color dot
+            </label>
+          </div>
         </div>
 
         <label className="hp-field">

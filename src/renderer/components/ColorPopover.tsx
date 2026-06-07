@@ -7,10 +7,24 @@ interface ColorPopoverProps {
   value: string;
   onChange: (color: string) => void;
   onClose: () => void;
+  // Forwarded to ColorSwatches: the per-pane frame/dot toggles.
+  frameOn?: boolean;
+  dotOn?: boolean;
+  onToggleFrame?: (on: boolean) => void;
+  onToggleDot?: (on: boolean) => void;
 }
 
 // Fixed-positioned so it escapes the pane's overflow:hidden clipping.
-export function ColorPopover({ anchor, value, onChange, onClose }: ColorPopoverProps) {
+export function ColorPopover({
+  anchor,
+  value,
+  onChange,
+  onClose,
+  frameOn,
+  dotOn,
+  onToggleFrame,
+  onToggleDot
+}: ColorPopoverProps) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -32,7 +46,14 @@ export function ColorPopover({ anchor, value, onChange, onClose }: ColorPopoverP
 
   return (
     <div className="hp-popover" style={style} ref={ref} onMouseDown={(e) => e.stopPropagation()}>
-      <ColorSwatches value={value} onChange={onChange} />
+      <ColorSwatches
+        value={value}
+        onChange={onChange}
+        frameOn={frameOn}
+        dotOn={dotOn}
+        onToggleFrame={onToggleFrame}
+        onToggleDot={onToggleDot}
+      />
     </div>
   );
 }
