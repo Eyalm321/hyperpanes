@@ -16,10 +16,21 @@ path = "src/main.rs"
 [dependencies]
 hyperpanes-core = { path = "../core" }
 hyperpanes-terminal-widget = { path = "../terminal-widget" }
-slint = { version = "1.16", features = ["unstable-wgpu-28", "renderer-femtovg-wgpu"] }
+# `raw-window-handle-06` exposes the native HWND (for the frameless-window Win32 glue).
+slint = { version = "1.16", features = [
+    "unstable-wgpu-28",
+    "renderer-femtovg-wgpu",
+    "raw-window-handle-06",
+] }
+raw-window-handle = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
-# Frameless window / custom titlebar (WM_NCHITTEST + min/max/close) — lift from spike-tearoff.
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# Frameless window / custom titlebar (strip WS_CAPTION + the HTCAPTION drag trick + min/max/close)
+# — lifted from spike-tearoff.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [build-dependencies]
 slint-build = "1.16"
