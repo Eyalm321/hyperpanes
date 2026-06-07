@@ -1,12 +1,44 @@
 # Phase 0 · Spike A — GPU terminal-in-Slint — RESULTS
 
-**Recommendation: 🟢 GO** (with one mandatory follow-up: re-measure on the actual Intel
-iGPU laptop — see *Caveats*). The single riskiest piece of the rewrite is proven: an
+**Recommendation: 🟢 GO — provisional.** Decision (user, 2026-06-07): **GO, but the toolkit
+choice is gated on re-measuring on the real Intel iGPU laptop first** — see the
+*🚦 GATING* section directly below. The single riskiest piece of the rewrite is proven: an
 `alacritty_terminal` grid, fed by a real conpty shell, rasterized with `swash`, rendered
 into a **per-pane `wgpu::Texture` on Slint's own wgpu device**, and imported via
 `slint::Image::try_from` composites as an ordinary Slint `Image` — getting border-radius,
 drop-shadow, accent border, z-order and a title chip *for free, over the terminal surface*.
 A pure-CPU `SharedPixelBuffer` fallback works behind the same trait. Both clear the bars.
+
+---
+
+## 🚦 GATING — iGPU re-measure (must pass before the toolkit decision is locked)
+
+This rig is a **discrete RTX 2080 Ti**, not the Intel-iGPU target. The GO stands by
+inference (tiny per-frame workload + a CPU-only software fallback that already beats 60),
+but per the go/no-go owner this must be **confirmed on the actual Intel iGPU laptop** before
+the native-Slint toolkit choice is final. Procedure (≈5 min, no code changes):
+
+```
+cd rs/spikes/terminal-render
+cargo run -- --bench --max               # record GPU full-repaint FPS  (target ≥ 60)
+cargo run -- --bench --max --software    # record software FPS          (target ≥ 30)
+cargo run -- --max --flood               # watch HUD: ingest rate + idle %/core; eyeball crispness
+SLINT_SCALE_FACTOR=1.5 cargo run -- --max   # confirm crisp text at 150% DPI
+```
+Also confirm with Task Manager that whole-process idle CPU < 3%.
+
+| Measurement (Intel iGPU) | Target | Result | Pass? |
+|---|---|---|---|
+| GPU full-repaint FPS, maximized @100% | ≥ 60 | _fill in_ | |
+| GPU full-repaint FPS, maximized @150% | ≥ 60 | _fill in_ | |
+| Software full-repaint FPS, maximized | ≥ 30 | _fill in_ | |
+| Idle CPU (Task Manager, whole process) | < 3 % | _fill in_ | |
+| Text crisp @ 100/125/150% DPI (visual) | yes | _fill in_ | |
+| Builds & runs on the iGPU at all | yes | _fill in_ | |
+
+If GPU < 60 on the iGPU but software ≥ 30: still not a NO-GO — ship software-default on
+weak iGPUs and enable GPU where it clears the bar (the `PaneRenderer` swap is one line).
+True NO-GO only if the GPU path crashes broadly **and** software can't hold 30.
 
 ---
 
