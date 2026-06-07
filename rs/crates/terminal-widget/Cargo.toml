@@ -5,16 +5,42 @@ edition = "2021"
 rust-version = "1.85"
 publish = false
 
-# Standalone workspace root (own heavy GPU deps; not part of the lean `rs/` core workspace).
-# You OWN this file — adjust deps freely (unlike the frozen core Cargo.toml).
+# Standalone workspace root (owns the heavy GPU/terminal deps; NOT part of the lean
+# `rs/` core workspace). You OWN this file — adjust deps freely.
 [workspace]
 
 [dependencies]
+# The headless core: consumed as a dependency (session_manager owns the live PTYs).
 hyperpanes-core = { path = "../core" }
-slint = "1.16"
-# Lift the proven renderer deps (wgpu, swash, alacritty_terminal, portable-pty / or reuse
-# core's session engine, etagere/guillotiere, raw-window-handle, windows) from the WORKING
-# spike at `rs/spikes/terminal-render/Cargo.toml` — it already compiles & ran on this machine.
+
+# Slint UI + its wgpu interop seam. `unstable-wgpu-28` pins wgpu 28 and exposes
+# `slint::wgpu_28` (texture import via Image::try_from + a shared Device/Queue);
+# `renderer-femtovg-wgpu` is the concrete wgpu renderer Slint needs at runtime.
+slint = { version = "1.16", features = ["unstable-wgpu-28", "renderer-femtovg-wgpu"] }
+# wgpu MUST match the version Slint links (28) so the Texture types are identical.
+wgpu = "28"
+
+# Terminal model + VTE parser + damage tracking (same version as core — no type clash,
+# we never pass alacritty types across the core boundary).
+alacritty_terminal = "0.26"
+# Glyph rasterization (coverage masks).
+swash = "0.2"
+# Glyph-atlas shelf packer (GPU path).
+etagere = "0.2"
+# Plain-old-data casts for instance/vertex buffers.
+bytemuck = { version = "1", features = ["derive"] }
+anyhow = "1.0.102"
+
+# Drives the SessionManager (its per-session async driver tasks + batch timers). Match
+# core's feature set so the runtime has time/sync/macros available.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [build-dependencies]
 slint-build = "1.16"
+
+# Optimize deps even in dev so the software renderer is smooth in the demo.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
