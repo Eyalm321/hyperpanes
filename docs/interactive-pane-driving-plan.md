@@ -152,20 +152,22 @@ the new primitives — **PASSED**: `prompt_pane` did each turn in one call; `rea
 PowerShell sleep; `send_input({submit:false})` + a bare `send_keys(["enter"])` submitted a line
 ("key landed ✅"); `send_keys(["shift+tab"])` cycled the permission mode. Two gaps surfaced:
 
-- **P4a — `open_pane` arg quoting (real bug/limitation). BUILT.** A `command` with complex quoted
+- **P4a — `open_pane` arg quoting (real bug/limitation). BUILT & LIVE-VERIFIED (v0.1.6).** A `command` with complex quoted
   args (e.g. `claude --append-system-prompt "…long persona…"`) is **mangled**: the `command` string
   is handed to the pane's shell (cmd.exe), which splits on spaces, so the flag value truncates and
   stray tokens leak as positional args — in the gold test a stray `"are"` became claude's first
-  prompt and the persona never applied. **Fix (shipped):** an **`args?: string[]`** form. With
+  prompt and the persona never applied. **Fix (shipped v0.1.5, Windows PATHEXT resolution added v0.1.6):** an **`args?: string[]`** form. With
   `command` set, a non-empty `args` runs `command` **directly** as the executable with that argv —
   no shell, no re-parse — so values with spaces/quotes survive intact; `command` alone keeps the
-  shell path (back-compat). *App:* `resolveSpawn` pure core (`session.ts`, tested) chooses
-  file+argv; threaded through `PaneSpec`/`Pane`/`HpSpawnOptions`, `addPane`, `groupFromSpec`/
-  `specFromGroup` (round-trip), `Terminal.tsx` (prop + respawn dep + memo), the `newPane` control
-  command (`strArray`/`argvOf` coercion), and surfaced on `/state` + `buildControlPayload`. *MCP:*
+  shell path (back-compat). On Windows, `resolveWindowsCommand` walks PATH+PATHEXT so a bare name
+  like `"claude"` resolves to `claude.exe` automatically (no full path required by caller). *App:*
+  `resolveSpawn` + `resolveWindowsCommand` (`session.ts`, tested) chooses file+argv; threaded
+  through `PaneSpec`/`Pane`/`HpSpawnOptions`, `addPane`, `groupFromSpec`/`specFromGroup`
+  (round-trip), `Terminal.tsx` (prop + respawn dep + memo), the `newPane` control command
+  (`strArray`/`argvOf` coercion), and surfaced on `/state` + `buildControlPayload`. *MCP:*
   `open_pane` schema + tool, `PaneSpecSchema`, `compile-cli` (flagged JSON-only/lossy), `list_panes`
-  display. The caller owns making `command` spawnable as-is (absolute path / a name the OS launches
-  directly), since there is no shell to resolve `.cmd`/PATHEXT shims.
+  display. **Live verified 2026-06-05:** `open_pane({ command:"claude", args:["--append-system-prompt","You are Pane…"] })`
+  → persona applied, reply signed with 🐾, no stray tokens.
 - **P4b — `awaitingInput:true` is unverified live. BUILT (regression fixtures).** The gold test
   never hit a blocking y/n: the cwd **auto-trusted** at boot (no startup dialog) and tool calls
   **auto-ran**, so only the `false` (idle/working) path was exercised. Added **deterministic
