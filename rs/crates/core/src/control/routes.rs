@@ -1,15 +1,998 @@
 //! All HTTP route handlers (axum) — the byte-compatible surface the MCP server depends on.
-//! Port the route table from `src/main/control-server.ts` EXACTLY:
+//! Ports the route table from `src/main/control-server.ts` EXACTLY:
 //!   GET  /health                 (the ONLY unauthenticated route)
 //!   GET  /state                  scope-filtered windows tree (readmodel)
-//!   POST /tokens                 mint scoped token (tokens + scope::checkMintable)
-//!   GET  /panes/:id/output       mode=screen|raw, tail, strip, since, waitForIdle/settleMs/timeoutMs
+//!   POST /tokens                 mint scoped token (tokens + scope::check_mintable)
+//!   GET  /panes/{id}/output      mode=screen|raw, tail, strip, since, waitForIdle/settleMs/timeoutMs
 //!                                (control::output cores); cursor ALWAYS present
-//!   POST /panes/:id/input        allowInput gate (403); data|keys (control::input); submit; lock 423
-//!   GET|POST /panes/:id/messages durable inbox (control::inbox)
-//!   POST|DELETE /panes/:id/lock  advisory lock (control::lock)
+//!   POST /panes/{id}/input       allowInput gate (403); data|keys (control::input); submit; lock 423
+//!   GET|POST /panes/{id}/messages durable inbox (control::inbox)
+//!   POST|DELETE /panes/{id}/lock  advisory lock (control::lock)
 //!   POST /command                dispatch
+//!   GET  /events                 WS upgrade (token via header or ?token=)
 //!   + 401 unauthorized / 404 {error,path} / 405 method-not-allowed fallbacks
-//! Bearer via `Authorization: Bearer` or `?token=`. Every body shape must match (omit-when-unset).
-//!
-//! STUB — owned by track `control-server`.
+//! Bearer via `Authorization: Bearer` or `?token=` (WS only). Every body shape matches the TS
+//! source (omit-when-unset; ordered structs where field order is observable).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::Bytes;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Serialize;
+use serde_json::{json, Value};
+
+use crate::ansi_strip::strip_ansi;
+use crate::control::dispatch;
+use crate::control::events::ControlEvent;
+use crate::control::input::{keys_to_bytes, submit_newlines, KeysResult, SUBMIT_DELAY_MS};
+use crate::control::output::{
+    detect_awaiting_input, next_poll_delay, slice_since, wait_decision, WaitVerdict,
+    DEFAULT_SETTLE_MS, DEFAULT_WAIT_TIMEOUT_MS,
+};
+use crate::control::readmodel::PaneStatus;
+use crate::control::scope::{check_mintable, coerce_scope, pane_in_scope, Scope};
+use crate::control::server::{events_url, notify_state, now_ms, Shared};
+use crate::control::tokens::TokenInfo;
+
+/// Build the full router with the shared state baked in.
+pub fn router(shared: Arc<Shared>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/state", get(state))
+        .route("/tokens", post(tokens))
+        .route("/command", post(command))
+        .route("/panes/{id}/output", get(output))
+        .route("/panes/{id}/input", post(input))
+        .route("/panes/{id}/messages", get(messages_get).post(messages_post))
+        .route("/panes/{id}/lock", post(lock_post).delete(lock_delete))
+        .route("/events", get(events_ws))
+        .method_not_allowed_fallback(method_not_allowed)
+        .fallback(not_found)
+        .with_state(shared)
+}
+
+// ---- response helpers ---------------------------------------------------------------------
+
+fn jstatus(code: u16, body: Value) -> Response {
+    (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(body)).into_response()
+}
+
+fn ok_json<T: Serialize>(body: T) -> Response {
+    Json(body).into_response()
+}
+
+// ---- auth ---------------------------------------------------------------------------------
+
+fn bearer_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::to_string)
+}
+
+/// Resolve the presented bearer (HTTP header only — `?token=` is WS-only, per TS). 401 on failure.
+fn authorize(shared: &Arc<Shared>, headers: &HeaderMap) -> Result<TokenInfo, Response> {
+    let token = bearer_header(headers);
+    shared
+        .tokens
+        .lock()
+        .unwrap()
+        .resolve(token.as_deref(), now_ms())
+        .ok_or_else(|| jstatus(401, json!({ "error": "unauthorized" })))
+}
+
+/// A resolved, in-scope pane: its session uid. 404 (no such pane) / 403 (out of scope).
+struct FoundPane {
+    uid: String,
+}
+
+fn find_pane_scoped(
+    shared: &Arc<Shared>,
+    scope: Option<&Scope>,
+    pane_id: &str,
+) -> Result<FoundPane, Response> {
+    let m = shared.model.lock().unwrap();
+    match m.coords_of(pane_id) {
+        None => Err(jstatus(404, json!({ "error": "no such pane", "paneId": pane_id }))),
+        Some(coords) => {
+            if !pane_in_scope(scope, &coords) {
+                return Err(jstatus(403, json!({ "error": "pane out of scope", "paneId": pane_id })));
+            }
+            let uid = m.pane(pane_id).map(|p| p.session_uid.clone()).unwrap_or_default();
+            Ok(FoundPane { uid })
+        }
+    }
+}
+
+// ---- /health ------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HealthOut {
+    ok: bool,
+    app: &'static str,
+    pid: u32,
+    version: String,
+    allow_input: bool,
+}
+
+async fn health(State(shared): State<Arc<Shared>>) -> Response {
+    ok_json(HealthOut {
+        ok: true,
+        app: "hyperpanes",
+        pid: shared.pid,
+        version: shared.version.clone(),
+        allow_input: shared.allow_input(),
+    })
+}
+
+// ---- /state -------------------------------------------------------------------------------
+
+async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let m = shared.model.lock().unwrap();
+    let out = m.state_for_scope(info.scope.as_ref(), &|p| shared.compute_activity(p));
+    ok_json(out)
+}
+
+// ---- /tokens ------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MintOut {
+    ok: bool,
+    token: String,
+    scope: Scope,
+    expires_at: Option<i64>,
+    port: Option<u16>,
+    events: Value,
+}
+
+async fn tokens(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let parsed: Option<Value> = serde_json::from_slice(&body).ok();
+    let scope_val = parsed
+        .as_ref()
+        .and_then(|b| b.get("scope"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let requested = match coerce_scope(&scope_val) {
+        Some(s) => s,
+        None => {
+            return jstatus(
+                400,
+                json!({ "error": "expected { scope: { windowIds?|tabIds?|paneIds? }, ttlMs? }" }),
+            )
+        }
+    };
+    // No-escalation: the requested scope must sit within the minter's authority + name real ids.
+    let problem = {
+        let m = shared.model.lock().unwrap();
+        check_mintable(info.scope.as_ref(), &requested, &*m)
+    };
+    if let Some(p) = problem {
+        return jstatus(403, json!({ "error": p }));
+    }
+    let ttl = parsed
+        .as_ref()
+        .and_then(|b| b.get("ttlMs"))
+        .and_then(Value::as_i64)
+        .filter(|&t| t > 0);
+    let (token, expires_at) = shared.tokens.lock().unwrap().mint(requested.clone(), ttl, now_ms());
+    let port = shared.port();
+    let (port_field, events) = if port != 0 {
+        (Some(port), Value::String(events_url(port, &token)))
+    } else {
+        (None, Value::Null)
+    };
+    ok_json(MintOut { ok: true, token, scope: requested, expires_at, port: port_field, events })
+}
+
+// ---- /panes/{id}/output -------------------------------------------------------------------
+
+async fn output(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let found = match find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    let uid = found.uid;
+
+    if q.get("waitForIdle").map(|v| v == "1").unwrap_or(false) {
+        let settle = pos_num(q.get("settleMs")).unwrap_or(DEFAULT_SETTLE_MS);
+        let timeout = pos_num(q.get("timeoutMs")).unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+        let since = non_neg_num(q.get("since"));
+        let (settled, timed_out) = wait_for_quiet(&shared, &uid, settle, timeout, since).await;
+        let mut body = build_output_body(&shared, &id, &uid, &q);
+        if let Value::Object(map) = &mut body {
+            map.insert("waited".into(), json!(true));
+            map.insert("settled".into(), json!(settled));
+            map.insert("timedOut".into(), json!(timed_out));
+        }
+        return ok_json(body);
+    }
+    ok_json(build_output_body(&shared, &id, &uid, &q))
+}
+
+fn pane_status_str(shared: &Arc<Shared>, pane_id: &str) -> &'static str {
+    shared
+        .model
+        .lock()
+        .unwrap()
+        .pane(pane_id)
+        .map(|p| p.status.as_str())
+        .unwrap_or(PaneStatus::Exited.as_str())
+}
+
+fn build_output_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<String, String>) -> Value {
+    if q.get("mode").map(|m| m == "screen").unwrap_or(false) {
+        build_screen_body(shared, pane_id, uid, q)
+    } else {
+        read_output_body(shared, pane_id, uid, q)
+    }
+}
+
+fn read_output_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<String, String>) -> Value {
+    let raw = shared.sessions.replay(uid).unwrap_or_default();
+    let total = shared
+        .sessions
+        .output_bytes(uid)
+        .map(|b| b as i64)
+        .unwrap_or_else(|| raw.encode_utf16().count() as i64);
+    let since = non_neg_num(q.get("since"));
+    let mut text = raw.clone();
+    let mut cursor = total;
+    let mut truncated = false;
+    if let Some(s) = since {
+        let sl = slice_since(&raw, total, s);
+        text = sl.output;
+        cursor = sl.cursor;
+        truncated = sl.truncated;
+    }
+    let strip = q.get("strip").map(|v| v == "1").unwrap_or(false);
+    if strip {
+        text = strip_ansi(&text);
+    }
+    if let Some(tail) = tail_num(q.get("tail")) {
+        text = tail_lines(&text, tail);
+    }
+    let status = pane_status_str(shared, pane_id);
+    let mut body = json!({
+        "paneId": pane_id,
+        "status": status,
+        "stripped": strip,
+        "output": text,
+        "cursor": cursor,
+    });
+    if let Some(s) = since {
+        if let Value::Object(map) = &mut body {
+            map.insert("since".into(), json!(s));
+            map.insert("truncated".into(), json!(truncated));
+        }
+    }
+    body
+}
+
+fn build_screen_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<String, String>) -> Value {
+    let cursor = shared.sessions.output_bytes(uid).map(|b| b as i64).unwrap_or(0);
+    match shared.sessions.render_screen(uid) {
+        Some(full) => {
+            // Prompt detection runs on the FULL screen so a clipping `tail` can't hide a blocked
+            // prompt above the tail window.
+            let awaiting = detect_awaiting_input(&full);
+            let mut text = full;
+            if let Some(tail) = tail_num(q.get("tail")) {
+                text = tail_lines(&text, tail);
+            }
+            json!({
+                "paneId": pane_id,
+                "status": pane_status_str(shared, pane_id),
+                "mode": "screen",
+                "output": text,
+                "cursor": cursor,
+                "awaitingInput": awaiting,
+            })
+        }
+        None => {
+            // No screen (pane gone / wedged): fall back to the raw replay, flagged.
+            let mut body = read_output_body(shared, pane_id, uid, q);
+            if let Value::Object(map) = &mut body {
+                map.insert("mode".into(), json!("raw"));
+                map.insert("screenUnavailable".into(), json!(true));
+            }
+            body
+        }
+    }
+}
+
+/// Block until the pane has been output-quiet for `settle_ms` (or `timeout_ms` elapses), driving
+/// an adaptive poll over the live tracking maps (pure `wait_decision`/`next_poll_delay`).
+async fn wait_for_quiet(
+    shared: &Arc<Shared>,
+    uid: &str,
+    settle_ms: i64,
+    timeout_ms: i64,
+    since: Option<i64>,
+) -> (bool, bool) {
+    let start = now_ms();
+    loop {
+        let now = now_ms();
+        let last = shared.sessions.last_output_at(uid).map(|t| t as i64);
+        let total = shared.sessions.output_bytes(uid).map(|b| b as i64).unwrap_or(0);
+        match wait_decision(last, total, since, now, start, settle_ms, timeout_ms) {
+            WaitVerdict::Settled => return (true, false),
+            WaitVerdict::Timeout => return (false, true),
+            WaitVerdict::Wait => {
+                let d = next_poll_delay(last, now, start, settle_ms, timeout_ms).max(1) as u64;
+                tokio::time::sleep(Duration::from_millis(d)).await;
+            }
+        }
+    }
+}
+
+// ---- /panes/{id}/input --------------------------------------------------------------------
+
+async fn input(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let found = match find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    if !shared.allow_input() {
+        return jstatus(403, json!({ "error": "input not allowed" }));
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let has_data = b.get("data").and_then(Value::as_str).is_some();
+    let has_keys = b.get("keys").map(Value::is_array).unwrap_or(false);
+    if !has_data && !has_keys {
+        return jstatus(400, json!({ "error": "expected { data: string } or { keys: string[] }" }));
+    }
+    // Advisory write lock (H): if someone else holds it, refuse.
+    let owner = b.get("owner").and_then(Value::as_str);
+    let holder = shared.locks.lock().unwrap().holder(&id, now_ms());
+    if let Some(h) = &holder {
+        if Some(h.as_str()) != owner {
+            return jstatus(423, json!({ "error": "pane locked", "owner": h }));
+        }
+    }
+    let uid = found.uid;
+
+    if has_keys {
+        let keys: Vec<String> = b
+            .get("keys")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        return match keys_to_bytes(&refs) {
+            KeysResult::Ok { bytes } => {
+                shared.sessions.write(&uid, &bytes);
+                jstatus(200, json!({ "ok": true, "keys": keys }))
+            }
+            KeysResult::Err { unknown } => {
+                jstatus(400, json!({ "error": "unknown key(s)", "unknown": unknown }))
+            }
+        };
+    }
+
+    let data = b.get("data").and_then(Value::as_str).unwrap_or("");
+    let platform = if cfg!(windows) { "win32" } else { "linux" };
+    shared.sessions.write(&uid, &submit_newlines(data, platform));
+    // submit (A1): a bare CR as a SEPARATE pty write a beat later, so bracketed-paste TUIs read it
+    // as Enter, not pasted content.
+    if b.get("submit").and_then(Value::as_bool) == Some(true) {
+        let delay = b
+            .get("submitDelayMs")
+            .and_then(Value::as_i64)
+            .filter(|&d| d >= 0)
+            .map(|d| d as u64)
+            .unwrap_or(SUBMIT_DELAY_MS);
+        let sessions = Arc::clone(&shared.sessions);
+        let uid2 = uid.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            sessions.write(&uid2, "\r");
+        });
+    }
+    jstatus(200, json!({ "ok": true }))
+}
+
+// ---- /panes/{id}/messages -----------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessagesOut {
+    pane_id: String,
+    messages: Vec<crate::control::inbox::PaneMessage>,
+    dropped: usize,
+    latest_seq: u64,
+}
+
+async fn messages_get(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        return e;
+    }
+    let after = non_neg_num(q.get("after")).filter(|&a| a > 0).map(|a| a as u64).unwrap_or(0);
+    let inbox = shared.inbox.lock().unwrap();
+    let out = MessagesOut {
+        messages: inbox.read(&id, after),
+        dropped: inbox.dropped_count(&id),
+        latest_seq: inbox.latest_seq(&id),
+        pane_id: id,
+    };
+    ok_json(out)
+}
+
+async fn messages_post(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let from = b.get("from").and_then(Value::as_str).unwrap_or("unknown").to_string();
+    let msg_body = match b.get("body").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => return jstatus(400, json!({ "error": "expected { from?, body: string }" })),
+    };
+    let msg = shared.inbox.lock().unwrap().post(&id, &from, &msg_body, now_ms());
+    // Nudge live, in-scope clients (the durable read remains the source of truth).
+    let coords = shared.model.lock().unwrap().coords_of(&id);
+    shared.events.broadcast_for_pane(
+        coords.as_ref(),
+        &ControlEvent::Message { to: id, from, seq: msg.seq, body: msg_body },
+    );
+    jstatus(200, json!({ "ok": true, "seq": msg.seq }))
+}
+
+// ---- /panes/{id}/lock ---------------------------------------------------------------------
+
+async fn lock_post(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let owner = match b.get("owner").and_then(Value::as_str) {
+        Some(o) => o,
+        None => return jstatus(400, json!({ "error": "expected { owner: string, ttlMs? }" })),
+    };
+    let ttl = b.get("ttlMs").and_then(Value::as_i64).filter(|&t| t > 0).unwrap_or(30_000);
+    let r = shared.locks.lock().unwrap().acquire(&id, owner, now_ms(), ttl);
+    if r.ok {
+        jstatus(200, json!({ "ok": true, "owner": r.owner, "expiresAt": r.expires_at }))
+    } else {
+        jstatus(423, json!({ "ok": false, "owner": r.owner, "expiresAt": r.expires_at, "error": "held" }))
+    }
+}
+
+async fn lock_delete(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let owner = match b.get("owner").and_then(Value::as_str) {
+        Some(o) => o,
+        None => return jstatus(400, json!({ "error": "expected { owner: string }" })),
+    };
+    let ok = shared.locks.lock().unwrap().release(&id, owner, now_ms());
+    if ok {
+        jstatus(200, json!({ "ok": true }))
+    } else {
+        jstatus(423, json!({ "ok": false, "error": "not the lock holder" }))
+    }
+}
+
+// ---- /command -----------------------------------------------------------------------------
+
+async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let cmd: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let control_file = shared.control_file.to_str().map(str::to_string);
+    let result = {
+        let mut m = shared.model.lock().unwrap();
+        dispatch::handle_command(&mut m, &shared.sessions, control_file.as_deref(), info.scope.as_ref(), &cmd)
+    };
+    if result.notify_state {
+        notify_state(&shared);
+    }
+    jstatus(result.status, result.body)
+}
+
+// ---- /events (WebSocket) ------------------------------------------------------------------
+
+async fn events_ws(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Token from the `?token=` query (WS clients can't set Authorization reliably) or a Bearer header.
+    let token = q.get("token").cloned().or_else(|| bearer_header(&headers));
+    let info = shared.tokens.lock().unwrap().resolve(token.as_deref(), now_ms());
+    let Some(info) = info else {
+        return (StatusCode::UNAUTHORIZED, "").into_response();
+    };
+    let scope = info.scope;
+    let shared2 = Arc::clone(&shared);
+    ws.on_upgrade(move |socket| handle_ws(shared2, socket, scope))
+}
+
+async fn handle_ws(shared: Arc<Shared>, mut socket: WebSocket, scope: Option<Scope>) {
+    let (id, mut rx) = shared.events.add_client(scope);
+    // Greet first (this frame is queued ahead of any fan-out).
+    shared.events.send_to(
+        id,
+        &ControlEvent::Hello { pid: shared.pid, version: shared.version.clone() },
+    );
+    loop {
+        tokio::select! {
+            maybe = rx.recv() => match maybe {
+                Some(text) => {
+                    if socket.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            inbound = socket.recv() => match inbound {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break,
+            },
+        }
+    }
+    shared.events.remove_client(id);
+}
+
+// ---- fallbacks ----------------------------------------------------------------------------
+
+async fn method_not_allowed() -> Response {
+    jstatus(405, json!({ "error": "method not allowed" }))
+}
+
+async fn not_found(uri: Uri) -> Response {
+    jstatus(404, json!({ "error": "not found", "path": uri.path() }))
+}
+
+// ---- query-param parsing (mirrors the TS posNum / nonNegNum / Number(tail)) ----------------
+
+fn pos_num(v: Option<&String>) -> Option<i64> {
+    v.and_then(|s| s.parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map(|n| n as i64)
+}
+
+fn non_neg_num(v: Option<&String>) -> Option<i64> {
+    v.and_then(|s| s.parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| n as i64)
+}
+
+fn tail_num(v: Option<&String>) -> Option<usize> {
+    v.and_then(|s| s.parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map(|n| n as usize)
+}
+
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn num_parsers_match_ts_semantics() {
+        assert_eq!(pos_num(Some(&"600".to_string())), Some(600));
+        assert_eq!(pos_num(Some(&"0".to_string())), None);
+        assert_eq!(pos_num(Some(&"-5".to_string())), None);
+        assert_eq!(pos_num(None), None);
+        assert_eq!(non_neg_num(Some(&"0".to_string())), Some(0));
+        assert_eq!(non_neg_num(Some(&"-1".to_string())), None);
+        assert_eq!(tail_num(Some(&"3".to_string())), Some(3));
+        assert_eq!(tail_num(Some(&"0".to_string())), None);
+    }
+
+    #[test]
+    fn tail_lines_keeps_last_n() {
+        assert_eq!(tail_lines("a\nb\nc\nd", 2), "c\nd");
+        assert_eq!(tail_lines("a\nb", 5), "a\nb");
+    }
+}
+
+/// Golden-JSON parity: boot the REAL axum stack and assert byte-exact response bodies for every
+/// route + error shape (modulo port/token/pid), against the `src/main/control-server.ts` oracle.
+/// Runs the full socket round-trip with `reqwest` (a lib dependency, available to unit tests).
+#[cfg(test)]
+mod golden {
+    use super::router;
+    use crate::control::readmodel::{PaneInfo, PaneStatus, TabInfo, WindowInfo};
+    use crate::control::server::Shared;
+    use crate::session_manager::SessionManager;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    struct Server {
+        shared: Arc<Shared>,
+        base: String,
+        token: String,
+    }
+
+    async fn boot(allow_input: bool) -> Server {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let sessions = Arc::new(SessionManager::new(tx));
+        let control_file = std::env::temp_dir().join("hp-golden-control.json");
+        let shared = Shared::new(sessions, allow_input, "0.1.8", control_file);
+        shared.model.lock().unwrap().add_window(WindowInfo {
+            window_id: 1,
+            active_tab_id: Some("t1".into()),
+            tabs: vec![TabInfo { id: "t1".into(), title: "Tab 1".into(), layout: "auto".into(), panes: vec![] }],
+        });
+        let token = "tok-master".to_string();
+        shared.tokens.lock().unwrap().set_master(token.clone());
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        shared.port.store(port, Ordering::SeqCst);
+        let app = router(Arc::clone(&shared));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Server { shared, base: format!("http://127.0.0.1:{port}"), token }
+    }
+
+    fn pane(id: &str, uid: &str) -> PaneInfo {
+        PaneInfo {
+            id: id.into(),
+            session_uid: uid.into(),
+            label: "shell".into(),
+            subtitle: None,
+            color: "#3b82f6".into(),
+            command: None,
+            args: None,
+            cwd: None,
+            shell: None,
+            status: PaneStatus::Running,
+            exit_code: None,
+            meta: None,
+        }
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn health_is_byte_exact() {
+        let s = boot(true).await;
+        let r = client()
+            .get(format!("{}/health", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        let body = r.text().await.unwrap();
+        let pid = std::process::id();
+        assert_eq!(
+            body,
+            format!(r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true}}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn health_needs_no_auth() {
+        let s = boot(false).await;
+        let r = client().get(format!("{}/health", s.base)).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert!(r.text().await.unwrap().contains(r#""allowInput":false"#));
+    }
+
+    #[tokio::test]
+    async fn state_empty_window_is_byte_exact() {
+        let s = boot(true).await;
+        let r = client()
+            .get(format!("{}/state", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(
+            r.text().await.unwrap(),
+            r#"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[]}]}]}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn state_with_pane_omits_unset_optionals_and_keeps_field_order() {
+        let s = boot(true).await;
+        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        let body = client()
+            .get(format!("{}/state", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        // A never-output running pane reads `busy`; optionals omitted; field order preserved.
+        assert!(body.contains(
+            r##""panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#3b82f6","status":"running","activity":"busy"}]"##
+        ));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_is_401_exact() {
+        let s = boot(true).await;
+        let r = client().get(format!("{}/state", s.base)).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"unauthorized"}"#);
+    }
+
+    #[tokio::test]
+    async fn no_such_pane_is_404_exact() {
+        let s = boot(true).await;
+        let r = client()
+            .get(format!("{}/panes/ghost/output", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 404);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"no such pane","paneId":"ghost"}"#);
+    }
+
+    #[tokio::test]
+    async fn unknown_path_is_404_not_found_with_path() {
+        let s = boot(true).await;
+        let r = client()
+            .get(format!("{}/nope", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 404);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"not found","path":"/nope"}"#);
+    }
+
+    #[tokio::test]
+    async fn output_of_a_sessionless_pane_is_byte_exact() {
+        let s = boot(true).await;
+        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        let r = client()
+            .get(format!("{}/panes/p1/output", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        // serde_json::Value object → keys sorted; cursor ALWAYS present.
+        assert_eq!(
+            r.text().await.unwrap(),
+            r#"{"cursor":0,"output":"","paneId":"p1","status":"running","stripped":false}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn input_blocked_when_allow_input_off_is_403() {
+        let s = boot(false).await;
+        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        let r = client()
+            .post(format!("{}/panes/p1/input", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"data":"hi"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"input not allowed"}"#);
+    }
+
+    #[tokio::test]
+    async fn messages_post_then_get_roundtrip() {
+        let s = boot(true).await;
+        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        let post = client()
+            .post(format!("{}/panes/p1/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"from":"mgr","body":"go"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(post.text().await.unwrap(), r#"{"ok":true,"seq":1}"#);
+        let get: serde_json::Value = client()
+            .get(format!("{}/panes/p1/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        // ts is wall-clock; assert every other field byte-for-byte via structural compare.
+        assert_eq!(get["paneId"], serde_json::json!("p1"));
+        assert_eq!(get["dropped"], serde_json::json!(0));
+        assert_eq!(get["latestSeq"], serde_json::json!(1));
+        let m = &get["messages"][0];
+        assert_eq!(m["seq"], serde_json::json!(1));
+        assert_eq!(m["to"], serde_json::json!("p1"));
+        assert_eq!(m["from"], serde_json::json!("mgr"));
+        assert_eq!(m["body"], serde_json::json!("go"));
+        assert!(m["ts"].is_number());
+    }
+
+    #[tokio::test]
+    async fn lock_acquire_then_nonowner_input_is_423() {
+        let s = boot(true).await;
+        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        let lock: serde_json::Value = client()
+            .post(format!("{}/panes/p1/lock", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"owner":"mgrA","ttlMs":60000}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(lock["ok"], serde_json::json!(true));
+        assert_eq!(lock["owner"], serde_json::json!("mgrA"));
+        assert!(lock["expiresAt"].is_number());
+        // A different writer is refused 423 with the holder named.
+        let blocked = client()
+            .post(format!("{}/panes/p1/input", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"data":"x","owner":"mgrB"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(blocked.status().as_u16(), 423);
+        assert_eq!(blocked.text().await.unwrap(), r#"{"error":"pane locked","owner":"mgrA"}"#);
+    }
+
+    #[tokio::test]
+    async fn tokens_mint_and_no_escalation() {
+        let s = boot(true).await;
+        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        // Master mints a pane-scoped token.
+        let minted: serde_json::Value = client()
+            .post(format!("{}/tokens", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"scope":{"paneIds":["p1"]}}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(minted["ok"], serde_json::json!(true));
+        let scoped = minted["token"].as_str().unwrap().to_string();
+        assert_eq!(minted["token"].as_str().unwrap().len(), 64);
+        assert_eq!(minted["scope"], serde_json::json!({ "paneIds": ["p1"] }));
+        assert!(minted["events"].as_str().unwrap().contains("/events?token="));
+        // The scoped token cannot escalate to the whole window → 403.
+        let esc = client()
+            .post(format!("{}/tokens", s.base))
+            .header("authorization", format!("Bearer {}", scoped))
+            .header("content-type", "application/json")
+            .body(r#"{"scope":{"windowIds":[1]}}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(esc.status().as_u16(), 403);
+        assert!(esc.text().await.unwrap().contains("outside the minting token's scope"));
+    }
+
+    #[tokio::test]
+    async fn new_pane_command_returns_id_and_lands_in_state() {
+        let s = boot(true).await;
+        let resp: serde_json::Value = client()
+            .post(format!("{}/command", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"type":"newPane","windowId":1,"pane":{"label":"worker","command":"echo hi"}}"#)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["ok"], serde_json::json!(true));
+        let pane_id = resp["result"].as_str().unwrap().to_string();
+        // The pane is immediately present in /state (no debounce — synchronous in-process).
+        let state = client()
+            .get(format!("{}/state", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(state.contains(&format!(r#""id":"{pane_id}""#)));
+        assert!(state.contains(r#""label":"worker""#));
+        // Clean up the spawned pty.
+        let _ = client()
+            .post(format!("{}/command", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"type":"closePane","paneId":"{pane_id}"}}"#))
+            .send()
+            .await;
+    }
+}
