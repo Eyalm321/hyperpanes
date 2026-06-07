@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // the pure repoNameFromUrl helper can be imported and tested under plain Node.
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp' } }));
 
-import { repoNameFromUrl } from './projects';
+import { canonicalPath, repoNameFromUrl } from './projects';
 
 describe('repoNameFromUrl', () => {
   it('parses an https GitHub URL with .git', () => {
@@ -24,5 +24,19 @@ describe('repoNameFromUrl', () => {
   });
   it('returns null for an empty string', () => {
     expect(repoNameFromUrl('')).toBeNull();
+  });
+});
+
+// Windows-only: the drive-case/slash normalization that prevents the same repo
+// from being saved twice when reported by different shells.
+describe.skipIf(process.platform !== 'win32')('canonicalPath (Windows)', () => {
+  it('uppercases the drive letter', () => {
+    expect(canonicalPath('c:\\hyperpanes')).toBe('C:\\hyperpanes');
+  });
+  it('normalizes forward slashes and strips a trailing separator', () => {
+    expect(canonicalPath('C:/Users/me/repo/')).toBe('C:\\Users\\me\\repo');
+  });
+  it('makes cmd (c:\\) and pwsh (C:\\) paths identical', () => {
+    expect(canonicalPath('c:\\hyperpanes')).toBe(canonicalPath('C:\\hyperpanes'));
   });
 });

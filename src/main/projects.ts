@@ -28,9 +28,31 @@ const PROJECT_COLORS = [
   '#eab308'
 ];
 
+const isWin = process.platform === 'win32';
+
+// Canonical absolute path for storage: strip trailing separators; on Windows
+// normalize slashes to backslashes and uppercase the drive letter, so the SAME
+// repo reported by different shells (cmd's c:\…, pwsh's C:\…, git-bash's /c/… via
+// fileUriToPath) stores identically instead of as separate projects.
+export function canonicalPath(p: string): string {
+  let s = p.replace(/[\\/]+$/, '');
+  if (isWin) {
+    s = s.replace(/\//g, '\\').replace(/^([a-z]):/, (_m, d) => `${d.toUpperCase()}:`);
+  }
+  return s;
+}
+
+// Dedup key — case-insensitive on Windows (its paths ignore case), so the same
+// directory never lands as two projects.
+const pathKey = (p: string): string => {
+  const c = canonicalPath(p);
+  return isWin ? c.toLowerCase() : c;
+};
+
 function colorForPath(p: string): string {
+  const key = pathKey(p);
   let h = 0;
-  for (let i = 0; i < p.length; i++) h = (h * 31 + p.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return PROJECT_COLORS[h % PROJECT_COLORS.length];
 }
 
@@ -65,8 +87,6 @@ function gitRepoName(gitRoot: string): string | null {
   }
 }
 
-const norm = (p: string): string => p.replace(/[\\/]+$/, '');
-
 function storePath(): string {
   return join(app.getPath('userData'), 'projects.json');
 }
@@ -74,15 +94,32 @@ function storePath(): string {
 // In-memory cache so reads don't hit disk on every cwd change; writes refresh it.
 let cache: Project[] | null = null;
 
+// Collapse entries pointing at the same directory (case-insensitively on Windows),
+// keeping the most-recently-opened, and canonicalize each stored path. Self-heals
+// duplicates saved before paths were canonicalized.
+function dedupe(list: Project[]): Project[] {
+  const byKey = new Map<string, Project>();
+  for (const proj of list) {
+    const canon = { ...proj, path: canonicalPath(proj.path) };
+    const k = pathKey(canon.path);
+    const prev = byKey.get(k);
+    if (!prev || (canon.lastOpenedAt ?? 0) >= (prev.lastOpenedAt ?? 0)) byKey.set(k, canon);
+  }
+  return [...byKey.values()];
+}
+
 function load(): Project[] {
   if (cache) return cache;
   try {
     const data = JSON.parse(readFileSync(storePath(), 'utf8'));
-    cache = Array.isArray(data?.projects) ? (data.projects as Project[]) : [];
+    const raw = Array.isArray(data?.projects) ? (data.projects as Project[]) : [];
+    const deduped = dedupe(raw);
+    cache = deduped;
+    if (deduped.length !== raw.length) save(deduped); // persist the cleanup
   } catch {
     cache = []; // missing/corrupt file → start empty
   }
-  return cache;
+  return cache ?? [];
 }
 
 function save(list: Project[]): void {
@@ -101,12 +138,14 @@ export function listProjects(): Project[] {
 
 // Remember a git root (or bump its recency if already known); returns the project.
 export function upsertProjectByRoot(root: string): Project {
-  const path = norm(root);
+  const path = canonicalPath(root);
+  const key = pathKey(path);
   const list = load();
   const repo = gitRepoName(path);
-  const existing = list.find((p) => norm(p.path) === path);
+  const existing = list.find((p) => pathKey(p.path) === key);
   if (existing) {
     existing.lastOpenedAt = Date.now();
+    existing.path = path; // canonicalize a path stored before this normalization
     // Heal an entry saved under the old folder-name logic to the real repo name —
     // but never clobber a name the user deliberately changed.
     if (repo && existing.name === basename(path) && existing.name !== repo) {
