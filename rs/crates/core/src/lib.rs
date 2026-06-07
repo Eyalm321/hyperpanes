@@ -11,6 +11,7 @@ pub mod app;
 pub mod cli;
 pub mod control;
 pub mod layout;
+pub mod paths;
 pub mod persistence;
 pub mod session;
 pub mod session_manager;
