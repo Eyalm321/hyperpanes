@@ -1,0 +1,41 @@
+// Data rows shared between the Rust controller and the .slint views. The Rust
+// side computes every geometry (logical px) and pushes these as models.
+
+// One tiled pane: the rendered terminal surface + its placement + chrome state.
+export struct PaneItem {
+    surface: image,
+    title: string,
+    accent: color,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    visible: bool,
+    focused: bool,
+}
+
+// One tab (workspace group) chip in the strip.
+export struct TabItem {
+    title: string,
+    active: bool,
+}
+
+// A draggable resize seam (vertical column / horizontal row / main-stack main).
+export struct DividerItem {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    vertical: bool,
+    // boundary after pane `index` (kind Size); -1 for the main-stack divider.
+    index: int,
+    main: bool,
+}
+
+// One entry in the layout-picker menu.
+export struct LayoutOption {
+    id: int,        // matches the Rust Layout discriminant order
+    label: string,
+    glyph: string,
+    active: bool,
+}

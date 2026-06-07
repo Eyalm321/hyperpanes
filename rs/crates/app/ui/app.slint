@@ -1,56 +1,22 @@
-// The hyperpanes single-window MVP shell.
+// The hyperpanes multi-tab workspace shell (Phase 3, Wave 1).
 //
-//   frameless Window  →  custom icon-only top bar (drag region + min/max/close + tab + tools)
-//                     →  a pane area that absolutely-positions N reusable `TerminalPane`s
-//                        at the rects the Rust side computes from `core::layout::compute_tiles`.
+//   frameless Window  →  TopBar  (brand · tab strip · hud · tools · window controls)
+//                     →  PaneView (active tab's tiled TerminalPanes + resize dividers
+//                                  + Wave-2 overlay slot)
 //
-// The Rust controller (`src/main.rs`) drives everything: it fills `panes` (each carries its
-// already-computed logical-px rect + the rendered terminal `surface`), routes `key` to the
-// focused pane's session, and turns the top-bar callbacks into Win32 window ops.
+// All state is owned by the Rust controller (src/*.rs). It pushes models (`panes`,
+// `tabs`, `dividers`, `layouts`) and scalar props down, and subscribes to the
+// callbacks below — every one of which the controller turns into a `Command`
+// dispatched against the central `State` (see ARCHITECTURE.md).
 
-import { TerminalPane, KeyMsg } from "@widgets";
+import { Theme } from "theme.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption } from "types.slint";
+import { TopBar } from "topbar.slint";
+import { PaneView } from "paneview.slint";
+import { KeyMsg } from "@widgets";
 
-// One tiled pane: the rendered terminal surface + its placement (logical px) + chrome state.
-export struct PaneItem {
-    surface: image,
-    title: string,
-    accent: color,
-    x: length,
-    y: length,
-    w: length,
-    h: length,
-    visible: bool,
-    focused: bool,
-}
-
-// A flat icon button for the top bar (window controls + tools).
-component IconButton inherits Rectangle {
-    in property <string> label;
-    in property <color> ink: #c8c8d4;
-    in property <color> hover-bg: #ffffff1a;
-    in property <length> glyph-size: 14px;
-    // Empty → the default UI font; window controls use "Segoe MDL2 Assets".
-    in property <string> glyph-font: "";
-    callback clicked;
-
-    width: 44px;
-    background: ta.has-hover ? hover-bg : transparent;
-    animate background { duration: 90ms; }
-
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-    }
-
-    Text {
-        text: root.label;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        color: root.ink;
-        font-size: root.glyph-size;
-        font-family: root.glyph-font;
-        font-weight: 600;
-    }
-}
+// Re-export the row structs so the Rust side (slint::include_modules!) can build them.
+export { PaneItem, TabItem, DividerItem, LayoutOption, KeyMsg }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";
@@ -59,21 +25,45 @@ export component AppWindow inherits Window {
     min-width: 480px;
     min-height: 320px;
     default-font-size: 14px;
-    background: #0c0c12;
+    background: Theme.bg;
 
-    // ---- inputs (driven from Rust) ----
+    // ---- models (driven from Rust) ----
     in property <[PaneItem]> panes;
-    in property <string> tab-title: "shell";
-    in property <string> layout-name: "auto";
+    in property <[TabItem]> tabs;
+    in property <[DividerItem]> dividers;
+    in property <[LayoutOption]> layouts;
+    // ---- scalars ----
+    in property <int> editing-tab: -1;
+    in property <string> layout-glyph: "\u{E80A}";
     in property <string> hud: "";
+    in property <bool> zoomed: false;
+    in property <bool> fullscreen: false;
+    // Briefly true after entering fullscreen → flashes the "hold Esc to exit" hint.
+    in property <bool> fullscreen-hint: false;
+    // True while Esc is held → keeps the hint up and fills its progress bar.
+    in property <bool> esc-holding: false;
+    in property <bool> overlay-visible: false;
 
-    // ---- outputs (Rust subscribes) ----
-    callback key(int, KeyMsg);          // (pane index, key) from the focused pane
-    callback focus-pane(int);           // a pane was clicked → focus it
+    // ---- outputs (Rust subscribes; each maps to a Command) ----
+    callback key(int, KeyMsg);
+    callback focus-pane(int);
     callback area-resized(length, length);
+    callback divider-drag(int, bool, bool, length, length);
+    callback pane-zoom(int);
+    callback pane-fullscreen(int);
+    callback pane-close(int);
+    // tabs
+    callback select-tab(int);
+    callback close-tab(int);
+    callback new-tab();
+    callback begin-rename(int);
+    callback rename-tab(int, string);
+    // panes / layout
     callback new-pane();
     callback close-focused();
-    callback cycle-layout();
+    callback set-layout(int);
+    callback toggle-zoom();
+    callback toggle-fullscreen();
     // window controls (→ Win32)
     callback start-drag();
     callback min-window();
@@ -83,181 +73,122 @@ export component AppWindow inherits Window {
     VerticalLayout {
         spacing: 0px;
 
-        // ===== custom top bar =====
-        Rectangle {
-            height: 40px;
-            background: @linear-gradient(180deg, #1a1a26 0%, #14141d 100%);
+        // The top bar hides in OS fullscreen (chrome-free terminal).
+        if !root.fullscreen : TopBar {
+            tabs: root.tabs;
+            editing-tab: root.editing-tab;
+            layouts: root.layouts;
+            zoomed: root.zoomed;
+            fullscreen: root.fullscreen;
 
-            // Whole-bar drag region (sits UNDER the buttons; plain items above don't grab,
-            // so empty bar space falls through to here).
-            TouchArea {
-                pointer-event(e) => {
-                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                        root.start-drag();
-                    }
-                }
-                double-clicked => { root.max-window(); }
-            }
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 4px;
-                spacing: 8px;
-
-                // brand dot + name
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        width: 100px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            Rectangle {
-                                width: 10px; height: 10px; border-radius: 5px;
-                                y: (parent.height - self.height) / 2;
-                                background: #7aa2f7;
-                            }
-                            Text {
-                                text: "hyperpanes";
-                                color: #e6e6f0;
-                                font-size: 13px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                // single tab chip
-                VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        height: 24px;
-                        background: #2a2a3a;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: #3a3a50;
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            Text {
-                                text: root.tab-title;
-                                color: #c8c8d4;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-
-                // flexible spacer
-                Rectangle { horizontal-stretch: 1; }
-
-                // hud (fps / renderer)
-                VerticalLayout {
-                    alignment: center;
-                    Text {
-                        text: root.hud;
-                        color: #5a5a6a;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // tools: layout cycle, new pane, close pane (Segoe MDL2 Assets glyphs)
-                IconButton {
-                    label: "\u{E80A}";        // GridView — cycle layout
-                    glyph-font: "Segoe MDL2 Assets";
-                    glyph-size: 13px;
-                    clicked => { root.cycle-layout(); }
-                }
-                IconButton {
-                    label: "\u{E710}";        // Add — new pane
-                    glyph-font: "Segoe MDL2 Assets";
-                    glyph-size: 13px;
-                    clicked => { root.new-pane(); }
-                }
-                IconButton {
-                    label: "\u{E711}";        // Cancel — close focused pane
-                    glyph-font: "Segoe MDL2 Assets";
-                    glyph-size: 12px;
-                    ink: #b0b0bc;
-                    clicked => { root.close-focused(); }
-                }
-
-                // small separator before window controls
-                Rectangle { width: 8px; }
-
-                // window controls (Segoe MDL2 Assets: Chrome Minimize / Maximize / Close)
-                IconButton {
-                    label: "\u{E921}";
-                    glyph-font: "Segoe MDL2 Assets";
-                    glyph-size: 10px;
-                    clicked => { root.min-window(); }
-                }
-                IconButton {
-                    label: "\u{E922}";
-                    glyph-font: "Segoe MDL2 Assets";
-                    glyph-size: 10px;
-                    clicked => { root.max-window(); }
-                }
-                IconButton {
-                    label: "\u{E8BB}";
-                    glyph-font: "Segoe MDL2 Assets";
-                    glyph-size: 10px;
-                    hover-bg: #e0445a;
-                    clicked => { root.close-window(); }
-                }
-            }
+            select-tab(i) => { root.select-tab(i); }
+            close-tab(i) => { root.close-tab(i); }
+            new-tab => { root.new-tab(); }
+            begin-rename(i) => { root.begin-rename(i); }
+            rename-tab(i, t) => { root.rename-tab(i, t); }
+            set-layout(l) => { root.set-layout(l); }
+            new-pane => { root.new-pane(); }
+            toggle-zoom => { root.toggle-zoom(); }
+            toggle-fullscreen => { root.toggle-fullscreen(); }
+            start-drag => { root.start-drag(); }
+            min-window => { root.min-window(); }
+            max-window => { root.max-window(); }
+            close-window => { root.close-window(); }
         }
 
-        // ===== pane area =====
-        area := Rectangle {
+        PaneView {
             vertical-stretch: 1;
-            background: #0c0c12;
-            clip: true;
+            panes: root.panes;
+            dividers: root.dividers;
+            zoomed: root.zoomed;
+            fullscreen: root.fullscreen;
+            overlay-visible: root.overlay-visible;
 
-            changed width => { root.area-resized(self.width, self.height); }
-            changed height => { root.area-resized(self.width, self.height); }
+            key(i, m) => { root.key(i, m); }
+            focus-pane(i) => { root.focus-pane(i); }
+            area-resized(w, h) => { root.area-resized(w, h); }
+            divider-drag(i, main, vert, dx, dy) => { root.divider-drag(i, main, vert, dx, dy); }
+            pane-zoom(i) => { root.pane-zoom(i); }
+            pane-fullscreen(i) => { root.pane-fullscreen(i); }
+            pane-close(i) => { root.pane-close(i); }
+        }
+    }
 
-            for pane[idx] in root.panes: Rectangle {
-                x: pane.x;
-                y: pane.y;
-                width: pane.w;
-                height: pane.h;
-                visible: pane.visible;
+    // ===== fullscreen "Hold Esc to exit" hint (ported 1:1 from the Electron app) =====
+    // Boxless: bare terminal-coloured text + an "Esc" key chip above a thin
+    // progress track whose fill grows while Esc is held. Shown on entering
+    // fullscreen (a brief flash) and again whenever Esc is being held.
+    if root.fullscreen : Rectangle {
+        // Fixed size — a sizeless Rectangle in a Window fills it (which would
+        // centre the content mid-screen), so pin width/height and place it.
+        width: 280px;
+        height: 38px;
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 28px;
+        opacity: (root.fullscreen-hint || root.esc-holding) ? 1.0 : 0.0;
+        animate opacity { duration: 220ms; easing: ease-out; }
 
-                tp := TerminalPane {
-                    width: 100%;
-                    height: 100%;
-                    surface: pane.surface;
-                    title: pane.title;
-                    accent: pane.accent;
-                    key(m) => { root.key(idx, m); }
+        VerticalLayout {
+            alignment: center;
+            spacing: 7px;
+
+            // text line (centred row)
+            HorizontalLayout {
+                alignment: center;
+                spacing: 5px;
+                Text {
+                    text: "Hold";
+                    color: #cdd6f4;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
                 }
-
-                // focus ring over the focused pane
-                if pane.focused: Rectangle {
-                    border-width: 2px;
-                    border-radius: 12px;
-                    border-color: pane.accent;
-                }
-
-                // click-to-focus: on TOP of the pane so we can both notify Rust and
-                // forward focus into the terminal's FocusScope.
-                TouchArea {
-                    clicked => {
-                        root.focus-pane(idx);
-                        tp.focus();
+                Rectangle {
+                    background: #cdd6f424;          // foreground @ ~14% alpha
+                    border-radius: 5px;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        padding-top: 1px;
+                        padding-bottom: 1px;
+                        Text {
+                            text: "Esc";
+                            color: #cdd6f4;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
                     }
+                }
+                Text {
+                    text: "to exit fullscreen";
+                    color: #cdd6f4;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
                 }
             }
 
-            // empty-state hint (no panes yet)
-            if root.panes.length == 0: Text {
-                text: "starting shell…";
-                color: #44444f;
-                font-size: 14px;
+            // progress track (168×3, centred row) + fill that grows over the hold
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 168px;
+                    height: 3px;
+                    border-radius: 2px;
+                    background: #cdd6f424;
+                    clip: true;
+                    Rectangle {
+                        x: 0;
+                        height: parent.height;
+                        border-radius: 2px;
+                        background: #cdd6f4;
+                        width: root.esc-holding ? parent.width : 0px;
+                        animate width {
+                            duration: root.esc-holding ? 600ms : 150ms;
+                            easing: linear;
+                        }
+                    }
+                }
             }
         }
     }
