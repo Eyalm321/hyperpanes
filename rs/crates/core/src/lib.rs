@@ -10,6 +10,7 @@ pub mod ansi_strip;
 pub mod app;
 pub mod cli;
 pub mod control;
+pub mod layout;
 pub mod persistence;
 pub mod session;
 pub mod session_manager;

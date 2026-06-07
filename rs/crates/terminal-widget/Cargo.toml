@@ -1,0 +1,20 @@
+[package]
+name = "hyperpanes-terminal-widget"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Standalone workspace root (own heavy GPU deps; not part of the lean `rs/` core workspace).
+# You OWN this file — adjust deps freely (unlike the frozen core Cargo.toml).
+[workspace]
+
+[dependencies]
+hyperpanes-core = { path = "../core" }
+slint = "1.16"
+# Lift the proven renderer deps (wgpu, swash, alacritty_terminal, portable-pty / or reuse
+# core's session engine, etagere/guillotiere, raw-window-handle, windows) from the WORKING
+# spike at `rs/spikes/terminal-render/Cargo.toml` — it already compiles & ran on this machine.
+
+[build-dependencies]
+slint-build = "1.16"
