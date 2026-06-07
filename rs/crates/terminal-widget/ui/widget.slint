@@ -1,0 +1,153 @@
+// The reusable terminal-pane UI for the native hyperpanes app.
+//
+// `TerminalPane` is the Wave-2 deliverable: a self-contained pane that displays the
+// terminal `surface` image (rendered by the Rust controller at physical resolution),
+// composites the app chrome (rounded corners, drop-shadow, accent border, title chip)
+// OVER it for free, captures key input through a FocusScope, and reports geometry changes
+// so the controller can reflow the grid. Drop N of these into any layout.
+//
+// `DemoWindow` is the standalone harness (src/bin/demo.rs) — two live panes side by side.
+
+export struct KeyMsg {
+    text: string,
+    control: bool,
+    alt: bool,
+    shift: bool,
+}
+
+export component TerminalPane inherits Rectangle {
+    // --- inputs (the controller / parent layout drive these) ---
+    in property <image> surface;
+    in property <string> title: "";
+    in property <color> accent: #7aa2f7;
+    in property <bool> chrome: true;
+
+    // --- outputs (the controller subscribes to these) ---
+    // A key was pressed while this pane had focus → encode to PTY bytes and write.
+    callback key(KeyMsg);
+    // The pane's on-screen size changed (logical px) → recompute cols/rows and resize.
+    callback geometry-changed(length, length);
+
+    forward-focus: fs;
+
+    border-radius: root.chrome ? 12px : 0px;
+    clip: true;
+    background: #16161e;
+    drop-shadow-blur: root.chrome ? 28px : 0px;
+    drop-shadow-color: #00000099;
+    drop-shadow-offset-y: root.chrome ? 8px : 0px;
+
+    changed width => { root.geometry-changed(root.width, root.height); }
+    changed height => { root.geometry-changed(root.width, root.height); }
+
+    // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
+    Image {
+        source: root.surface;
+        width: 100%;
+        height: 100%;
+        image-fit: fill;
+        image-rendering: pixelated;
+    }
+
+    // Click anywhere on the pane to focus it (so the keyboard routes here).
+    TouchArea {
+        clicked => { fs.focus(); }
+    }
+
+    fs := FocusScope {
+        key-pressed(e) => {
+            root.key({
+                text: e.text,
+                control: e.modifiers.control,
+                alt: e.modifiers.alt,
+                shift: e.modifiers.shift,
+            });
+            accept
+        }
+    }
+
+    // Hairline accent border, drawn OVER the terminal.
+    if root.chrome: Rectangle {
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: root.accent.with-alpha(0.35);
+    }
+
+    // Pane title chip, composited above everything (auto-sized by its layout).
+    if (root.chrome && root.title != ""): Rectangle {
+        x: 10px;
+        y: 8px;
+        height: 22px;
+        border-radius: 6px;
+        background: #000000aa;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            Text {
+                vertical-alignment: center;
+                text: root.title;
+                color: root.accent;
+                font-size: 12px;
+                font-weight: 600;
+            }
+        }
+    }
+}
+
+export struct PaneVisual {
+    surface: image,
+    title: string,
+    accent: color,
+}
+
+export component DemoWindow inherits Window {
+    in property <[PaneVisual]> panes;
+    in property <string> hud: "";
+
+    // (pane index, key) — routed from whichever pane has focus.
+    callback key(int, KeyMsg);
+    // (pane index, width, height) — geometry of a pane changed.
+    callback geometry-changed(int, length, length);
+
+    title: "hyperpanes — terminal-widget demo";
+    preferred-width: 1280px;
+    preferred-height: 760px;
+    background: #0f0f17;
+
+    // Subtle desktop gradient so rounded corners + shadows read distinctly.
+    Rectangle {
+        background: @linear-gradient(135deg, #12121d 0%, #1a1320 100%);
+    }
+
+    HorizontalLayout {
+        padding: 16px;
+        spacing: 16px;
+        for pane[idx] in root.panes: TerminalPane {
+            surface: pane.surface;
+            title: pane.title;
+            accent: pane.accent;
+            key(m) => { root.key(idx, m); }
+            geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }
+        }
+    }
+
+    // HUD overlay (FPS / renderer / bytes), top-right, auto-sized.
+    if root.hud != "": Rectangle {
+        x: parent.width - self.width - 14px;
+        y: 10px;
+        height: 24px;
+        border-radius: 6px;
+        background: #000000bb;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            Text {
+                vertical-alignment: center;
+                text: root.hud;
+                color: #9ece6a;
+                font-size: 12px;
+                font-family: "Consolas";
+            }
+        }
+    }
+}

@@ -1,7 +1,362 @@
-//! Standalone demo for the terminal widget — a window with one or two live `TerminalPane`s
-//! running real shells, so the widget can be developed/verified in isolation (like the spike).
-//! STUB — owned by track `terminal-widget`.
+//! Standalone demo for `hyperpanes-terminal-widget`: a window with two live
+//! `TerminalPane`s, each bound to a real shell spawned through
+//! `hyperpanes_core::session_manager`. This is how the widget is developed/verified in
+//! isolation (like Spike A), and the reference wiring Wave-2's `app-shell` mirrors.
+//!
+//! What it demonstrates end-to-end:
+//!   * a `SessionManager` session per pane (real conpty shell, NOT a private pty);
+//!   * its batched `SessionEvent::Data` fed into the pane's grid, DSR/DA replies forwarded
+//!     back via `SessionManager::write`;
+//!   * Slint key events → `keys::encode_key` → `SessionManager::write` (type into a pane);
+//!   * geometry changes → grid + session resize;
+//!   * software (CPU `SharedPixelBuffer`) **and** GPU (`wgpu::Texture`) renderers behind
+//!     the `PaneRenderer` trait — pane 0 GPU, pane 1 software by default.
+//!
+//! Flags: `--software` (both panes software) · `--gpu` (both GPU).
 
-fn main() {
-    println!("terminal-widget demo: not yet implemented");
+use hyperpanes_core::session_manager::{SessionEvent, SessionManager, SpawnOptions};
+use hyperpanes_terminal_widget::ui::{DemoWindow, KeyMsg, PaneVisual};
+use hyperpanes_terminal_widget::{
+    cells_for_px, encode_key, Font, GpuRenderer, PaneRenderer, RenderOpts, SoftwareRenderer,
+    TerminalPane,
+};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::unbounded_channel;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Gpu,
+    Software,
+}
+
+struct PaneCtl {
+    pane: TerminalPane,
+    kind: Kind,
+    started: bool,
+    /// The command written once the shell first produces output (so it isn't dropped
+    /// before conpty is ready). `None` once sent.
+    startup: Option<String>,
+}
+
+struct State {
+    font: Font,
+    panes: Vec<PaneCtl>,
+    /// Cell dims currently applied per pane (to detect a real reflow).
+    applied: Vec<(usize, usize)>,
+    last_blink: Instant,
+    cursor_on: bool,
+    last_hud: Instant,
+    frames: u32,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ---- flags ----
+    let mut force: Option<Kind> = None;
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--gpu" => force = Some(Kind::Gpu),
+            "--software" | "--sw" => force = Some(Kind::Software),
+            _ => {}
+        }
+    }
+
+    // ---- Slint backend: try to get a shared wgpu 28 device (for the GPU renderer). ----
+    // Falls back to software-only if wgpu isn't available on this host.
+    let want_gpu_backend = force != Some(Kind::Software);
+    let wgpu_selected = if want_gpu_backend {
+        slint::BackendSelector::new()
+            .require_wgpu_28(slint::wgpu_28::WGPUConfiguration::default())
+            .select()
+            .map_err(|e| eprintln!("[demo] wgpu-28 backend unavailable ({e}); software-only"))
+            .is_ok()
+    } else {
+        false
+    };
+
+    // Per-pane renderer kind. Default proves BOTH paths (pane 0 GPU, pane 1 software).
+    let kinds: Vec<Kind> = match force {
+        Some(k) => vec![k, k],
+        None if wgpu_selected => vec![Kind::Gpu, Kind::Software],
+        None => vec![Kind::Software, Kind::Software],
+    };
+    let titles = ["pane 0", "pane 1"];
+    let accents = [
+        slint::Color::from_rgb_u8(0x7a, 0xa2, 0xf7),
+        slint::Color::from_rgb_u8(0xbb, 0x9a, 0xf7),
+    ];
+    let uids: Vec<String> = vec!["pane-0".to_string(), "pane-1".to_string()];
+    let n = uids.len();
+
+    // ---- tokio runtime that drives the SessionManager's per-session tasks ----
+    let rt = tokio::runtime::Runtime::new()?;
+    let _guard = rt.enter();
+
+    // ---- the session manager + its event stream ----
+    let (etx, erx) = unbounded_channel::<SessionEvent>();
+    let mgr = Rc::new(SessionManager::new(etx));
+    let erx = Rc::new(RefCell::new(erx));
+
+    // ---- window + model ----
+    let app = DemoWindow::new()?;
+    let model: Rc<VecModel<PaneVisual>> = Rc::new(VecModel::default());
+    // Seed one (empty) row per pane up front so the `for` instantiates the panes and their
+    // geometry-changed callbacks fire.
+    for i in 0..n {
+        model.push(PaneVisual {
+            surface: slint::Image::default(),
+            title: titles[i].into(),
+            accent: accents[i],
+        });
+    }
+    app.set_panes(ModelRc::from(model.clone()));
+
+    // Capture Slint's wgpu Device/Queue once rendering is set up.
+    let gpu_slot: Rc<RefCell<Option<(wgpu::Device, wgpu::Queue)>>> = Rc::new(RefCell::new(None));
+    {
+        let slot = gpu_slot.clone();
+        app.window()
+            .set_rendering_notifier(move |state, api| {
+                if let slint::RenderingState::RenderingSetup = state {
+                    if let slint::GraphicsAPI::WGPU28 { device, queue, .. } = api {
+                        *slot.borrow_mut() = Some((device.clone(), queue.clone()));
+                    }
+                }
+            })
+            .ok();
+    }
+
+    // Latest reported geometry per pane (logical px); updated by geometry-changed.
+    let geom: Rc<RefCell<Vec<(f32, f32)>>> = Rc::new(RefCell::new(vec![(0.0, 0.0); n]));
+    {
+        let geom = geom.clone();
+        app.on_geometry_changed(move |idx, w, h| {
+            let idx = idx as usize;
+            if let Some(slot) = geom.borrow_mut().get_mut(idx) {
+                *slot = (w, h);
+            }
+        });
+    }
+
+    // Key input: encode and write to the focused pane's session.
+    {
+        let mgr = mgr.clone();
+        let uids = uids.clone();
+        app.on_key(move |idx, msg: KeyMsg| {
+            let idx = idx as usize;
+            if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
+                if let Some(uid) = uids.get(idx) {
+                    mgr.write(uid, &String::from_utf8_lossy(&bytes));
+                }
+            }
+        });
+    }
+
+    let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
+
+    // ---- the render/pump loop (Slint timer on the UI thread) ----
+    let timer = slint::Timer::default();
+    let app_weak = app.as_weak();
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(8), {
+        let state = state.clone();
+        let gpu_slot = gpu_slot.clone();
+        let geom = geom.clone();
+        let model = model.clone();
+        let mgr = mgr.clone();
+        let erx = erx.clone();
+        let uids = uids.clone();
+        let kinds = kinds.clone();
+        move || {
+            let app = match app_weak.upgrade() {
+                Some(a) => a,
+                None => return,
+            };
+            let scale = app.window().scale_factor().max(1.0);
+
+            // ---------- lazy init (needs geometry for every pane + a wgpu device if any
+            //            pane is GPU) ----------
+            if state.borrow().is_none() {
+                let want_gpu = kinds.iter().any(|k| *k == Kind::Gpu);
+                if want_gpu && gpu_slot.borrow().is_none() {
+                    return; // wait for RenderingSetup
+                }
+                let g = geom.borrow();
+                if g.iter().any(|(w, h)| *w <= 1.0 || *h <= 1.0) {
+                    return; // wait for the first real layout
+                }
+
+                let px = (14.0 * scale).round().max(8.0);
+                let font_path = if std::path::Path::new("C:/Windows/Fonts/CascadiaMono.ttf").exists()
+                {
+                    "C:/Windows/Fonts/CascadiaMono.ttf"
+                } else {
+                    "C:/Windows/Fonts/consola.ttf"
+                };
+                let font = Font::from_path(font_path, px).expect("font load");
+                let (cw, ch) = (font.cell_w, font.cell_h);
+
+                let mut panes = Vec::new();
+                let mut applied = Vec::new();
+                for i in 0..uids.len() {
+                    let (w, h) = g[i];
+                    let (cols, rows) = cells_for_px(w * scale, h * scale, cw, ch);
+                    // Spawn the bound session FIRST, sized to this grid.
+                    mgr.create(SpawnOptions {
+                        uid: uids[i].clone(),
+                        cols: Some(cols as u16),
+                        rows: Some(rows as u16),
+                        pane_id: Some(uids[i].clone()),
+                        ..Default::default()
+                    })
+                    .expect("spawn session");
+
+                    let renderer: Box<dyn PaneRenderer> = match kinds[i] {
+                        Kind::Gpu => {
+                            let (d, q) = gpu_slot.borrow().clone().unwrap();
+                            Box::new(GpuRenderer::new(d, q))
+                        }
+                        Kind::Software => Box::new(SoftwareRenderer::new()),
+                    };
+                    let pane = TerminalPane::new(cols, rows, renderer);
+                    eprintln!(
+                        "[demo] {} — {}x{} cells ({}x{} px) [{}]",
+                        uids[i],
+                        cols,
+                        rows,
+                        cols as u32 * cw,
+                        rows as u32 * ch,
+                        pane.renderer_name()
+                    );
+                    panes.push(PaneCtl {
+                        pane,
+                        kind: kinds[i],
+                        started: false,
+                        startup: Some(format!(
+                            "echo hyperpanes terminal-widget [{}]\r",
+                            if kinds[i] == Kind::Gpu { "GPU" } else { "software" }
+                        )),
+                    });
+                    applied.push((cols, rows));
+                }
+
+                *state.borrow_mut() = Some(State {
+                    font,
+                    panes,
+                    applied,
+                    last_blink: Instant::now(),
+                    cursor_on: true,
+                    last_hud: Instant::now(),
+                    frames: 0,
+                });
+            }
+
+            let mut guard = state.borrow_mut();
+            let st = guard.as_mut().unwrap();
+
+            // ---------- drain session events into the panes ----------
+            {
+                let mut rx = erx.borrow_mut();
+                while let Ok(ev) = rx.try_recv() {
+                    match ev {
+                        SessionEvent::Data { uid, data } => {
+                            if let Some(i) = uids.iter().position(|u| *u == uid) {
+                                let pc = &mut st.panes[i];
+                                pc.pane.feed(&data);
+                                let replies = pc.pane.take_replies();
+                                if !replies.is_empty() {
+                                    mgr.write(&uid, &String::from_utf8_lossy(&replies));
+                                }
+                                // First output → the shell is alive; send the demo command.
+                                if !pc.started {
+                                    pc.started = true;
+                                    if let Some(cmd) = pc.startup.take() {
+                                        mgr.write(&uid, &cmd);
+                                    }
+                                }
+                            }
+                        }
+                        SessionEvent::Cwd { uid, cwd } => {
+                            eprintln!("[demo] {uid} cwd → {cwd}");
+                        }
+                        SessionEvent::Exit { uid, code } => {
+                            eprintln!("[demo] {uid} exited ({code})");
+                        }
+                    }
+                }
+            }
+
+            // ---------- apply geometry changes (reflow grid + session) ----------
+            {
+                let g = geom.borrow();
+                let cw = st.font.cell_w;
+                let ch = st.font.cell_h;
+                for i in 0..st.panes.len() {
+                    let (w, h) = g[i];
+                    if w <= 1.0 || h <= 1.0 {
+                        continue;
+                    }
+                    let (cols, rows) = cells_for_px(w * scale, h * scale, cw, ch);
+                    if (cols, rows) != st.applied[i] {
+                        if st.panes[i].pane.resize(cols, rows) {
+                            mgr.resize(&uids[i], cols as u16, rows as u16);
+                        }
+                        st.applied[i] = (cols, rows);
+                    }
+                }
+            }
+
+            // ---------- cursor blink (~530ms) ----------
+            let blink_changed = if st.last_blink.elapsed() >= Duration::from_millis(530) {
+                st.cursor_on = !st.cursor_on;
+                st.last_blink = Instant::now();
+                true
+            } else {
+                false
+            };
+            let opts = RenderOpts {
+                cursor_on: st.cursor_on,
+            };
+
+            // ---------- render dirty panes → model ----------
+            let mut rendered = false;
+            let State { font, panes, .. } = &mut *st;
+            for (i, pc) in panes.iter_mut().enumerate() {
+                if !pc.pane.take_dirty() && !blink_changed {
+                    continue;
+                }
+                let img = pc.pane.render(font, &opts);
+                model.set_row_data(
+                    i,
+                    PaneVisual {
+                        surface: img,
+                        title: titles[i].into(),
+                        accent: accents[i],
+                    },
+                );
+                rendered = true;
+            }
+            if rendered {
+                st.frames += 1;
+            }
+
+            // ---------- HUD ----------
+            if st.last_hud.elapsed() >= Duration::from_millis(500) {
+                let fps = st.frames as f32 / st.last_hud.elapsed().as_secs_f32();
+                let names: Vec<&str> = st.panes.iter().map(|p| match p.kind {
+                    Kind::Gpu => "GPU",
+                    Kind::Software => "SW",
+                }).collect();
+                app.set_hud(format!("{:.0} fps · {}", fps, names.join(" + ")).into());
+                st.frames = 0;
+                st.last_hud = Instant::now();
+            }
+        }
+    });
+
+    app.run()?;
+    // Tidy up the shells on exit.
+    mgr.kill_all();
+    Ok(())
 }
