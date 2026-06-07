@@ -32,3 +32,9 @@ windows = { version = "0.58", features = [
   "Win32_Security",
   "Win32_System_IO",
 ] }
+
+# --- Wave 2: control server (HTTP + WS) ---
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+subtle = "2"      # constant-time master-token compare (timingSafeEqual parity)
+rand = "0.8"      # 32-random-byte hex master token

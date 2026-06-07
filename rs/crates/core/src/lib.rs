@@ -7,6 +7,7 @@
 
 pub mod ai;
 pub mod ansi_strip;
+pub mod app;
 pub mod cli;
 pub mod control;
 pub mod persistence;
