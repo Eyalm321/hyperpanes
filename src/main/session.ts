@@ -67,8 +67,19 @@ export interface SpawnOptions {
   paneId?: string;
 }
 
+// Prefer PowerShell 7 (pwsh) on Windows when it's installed: only pwsh gets our
+// shell integration's inline history prediction (PSReadLine) and OSC-7 cwd
+// reporting — cmd.exe supports neither. Fall back to COMSPEC (cmd), then Windows
+// PowerShell. Resolved once and cached (a PATH scan per spawn would be wasteful).
+let winDefaultShell: string | undefined;
 export function defaultShell(): string {
-  if (process.platform === 'win32') return process.env.COMSPEC || 'powershell.exe';
+  if (process.platform === 'win32') {
+    if (winDefaultShell === undefined) {
+      const pwsh = resolveWindowsCommand('pwsh.exe');
+      winDefaultShell = isFile(pwsh) ? 'pwsh.exe' : process.env.COMSPEC || 'powershell.exe';
+    }
+    return winDefaultShell;
+  }
   return process.env.SHELL || '/bin/bash';
 }
 
