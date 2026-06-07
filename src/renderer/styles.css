@@ -929,6 +929,23 @@ body {
   opacity: 0.75;
 }
 
+/* Typewriter caret: a blinking block shown only while the AI line is mid-reveal. */
+.hp-pane-subtitle-ai.typing::after {
+  content: '';
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: hp-ai-caret 0.7s steps(1) infinite;
+}
+@keyframes hp-ai-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
 /* Inline editor wrapping the title + subtitle inputs (and the "add" button). */
 .hp-label-edit {
   display: inline-flex;

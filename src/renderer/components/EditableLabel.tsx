@@ -1,5 +1,37 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 
+// Reveal text one character at a time when it CHANGES (never on first mount), so a
+// fresh ambient-AI summary "types" itself in. Returns the progressively-revealed
+// string plus whether it's mid-type (drives the caret).
+function useTypewriter(text: string | undefined): { text: string; typing: boolean } {
+  const [shown, setShown] = useState(text ?? '');
+  const [typing, setTyping] = useState(false);
+  const prev = useRef(text ?? '');
+  useEffect(() => {
+    const target = text ?? '';
+    if (target === prev.current) return; // unchanged → leave it (no mount animation)
+    prev.current = target;
+    if (!target) {
+      setShown('');
+      setTyping(false);
+      return;
+    }
+    let i = 0;
+    setShown('');
+    setTyping(true);
+    const id = setInterval(() => {
+      i += 1;
+      setShown(target.slice(0, i));
+      if (i >= target.length) {
+        clearInterval(id);
+        setTyping(false);
+      }
+    }, 26);
+    return () => clearInterval(id);
+  }, [text]);
+  return { text: shown, typing };
+}
+
 interface EditableLabelProps {
   value: string;
   subtitle?: string; // user-set subtitle: editable, always wins, seeds the editor
@@ -29,6 +61,10 @@ export const EditableLabel = forwardRef<EditableLabelHandle, EditableLabelProps>
   useEffect(() => {
     if (editing) titleRef.current?.select();
   }, [editing]);
+
+  // The AI line types itself in on each update — but only when no manual subtitle
+  // is set (a manual subtitle wins and shows instantly, no animation).
+  const { text: aiShown, typing: aiTyping } = useTypewriter(subtitle ? undefined : aiSubtitle);
 
   const start = () => {
     setDraft(value);
@@ -113,8 +149,11 @@ export const EditableLabel = forwardRef<EditableLabelHandle, EditableLabelProps>
         <span className="hp-pane-subtitle">{subtitle}</span>
       ) : (
         aiSubtitle && (
-          <span className="hp-pane-subtitle hp-pane-subtitle-ai" title="AI summary of this pane">
-            ✦ {aiSubtitle}
+          <span
+            className={`hp-pane-subtitle hp-pane-subtitle-ai${aiTyping ? ' typing' : ''}`}
+            title="AI summary of this pane"
+          >
+            ✦ {aiShown}
           </span>
         )
       )}
