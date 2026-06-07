@@ -1,0 +1,14 @@
+[package]
+name = "hyperpanes-core"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Dependencies are PRE-DECLARED by the fan-out scaffold so that no track ever needs
+# to edit this file — editing Cargo.toml in parallel worktrees would collide at
+# merge. If you genuinely need a new crate, that is a checkpoint with the
+# orchestrator, not a unilateral edit.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

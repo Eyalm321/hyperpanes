@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/core"]
+# The spikes are throwaway, heavy-dependency (Slint/wgpu) crates owned entirely by
+# their own fan-out track. Each declares its own `[workspace]` so it never drags
+# the lean core build, and is excluded here for clarity.
+exclude = ["spikes/terminal-render", "spikes/tearoff"]

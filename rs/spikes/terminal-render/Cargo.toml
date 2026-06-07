@@ -1,0 +1,20 @@
+[package]
+name = "spike-terminal-render"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Standalone workspace root so the heavy GPU/terminal deps never touch the core
+# build. This crate is throwaway and owned entirely by track `spike-terminal-render`.
+[workspace]
+
+[dependencies]
+# Starting points (current as of research, June 2026) — the spike agent finalizes
+# exact versions/features. See FANOUT-HANDOFF.md for the rendering approach.
+slint = "1.16"
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+swash = "0.2"
+# Add as the spike needs them: wgpu (texture import via Slint unstable-wgpu),
+# etagere/guillotiere (atlas packing), raw-window-handle, windows (Win32).

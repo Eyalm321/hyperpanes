@@ -20,6 +20,9 @@ reference/
 # benchmark harness output (json + report + per-run temp wrappers)
 bench/results/
 
+# Rust build output (native rewrite under rs/ and spikes)
+target/
+
 # fan-out orchestration scratch (handoffs, contracts, plan.json)
 .fanout/
 # per-worktree handoff copied in by make-worktrees.ps1 (context, never committed)

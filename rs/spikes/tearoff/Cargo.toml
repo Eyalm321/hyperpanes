@@ -1,0 +1,15 @@
+[package]
+name = "spike-tearoff"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Standalone workspace root; throwaway crate owned entirely by track `spike-tearoff`.
+[workspace]
+
+[dependencies]
+# Starting points — the spike agent finalizes versions/features. See FANOUT-HANDOFF.md.
+slint = "1.16"
+# Add as needed: windows (GetCursorPos, WM_NCHITTEST, layered/click-through window),
+# raw-window-handle.
