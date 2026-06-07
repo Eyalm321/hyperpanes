@@ -65,6 +65,15 @@ export function integrationFor(
     const posix = script.replace(/\\/g, '/');
     return { args: ['--rcfile', posix, '-i'], env: {} };
   }
+  if (kind === 'cmd') {
+    // cmd has no init-script hook, but its PROMPT can carry the cwd: $E=ESC,
+    // $P=current path, $G='>'. We prefix the OSC 9;9 cwd report
+    // (ESC]9;9;<path>ST — the de-facto Windows "current directory" sequence) then
+    // restore the normal "<path>>" prompt. No script/args needed, just the env
+    // var. It replaces any custom cmd prompt but keeps the default look; strictly
+    // additive to functionality (parseOscCwd reads OSC 9;9 too).
+    return { args: [], env: { PROMPT: '$E]9;9;$P$E\\$P$G' } };
+  }
   return null;
 }
 
@@ -116,27 +125,42 @@ export function fileUriToPath(uri: string): string | null {
   return decoded || null;
 }
 
-// Bound on a carried, still-incomplete OSC 7 sequence. A real cwd URI is short; a
+// Bound on a carried, still-incomplete OSC sequence. A real cwd payload is short; a
 // sequence that grows past this is junk and is abandoned rather than buffered.
-const OSC7_MAX = 8192;
-const OSC7_PREFIX = '\x1b]7;'; // ESC ] 7 ;
+const OSC_MAX = 8192;
+const OSC_PREFIX = '\x1b]'; // ESC ]
 
-// Pure, stateful-free OSC 7 scanner. Given the carry from the previous call and the
-// next raw pty chunk, returns the cwd of the LAST complete OSC 7 in this window (or
-// null) plus the carry to feed the next call. Handles sequences split across chunks
-// (both a split URI and a split prefix) via a bounded carry. De-duping on change is
-// the caller's job (a prompt re-emits OSC 7 every keystroke).
-export function parseOsc7(carry: string, chunk: string): { cwd: string | null; carry: string } {
-  // Fast reject: nothing pending and no ESC anywhere → impossible to hold OSC 7.
+// Interpret one OSC payload (the bytes between `ESC]` and its terminator) as a cwd:
+//   • `7;<file-uri>` → fileUriToPath  (pwsh, bash/git-bash)
+//   • `9;9;<path>`   → a raw OS path, optionally double-quoted  (cmd, Windows Terminal)
+// Anything else (title `0;…`, hyperlink `8;…`, progress `9;4;…`, …) is not a cwd.
+function oscDataToCwd(data: string): string | null {
+  if (data.startsWith('7;')) return fileUriToPath(data.slice(2));
+  if (data.startsWith('9;9;')) {
+    let p = data.slice(4).trim();
+    if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+    return p || null;
+  }
+  return null;
+}
+
+// Pure, state-free scanner for cwd-bearing OSC sequences (OSC 7 + OSC 9;9). Given
+// the carry from the previous call and the next raw pty chunk, returns the cwd of
+// the LAST recognized sequence in this window (or null) plus the carry to feed the
+// next call. Handles sequences split across chunks (split payload and split prefix)
+// via a bounded carry. De-duping on change is the caller's job (a prompt re-emits
+// its cwd OSC every keystroke).
+export function parseOscCwd(carry: string, chunk: string): { cwd: string | null; carry: string } {
+  // Fast reject: nothing pending and no ESC anywhere → impossible to hold an OSC.
   if (!carry && chunk.indexOf('\x1b') === -1) return { cwd: null, carry: '' };
 
   const buf = carry + chunk;
-  let lastUri: string | null = null;
+  let lastCwd: string | null = null;
   let searchFrom = 0;
   for (;;) {
-    const start = buf.indexOf(OSC7_PREFIX, searchFrom);
+    const start = buf.indexOf(OSC_PREFIX, searchFrom);
     if (start === -1) break;
-    const afterPrefix = start + OSC7_PREFIX.length;
+    const afterPrefix = start + OSC_PREFIX.length;
     const belIdx = buf.indexOf('\x07', afterPrefix); // BEL terminator
     const stIdx = buf.indexOf('\x1b\\', afterPrefix); // ST terminator (ESC \)
     let end = -1;
@@ -149,30 +173,25 @@ export function parseOsc7(carry: string, chunk: string): { cwd: string | null; c
       termLen = 2;
     }
     if (end === -1) break; // incomplete sequence at the tail — handled by carry below
-    lastUri = buf.slice(afterPrefix, end);
+    const cwd = oscDataToCwd(buf.slice(afterPrefix, end));
+    if (cwd) lastCwd = cwd;
     searchFrom = end + termLen;
   }
 
   // Carry forward only a trailing partial that might complete in the next chunk.
   let nextCarry = '';
-  const lastStart = buf.lastIndexOf(OSC7_PREFIX);
+  const lastStart = buf.lastIndexOf(OSC_PREFIX);
   if (lastStart !== -1) {
-    const after = lastStart + OSC7_PREFIX.length;
+    const after = lastStart + OSC_PREFIX.length;
     const complete = buf.indexOf('\x07', after) !== -1 || buf.indexOf('\x1b\\', after) !== -1;
     if (!complete) {
       const tail = buf.slice(lastStart);
-      nextCarry = tail.length > OSC7_MAX ? '' : tail; // abandon oversized junk
+      nextCarry = tail.length > OSC_MAX ? '' : tail; // abandon oversized junk
     }
-  } else {
-    // No full prefix, but the prefix itself may be split (ends with ESC / ESC] / ESC]7).
-    for (let i = OSC7_PREFIX.length - 1; i >= 1; i--) {
-      if (buf.length >= i && buf.slice(-i) === OSC7_PREFIX.slice(0, i)) {
-        nextCarry = buf.slice(-i);
-        break;
-      }
-    }
+  } else if (buf.slice(-1) === '\x1b') {
+    // The 2-char prefix may be split: a lone trailing ESC starts the next OSC.
+    nextCarry = '\x1b';
   }
 
-  const cwd = lastUri !== null ? fileUriToPath(lastUri) : null;
-  return { cwd, carry: nextCarry };
+  return { cwd: lastCwd, carry: nextCarry };
 }

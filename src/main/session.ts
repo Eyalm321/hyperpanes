@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { app } from 'electron';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
-import { integrationFor, shellIntegrationDir, parseOsc7 } from './shell-integration';
+import { integrationFor, shellIntegrationDir, parseOscCwd } from './shell-integration';
 
 // Max duration / size to batch pty output before flushing to the renderer.
 // Mirrors vercel/hyper's DataBatcher: collapses many tiny pty chunks into one
@@ -207,7 +207,7 @@ export class Session extends EventEmitter {
   private batcher = new DataBatcher();
   private ended = false;
   private replay = ''; // recent output, for re-attach
-  private osc7Carry = ''; // partial OSC 7 sequence split across pty chunks
+  private oscCarry = ''; // partial OSC cwd sequence (7 or 9;9) split across pty chunks
   private lastCwd: string | null = null; // de-dupe: emit 'cwd' only on change
 
   constructor(opts: SpawnOptions) {
@@ -267,10 +267,11 @@ export class Session extends EventEmitter {
 
     this.pty.onData((chunk) => {
       if (this.ended) return;
-      // Tap the RAW chunk for OSC 7 before batching. xterm consumes OSC 7 silently,
-      // so passing it through unchanged renders nothing; we only sniff the cwd out.
-      const { cwd, carry } = parseOsc7(this.osc7Carry, chunk);
-      this.osc7Carry = carry;
+      // Tap the RAW chunk for a cwd OSC (7 from pwsh/bash, 9;9 from cmd) before
+      // batching. xterm consumes these OSCs silently, so passing the chunk through
+      // unchanged renders nothing; we only sniff the cwd out.
+      const { cwd, carry } = parseOscCwd(this.oscCarry, chunk);
+      this.oscCarry = carry;
       if (cwd && cwd !== this.lastCwd) {
         this.lastCwd = cwd;
         this.emit('cwd', cwd); // SessionCwd contract — projects track consumes this

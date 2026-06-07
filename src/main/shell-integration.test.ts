@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 
 // shell-integration.ts imports `app` from electron only for shellIntegrationDir;
-// stub it so the pure helpers (fileUriToPath, parseOsc7, classify) run under Node.
+// stub it so the pure helpers (fileUriToPath, parseOscCwd, classify) run under Node.
 import { vi } from 'vitest';
 vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => '/app' } }));
 
-import { classify, fileUriToPath, parseOsc7 } from './shell-integration';
+import { classify, fileUriToPath, integrationFor, parseOscCwd } from './shell-integration';
 
 describe('classify', () => {
   it('detects pwsh first (powershell also ends in "sh")', () => {
@@ -64,67 +64,113 @@ describe('fileUriToPath', () => {
   });
 });
 
-describe('parseOsc7', () => {
+describe('parseOscCwd', () => {
   const BEL = '\x07';
   const ESC = '\x1b';
   const seq = (uri: string) => `${ESC}]7;${uri}${BEL}`;
 
   it('finds a complete sequence in one chunk', () => {
-    const r = parseOsc7('', `hello${seq('file:///C:/a/b')}world`);
+    const r = parseOscCwd('', `hello${seq('file:///C:/a/b')}world`);
     expect(r.cwd).toBe('C:\\a\\b');
     expect(r.carry).toBe('');
   });
 
   it('fast-rejects a plain chunk with no ESC and no carry', () => {
-    const r = parseOsc7('', 'just some normal output\n');
+    const r = parseOscCwd('', 'just some normal output\n');
     expect(r.cwd).toBeNull();
     expect(r.carry).toBe('');
   });
 
   it('accepts an ST (ESC backslash) terminator', () => {
-    const r = parseOsc7('', `${ESC}]7;file:///C:/x${ESC}\\`);
+    const r = parseOscCwd('', `${ESC}]7;file:///C:/x${ESC}\\`);
     expect(r.cwd).toBe('C:\\x');
   });
 
   it('returns the LAST complete sequence when several are present', () => {
-    const r = parseOsc7('', `${seq('file:///C:/first')}${seq('file:///C:/second')}`);
+    const r = parseOscCwd('', `${seq('file:///C:/first')}${seq('file:///C:/second')}`);
     expect(r.cwd).toBe('C:\\second');
   });
 
   it('carries a URI split across two chunks', () => {
-    const a = parseOsc7('', `${ESC}]7;file:///C:/Users/`);
+    const a = parseOscCwd('', `${ESC}]7;file:///C:/Users/`);
     expect(a.cwd).toBeNull();
     expect(a.carry).toBe(`${ESC}]7;file:///C:/Users/`);
-    const b = parseOsc7(a.carry, `me/repo${BEL}`);
+    const b = parseOscCwd(a.carry, `me/repo${BEL}`);
     expect(b.cwd).toBe('C:\\Users\\me\\repo');
     expect(b.carry).toBe('');
   });
 
   it('carries a PREFIX split across two chunks (ESC]7 | ;file://...)', () => {
-    const a = parseOsc7('', `output${ESC}]7`);
+    const a = parseOscCwd('', `output${ESC}]7`);
     expect(a.cwd).toBeNull();
     expect(a.carry).toBe(`${ESC}]7`);
-    const b = parseOsc7(a.carry, `;file:///C:/proj${BEL}`);
+    const b = parseOscCwd(a.carry, `;file:///C:/proj${BEL}`);
     expect(b.cwd).toBe('C:\\proj');
   });
 
   it('carries a bare trailing ESC', () => {
-    const a = parseOsc7('', `text${ESC}`);
+    const a = parseOscCwd('', `text${ESC}`);
     expect(a.carry).toBe(ESC);
-    const b = parseOsc7(a.carry, `]7;file:///C:/q${BEL}`);
+    const b = parseOscCwd(a.carry, `]7;file:///C:/q${BEL}`);
     expect(b.cwd).toBe('C:\\q');
   });
 
   it('abandons an oversized unterminated sequence (bounded carry)', () => {
     const huge = 'x'.repeat(20000);
-    const r = parseOsc7('', `${ESC}]7;file:///C:/${huge}`);
+    const r = parseOscCwd('', `${ESC}]7;file:///C:/${huge}`);
     expect(r.cwd).toBeNull();
     expect(r.carry).toBe('');
   });
 
   it('does not retain a non-OSC7 escape tail', () => {
-    const r = parseOsc7('', `\x1b[0m colored text`);
+    const r = parseOscCwd('', `\x1b[0m colored text`);
     expect(r.cwd).toBeNull();
     expect(r.carry).toBe('');
+  });
+});
+
+describe('parseOscCwd — OSC 9;9 (cmd)', () => {
+  const BEL = '\x07';
+  const ESC = '\x1b';
+
+  it('reads a raw Windows path from OSC 9;9 (ST-terminated)', () => {
+    const r = parseOscCwd('', `${ESC}]9;9;C:\\Users\\me\\repo${ESC}\\`);
+    expect(r.cwd).toBe('C:\\Users\\me\\repo');
+  });
+
+  it('strips surrounding quotes (Windows Terminal style)', () => {
+    const r = parseOscCwd('', `${ESC}]9;9;"C:\\Program Files\\x"${BEL}`);
+    expect(r.cwd).toBe('C:\\Program Files\\x');
+  });
+
+  it('ignores a non-cwd OSC (title 0;…)', () => {
+    const r = parseOscCwd('', `${ESC}]0;my tab title${BEL}`);
+    expect(r.cwd).toBeNull();
+  });
+
+  it('picks the cwd OSC even when a title OSC precedes it', () => {
+    const r = parseOscCwd('', `${ESC}]0;title${BEL}${ESC}]9;9;C:\\proj${BEL}`);
+    expect(r.cwd).toBe('C:\\proj');
+  });
+
+  it('carries a 9;9 path split across two chunks', () => {
+    const a = parseOscCwd('', `${ESC}]9;9;C:\\Users\\`);
+    expect(a.cwd).toBeNull();
+    const b = parseOscCwd(a.carry, `me\\repo${BEL}`);
+    expect(b.cwd).toBe('C:\\Users\\me\\repo');
+  });
+});
+
+describe('integrationFor — cmd', () => {
+  it('gives cmd a PROMPT that emits the OSC 9;9 cwd, with no extra args', () => {
+    const r = integrationFor('C:\\Windows\\System32\\cmd.exe', '/whatever');
+    expect(r).not.toBeNull();
+    expect(r!.args).toEqual([]);
+    expect(r!.env.PROMPT).toContain(']9;9;');
+    expect(r!.env.PROMPT).toContain('$P');
+  });
+
+  it('still returns null for an unknown (other) shell', () => {
+    expect(integrationFor('zsh', '/x')).toBeNull();
   });
 });
