@@ -5,6 +5,7 @@ import type {
   ControlWindowPayload,
   GroupPayload,
   MetricsSnapshot,
+  Project,
   WindowSpec
 } from '../renderer/types';
 
@@ -123,6 +124,34 @@ const api = {
     return () => {
       exitSubs.delete(cb);
     };
+  },
+
+  // Live cwd from OSC 7 shell integration (one global subscription is plenty).
+  onCwd: (cb: (uid: string, cwd: string) => void): (() => void) => {
+    const listener = (_e: unknown, p: { uid: string; cwd: string }) => cb(p.uid, p.cwd);
+    ipcRenderer.on('session:cwd', listener);
+    return () => ipcRenderer.removeListener('session:cwd', listener);
+  },
+
+  // Git projects (sidebar projects history). `onPaneProject` fires when a pane's
+  // cwd enters a known git root, so the renderer can tint that pane.
+  projects: {
+    list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
+    setColor: (id: string, color: string): Promise<Project[]> =>
+      ipcRenderer.invoke('projects:setColor', { id, color }),
+    rename: (id: string, name: string): Promise<Project[]> =>
+      ipcRenderer.invoke('projects:rename', { id, name }),
+    remove: (id: string): Promise<Project[]> => ipcRenderer.invoke('projects:remove', { id }),
+    onChanged: (cb: (list: Project[]) => void): (() => void) => {
+      const listener = (_e: unknown, list: Project[]) => cb(list);
+      ipcRenderer.on('projects:changed', listener);
+      return () => ipcRenderer.removeListener('projects:changed', listener);
+    },
+    onPaneProject: (cb: (uid: string, project: Project) => void): (() => void) => {
+      const listener = (_e: unknown, p: { uid: string; project: Project }) => cb(p.uid, p.project);
+      ipcRenderer.on('session:project', listener);
+      return () => ipcRenderer.removeListener('session:project', listener);
+    }
   },
 
   workspace: {

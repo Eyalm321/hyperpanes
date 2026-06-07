@@ -3,6 +3,8 @@ import { Session, type SpawnOptions } from './session';
 export interface SessionHandlers {
   onData: (uid: string, data: string) => void;
   onExit: (uid: string, code: number) => void;
+  // Live cwd from OSC 7 shell integration; fires when a pane's directory changes.
+  onCwd?: (uid: string, cwd: string) => void;
 }
 
 /** Owns every live pty Session, keyed by uid. */
@@ -16,6 +18,7 @@ export class SessionManager {
   create(opts: SpawnOptions, handlers: SessionHandlers): Session {
     const session = new Session(opts);
     session.on('data', (data: string) => handlers.onData(opts.uid, data));
+    session.on('cwd', (cwd: string) => handlers.onCwd?.(opts.uid, cwd));
     session.on('exit', (code: number) => {
       handlers.onExit(opts.uid, code);
       this.sessions.delete(opts.uid);

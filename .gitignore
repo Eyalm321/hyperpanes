@@ -19,3 +19,6 @@ reference/
 
 # benchmark harness output (json + report + per-run temp wrappers)
 bench/results/
+
+# fan-out orchestration scratch (handoffs, contracts, plan.json)
+.fanout/

@@ -9,6 +9,11 @@ export interface Pane {
   label: string; // user-facing name (locked in Phase 3)
   subtitle?: string; // optional secondary line shown under the label
   color: string; // frame color
+  // Per-pane override of the global show-frame / show-dot Appearance toggles
+  // (undefined = inherit useSettings). New panes default both to false (clean,
+  // uncolored); opening a project or a git-project tint flips them on.
+  showFrame?: boolean;
+  showDot?: boolean;
   command?: string; // run via `shell -c`; absent = interactive shell
   // Literal argv for a DIRECT spawn (no shell, no re-parse): with `command` set,
   // runs `command` with exactly these args, so values containing spaces/quotes
@@ -33,12 +38,26 @@ export interface PaneSpec {
   label?: string;
   subtitle?: string;
   color?: string;
+  showFrame?: boolean;
+  showDot?: boolean;
   command?: string;
   args?: string[]; // literal argv for a direct (no-shell) spawn with `command` (P4a)
   cwd?: string;
   shell?: string;
   fontSize?: number;
   meta?: Record<string, string>; // free-form per-pane metadata (agent-orchestration C)
+}
+
+// ---- Git projects (sidebar projects history) ----
+// A git repo the app remembers from a pane cd-ing into it. Persisted to
+// projects.json by main. Each gets its own frame/dot color and is titled by the
+// repo folder name; opening one spawns a pane cd'd into `path`, tinted `color`.
+export interface Project {
+  id: string;
+  path: string; // normalized git-root absolute path
+  name: string; // basename of the git root (the title)
+  color: string; // frame/dot color for panes in this project
+  lastOpenedAt?: number; // epoch ms; set by main, for recency sorting
 }
 
 // A single group (tab): a pane set + layout + tab title. The optional sizing /

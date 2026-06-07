@@ -84,6 +84,9 @@ interface WorkspaceState {
   removePane: (id: string) => void;
   renamePane: (id: string, label: string, subtitle?: string) => void; // subtitle: '' clears, undefined leaves as-is
   recolorPane: (id: string, color: string) => void;
+  setPaneFrame: (id: string, on: boolean) => void; // per-pane show-frame override (color toggles)
+  setPaneDot: (id: string, on: boolean) => void; // per-pane show-dot override (color toggles)
+  applyProjectToPane: (id: string, project: { color: string; name: string }) => void; // tint a pane to a detected git project
   setPaneMeta: (id: string, patch: Record<string, string | null>) => void; // merge org metadata; null value deletes a key (agent-orchestration C)
   remapPalette: (to: PaletteName) => void; // re-slot every pane's color into a palette
   restartPane: (id: string) => void;
@@ -120,6 +123,8 @@ export function specFromGroup(g: Group): GroupSpec {
       label: p.label,
       ...(p.subtitle ? { subtitle: p.subtitle } : {}),
       color: p.color,
+      ...(p.showFrame !== undefined ? { showFrame: p.showFrame } : {}),
+      ...(p.showDot !== undefined ? { showDot: p.showDot } : {}),
       ...(p.command ? { command: p.command } : {}),
       ...(p.args && p.args.length ? { args: p.args } : {}),
       ...(p.cwd ? { cwd: p.cwd } : {}),
@@ -158,6 +163,9 @@ function seededGroup(seq: number): Group {
     sessionUid: uuid(),
     label: 'shell',
     color: nextColor(0, useSettings.getState().framePalette),
+    // New panes are clean/uncolored by default (no frame, no dot).
+    showFrame: false,
+    showDot: false,
     status: 'running'
   };
   return { ...base, panes: [pane], sizes: equalSizes(1), focusedId: pane.id, seq: 1 };
@@ -208,6 +216,8 @@ function groupFromSpec(spec: GroupSpec, fallbackTitle: string): Group {
       // Heal a color saved under an older palette definition to the active
       // palette's current value for its slot; custom colors pass through.
       color: p.color ? remapColor(p.color, palette) : nextColor(seq - 1, palette),
+      showFrame: p.showFrame,
+      showDot: p.showDot,
       command: p.command || undefined,
       args: argvOf(p.args), // direct-spawn argv (P4a), defensively coerced
       cwd: p.cwd || undefined,
@@ -579,6 +589,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
             label: partial?.label ?? `pane ${seq}`,
             subtitle: partial?.subtitle,
             color: partial?.color ?? nextColor(seq - 1, useSettings.getState().framePalette),
+            // Clean/uncolored by default; a caller (e.g. opening a project) can
+            // override, and a git-project tint flips these on later.
+            showFrame: partial?.showFrame ?? false,
+            showDot: partial?.showDot ?? false,
             command: partial?.command,
             args: partial?.args,
             cwd: partial?.cwd,
@@ -642,6 +656,38 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         groups: mapPaneGroup(s, id, (g) => ({
           ...g,
           panes: g.panes.map((p) => (p.id === id ? { ...p, color } : p))
+        }))
+      })),
+
+    // Per-pane override of the global show-frame toggle (undefined inherits it).
+    setPaneFrame: (id, on) =>
+      set((s) => ({
+        groups: mapPaneGroup(s, id, (g) => ({
+          ...g,
+          panes: g.panes.map((p) => (p.id === id ? { ...p, showFrame: on } : p))
+        }))
+      })),
+
+    // Per-pane override of the global show-dot toggle (undefined inherits it).
+    setPaneDot: (id, on) =>
+      set((s) => ({
+        groups: mapPaneGroup(s, id, (g) => ({
+          ...g,
+          panes: g.panes.map((p) => (p.id === id ? { ...p, showDot: on } : p))
+        }))
+      })),
+
+    // Tint a pane to a detected git project: adopt its color, turn the frame and
+    // dot on, and show the repo name as the subtitle. (projects feature seam)
+    applyProjectToPane: (id, project) =>
+      set((s) => ({
+        groups: mapPaneGroup(s, id, (g) => ({
+          ...g,
+          panes: g.panes.map((p) =>
+            p.id === id
+              ? { ...p, color: project.color, showFrame: true, showDot: true, subtitle: project.name }
+              : p
+          )
         }))
       })),
 

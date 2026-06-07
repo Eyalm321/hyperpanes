@@ -16,6 +16,14 @@ import {
 } from './workspace';
 import { ControlServer, type ControlWindowPayload } from './control-server';
 import { collectMetrics } from './metrics';
+import { findGitRoot } from './git';
+import {
+  listProjects,
+  upsertProjectByRoot,
+  setProjectColor,
+  renameProject,
+  removeProject
+} from './projects';
 
 // Per-window spawn options. `windowSpec`/`bounds`/`cascadeIndex` drive launch-time
 // windows (M0); `inactive` is the live-drag float.
@@ -331,6 +339,17 @@ export function registerIpc(
         send('session:data', { uid, data });
         control.emitOutput(uid, data); // tee to the /events stream (no-op if no clients)
       },
+      // Live cwd (OSC 7 shell integration): forward it, and if it's inside a git
+      // repo, remember the project and tell the renderer to tint the pane.
+      onCwd: (uid, cwd) => {
+        send('session:cwd', { uid, cwd });
+        const root = findGitRoot(cwd);
+        if (root) {
+          const project = upsertProjectByRoot(root);
+          send('session:project', { uid, project });
+          send('projects:changed', listProjects());
+        }
+      },
       onExit: (uid, code) => {
         send('session:exit', { uid, code });
         owner.delete(uid);
@@ -354,6 +373,27 @@ export function registerIpc(
   ipcMain.on('session:kill', (_e, { uid }: { uid: string }) => {
     manager.kill(uid);
     owner.delete(uid);
+  });
+
+  // ---- Git projects (sidebar projects history) ----
+  ipcMain.handle('projects:list', () => listProjects());
+  ipcMain.handle('projects:setColor', (_e, { id, color }: { id: string; color: string }) => {
+    setProjectColor(id, color);
+    const list = listProjects();
+    send('projects:changed', list);
+    return list;
+  });
+  ipcMain.handle('projects:rename', (_e, { id, name }: { id: string; name: string }) => {
+    renameProject(id, name);
+    const list = listProjects();
+    send('projects:changed', list);
+    return list;
+  });
+  ipcMain.handle('projects:remove', (_e, { id }: { id: string }) => {
+    removeProject(id);
+    const list = listProjects();
+    send('projects:changed', list);
+    return list;
   });
 
   // ---- Clickable file paths: verify on disk, then open in editor / OS handler ----
