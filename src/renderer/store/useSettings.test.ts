@@ -62,4 +62,11 @@ describe('useSettings persistence', () => {
     expect(useSettings.getState().idleEffect).toBe('blink');
     expect(saved().idleEffect).toBe('blink');
   });
+
+  it('defaults the sidebar on and persists toggling it off', () => {
+    expect(useSettings.getState().showSidebar).toBe(true);
+    useSettings.getState().setShowSidebar(false);
+    expect(useSettings.getState().showSidebar).toBe(false);
+    expect(saved().showSidebar).toBe(false);
+  });
 });

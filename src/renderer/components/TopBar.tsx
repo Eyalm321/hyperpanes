@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { activeGroup, useWorkspace } from '../store/useWorkspace';
 import { useUI } from '../store/useUI';
 import { useKeybindings } from '../store/useKeybindings';
+import { useSettings } from '../store/useSettings';
 import { comboLabel } from '../keybindings';
 import { AUTO_LAYOUT, LAYOUTS, effectiveLayout } from '../layout/presets';
 import { serializeWorkspace } from '../workspace/serialize';
@@ -23,10 +24,11 @@ export function TopBar() {
   const layout = useWorkspace((s) => activeGroup(s).layout);
   const paneCount = useWorkspace((s) => activeGroup(s).panes.length);
   const setLayout = useWorkspace((s) => s.setLayout);
-  const addPane = useWorkspace((s) => s.addPane);
   const openNewPane = useUI((s) => s.openNewPane);
   const openPalette = useUI((s) => s.openPalette);
   const openPreferences = useUI((s) => s.openPreferences);
+  const showSidebar = useSettings((s) => s.showSidebar);
+  const setShowSidebar = useSettings((s) => s.setShowSidebar);
   const paletteKey = useKeybindings((s) => comboLabel(s.combos['palette.toggle']));
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -148,6 +150,16 @@ export function TopBar() {
               <span>Save workspace…</span>
             </button>
             <div className="hp-menu-sep" />
+            <button
+              className="hp-menu-item"
+              role="menuitemcheckbox"
+              aria-checked={showSidebar}
+              onClick={fromMenu(() => setShowSidebar(!showSidebar))}
+            >
+              <span className="hp-menu-glyph">▥</span>
+              <span>Sidebar</span>
+              <span className="hp-menu-radio">{showSidebar ? '✓' : ''}</span>
+            </button>
             <button className="hp-menu-item" role="menuitem" onClick={fromMenu(openPreferences)}>
               <IconSettings />
               <span>Preferences…</span>
@@ -159,15 +171,6 @@ export function TopBar() {
       {/* The tab strip fills the middle and doubles as the window-drag region
           (its empty trailing area stays app-region: drag). Replaces the old spacer. */}
       <TabStrip />
-
-      <button
-        className="hp-iconbtn hp-new"
-        onClick={(e) => (e.shiftKey ? openNewPane() : addPane())}
-        title="New pane — Shift-click for options"
-        aria-label="New pane"
-      >
-        <IconPlus />
-      </button>
 
       <span className="hp-winsep" />
 

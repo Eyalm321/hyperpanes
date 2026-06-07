@@ -526,11 +526,116 @@ body {
   width: 100%;
 }
 
+/* ---- Body: the groups area + the right-side sidebar, side by side ---- */
+.hp-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
 /* ---- Groups (one mounted PaneArea per tab; only the active is shown) ---- */
 .hp-groups {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
+}
+
+/* ---- Right sidebar: quick-pane button + git-projects history ---- */
+.hp-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--hp-mantle);
+  border-left: 1px solid var(--hp-border);
+  padding: 8px;
+  gap: 8px;
+}
+
+.hp-sidebar-newpane {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--hp-border);
+  border-radius: 6px;
+  background: var(--hp-surface);
+  color: var(--hp-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.hp-sidebar-newpane:hover {
+  background: var(--hp-surface2);
+  border-color: var(--hp-accent);
+}
+
+.hp-sidebar-sep {
+  height: 1px;
+  background: var(--hp-border);
+}
+
+.hp-sidebar-projects {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hp-sidebar-empty {
+  margin: 4px 2px;
+  color: var(--hp-subtext);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.hp-project {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--hp-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hp-project:hover {
+  background: var(--hp-surface2);
+}
+
+.hp-project-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.hp-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hp-sidebar-rename {
+  width: 180px;
+  padding: 4px 6px;
+  border: 1px solid var(--hp-accent);
+  border-radius: 4px;
+  background: var(--hp-surface);
+  color: var(--hp-text);
+  font: inherit;
+  font-size: 13px;
 }
 
 .hp-group {
