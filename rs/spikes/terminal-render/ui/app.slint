@@ -1,0 +1,107 @@
+// Spike A harness UI. Each pane is a rounded, border-radiused, shadowed Rectangle
+// that *clips* a single Image — the terminal texture (GPU) or pixel buffer (software).
+// The point: prove Slint gives us border-radius / shadow / z-order "for free" composited
+// OVER the terminal surface.
+
+export struct PaneVisual {
+    surface: image,
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    title: string,
+    accent: color,
+}
+
+export component MainWindow inherits Window {
+    in property <[PaneVisual]> panes;
+    in property <string> hud: "";
+
+    title: "spike-terminal-render — Phase 0 Spike A";
+    preferred-width: 1600px;
+    preferred-height: 900px;
+    background: #0f0f17;
+
+    // Subtle desktop gradient so rounded corners + shadows are visibly distinct.
+    Rectangle {
+        background: @linear-gradient(135deg, #12121d 0%, #1a1320 100%);
+    }
+
+    for pane in panes: Rectangle {
+        x: pane.x;
+        y: pane.y;
+        width: pane.width;
+        height: pane.height;
+
+        // The deliverable visual contract: radius + drop shadow around the terminal.
+        border-radius: 12px;
+        clip: true;
+        background: #16161e;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #00000099;
+        drop-shadow-offset-y: 8px;
+
+        // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
+        Image {
+            source: pane.surface;
+            width: 100%;
+            height: 100%;
+            image-fit: fill;
+            image-rendering: pixelated;
+        }
+
+        // Hairline accent border, drawn OVER the terminal — proves compositing
+        // on top of the imported surface works.
+        Rectangle {
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: pane.accent.with-alpha(0.35);
+        }
+        // Fake inset shadow: a thin dark inner frame.
+        Rectangle {
+            border-radius: 12px;
+            border-width: 1.5px;
+            border-color: #00000055;
+        }
+
+        // Pane title chip, composited above everything (auto-sized by layout).
+        Rectangle {
+            x: 10px;
+            y: 8px;
+            height: 22px;
+            border-radius: 6px;
+            background: #000000aa;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                Text {
+                    vertical-alignment: center;
+                    text: pane.title;
+                    color: pane.accent;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+            }
+        }
+    }
+
+    // HUD overlay (FPS / mode / dirty state), top-right, auto-sized.
+    Rectangle {
+        x: parent.width - self.width - 14px;
+        y: 10px;
+        height: 24px;
+        border-radius: 6px;
+        background: #000000bb;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            Text {
+                vertical-alignment: center;
+                text: hud;
+                color: #9ece6a;
+                font-size: 12px;
+                font-family: "Consolas";
+            }
+        }
+    }
+}
