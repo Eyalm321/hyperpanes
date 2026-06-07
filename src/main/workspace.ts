@@ -121,11 +121,32 @@ function writeWorkspace(path: string, data: WorkspaceFile): boolean {
   }
 }
 
+// Where a second `hyperpanes …` launch puts its content: a brand-new OS window,
+// or merged into an existing one. `target` picks which existing window (the
+// last-focused, or a specific BrowserWindow id); `as` picks the unit — new
+// tab(s) per group, or the panes merged into that window's active tab.
+export type LaunchRouting =
+  | { mode: 'new-window' }
+  | { mode: 'attach'; target: 'focused' | 'last' | number; as: 'tab' | 'panes' };
+
 export interface ParsedCli {
   /** A workspace assembled from inline flags (`-c`, `--layout`, …), or null. */
   workspace: WorkspaceFile | null;
   /** A positional `.json` path, e.g. `hyperpanes ./dev.json`. */
   jsonPath: string | null;
+  /** New window vs attach-to-existing for this invocation (see LaunchRouting). */
+  routing: LaunchRouting;
+}
+
+// Coerce a `--attach=<target>` value into a routing target. Bare/`focused`/
+// `current` → the last-focused window; `last` → same intent (most-recent window);
+// a number → a specific BrowserWindow id; anything else falls back to focused.
+function parseRoutingTarget(v: string): 'focused' | 'last' | number {
+  const s = v.toLowerCase();
+  if (s === 'last') return 'last';
+  if (s === '' || s === 'focused' || s === 'current') return 'focused';
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : 'focused';
 }
 
 /**
@@ -147,6 +168,12 @@ export interface ParsedCli {
  *     `--cwd`, `--shell`, `--font` attach to the most recent `-c`.
  *   • `--cwd`/`--shell` seen before any `-c` are launch-wide defaults applied to
  *     every pane lacking its own; `--layout` sets the current (or next) tab.
+ *
+ * Launch routing (where a second invocation's content lands while the app runs):
+ *   • default → ATTACH to the focused window as new tab(s);
+ *   • `--new-window` (or any `--window` separator) → open new OS window(s);
+ *   • `--attach[=focused|last|<id>]` / `--into-current` → attach to that window;
+ *   • `--as tab` (default) | `--as panes` → attach unit when attaching.
  *
  * Output is back-compatible: with no `--window`/`--tab` it's the legacy
  * single-window `{ name, layout, panes }`; otherwise `{ name, windows }`. Both
@@ -180,6 +207,12 @@ export function parseCli(argv: string[], existsFn: (p: string) => boolean = exis
   // `--layout` before a tab exists is held until the next tab is created.
   let pendingLayout: string | undefined;
   let explicitStructure = false; // any --window / --tab seen → emit the windows shape
+  let usedWindowSeparator = false; // a --window was seen → default routing is new-window
+  let routingNewWindow = false; // explicit --new-window
+  let routingAttach = false; // explicit --attach / --into-current
+  let routingTarget: 'focused' | 'last' | number = 'focused';
+  let routingAs: 'tab' | 'panes' = 'tab';
+  let routingAsSet = false; // an explicit --as also forces attach mode
   let name: string | undefined;
   let defaultCwd: string | undefined;
   let defaultShell: string | undefined;
@@ -209,11 +242,35 @@ export function parseCli(argv: string[], existsFn: (p: string) => boolean = exis
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const value = () => args[++i];
+    // Launch-routing flags are handled before the structural switch so the
+    // `--flag=value` form works without disturbing the space-separated value
+    // flags below; each `continue`s past the switch.
+    const eq = a.indexOf('=');
+    const head = eq >= 0 ? a.slice(0, eq) : a;
+    const inline = eq >= 0 ? a.slice(eq + 1) : undefined;
+    if (head === '--new-window') {
+      routingNewWindow = true;
+      continue;
+    }
+    if (head === '--attach' || head === '--into-current') {
+      routingAttach = true;
+      routingTarget = parseRoutingTarget(inline ?? '');
+      continue;
+    }
+    if (head === '--as') {
+      const v = (inline ?? value() ?? '').toLowerCase();
+      if (v === 'panes' || v === 'tab') {
+        routingAs = v;
+        routingAsSet = true;
+      }
+      continue;
+    }
     switch (a) {
       case '--window':
         openWindow();
         headerScope = 'window';
         explicitStructure = true;
+        usedWindowSeparator = true;
         break;
       case '--tab':
         openTab();
@@ -277,9 +334,19 @@ export function parseCli(argv: string[], existsFn: (p: string) => boolean = exis
     }
   }
 
+  // Resolve routing: an explicit attach (--attach / --as) wins; else an explicit
+  // --new-window or any --window separator means new window(s); otherwise the
+  // default is to attach the content into the focused window as new tab(s).
+  const routing: LaunchRouting =
+    routingAttach || routingAsSet
+      ? { mode: 'attach', target: routingTarget, as: routingAs }
+      : routingNewWindow || usedWindowSeparator
+        ? { mode: 'new-window' }
+        : { mode: 'attach', target: 'focused', as: 'tab' };
+
   // Finish panes (label default + launch-wide cwd/shell), then prune empties.
   const allPanes = windows.flatMap((w) => w.tabs).flatMap((t) => t.panes);
-  if (allPanes.length === 0) return { workspace: null, jsonPath };
+  if (allPanes.length === 0) return { workspace: null, jsonPath, routing };
   for (const p of allPanes) {
     if (!p.label && p.command) p.label = p.command.trim().split(/\s+/)[0] || 'shell';
     if (defaultCwd && !p.cwd) p.cwd = defaultCwd;
@@ -292,13 +359,13 @@ export function parseCli(argv: string[], existsFn: (p: string) => boolean = exis
   if (!explicitStructure) {
     // Legacy single-window / single-tab shape.
     const tab = pruned[0].tabs[0];
-    return { workspace: { name, layout: tab.layout, panes: tab.panes }, jsonPath };
+    return { workspace: { name, layout: tab.layout, panes: tab.panes }, jsonPath, routing };
   }
   const winSpecs: WindowSpec[] = pruned.map((w) => ({
     title: w.title,
     groups: w.tabs.map<GroupSpec>((t) => ({ title: t.title, layout: t.layout, panes: t.panes }))
   }));
-  return { workspace: { name, windows: winSpecs }, jsonPath };
+  return { workspace: { name, windows: winSpecs }, jsonPath, routing };
 }
 
 const lastPath = () => join(app.getPath('userData'), 'last-workspace.json');
@@ -329,14 +396,19 @@ export function getInitialWindows(): WindowSpec[] {
   return windowsOf(getInitialWorkspace());
 }
 
-// The window list a second `hyperpanes …` invocation wants opened — its CLI/json
-// only (no last-session fallback: a relaunch with no args should just focus, not
-// reopen the saved session). Returns [] when the relaunch carried no content.
-export function resolveSecondInstanceWindows(argv: string[], cwd: string): WindowSpec[] {
-  const { workspace, jsonPath } = parseCli(argv);
-  if (workspace) return windowsOf(resolveCwds(workspace, cwd));
-  if (jsonPath) return windowsOf(readWorkspace(jsonPath));
-  return [];
+// The windows a second `hyperpanes …` invocation wants, plus how to route them
+// (new window vs attach into an existing one). CLI/json only — no last-session
+// fallback: a relaunch with no args should just focus, not reopen the saved
+// session. `windows` is [] when the relaunch carried no content (caller focuses).
+// A `.json` launch is always new-window (a file describes whole windows).
+export function resolveSecondInstanceWindows(
+  argv: string[],
+  cwd: string
+): { windows: WindowSpec[]; routing: LaunchRouting } {
+  const { workspace, jsonPath, routing } = parseCli(argv);
+  if (workspace) return { windows: windowsOf(resolveCwds(workspace, cwd)), routing };
+  if (jsonPath) return { windows: windowsOf(readWorkspace(jsonPath)), routing: { mode: 'new-window' } };
+  return { windows: [], routing };
 }
 
 export async function openWorkspaceDialog(win: BrowserWindow | null): Promise<WorkspaceFile | null> {

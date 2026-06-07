@@ -112,8 +112,14 @@ Work:
   seed (multiple tabs + active index), not just the single-`GroupPayload` tear-off seed.
   Main computes the window list and calls `spawnWindow` once per `WindowSpec`;
   `workspace:getInitial` stays as the fallback for the very first window only.
-- Default routing: a launch opens its **declared windows** (new windows). A
-  `--into-current` (later) can merge as tabs into the active window.
+- Default routing: **DONE (2026-06-07).** A second `hyperpanes …` now **attaches into the
+  focused window** by default (content lands as new tabs); `--new-window` (or any `--window`
+  separator) forces a new window, and `--attach[=focused|last|<id>]` / `--into-current` +
+  `--as tab|panes` make the target/unit explicit. `parseCli` emits a `LaunchRouting`;
+  `index.ts`'s `second-instance` calls `ipc.ts`'s `routeLaunch`, which spawns new windows or
+  dispatches a unified `attach` control command into the target window's renderer (a fresh
+  store action `appendGroups` adds the tabs). The same `attach` command backs the MCP
+  `open_tab` tool, so CLI and agents share one path. (First launch is always new-window.)
 - Persistence: `serializeSession` (`src/renderer/workspace/serialize.ts`) currently
   snapshots one window. Decide: extend autosave/restore to multi-window, or keep restore
   single-window for M0 and only honor `windows` on explicit file/CLI launch.

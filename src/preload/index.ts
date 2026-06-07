@@ -9,6 +9,7 @@ import type {
   GroupPayload,
   MetricsSnapshot,
   Project,
+  UpdateStatus,
   WindowSpec
 } from '../renderer/types';
 
@@ -209,6 +210,23 @@ const api = {
       const listener = (_e: unknown, status: AiStatus) => cb(status);
       ipcRenderer.on('ai:status', listener);
       return () => ipcRenderer.removeListener('ai:status', listener);
+    }
+  },
+
+  // Update-in-place (electron-updater, packaged-only). Preferences reads the
+  // version + autoCheck toggle and can trigger a manual check; the toast listens
+  // for status and calls quitAndInstall when the user clicks Restart. main owns
+  // the updater + the persisted autoCheck flag (mirrors control/ai).
+  update: {
+    getStatus: (): Promise<UpdateStatus> => ipcRenderer.invoke('update:getStatus'),
+    check: (): Promise<UpdateStatus> => ipcRenderer.invoke('update:check'),
+    setAutoCheck: (on: boolean): Promise<UpdateStatus> =>
+      ipcRenderer.invoke('update:setAutoCheck', on),
+    quitAndInstall: (): void => ipcRenderer.send('update:quitAndInstall'),
+    onStatus: (cb: (status: UpdateStatus) => void): (() => void) => {
+      const listener = (_e: unknown, status: UpdateStatus) => cb(status);
+      ipcRenderer.on('update:status', listener);
+      return () => ipcRenderer.removeListener('update:status', listener);
     }
   },
 

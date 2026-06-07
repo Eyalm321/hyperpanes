@@ -120,6 +120,59 @@ describe('applyControlCommand', () => {
     expect(panes.some((p) => p.label === 'extra' && p.command === 'top')).toBe(true);
   });
 
+  it('attach (as tab) appends fresh-shell tabs and returns their ids', () => {
+    reset();
+    const before = useWorkspace.getState().groups.length;
+    const ids = applyControlCommand({
+      type: 'attach',
+      as: 'tab',
+      groups: [
+        { title: 'db', layout: 'columns', panes: [{ label: 'psql', command: 'psql' }] },
+        { title: 'tests', panes: [{ label: 'unit', command: 'vitest' }] }
+      ]
+    }) as string[];
+    const groups = useWorkspace.getState().groups;
+    expect(groups).toHaveLength(before + 2);
+    expect(ids).toHaveLength(2);
+    // The returned ids are the two new tabs, and they carry fresh sessions.
+    const db = groups.find((g) => g.id === ids[0])!;
+    expect(db.title).toBe('db');
+    expect(db.panes[0].command).toBe('psql');
+    expect(db.panes[0].sessionUid).toBeTruthy();
+    // The first appended tab becomes active.
+    expect(useWorkspace.getState().activeId).toBe(ids[0]);
+  });
+
+  it('attach (as panes) merges panes into the active tab', () => {
+    reset();
+    const activeBefore = activeGroup(useWorkspace.getState());
+    const groupsBefore = useWorkspace.getState().groups.length;
+    const paneCountBefore = activeBefore.panes.length;
+    const ids = applyControlCommand({
+      type: 'attach',
+      as: 'panes',
+      groups: [{ panes: [{ label: 'extra', command: 'top' }, { label: 'watch', command: 'tail -f x' }] }]
+    }) as string[];
+    const s = useWorkspace.getState();
+    // No new tab — the panes land in the (same) active tab.
+    expect(s.groups).toHaveLength(groupsBefore);
+    const active = activeGroup(s);
+    expect(active.id).toBe(activeBefore.id);
+    expect(active.panes).toHaveLength(paneCountBefore + 2);
+    expect(ids).toHaveLength(2);
+    expect(active.panes.some((p) => p.command === 'top')).toBe(true);
+  });
+
+  it('attach defaults to tabs when `as` is omitted, and no-ops on empty groups', () => {
+    reset();
+    const before = useWorkspace.getState().groups.length;
+    applyControlCommand({ type: 'attach', groups: [{ panes: [{ label: 'x' }] }] });
+    expect(useWorkspace.getState().groups).toHaveLength(before + 1);
+    // Groups with no panes are dropped → a fully-empty attach is a no-op.
+    expect(applyControlCommand({ type: 'attach', groups: [{ panes: [] }] })).toBeUndefined();
+    expect(useWorkspace.getState().groups).toHaveLength(before + 1);
+  });
+
   it('newPane returns the new pane id and carries spawn-time meta (C/D)', () => {
     reset();
     const id = applyControlCommand({

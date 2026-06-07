@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { SessionManager } from './session-manager';
 import { resolvePaths, openResolvedPath } from './paths';
 import type { SpawnOptions } from './session';
-import type { GroupPayload } from '../renderer/types';
+import type { GroupPayload, UpdateStatus } from '../renderer/types';
 import { originForDrop, WINDOW_WIDTH, WINDOW_HEIGHT, DOCK_BAND_HEIGHT } from './window-geometry';
 import {
   getInitialWorkspace,
@@ -12,7 +12,8 @@ import {
   type WorkspaceFile,
   type WindowSpec,
   type WindowBounds,
-  type GroupSpec
+  type GroupSpec,
+  type LaunchRouting
 } from './workspace';
 import { ControlServer, type ControlWindowPayload, type ControlCommand } from './control-server';
 import { collectMetrics } from './metrics';
@@ -50,6 +51,12 @@ export interface IpcHandle {
     at?: { x: number; y: number },
     opts?: SpawnWindowOpts
   ) => BrowserWindow;
+  /**
+   * Place a launch's windows per its routing: open new OS windows, or attach the
+   * content into an existing window (as new tabs or merged panes). Used by both
+   * the first launch (always new windows) and a second `hyperpanes …` invocation.
+   */
+  routeLaunch: (windows: WindowSpec[], routing: LaunchRouting) => void;
 }
 
 /**
@@ -152,6 +159,10 @@ export function registerIpc(
   const pendingWindowSpec = new Map<number, WindowSpec>();
   // The session-of-record window — the only one that persists last-workspace.json.
   let primaryWindowId: number | null = null;
+  // The most-recently-focused window, so an attach launch (`hyperpanes …` from an
+  // external terminal, where the app itself isn't focused at that instant) can
+  // route into the window the user last worked in, not an arbitrary one.
+  let lastFocusedWindowId: number | null = null;
   // The in-flight live tear-off (Chrome-style). `floatWinId` is the real seeded
   // window that follows the cursor; while the cursor is over another window's tab
   // bar that float is HIDDEN and `previewWinId` shows a dock-preview ghost in that
@@ -317,6 +328,10 @@ export function registerIpc(
       cascadeIndex: opts?.cascadeIndex
     });
     if (primaryWindowId === null) primaryWindowId = win.id;
+    lastFocusedWindowId = win.id; // a fresh window is the natural attach target
+    win.on('focus', () => {
+      lastFocusedWindowId = win.id;
+    });
     if (seed) pendingSeed.set(win.id, seed);
     if (opts?.windowSpec) pendingWindowSpec.set(win.id, opts.windowSpec);
     win.on('closed', () => {
@@ -342,6 +357,61 @@ export function registerIpc(
       if (!quitting) writeSession();
     });
     return win;
+  };
+
+  // Open one new OS window per spec. Bounds win over a cascade stagger so
+  // file-described layouts land where asked and ad-hoc launches don't stack.
+  const openWindowsNew = (windows: WindowSpec[]) => {
+    windows.forEach((w, i) => {
+      const opts: SpawnWindowOpts = { windowSpec: w, cascadeIndex: i };
+      if (w.bounds) opts.bounds = w.bounds;
+      spawnWindow(undefined, undefined, opts);
+    });
+  };
+
+  // Resolve the existing window an attach launch should target. A numeric target
+  // is a specific BrowserWindow id; `focused`/`last` use the last-focused window,
+  // falling back to the OS-focused window, then any live window.
+  const resolveTargetWindow = (target: 'focused' | 'last' | number): BrowserWindow | null => {
+    if (typeof target === 'number') {
+      const w = BrowserWindow.fromId(target);
+      return w && !w.isDestroyed() ? w : null;
+    }
+    const tracked = lastFocusedWindowId != null ? BrowserWindow.fromId(lastFocusedWindowId) : null;
+    if (tracked && !tracked.isDestroyed()) return tracked;
+    const focused = BrowserWindow.getFocusedWindow();
+    if (focused && !focused.isDestroyed()) return focused;
+    return BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ?? null;
+  };
+
+  // Merge a launched window's tabs into an existing window: surface it, then
+  // dispatch a single `attach` command its renderer enacts (new tabs, or panes
+  // merged into the active tab). Reuses the control-command pipeline (always
+  // wired in the renderer), so it works whether or not the control server is on.
+  const attachInto = (win: BrowserWindow, spec: WindowSpec, as: 'tab' | 'panes') => {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+    void dispatchToWindow(win.id, { type: 'attach', groups: spec.groups, as });
+  };
+
+  // Place a launch per its routing (see LaunchRouting). Attach merges the FIRST
+  // window's tabs into the target window; any further windows from a multi-window
+  // launch can't share one target, so they open as new windows. With no window to
+  // attach to (e.g. all closed), attach degrades to opening new windows.
+  const routeLaunch = (windows: WindowSpec[], routing: LaunchRouting) => {
+    if (windows.length === 0) return;
+    if (routing.mode === 'new-window') {
+      openWindowsNew(windows);
+      return;
+    }
+    const target = resolveTargetWindow(routing.target);
+    if (!target) {
+      openWindowsNew(windows);
+      return;
+    }
+    const [first, ...rest] = windows;
+    attachInto(target, first, routing.as);
+    if (rest.length) openWindowsNew(rest);
   };
 
   ipcMain.handle('session:spawn', (e, opts: SpawnOptions) => {
@@ -695,10 +765,28 @@ export function registerIpc(
   // Load persisted AI settings + memory; start watching if left enabled (default: off).
   ai.init();
 
+  // ---- Update-in-place (electron-updater) — CONTRACT STUB ----
+  // Base-branch placeholder so the renderer (toast + Preferences) compiles and
+  // runs with update reported as unsupported/no-op. The `updater` fan-out track
+  // REPLACES this whole block with the real UpdaterService wiring (events
+  // broadcast on 'update:status' via `send`, autoCheck persisted in userData).
+  const updateStub = (): UpdateStatus => ({
+    stage: 'idle',
+    currentVersion: app.getVersion(),
+    supported: false,
+    autoCheck: false
+  });
+  ipcMain.handle('update:getStatus', () => updateStub());
+  ipcMain.handle('update:check', () => updateStub());
+  ipcMain.handle('update:setAutoCheck', (_e, _on: boolean) => updateStub());
+  ipcMain.on('update:quitAndInstall', () => {
+    /* no-op until the updater track lands */
+  });
+
   // ---- Diagnostics: memory/process/startup snapshot (Performance: Dump metrics) ----
   ipcMain.handle('metrics:get', () => collectMetrics());
 
-  return { manager, control, spawnWindow };
+  return { manager, control, spawnWindow, routeLaunch };
 }
 
 // First non-minimized window (in BrowserWindow.getAllWindows() / creation order)

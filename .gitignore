@@ -22,3 +22,5 @@ bench/results/
 
 # fan-out orchestration scratch (handoffs, contracts, plan.json)
 .fanout/
+# per-worktree handoff copied in by make-worktrees.ps1 (context, never committed)
+FANOUT-HANDOFF.md

@@ -102,6 +102,7 @@ interface WorkspaceState {
   markExited: (id: string, code: number) => void;
   loadWorkspace: (file: WorkspaceFile) => void; // into the active tab
   loadSession: (file: WorkspaceFile) => void; // replace all tabs
+  appendGroups: (specs: GroupSpec[]) => string[]; // add fresh-shell tabs (launch attach); returns new tab ids
 }
 
 // When zoomed, navigation keeps the zoom glued to the newly focused pane.
@@ -869,6 +870,27 @@ export const useWorkspace = create<WorkspaceState>((set, get) => {
         const idx =
           file.active != null && file.active >= 0 && file.active < groups.length ? file.active : 0;
         return { groups, activeId: groups[idx].id, closed: s.closed, groupSeq };
-      })
+      }),
+
+    // Append launch-described tabs to THIS window (a second `hyperpanes …`
+    // attaching into it). groupFromSpec mints fresh ids + sessionUids, so each tab
+    // gets new shells (command panes run, interactive shells start clean) — unlike
+    // injectGroup, which re-homes a live torn-off group. The first new tab becomes
+    // active. A pristine window (one empty tab) is replaced rather than appended to.
+    appendGroups: (specs) => {
+      if (specs.length === 0) return [];
+      const built: Group[] = [];
+      set((s) => {
+        let groupSeq = s.groupSeq;
+        for (const spec of specs) {
+          groupSeq += 1;
+          built.push(groupFromSpec(spec, `workspace ${groupSeq}`));
+        }
+        const pristine = s.groups.length === 1 && s.groups[0].panes.length === 0;
+        const groups = pristine ? built : [...s.groups, ...built];
+        return { groups, activeId: built[0].id, groupSeq };
+      });
+      return built.map((g) => g.id);
+    }
   };
 });

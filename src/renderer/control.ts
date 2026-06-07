@@ -1,7 +1,7 @@
 import { useWorkspace, type Group } from './store/useWorkspace';
 import { useIdle } from './store/useIdle';
 import { paneScreens } from './paneScreens';
-import type { ControlCommand, ControlWindowPayload } from './types';
+import type { ControlCommand, ControlWindowPayload, GroupSpec, Layout, PaneSpec } from './types';
 
 // Bridge between this window's store and the main-process control API (M2).
 // `buildControlPayload` snapshots the window's structure for `GET /state`;
@@ -84,6 +84,52 @@ const metaPatch = (v: unknown): Record<string, string | null> | undefined => {
   return Object.keys(out).length ? out : undefined;
 };
 
+const num = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
+
+// Coerce an untrusted pane spec (from the launch attach path / an agent over
+// /command) into a PaneSpec, dropping fields of the wrong type. Same defensive
+// posture as metaRecord — groupFromSpec then re-validates layout/sizes downstream.
+function coercePaneSpec(v: unknown): PaneSpec {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const spec: PaneSpec = {};
+  const set = <K extends keyof PaneSpec>(k: K, val: PaneSpec[K] | undefined) => {
+    if (val !== undefined) spec[k] = val;
+  };
+  set('label', str(o.label));
+  set('subtitle', str(o.subtitle));
+  set('color', str(o.color));
+  set('command', str(o.command));
+  set('args', strArray(o.args));
+  set('cwd', str(o.cwd));
+  set('shell', str(o.shell));
+  set('fontSize', num(o.fontSize));
+  set('meta', metaRecord(o.meta));
+  set('showFrame', bool(o.showFrame));
+  set('showDot', bool(o.showDot));
+  return spec;
+}
+
+// Coerce an untrusted group spec into a GroupSpec, or null if it has no panes.
+function coerceGroupSpec(v: unknown): GroupSpec | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const panes = Array.isArray(o.panes) ? o.panes.map(coercePaneSpec) : [];
+  if (panes.length === 0) return null;
+  const spec: GroupSpec = { panes };
+  if (str(o.title) != null) spec.title = str(o.title);
+  if (str(o.layout) != null) spec.layout = str(o.layout) as Layout;
+  if (Array.isArray(o.sizes)) {
+    const sizes = (o.sizes as unknown[]).filter((n): n is number => typeof n === 'number');
+    if (sizes.length) spec.sizes = sizes;
+  }
+  if (num(o.mainFraction) != null) spec.mainFraction = num(o.mainFraction);
+  if (num(o.focused) != null) spec.focused = num(o.focused);
+  if (num(o.zoomed) != null) spec.zoomed = num(o.zoomed);
+  return spec;
+}
+
 // Enact a control command. Unknown types and missing targets are no-ops — the
 // server already resolved the target window, so this runs in the right renderer.
 // Returns a command-specific result (newPane → the new pane id) that App relays
@@ -136,6 +182,32 @@ export function applyControlCommand(cmd: ControlCommand): unknown {
         meta: metaRecord(pane.meta),
         env: metaRecord(pane.env)
       });
+    }
+    case 'attach': {
+      // Launch attach (a second `hyperpanes …` routed into this window) and the
+      // MCP equivalent. `as:'tab'` (default) adds each group as a fresh-shell tab;
+      // `as:'panes'` merges all the groups' panes into the active tab. Returns the
+      // new tab ids (tab) or new pane ids (panes) so a caller can map them (D).
+      const groups = (Array.isArray(cmd.groups) ? cmd.groups : [])
+        .map(coerceGroupSpec)
+        .filter((g): g is GroupSpec => g != null);
+      if (groups.length === 0) return undefined;
+      if (cmd.as === 'panes') {
+        return groups
+          .flatMap((g) => g.panes)
+          .map((p) =>
+            ws.addPane({
+              label: p.label,
+              command: p.command,
+              args: p.args,
+              cwd: p.cwd,
+              shell: p.shell,
+              color: p.color,
+              meta: p.meta
+            })
+          );
+      }
+      return ws.appendGroups(groups);
     }
     case 'readScreen': {
       // Rendered-screen read (interactive-pane-driving plan C1): serialize this

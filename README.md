@@ -230,12 +230,28 @@ hyperpanes --window --name app --layout main-stack \
 | `--layout <id>` | Current (or next) tab's layout: `auto` · `single` · `columns` · `rows` · `grid` · `main-stack`. |
 | `--name <name>` | Titles the current scope: window (after `--window`), tab (after `--tab`), else the workspace. |
 
+**New window vs. attach.** While the app is already running, a second `hyperpanes …` invocation
+**attaches into the focused window** by default (its content shows up as new tab(s) there) rather than
+spawning a separate window. Use a `--window` separator or `--new-window` when you actually want a new
+window. Routing flags:
+
+| Flag | Meaning |
+| --- | --- |
+| *(default)* | Attach the launched content into the **focused** window as new tab(s). |
+| `--new-window` | Force a brand‑new OS window (today's pre‑attach behavior). |
+| `--attach[=focused\|last\|<id>]`, `--into-current` | Attach into a specific existing window (default `focused`; `<id>` is a window id). |
+| `--as tab` *(default)* / `--as panes` | Attach unit: each group as a new **tab**, or merge the panes into the target window's **active tab**. |
+
+A `--window` separator implies new‑window intent, so the multi‑window example above still opens its
+windows as new ones. `--attach` overrides that. A positional `.json` launch always opens new windows.
+
 > [!TIP]
 > Without any `--window`/`--tab` it stays the simple single-tab launch. Inline `-c` flags take
 > precedence over a positional `.json` path. During development, pass args after a `--`:
 > `npm run dev -- -c "npm run dev"`. On a packaged install, call the `hyperpanes` executable (its
 > install folder is added to `PATH`). hyperpanes runs as a **single instance**: a second
-> `hyperpanes …` while it's open routes its windows into the running app.
+> `hyperpanes …` while it's open routes its content into the running app (attaching by default; see
+> above).
 
 ## Keyboard shortcuts
 

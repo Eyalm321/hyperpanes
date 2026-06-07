@@ -179,6 +179,35 @@ export interface AiPanePublish {
   muted: boolean;
 }
 
+// ---- Update-in-place (in-app auto-update via electron-updater) ----
+// The lifecycle of an update check, surfaced to the toast + Preferences. The
+// updater itself lives in main (packaged-only); the renderer only reads status
+// and triggers checks/restart through window.hp.update.
+export type UpdateStage =
+  | 'idle' // nothing happening yet
+  | 'checking' // a check is in flight
+  | 'available' // a newer version was found (download starting)
+  | 'downloading' // the new version is downloading (see `percent`)
+  | 'downloaded' // ready to install — the toast offers Restart
+  | 'up-to-date' // last check found nothing newer
+  | 'error'; // the last check/download failed (see `error`)
+
+export interface UpdateStatus {
+  stage: UpdateStage;
+  currentVersion: string; // app.getVersion()
+  newVersion?: string; // the available/downloaded version, when known
+  percent?: number; // 0..100 while downloading
+  error?: string; // human-readable reason when stage==='error'
+  // False in dev / unpackaged builds (electron-updater needs latest.yml from a
+  // real release), so the UI hides itself instead of showing dead controls.
+  supported: boolean;
+  // Whether to check automatically on launch + periodically. Owned/persisted by
+  // MAIN (update-settings.json), toggled via window.hp.update.setAutoCheck —
+  // mirrors how the control API / ambient AI own their own enable flag.
+  autoCheck: boolean;
+  lastCheckedAt?: number; // epoch ms of the last completed check
+}
+
 // ---- Performance metrics (diagnostics) ----
 // A point-in-time snapshot for the "Performance: Dump metrics" command: cold-start
 // milestones (main-process), plus per-process memory from app.getAppMetrics(). The

@@ -1,12 +1,8 @@
 import { mark } from './metrics'; // first import → t0 ≈ process start
 import { app, BrowserWindow, Menu } from 'electron';
 import { createWindow } from './window';
-import { registerIpc, type IpcHandle, type SpawnWindowOpts } from './ipc';
-import {
-  getInitialWindows,
-  resolveSecondInstanceWindows,
-  type WindowSpec
-} from './workspace';
+import { registerIpc, type IpcHandle } from './ipc';
+import { getInitialWindows, resolveSecondInstanceWindows } from './workspace';
 import { join } from 'node:path';
 
 // A dev run (electron-vite dev / preview — anything that isn't the packaged,
@@ -28,17 +24,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   let spawnWindow: IpcHandle['spawnWindow'] | null = null;
-
-  // Open a window per spec; bounds win over a cascade stagger so file-described
-  // layouts land where asked and ad-hoc multi-window launches don't stack.
-  const openWindows = (windows: WindowSpec[]) => {
-    if (!spawnWindow) return;
-    windows.forEach((w, i) => {
-      const opts: SpawnWindowOpts = { windowSpec: w, cascadeIndex: i };
-      if (w.bounds) opts.bounds = w.bounds;
-      spawnWindow!(undefined, undefined, opts);
-    });
-  };
+  let routeLaunch: IpcHandle['routeLaunch'] | null = null;
 
   const focusExisting = () => {
     const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
@@ -48,12 +34,14 @@ if (!app.requestSingleInstanceLock()) {
     }
   };
 
-  // A second launch while we're already running. Open the windows it asked for;
-  // a bare relaunch (no CLI/json) just surfaces the running app.
+  // A second launch while we're already running. Route its windows per the parsed
+  // routing — attach into the focused window by default, or open new window(s) when
+  // asked (`--new-window`/`--window`). A bare relaunch (no CLI/json) just surfaces
+  // the running app.
   app.on('second-instance', (_e, argv, cwd) => {
-    const windows = resolveSecondInstanceWindows(argv, cwd);
+    const { windows, routing } = resolveSecondInstanceWindows(argv, cwd);
     if (windows.length === 0) focusExisting();
-    else openWindows(windows);
+    else routeLaunch?.(windows, routing);
   });
 
   app.whenReady().then(() => {
@@ -66,6 +54,7 @@ if (!app.requestSingleInstanceLock()) {
     // per-window session ownership so closing one window reaps only its sessions.
     const handle = registerIpc(createWindow);
     spawnWindow = handle.spawnWindow;
+    routeLaunch = handle.routeLaunch;
     const { manager, control } = handle;
     // Terminals no longer kill their pty on unmount (so panes/tabs can move
     // between tabs and windows without restarting), so reap every session when
@@ -78,10 +67,11 @@ if (!app.requestSingleInstanceLock()) {
 
     // Split the launch workspace (CLI / json / restored last session) across one
     // window per spec; nothing to restore → a single bare window (the renderer
-    // seeds a shell).
+    // seeds a shell). The first launch always opens new windows — there's nothing
+    // running to attach into — so routing is forced new-window here.
     const windows = getInitialWindows();
     if (windows.length === 0) spawnWindow();
-    else openWindows(windows);
+    else routeLaunch(windows, { mode: 'new-window' });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) spawnWindow?.();

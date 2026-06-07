@@ -10,7 +10,11 @@ const argv = (...rest: string[]) => ['/path/to/hyperpanes', ...rest];
 
 describe('parseCli', () => {
   it('returns nothing for a bare launch', () => {
-    expect(parseCli(argv())).toEqual({ workspace: null, jsonPath: null });
+    expect(parseCli(argv())).toEqual({
+      workspace: null,
+      jsonPath: null,
+      routing: { mode: 'attach', target: 'focused', as: 'tab' }
+    });
   });
 
   it('builds panes from repeated -c flags', () => {
@@ -114,6 +118,62 @@ describe('parseCli', () => {
     expect(workspace?.windows).toEqual([
       { title: undefined, groups: [{ title: undefined, layout: undefined, panes: [{ command: 'only', label: 'only' }] }] }
     ]);
+  });
+});
+
+// ---- launch routing: new window vs attach into an existing one ----
+describe('parseCli routing', () => {
+  it('defaults a bare/legacy launch to attach the focused window as a tab', () => {
+    const { routing } = parseCli(argv('-c', 'npm run dev'));
+    expect(routing).toEqual({ mode: 'attach', target: 'focused', as: 'tab' });
+  });
+
+  it('defaults a --tab-only launch (single window) to attach', () => {
+    const { routing } = parseCli(argv('--tab', '-c', 'a', '--tab', '-c', 'b'));
+    expect(routing).toEqual({ mode: 'attach', target: 'focused', as: 'tab' });
+  });
+
+  it('treats a --window separator as new-window intent by default', () => {
+    const { routing } = parseCli(argv('--window', '-c', 'a'));
+    expect(routing).toEqual({ mode: 'new-window' });
+  });
+
+  it('honors an explicit --new-window flag', () => {
+    const { routing } = parseCli(argv('--new-window', '-c', 'a'));
+    expect(routing).toEqual({ mode: 'new-window' });
+  });
+
+  it('--attach forces attach even when a --window separator is present', () => {
+    const { routing } = parseCli(argv('--attach', '--window', '-c', 'a'));
+    expect(routing).toEqual({ mode: 'attach', target: 'focused', as: 'tab' });
+  });
+
+  it('parses --attach=last and --attach=<id> targets', () => {
+    expect(parseCli(argv('--attach=last', '-c', 'a')).routing).toEqual({
+      mode: 'attach',
+      target: 'last',
+      as: 'tab'
+    });
+    expect(parseCli(argv('--attach=3', '-c', 'a')).routing).toEqual({
+      mode: 'attach',
+      target: 3,
+      as: 'tab'
+    });
+  });
+
+  it('--as panes implies attach and sets the unit', () => {
+    const { routing } = parseCli(argv('--as', 'panes', '-c', 'a'));
+    expect(routing).toEqual({ mode: 'attach', target: 'focused', as: 'panes' });
+  });
+
+  it('treats --into-current as attach to the focused window', () => {
+    const { routing } = parseCli(argv('--into-current', '-c', 'a'));
+    expect(routing).toEqual({ mode: 'attach', target: 'focused', as: 'tab' });
+  });
+
+  it('does not let a routing flag leak into the parsed panes', () => {
+    const { workspace } = parseCli(argv('--new-window', '--as', 'panes', '-c', 'npm run dev'));
+    expect(workspace?.panes).toEqual([{ command: 'npm run dev', label: 'npm' }]);
   });
 });
 

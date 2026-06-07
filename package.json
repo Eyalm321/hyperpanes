@@ -1,6 +1,6 @@
 {
   "name": "hyperpanes",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A terminal workspace: one window of tiled, labeled, color-framed terminal panes.",
   "author": "",
   "license": "MIT",
