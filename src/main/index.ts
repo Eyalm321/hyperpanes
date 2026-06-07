@@ -7,6 +7,17 @@ import {
   resolveSecondInstanceWindows,
   type WindowSpec
 } from './workspace';
+import { join } from 'node:path';
+
+// A dev run (electron-vite dev / preview — anything that isn't the packaged,
+// installed app) gets its OWN userData directory, so the dev build doesn't fight
+// the INSTALLED app for the single-instance lock (the lock file lives inside
+// userData). With separate userData they run side by side with independent
+// settings/sessions. Must run BEFORE requestSingleInstanceLock below (the lock is
+// keyed off this path) and before anything first reads a userData path.
+if (!app.isPackaged) {
+  app.setPath('userData', join(app.getPath('appData'), 'hyperpanes-dev'));
+}
 
 // One canonical process. A second `hyperpanes …` invocation must route into THIS
 // process (adding windows) rather than starting a rival — the foundation under
