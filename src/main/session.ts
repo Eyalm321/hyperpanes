@@ -229,6 +229,13 @@ export class Session extends EventEmitter {
     // file is the shell (command-via-shell / interactive), or the command itself
     // when an explicit argv was given (direct spawn, no re-parse — P4a).
     const { file, args } = resolveSpawn(shell, opts.command, opts.args, opts.cwd, opts.env);
+    // node-pty/conpty launches `file` directly and won't find a bare shell NAME
+    // like 'cmd' (no extension, not a full path) — only an absolute path or a name
+    // WITH extension resolves, which is why an explicit cmd/pwsh/powershell pick
+    // failed. Resolve to a full path on Windows (idempotent for an already-resolved
+    // direct-spawn file or an absolute path; returns the input unchanged if unfound).
+    const spawnFile =
+      process.platform === 'win32' ? resolveWindowsCommand(file, opts.cwd, opts.env) : file;
 
     // Shell integration: ONLY on the interactive branch (no `command`). Loads our
     // init script so the shell reports its cwd (OSC 7) and turns on history
@@ -268,7 +275,7 @@ export class Session extends EventEmitter {
       env.HYPERPANES_CONTROL_FILE = join(app.getPath('userData'), 'control.json');
     }
 
-    this.pty = pty.spawn(file, finalArgs, {
+    this.pty = pty.spawn(spawnFile, finalArgs, {
       name: 'xterm-256color',
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
