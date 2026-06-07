@@ -42,12 +42,26 @@ function layoutSubmenu(current: Layout, paneCount: number, pick: (l: Layout) => 
 // selected/bordered swatch tracks the current color even after you pick a new one
 // — the menu stays open, but the static menu data wouldn't otherwise update.
 function MenuColorSwatches({ paneId, groupId }: { paneId: string; groupId: string }) {
-  const color = useWorkspace((s) => {
+  const pane = useWorkspace((s) => {
     const g = s.groups.find((x) => x.id === groupId);
-    return g?.panes.find((p) => p.id === paneId)?.color ?? '';
+    return g?.panes.find((p) => p.id === paneId);
   });
   const recolorPane = useWorkspace((s) => s.recolorPane);
-  return <ColorSwatches value={color} onChange={(c) => recolorPane(paneId, c)} />;
+  const setPaneFrame = useWorkspace((s) => s.setPaneFrame);
+  const setPaneDot = useWorkspace((s) => s.setPaneDot);
+  const gFrame = useSettings((s) => s.showFrame);
+  const gDot = useSettings((s) => s.showDot);
+  if (!pane) return null;
+  return (
+    <ColorSwatches
+      value={pane.color}
+      onChange={(c) => recolorPane(paneId, c)}
+      frameOn={pane.showFrame ?? gFrame}
+      dotOn={pane.showDot ?? gDot}
+      onToggleFrame={(on) => setPaneFrame(paneId, on)}
+      onToggleDot={(on) => setPaneDot(paneId, on)}
+    />
+  );
 }
 
 const colorSubmenu = (paneId: string, groupId: string): MenuItem[] => [

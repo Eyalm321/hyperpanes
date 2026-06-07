@@ -1210,6 +1210,19 @@ body {
   cursor: pointer;
 }
 
+/* "No color" swatch — an empty chip with a red diagonal "/" slash (Photoshop). */
+.hp-swatch-none {
+  background-color: var(--hp-surface);
+  background-image: linear-gradient(
+    to top left,
+    transparent calc(50% - 1px),
+    #e5484d calc(50% - 1px),
+    #e5484d calc(50% + 1px),
+    transparent calc(50% + 1px)
+  );
+  border-color: var(--hp-border);
+}
+
 /* ---- Modal (new pane) ---- */
 .hp-modal-backdrop {
   position: fixed;

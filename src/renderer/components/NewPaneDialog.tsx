@@ -72,25 +72,14 @@ export function NewPaneDialog() {
 
         <div className="hp-field">
           <span>Color</span>
-          <ColorSwatches value={color} onChange={setColor} />
-        </div>
-
-        <div className="hp-field">
-          <span>Show</span>
-          <div style={{ display: 'flex', gap: '16px' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={showFrame}
-                onChange={(e) => setShowFrame(e.target.checked)}
-              />
-              Frame color
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-              <input type="checkbox" checked={showDot} onChange={(e) => setShowDot(e.target.checked)} />
-              Color dot
-            </label>
-          </div>
+          <ColorSwatches
+            value={color}
+            onChange={setColor}
+            frameOn={showFrame}
+            dotOn={showDot}
+            onToggleFrame={setShowFrame}
+            onToggleDot={setShowDot}
+          />
         </div>
 
         <label className="hp-field">
