@@ -9,7 +9,17 @@ publish = false
 [workspace]
 
 [dependencies]
-# Starting points — the spike agent finalizes versions/features. See FANOUT-HANDOFF.md.
-slint = "1.16"
-# Add as needed: windows (GetCursorPos, WM_NCHITTEST, layered/click-through window),
-# raw-window-handle.
+# Slint with the raw-window-handle-06 feature so we can pull the native HWND out of
+# each top-level window (needed for GetWindowRect hit-testing).
+slint = { version = "1.16", features = ["raw-window-handle-06"] }
+raw-window-handle = "0.6"
+
+# Win32 glue: global cursor (GetCursorPos), button-release polling (GetAsyncKeyState),
+# the layered/click-through/topmost "ghost" window, and window-rect hit-testing.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+] }
