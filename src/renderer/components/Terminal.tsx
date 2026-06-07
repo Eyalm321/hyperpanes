@@ -81,6 +81,12 @@ function TerminalImpl({ paneId, sessionUid, command, args, cwd, shell, env, focu
   const fontSizeRef = useRef(fontSize);
   fontSizeRef.current = fontSize;
 
+  // Per-pane scrollback cap. Read non-reactively in the mount effect's XTerm
+  // constructor (like font size), and re-applied live by the effect below.
+  const scrollback = useSettings((s) => s.scrollback);
+  const scrollbackRef = useRef(scrollback);
+  scrollbackRef.current = scrollback;
+
   // Appearance: terminal color theme + font family, applied live (see effects).
   const terminalTheme = useSettings((s) => s.terminalTheme);
   const fontFamily = useSettings((s) => s.fontFamily) || DEFAULT_FONT_FAMILY;
@@ -104,6 +110,7 @@ function TerminalImpl({ paneId, sessionUid, command, args, cwd, shell, env, focu
     const term = new XTerm({
       fontFamily: useSettings.getState().fontFamily || DEFAULT_FONT_FAMILY,
       fontSize: fontSizeRef.current,
+      scrollback: scrollbackRef.current,
       cursorBlink: true,
       allowProposedApi: true,
       theme: TERMINAL_THEMES[useSettings.getState().terminalTheme]
@@ -475,6 +482,17 @@ function TerminalImpl({ paneId, sessionUid, command, args, cwd, shell, env, focu
     const term = termRef.current;
     if (term) term.options.theme = TERMINAL_THEMES[terminalTheme];
   }, [terminalTheme]);
+
+  // Live-apply the scrollback cap (no refit — it doesn't change cell metrics).
+  // Lowering it trims the oldest history lines immediately on every mounted pane
+  // (including hidden ones), which is the memory-reclaim path.
+  const lastScrollback = useRef(scrollback);
+  useEffect(() => {
+    if (scrollback === lastScrollback.current) return;
+    lastScrollback.current = scrollback;
+    const term = termRef.current;
+    if (term) term.options.scrollback = scrollback;
+  }, [scrollback]);
 
   // Live-apply the terminal font family. Font metrics change, so refit + resync
   // the pty to the new cell grid.

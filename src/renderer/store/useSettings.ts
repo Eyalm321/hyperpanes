@@ -12,6 +12,14 @@ const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 6;
 const MAX_FONT_SIZE = 40;
 
+// Per-pane terminal scrollback (history lines kept above the viewport). xterm
+// allocates buffer lines lazily as output arrives, so this mainly caps growth —
+// the real cost is filled panes multiplied across every mounted pane (all panes
+// in every tab stay mounted). 0 = viewport-only (a hard memory floor).
+const DEFAULT_SCROLLBACK = 5000;
+const MIN_SCROLLBACK = 0;
+const MAX_SCROLLBACK = 100000;
+
 // Persisted app-wide preferences (distinct from useUI's transient modal state).
 // Kept deliberately small; each field has a "use the built-in default" empty
 // value so absence never breaks an older saved blob.
@@ -29,6 +37,9 @@ export interface Settings {
   fontFamily: string;
   // Default terminal font size for panes that haven't been individually zoomed.
   defaultFontSize: number;
+  // Per-pane scrollback (history lines). Caps buffer growth across all mounted
+  // panes; lower it to reclaim memory with many panes, raise it for log-watching.
+  scrollback: number;
   // Whether each pane shows its colored frame border + header tint.
   showFrame: boolean;
   // Whether each pane shows its color dot (which is also the color picker).
@@ -59,6 +70,7 @@ const DEFAULTS: Settings = {
   terminalTheme: DEFAULT_TERMINAL_THEME,
   fontFamily: '',
   defaultFontSize: DEFAULT_FONT_SIZE,
+  scrollback: DEFAULT_SCROLLBACK,
   showFrame: true,
   showDot: true,
   clickablePaths: true,
@@ -97,6 +109,7 @@ const pick = (s: SettingsState): Settings => ({
   terminalTheme: s.terminalTheme,
   fontFamily: s.fontFamily,
   defaultFontSize: s.defaultFontSize,
+  scrollback: s.scrollback,
   showFrame: s.showFrame,
   showDot: s.showDot,
   clickablePaths: s.clickablePaths,
@@ -108,6 +121,8 @@ const pick = (s: SettingsState): Settings => ({
 });
 
 const clampFont = (n: number) => Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, Math.round(n)));
+const clampScrollback = (n: number) =>
+  Math.max(MIN_SCROLLBACK, Math.min(MAX_SCROLLBACK, Math.round(n)));
 
 interface SettingsState extends Settings {
   setDefaultShell: (shell: string) => void;
@@ -115,6 +130,7 @@ interface SettingsState extends Settings {
   setTerminalTheme: (theme: TerminalThemeName) => void;
   setFontFamily: (family: string) => void;
   setDefaultFontSize: (size: number) => void;
+  setScrollback: (lines: number) => void;
   setShowFrame: (show: boolean) => void;
   setShowDot: (show: boolean) => void;
   setClickablePaths: (on: boolean) => void;
@@ -152,6 +168,12 @@ export const useSettings = create<SettingsState>((set) => ({
       const defaultFontSize = clampFont(size);
       persist(pick({ ...s, defaultFontSize }));
       return { defaultFontSize };
+    }),
+  setScrollback: (lines) =>
+    set((s) => {
+      const scrollback = clampScrollback(lines);
+      persist(pick({ ...s, scrollback }));
+      return { scrollback };
     }),
   setShowFrame: (showFrame) =>
     set((s) => {

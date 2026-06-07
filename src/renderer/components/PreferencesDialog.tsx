@@ -58,6 +58,7 @@ interface AppearanceDraft {
   terminalTheme: TerminalThemeName;
   fontFamily: string;
   defaultFontSize: number;
+  scrollback: number;
   showFrame: boolean;
   showDot: boolean;
   idleAlert: boolean;
@@ -68,6 +69,7 @@ interface AppearanceDraft {
 // Mirror useSettings' clamps so the draft shows the same bounds the setters apply.
 const clampPrefFont = (n: number) => Math.max(6, Math.min(40, Math.round(n)));
 const clampPrefSeconds = (n: number) => Math.max(2, Math.min(120, Math.round(n)));
+const clampPrefScrollback = (n: number) => Math.max(0, Math.min(100000, Math.round(n)));
 
 // True when the draft differs from the live settings — i.e. there are un-applied
 // appearance edits, so closing should prompt to save or discard.
@@ -79,6 +81,7 @@ function isAppearanceDirty(draft: AppearanceDraft | null): boolean {
     draft.terminalTheme !== s.terminalTheme ||
     draft.fontFamily !== s.fontFamily ||
     draft.defaultFontSize !== s.defaultFontSize ||
+    draft.scrollback !== s.scrollback ||
     draft.showFrame !== s.showFrame ||
     draft.showDot !== s.showDot ||
     draft.idleAlert !== s.idleAlert ||
@@ -114,6 +117,8 @@ export function PreferencesDialog() {
   const setFontFamily = useSettings((s) => s.setFontFamily);
   const defaultFontSize = useSettings((s) => s.defaultFontSize);
   const setDefaultFontSize = useSettings((s) => s.setDefaultFontSize);
+  const scrollback = useSettings((s) => s.scrollback);
+  const setScrollback = useSettings((s) => s.setScrollback);
   const showFrame = useSettings((s) => s.showFrame);
   const setShowFrame = useSettings((s) => s.setShowFrame);
   const showDot = useSettings((s) => s.showDot);
@@ -143,6 +148,7 @@ export function PreferencesDialog() {
     terminalTheme,
     fontFamily,
     defaultFontSize,
+    scrollback,
     showFrame,
     showDot,
     idleAlert,
@@ -160,6 +166,7 @@ export function PreferencesDialog() {
       terminalTheme: s.terminalTheme,
       fontFamily: s.fontFamily,
       defaultFontSize: s.defaultFontSize,
+      scrollback: s.scrollback,
       showFrame: s.showFrame,
       showDot: s.showDot,
       idleAlert: s.idleAlert,
@@ -181,6 +188,7 @@ export function PreferencesDialog() {
     if (d.terminalTheme !== s.terminalTheme) setTerminalTheme(d.terminalTheme);
     if (d.fontFamily !== s.fontFamily) setFontFamily(d.fontFamily);
     if (d.defaultFontSize !== s.defaultFontSize) setDefaultFontSize(d.defaultFontSize);
+    if (d.scrollback !== s.scrollback) setScrollback(d.scrollback);
     if (d.showFrame !== s.showFrame) setShowFrame(d.showFrame);
     if (d.showDot !== s.showDot) setShowDot(d.showDot);
     if (d.idleAlert !== s.idleAlert) setIdleAlert(d.idleAlert);
@@ -567,6 +575,33 @@ export function PreferencesDialog() {
                         title="Larger"
                         onClick={() =>
                           patchAppearance({ defaultFontSize: clampPrefFont(a.defaultFontSize + 1) })
+                        }
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <div className="hp-kb-row">
+                    <span className="hp-kb-label">
+                      Scrollback lines
+                      <em className="hp-kb-hint">history kept per pane · 0 = none · caps memory</em>
+                    </span>
+                    <div className="hp-kb-right">
+                      <button
+                        className="hp-kb-act"
+                        title="Fewer"
+                        onClick={() =>
+                          patchAppearance({ scrollback: clampPrefScrollback(a.scrollback - 1000) })
+                        }
+                      >
+                        −
+                      </button>
+                      <span className="hp-kb-combo static">{a.scrollback}</span>
+                      <button
+                        className="hp-kb-act"
+                        title="More"
+                        onClick={() =>
+                          patchAppearance({ scrollback: clampPrefScrollback(a.scrollback + 1000) })
                         }
                       >
                         +

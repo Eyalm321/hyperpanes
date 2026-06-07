@@ -15,7 +15,9 @@ const BATCH_MAX_SIZE = 200 * 1024;
 
 // Recent output kept so a re-attaching window (pane moved to another tab/window)
 // can replay history into its fresh terminal instead of showing a blank pane.
-const REPLAY_BUFFER_SIZE = 256 * 1024;
+// 128KB still restores many screens of recent output; halving from 256KB cuts
+// resident replay per live pty and the per-flush concat/slice copy size.
+const REPLAY_BUFFER_SIZE = 128 * 1024;
 
 class DataBatcher extends EventEmitter {
   private data = '';

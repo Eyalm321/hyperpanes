@@ -239,6 +239,27 @@ export function registerIpc(
     }
   };
 
+  // Like `send`, but routes a per-session event to ONLY the window that owns the
+  // session (the `owner` map, updated on every spawn/attach). The session:data
+  // stream is the hottest IPC path (a flush every ~16ms under load); broadcasting
+  // it to every window serialized the payload N times for no reason — non-owner
+  // renderers already drop it via their uid filter. Falls back to a full broadcast
+  // when the owner is unknown or its window is gone. Safe across a cross-window
+  // move: a re-attaching window renders from the spawn-reply replay (not live
+  // data), and the pty keeps buffering replay regardless, so a frame delivered to
+  // the briefly-stale owner (or dropped) is recovered on re-attach — never lost.
+  const sendToOwner = (uid: string, channel: string, payload: unknown) => {
+    const id = owner.get(uid);
+    if (id != null) {
+      const win = BrowserWindow.fromId(id);
+      if (win && !win.isDestroyed()) {
+        win.webContents.send(channel, payload);
+        return;
+      }
+    }
+    send(channel, payload);
+  };
+
   // Ambient AI (local Gemma via Ollama): taps pane output, summarizes it, and
   // writes a high-level "what you're doing" line into pane meta['ai.subtitle'].
   // Independent of the control server (its own enable + own settings file).
@@ -437,7 +458,7 @@ export function registerIpc(
     }
     manager.create(opts, {
       onData: (uid, data) => {
-        send('session:data', { uid, data });
+        sendToOwner(uid, 'session:data', { uid, data }); // hottest path — owner window only
         control.emitOutput(uid, data); // tee to the /events stream (no-op if no clients)
         ai.onData(uid, data); // tee to the ambient-AI tail (no-op if disabled)
       },
