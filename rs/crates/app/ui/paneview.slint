@@ -4,7 +4,6 @@
 
 import { Theme } from "theme.slint";
 import { PaneItem, DividerItem, PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
-import { OverlayLayer } from "overlays.slint";
 import { TerminalPane, KeyMsg } from "@widgets";
 
 // A draggable resize seam. Reports the cursor's offset from the seam centre each
@@ -330,53 +329,6 @@ export component PaneView inherits Rectangle {
         }
     }
 
-    // ===== Wave-2 overlay/panel slot =====
-    // A full-area scrim + the OverlayLayer that hosts the command palette, preferences
-    // dialog, and sidebar. Shown whenever `overlay-kind != 0`; a scrim click dismisses.
-    // Mounted here so the slot lives in the tree and Wave-2 work never restructures the
-    // pane-area layout.
-    if root.overlay-kind != 0 : Rectangle {
-        // Frosted-glass backdrop (Electron's `.hp-frosted-backdrop`). Slint has no true
-        // backdrop blur, so this is a tinted, mostly-opaque dark "glass" approximation.
-        background: #0b0c12cc;
-        // scrim click dismisses the overlay (the panels eat their own clicks)
-        TouchArea { clicked => { root.overlay-dismiss(); } }
-        OverlayLayer {
-            width: 100%;
-            height: 100%;
-            kind: root.overlay-kind;
-            palette: root.palette;
-            palette-sel: root.palette-sel;
-            families: root.pref-families;
-            font-label: root.pref-font-label;
-            font-custom: root.pref-font-custom;
-            font-custom-value: root.pref-font-custom-value;
-            preview-font: root.pref-preview-font;
-            preview-accent: root.pref-preview-accent;
-            preview-bg: root.pref-preview-bg;
-            preview-fg: root.pref-preview-fg;
-            preview-green: root.pref-preview-green;
-            preview-blue: root.pref-preview-blue;
-            preview-dim: root.pref-preview-dim;
-            themes: root.pref-themes;
-            theme-label: root.pref-theme-label;
-            frame-palettes: root.pref-palettes;
-            shells: root.pref-shells;
-            font-px: root.pref-fontpx;
-            show-frame: root.pref-frame;
-            show-dot: root.pref-dot;
-            clickable-paths: root.pref-clickable;
-            editor-command: root.pref-editor;
-            prefs-confirm: root.prefs-confirm;
-            palette-query(q) => { root.palette-query(q); }
-            palette-nav(d) => { root.palette-nav(d); }
-            palette-activate => { root.palette-activate(); }
-            palette-pick(i) => { root.palette-pick(i); }
-            pref-action(k, a) => { root.pref-action(k, a); }
-            pref-text(k, v) => { root.pref-text(k, v); }
-            pref-done => { root.pref-done(); }
-            pref-confirm(a) => { root.pref-confirm(a); }
-            dismiss => { root.overlay-dismiss(); }
-        }
-    }
+    // (The Wave-2 overlay — command palette / preferences — is mounted at the app root
+    //  now, so its frosted scrim covers the top bar + sidebar too; see app.slint.)
 }
