@@ -76,6 +76,89 @@ component NavItem inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// A live mini-terminal preview for the Appearance section (mirrors Electron's
+// `TerminalPreview`). It's a styled sample — not a live pty — that reflects the drafted
+// font family/size, frame-palette accent, frame border, and color dot, so the options are
+// visible before Done. (Terminal color theme + idle-glow aren't wired in the native widget
+// yet, so the preview doesn't reflect those — TODO(phase5).)
+component AppearancePreview inherits Rectangle {
+    in property <string> font-name;
+    in property <int> px;
+    in property <color> accent;
+    in property <bool> show-frame;
+    in property <bool> show-dot;
+    height: 134px;
+    border-radius: 8px;
+    background: #16161e;
+    border-width: root.show-frame ? 1px : 0px;
+    border-color: root.accent.with-alpha(0.55);
+    clip: true;
+    VerticalLayout {
+        // header chip
+        Rectangle {
+            height: 26px;
+            background: #1a1b26;
+            Rectangle { y: parent.height - 1px; height: 1px; background: #2a2b3c; }
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 6px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.accent;
+                        visible: root.show-dot;
+                    }
+                }
+                Text {
+                    text: "preview";
+                    color: root.accent;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+        // sample terminal output, rendered in the drafted font + size
+        Rectangle {
+            background: #16161e;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                alignment: start;
+                Text {
+                    text: "PS C:\\hyperpanes> cargo run";
+                    color: #c0caf5;
+                    font-family: root.font-name;
+                    font-size: root.px * 1px;
+                }
+                Text {
+                    text: "   Compiling hyperpanes v0.1.0";
+                    color: #9ece6a;
+                    font-family: root.font-name;
+                    font-size: root.px * 1px;
+                }
+                Text {
+                    text: "    Finished dev in 1.24s";
+                    color: #7aa2f7;
+                    font-family: root.font-name;
+                    font-size: root.px * 1px;
+                }
+                Text {
+                    text: "the quick brown fox 0123 ▮";
+                    color: #565f89;
+                    font-family: root.font-name;
+                    font-size: root.px * 1px;
+                }
+            }
+        }
+    }
+}
+
 // A dropdown (select) for the terminal font family — a button showing the current font that
 // opens a popup list of all installed monospace fonts. Mirrors Electron's `<select>`.
 component FontDropdown inherits Rectangle {
@@ -193,6 +276,8 @@ export component OverlayLayer inherits Rectangle {
     in property <string> font-label;
     in property <bool> font-custom: false;
     in property <string> font-custom-value: "";
+    in property <string> preview-font;
+    in property <color> preview-accent;
     in property <[FramePaletteOption]> frame-palettes;
     in property <[PrefOption]> shells;
     in property <int> font-px: 14;
@@ -372,6 +457,16 @@ export component OverlayLayer inherits Rectangle {
                         // ===================== Appearance =====================
                         if prefs.sel == 0 : VerticalLayout {
                             spacing: 12px;
+
+            // ---- live preview ----
+            Text { text: "Preview"; color: Theme.faint; font-size: 11px; }
+            AppearancePreview {
+                font-name: root.preview-font;
+                px: root.font-px;
+                accent: root.preview-accent;
+                show-frame: root.show-frame;
+                show-dot: root.show-dot;
+            }
 
             // ---- frame color palette (pane dot + border) ----
             Text { text: "Frame color palette"; color: Theme.faint; font-size: 11px; }

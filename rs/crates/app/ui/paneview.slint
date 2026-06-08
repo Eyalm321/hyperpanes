@@ -111,6 +111,8 @@ export component PaneView inherits Rectangle {
     in property <string> pref-font-label;
     in property <bool> pref-font-custom: false;
     in property <string> pref-font-custom-value: "";
+    in property <string> pref-preview-font;
+    in property <color> pref-preview-accent;
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
     in property <bool> pref-clickable: true;
@@ -342,6 +344,8 @@ export component PaneView inherits Rectangle {
             font-label: root.pref-font-label;
             font-custom: root.pref-font-custom;
             font-custom-value: root.pref-font-custom-value;
+            preview-font: root.pref-preview-font;
+            preview-accent: root.pref-preview-accent;
             frame-palettes: root.pref-palettes;
             shells: root.pref-shells;
             font-px: root.pref-fontpx;

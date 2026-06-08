@@ -55,6 +55,8 @@ export component AppWindow inherits Window {
     in property <string> pref-font-label;
     in property <bool> pref-font-custom: false;
     in property <string> pref-font-custom-value: "";
+    in property <string> pref-preview-font;
+    in property <color> pref-preview-accent;
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
     in property <bool> pref-clickable: true;
@@ -199,6 +201,8 @@ export component AppWindow inherits Window {
                 pref-font-label: root.pref-font-label;
                 pref-font-custom: root.pref-font-custom;
                 pref-font-custom-value: root.pref-font-custom-value;
+                pref-preview-font: root.pref-preview-font;
+                pref-preview-accent: root.pref-preview-accent;
                 pref-palettes: root.pref-palettes;
                 pref-shells: root.pref-shells;
                 pref-fontpx: root.pref-fontpx;
