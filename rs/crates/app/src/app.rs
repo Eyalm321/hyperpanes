@@ -384,6 +384,9 @@ impl App {
                                 // The rail is persistent; open its projects flyout so a
                                 // screenshot exercises the full surface.
                                 "sidebar" => Some(Command::ToggleProjects),
+                                // Open a context menu at a fixed anchor (screenshot scaffold).
+                                "panemenu" => Some(Command::OpenPaneContext(0, 380.0, 150.0)),
+                                "tabmenu" => Some(Command::OpenTabContext(0, 90.0, 44.0)),
                                 _ => None,
                             };
                             if let Some(cmd) = cmd {

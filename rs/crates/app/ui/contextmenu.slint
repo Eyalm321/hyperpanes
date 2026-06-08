@@ -54,11 +54,11 @@ component CtxRow inherits Rectangle {
             font-size: 11px;
             vertical-alignment: center;
         }
-        // trailing: a ✓ for a checked toggle, a ▸ for a submenu
+        // trailing: a ✓ for a checked toggle, a › for a submenu
         Text {
-            text: root.has-sub ? "▸" : ((e.show-check && e.checked) ? "✓" : "");
+            text: root.has-sub ? "›" : ((e.show-check && e.checked) ? "✓" : "");
             color: root.has-sub ? Theme.subtext : Theme.accent;
-            font-size: 12px;
+            font-size: root.has-sub ? 16px : 12px;
             vertical-alignment: center;
         }
     }
@@ -219,12 +219,15 @@ export component ContextMenu inherits Rectangle {
                                 border-radius: 5px;
                                 border-width: 1px;
                                 border-color: (!root.frame-on && !root.dot-on) ? Theme.text : Theme.border;
-                                Text {
-                                    text: "∅";
-                                    color: Theme.subtext;
-                                    font-size: 12px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
+                                // "no color" — a Photoshop-style red diagonal slash.
+                                Path {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewbox-width: 20;
+                                    viewbox-height: 20;
+                                    stroke: Theme.danger;
+                                    stroke-width: 1.6px;
+                                    commands: "M 4 16 L 16 4";
                                 }
                                 TouchArea { clicked => { root.swatch-none(); } }
                             }
@@ -269,7 +272,7 @@ export component ContextMenu inherits Rectangle {
                         padding: 5px;
                         spacing: 1px;
                         for lo in root.layouts : CtxRow {
-                            e: { label: lo.label, shortcut: "", glyph: lo.glyph, kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
+                            e: { label: lo.label, shortcut: "", glyph: "", kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
                             clicked => { root.set-layout(lo.id); }
                         }
                     }

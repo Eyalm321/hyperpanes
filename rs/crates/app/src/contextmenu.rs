@@ -184,11 +184,6 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
     let only = state.tabs.len() < 2;
     let is_last = idx + 1 >= state.tabs.len();
     let no_closed = state.closed_tabs.is_empty();
-    let layout_glyph = state
-        .tabs
-        .get(idx)
-        .map(|t| crate::theme::layout_glyph(t.layout).to_string())
-        .unwrap_or_default();
 
     let new_sc = state.keymap.label_for("tab.new").unwrap_or_default();
 
@@ -202,7 +197,7 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
     b.row("Close Tabs to the Right", "", "", false, false, is_last, false, sub::NONE, Some(Command::CloseTabsToRight(idx)));
     b.row("Reopen Closed Tab", "", "", false, false, no_closed, false, sub::NONE, Some(Command::ReopenClosedTab));
     b.sep();
-    b.row("Layout", "", &layout_glyph, false, false, false, false, sub::LAYOUT, None);
+    b.row("Layout", "", "", false, false, false, false, sub::LAYOUT, None);
 
     b.finish(CtxKind::Tab, idx, x, y)
 }

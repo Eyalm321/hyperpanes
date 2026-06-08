@@ -1752,11 +1752,6 @@ impl State {
         self.ctx.as_ref().map(|c| c.target)
     }
 
-    /// The open menu's kind.
-    pub fn ctx_kind(&self) -> Option<crate::contextmenu::CtxKind> {
-        self.ctx.as_ref().map(|c| c.kind)
-    }
-
     // ---- pane chrome actions ----
 
     /// Recolor active-tab pane `idx` to swatch `swatch` of the current frame palette: adopt the
