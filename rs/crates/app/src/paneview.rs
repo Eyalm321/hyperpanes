@@ -17,7 +17,8 @@ use std::rc::Rc;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
-    AppWindow, DividerItem, LayoutOption, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
+    AppWindow, DividerItem, FramePaletteOption, LayoutOption, PaletteItem, PaneItem, PrefOption,
+    ProjectItem, TabItem,
 };
 use crate::prefs;
 
@@ -44,6 +45,7 @@ pub struct Ui {
     pub palette: Rc<VecModel<PaletteItem>>,
     pub projects: Rc<VecModel<ProjectItem>>,
     pub families: Rc<VecModel<PrefOption>>,
+    pub palettes: Rc<VecModel<FramePaletteOption>>,
 }
 
 impl Ui {
@@ -57,6 +59,7 @@ impl Ui {
             palette: Rc::new(VecModel::default()),
             projects: Rc::new(VecModel::default()),
             families: Rc::new(VecModel::default()),
+            palettes: Rc::new(VecModel::default()),
         })
     }
 
@@ -69,6 +72,7 @@ impl Ui {
         app.set_palette(ModelRc::from(self.palette.clone()));
         app.set_projects(ModelRc::from(self.projects.clone()));
         app.set_pref_families(ModelRc::from(self.families.clone()));
+        app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
     }
 }
 
@@ -286,6 +290,26 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         })
         .collect();
     sync_model(&ui.families, families);
+
+    // frame-palette options (label + 8 slot color chips), active = current
+    let palettes: Vec<FramePaletteOption> = theme::FRAME_PALETTES
+        .iter()
+        .enumerate()
+        .map(|(id, (label, slots))| {
+            let colors: Vec<slint::Color> = slots
+                .iter()
+                .map(|(r, g, b)| slint::Color::from_rgb_u8(*r, *g, *b))
+                .collect();
+            FramePaletteOption {
+                id: id as i32,
+                label: (*label).into(),
+                active: id == state.settings.frame_palette,
+                colors: ModelRc::from(Rc::new(VecModel::from(colors))),
+            }
+        })
+        .collect();
+    sync_model(&ui.palettes, palettes);
+
     app.set_pref_fontpx(state.settings.font_px.round() as i32);
     app.set_show_frame(state.settings.show_frame);
     app.set_show_dot(state.settings.show_dot);

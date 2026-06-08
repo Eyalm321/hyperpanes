@@ -3,7 +3,7 @@
 // dividers over them, and reserves an overlay slot for Wave-2 panels.
 
 import { Theme } from "theme.slint";
-import { PaneItem, DividerItem, PaletteItem, PrefOption } from "types.slint";
+import { PaneItem, DividerItem, PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
 import { OverlayLayer } from "overlays.slint";
 import { TerminalPane, KeyMsg } from "@widgets";
 
@@ -108,6 +108,7 @@ export component PaneView inherits Rectangle {
     in property <[PaletteItem]> palette;
     in property <int> palette-sel: 0;
     in property <[PrefOption]> pref-families;
+    in property <[FramePaletteOption]> pref-palettes;
     in property <int> pref-fontpx: 14;
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
@@ -312,6 +313,7 @@ export component PaneView inherits Rectangle {
             palette: root.palette;
             palette-sel: root.palette-sel;
             families: root.pref-families;
+            frame-palettes: root.pref-palettes;
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;

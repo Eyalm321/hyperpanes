@@ -13,7 +13,7 @@
 // chords/text route here (not the panes) while open.
 
 import { Theme } from "theme.slint";
-import { PaletteItem, PrefOption } from "types.slint";
+import { PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
 
 // A small labelled toggle switch (frame/dot prefs).
 component PrefToggle inherits Rectangle {
@@ -100,6 +100,7 @@ export component OverlayLayer inherits Rectangle {
 
     // preferences
     in property <[PrefOption]> families;
+    in property <[FramePaletteOption]> frame-palettes;
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -255,6 +256,53 @@ export component OverlayLayer inherits Rectangle {
 
             // ===================== Appearance =====================
             SectionTitle { text: "Appearance"; }
+
+            // ---- frame color palette (pane dot + border) ----
+            Text { text: "Frame color palette"; color: Theme.faint; font-size: 11px; }
+            VerticalLayout {
+                spacing: 4px;
+                for opt[i] in root.frame-palettes : Rectangle {
+                    height: 30px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: opt.active ? Theme.accent : Theme.border;
+                    background: opt.active ? Theme.surface2 : (pta.has-hover ? Theme.surface : transparent);
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            text: opt.label;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            width: 86px;
+                        }
+                        // 8 color chips
+                        HorizontalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            alignment: start;
+                            for c in opt.colors : VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 14px;
+                                    height: 14px;
+                                    border-radius: 3px;
+                                    background: c;
+                                }
+                            }
+                        }
+                        Text {
+                            text: opt.active ? "✓" : "";
+                            color: Theme.accent;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    pta := TouchArea { clicked => { root.pref-action(4, opt.id); } }
+                }
+            }
 
             // ---- terminal font family ----
             Text { text: "Terminal font"; color: Theme.faint; font-size: 11px; }

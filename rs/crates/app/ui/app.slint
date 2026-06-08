@@ -10,7 +10,7 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { SidebarRail } from "sidebar.slint";
@@ -52,6 +52,7 @@ export component AppWindow inherits Window {
     in property <[PaletteItem]> palette;
     in property <int> palette-sel: 0;
     in property <[PrefOption]> pref-families;
+    in property <[FramePaletteOption]> pref-palettes;
     in property <int> pref-fontpx: 14;
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
@@ -177,6 +178,7 @@ export component AppWindow inherits Window {
                 palette: root.palette;
                 palette-sel: root.palette-sel;
                 pref-families: root.pref-families;
+                pref-palettes: root.pref-palettes;
                 pref-fontpx: root.pref-fontpx;
                 pref-frame: root.show-frame;
                 pref-dot: root.show-dot;

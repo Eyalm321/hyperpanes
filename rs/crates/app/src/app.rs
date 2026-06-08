@@ -1050,6 +1050,7 @@ impl App {
                     1 => crate::state::Setting::FontDelta(arg),
                     2 => crate::state::Setting::ShowFrame(arg != 0),
                     3 => crate::state::Setting::ShowDot(arg != 0),
+                    4 => crate::state::Setting::FramePalette(arg as usize),
                     _ => return,
                 };
                 app.run_command(&w, Command::ApplySetting(setting));

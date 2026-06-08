@@ -55,6 +55,8 @@ pub struct DetachedPane {
 pub enum Setting {
     /// Select font family by index into `prefs::FONT_FAMILIES`.
     FontFamily(usize),
+    /// Select the frame palette by index into `theme::FRAME_PALETTES` (remaps pane accents).
+    FramePalette(usize),
     /// Nudge the base font size by ±N points.
     FontDelta(i32),
     ShowFrame(bool),
@@ -110,10 +112,10 @@ impl Tab {
 
     /// Re-label + recolor panes so titles/accents stay 1..N in order. A pinned accent
     /// (a project color) is preserved.
-    fn relabel(&mut self) {
+    fn relabel(&mut self, palette: usize) {
         for (i, p) in self.panes.iter_mut().enumerate() {
             p.title = format!("{}", i + 1).into();
-            p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i));
+            p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i, palette));
         }
     }
 
@@ -251,6 +253,7 @@ impl State {
     ) -> Option<PaneState> {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
+        let palette = self.settings.frame_palette;
         let (cols, rows) = (80u16, 24u16);
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
@@ -266,7 +269,7 @@ impl State {
         Some(PaneState {
             uid,
             title: format!("{}", idx + 1).into(),
-            accent: accent.unwrap_or_else(|| theme::accent_for(idx)),
+            accent: accent.unwrap_or_else(|| theme::accent_for(idx, palette)),
             pane: TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new())),
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
@@ -319,6 +322,7 @@ impl State {
         if ti >= self.tabs.len() {
             return None;
         }
+        let palette = self.settings.frame_palette;
         let t = &mut self.tabs[ti];
         if idx >= t.panes.len() {
             return None;
@@ -358,7 +362,7 @@ impl State {
             Some(z) if z > idx => Some(z - 1),
             other => other,
         };
-        t.relabel();
+        t.relabel(palette);
         Some((ps, true))
     }
 
@@ -401,6 +405,7 @@ impl State {
     /// no blank pane and no PTY restart), rebind it to the existing `uid`, and focus it.
     /// `at` is clamped to `0..=len`, so a stitch can insert the pane at a hovered slot.
     pub fn adopt_pane_at(&mut self, mgr: &SessionManager, det: DetachedPane, at: usize) {
+        let palette = self.settings.frame_palette;
         let (cols, rows) = (80u16, 24u16);
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
@@ -411,7 +416,7 @@ impl State {
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
-            accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at)),
+            accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at, palette)),
             pane,
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
@@ -432,7 +437,7 @@ impl State {
         t.panes.insert(at, ps);
         t.focused = at;
         t.zoomed = None;
-        t.relabel();
+        t.relabel(palette);
         self.dirty = true;
     }
 
@@ -471,6 +476,7 @@ impl State {
     /// carrying its split size with it so the layout stays stable. Focus follows the moved
     /// pane. No-op when the move is a no-op or the indices are out of range.
     pub fn reorder_pane(&mut self, from: usize, to: usize) {
+        let palette = self.settings.frame_palette;
         let t = self.active_tab_mut();
         let n = t.panes.len();
         if from >= n || to > n {
@@ -492,7 +498,7 @@ impl State {
             Some(z) if z == from => Some(dest),
             _ => t.zoomed,
         };
-        t.relabel();
+        t.relabel(palette);
         self.dirty = true;
     }
 
@@ -817,6 +823,16 @@ impl State {
                     self.font_reload = true;
                 }
             }
+            Setting::FramePalette(idx) => {
+                if self.settings.frame_palette != idx {
+                    self.settings.frame_palette = idx;
+                    // Recompute every pane's accent against the new palette (by creation
+                    // slot); pinned project colors are preserved by `relabel`.
+                    for t in &mut self.tabs {
+                        t.relabel(idx);
+                    }
+                }
+            }
             Setting::FontDelta(d) => {
                 let next = Settings::clamp_font(self.settings.font_px + d as f32);
                 if next != self.settings.font_px {
@@ -1000,5 +1016,5 @@ fn parse_hex(s: &str) -> Color {
             return Color::from_rgb_u8(r, g, b);
         }
     }
-    theme::accent_for(0)
+    theme::accent_for(0, 0)
 }

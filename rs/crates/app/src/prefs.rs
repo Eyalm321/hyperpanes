@@ -33,6 +33,9 @@ pub const DEFAULT_FONT_PX: f32 = 14.0;
 pub struct Settings {
     /// Index into [`FONT_FAMILIES`] for the active terminal font.
     pub font_family: usize,
+    /// Index into [`crate::theme::FRAME_PALETTES`] for the active pane dot/frame palette.
+    /// Switching it remaps panes by creation slot (the native port of `framePalette`).
+    pub frame_palette: usize,
     /// Base (logical px, pre-DPI-scale) terminal font size.
     pub font_px: f32,
     /// Whether each pane draws its colored frame border + header tint.
@@ -51,6 +54,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             font_family: 0,
+            frame_palette: 0,
             font_px: DEFAULT_FONT_PX,
             show_frame: true,
             show_dot: true,

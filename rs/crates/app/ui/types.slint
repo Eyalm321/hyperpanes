@@ -60,3 +60,12 @@ export struct PrefOption {
     label: string,
     active: bool,
 }
+
+// One frame-palette choice in the Appearance picker: a label plus its 8 slot colors,
+// shown as chips. `active` marks the current palette.
+export struct FramePaletteOption {
+    id: int,
+    label: string,
+    active: bool,
+    colors: [color],
+}
