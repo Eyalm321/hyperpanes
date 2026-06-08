@@ -82,6 +82,9 @@ pub struct Hover {
     pub tab_over: Option<usize>,
     /// Pane tile under the cursor (active-tab pane index), if any.
     pub pane_idx: Option<usize>,
+    /// Cursor is within the hovered pane's **header** band (the drag handle) — drives the
+    /// idle open-hand cursor.
+    pub over_header: bool,
     /// Insertion index among that tab's panes for a stitch (edge-band aware).
     pub slot_index: usize,
     /// The hovered pane's rect (area-relative logical px) — for the slot highlight.

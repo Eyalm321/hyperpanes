@@ -38,6 +38,10 @@ use crate::{theme, window, AppWindow, KeyMsg};
 /// so the pane area then starts at the window's top edge.
 const TOPBAR_H: f32 = 32.0;
 
+/// Logical height of a pane's header (its drag handle) — matches the 26px header in
+/// `paneview.slint`. Used to show the open-hand cursor only over the handle, not the body.
+const HEADER_BAND: f32 = 26.0;
+
 /// What a freshly-spawned window is seeded with once its area is known (the first pane
 /// is sized against the real area, exactly as the single-window path did).
 pub enum PendingSeed {
@@ -470,6 +474,9 @@ impl App {
             if self.drag_capture.replace(false) {
                 window::end_drag_cursor(0); // defensive: release a stray capture/cursor
             }
+            // Idle: show the open-hand cursor while hovering a drag handle (header / tab).
+            let hov = self.compute_hover(windows, drag::cursor_pos());
+            window::set_hover_cursor(hov.over_strip || hov.over_header);
             return;
         }
 
@@ -641,6 +648,8 @@ impl App {
                     h.slot_index = j + off;
                     h.pane_rect = p.rect;
                     h.edge = edge;
+                    // The header band (top of the tile) is the drag handle → open-hand.
+                    h.over_header = (ay - py) < HEADER_BAND;
                     return h;
                 }
             }
@@ -798,7 +807,18 @@ impl App {
             let strip_active =
                 is_target && hover.over_strip && (is_pane || w.id == source_id);
             w.app.set_drop_strip_active(strip_active);
-            if strip_active {
+
+            // Spring-target highlight: the existing tab chip a dragged pane is hovering.
+            let spring_tab = if is_pane && is_target && hover.over_strip {
+                hover.tab_over.map(|i| i as i32).unwrap_or(-1)
+            } else {
+                -1
+            };
+            w.app.set_drop_tab_idx(spring_tab);
+
+            // Insertion caret — shown ONLY over the empty strip / gap (or a tab reorder),
+            // never together with a spring-highlighted tab (either/or, not both).
+            if strip_active && spring_tab < 0 {
                 let g = w.tab_geom.borrow();
                 let n = w.state.borrow().tabs.len().min(g.len());
                 let caret = if hover.tab_slot < n {
@@ -814,14 +834,6 @@ impl App {
             } else {
                 w.app.set_drop_tab_active(false);
             }
-
-            // Spring-target highlight: the existing tab chip a dragged pane is hovering.
-            let spring_tab = if is_pane && is_target && hover.over_strip {
-                hover.tab_over.map(|i| i as i32).unwrap_or(-1)
-            } else {
-                -1
-            };
-            w.app.set_drop_tab_idx(spring_tab);
 
             // Pane tile slot highlight (stitch / reorder target).
             let pane_active =

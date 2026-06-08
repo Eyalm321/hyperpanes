@@ -112,8 +112,7 @@ component TabChip inherits Rectangle {
     border-color: root.spring-hover ? Theme.brand : Theme.border;
 
     ta := TouchArea {
-        // open hand on hover, closed hand while dragging — the tab is a drag handle.
-        mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+        // The hand cursor over a tab is driven from Win32 (window.rs) so it's a real hand.
         clicked => { root.select(); }
         double-clicked => { root.begin-rename(); }
         pointer-event(e) => {

@@ -173,9 +173,8 @@ export component PaneView inherits Rectangle {
                     // arms a drag — the drag pump promotes it past the threshold (else it
                     // stays a plain click).
                     TouchArea {
-                        // open hand on hover, closed hand while dragging — signals the
-                        // header is a drag handle (tear-off / reorder).
-                        mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
+                        // The open/closed-hand cursor over this header is driven from Win32
+                        // (window.rs) so it can be a real hand + persist across the tear-off.
                         clicked => { root.focus-pane(idx); tp.focus(); }
                         pointer-event(ev) => {
                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
