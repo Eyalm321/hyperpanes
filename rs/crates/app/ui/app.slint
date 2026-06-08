@@ -52,6 +52,17 @@ export component AppWindow inherits Window {
     in property <[PrefOption]> pref-families;
     in property <int> pref-fontpx: 14;
     in property <[ProjectItem]> projects;
+    // ---- Wave-2 drag / tear-off previews (driven by the drag pump) ----
+    in property <bool> drop-win-active: false;    // this window is a cross-window tear target
+    in property <bool> drop-strip-active: false;  // the tab strip is a drop target
+    in property <length> drop-tab-x: 0px;         // tab insertion caret x (window coords)
+    in property <bool> drop-tab-active: false;
+    in property <length> drop-rect-x: 0px;        // hovered pane slot (area-relative)
+    in property <length> drop-rect-y: 0px;
+    in property <length> drop-rect-w: 0px;
+    in property <length> drop-rect-h: 0px;
+    in property <int> drop-rect-edge: 0;          // 0 left · 1 right · 2 top · 3 bottom
+    in property <bool> drop-rect-active: false;
 
     // ---- outputs (Rust subscribes; each maps to a Command) ----
     callback key(int, KeyMsg);
@@ -70,6 +81,10 @@ export component AppWindow inherits Window {
     // multi-window
     callback new-window();
     callback move-pane-new-window();
+    // drag / tear-off (Wave 2)
+    callback pane-grab(int);                 // a pane header was pressed (arm a drag)
+    callback tab-grab(int);                  // a tab was pressed (arm a reorder)
+    callback tab-geom(int, length, length);  // report a tab's window-x + width
     // panes / layout
     callback new-pane();
     callback close-focused();
@@ -104,7 +119,12 @@ export component AppWindow inherits Window {
             layouts: root.layouts;
             zoomed: root.zoomed;
             fullscreen: root.fullscreen;
+            drop-strip-active: root.drop-strip-active;
+            drop-tab-x: root.drop-tab-x;
+            drop-tab-active: root.drop-tab-active;
 
+            tab-grab(i) => { root.tab-grab(i); }
+            tab-geom(i, x, w) => { root.tab-geom(i, x, w); }
             select-tab(i) => { root.select-tab(i); }
             close-tab(i) => { root.close-tab(i); }
             new-tab => { root.new-tab(); }
@@ -141,7 +161,14 @@ export component AppWindow inherits Window {
             pref-frame: root.show-frame;
             pref-dot: root.show-dot;
             projects: root.projects;
+            drop-rect-x: root.drop-rect-x;
+            drop-rect-y: root.drop-rect-y;
+            drop-rect-w: root.drop-rect-w;
+            drop-rect-h: root.drop-rect-h;
+            drop-rect-edge: root.drop-rect-edge;
+            drop-rect-active: root.drop-rect-active;
 
+            pane-grab(i) => { root.pane-grab(i); }
             key(i, m) => { root.key(i, m); }
             focus-pane(i) => { root.focus-pane(i); }
             area-resized(w, h) => { root.area-resized(w, h); }
@@ -156,6 +183,20 @@ export component AppWindow inherits Window {
             pref-action(k, a) => { root.pref-action(k, a); }
             open-project(i) => { root.open-project(i); }
             overlay-dismiss => { root.overlay-dismiss(); }
+        }
+    }
+
+    // ===== cross-window tear-off target glow =====
+    // A bright inset border drawn over the whole window while it's the live target of a
+    // pane being torn in from another window (click-through — the drag pump owns input).
+    if root.drop-win-active : Rectangle {
+        background: transparent;
+        border-width: 2.5px;
+        border-color: Theme.brand;
+        border-radius: 8px;
+        Rectangle {
+            background: Theme.brand;
+            opacity: 0.06;
         }
     }
 

@@ -84,6 +84,15 @@ component TabChip inherits Rectangle {
     callback close();
     callback begin-rename();
     callback commit-rename(string);
+    callback grab();                         // a press on the tab — arm a reorder drag
+    callback report-geom(length, length);    // window-x + width, for hit-testing
+
+    // Report geometry to the controller whenever the strip reflows (so the drag pump can
+    // hit-test the strip without Slint pointer delivery).
+    property <length> ax: self.absolute-position.x;
+    changed ax => { root.report-geom(self.absolute-position.x, self.width); }
+    changed width => { root.report-geom(self.absolute-position.x, self.width); }
+    init => { root.report-geom(self.absolute-position.x, self.width); }
 
     min-width: 96px;
     max-width: 200px;
@@ -101,6 +110,9 @@ component TabChip inherits Rectangle {
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
                 root.close();
+            }
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.grab();
             }
         }
     }
@@ -205,12 +217,18 @@ export component TopBar inherits Rectangle {
     in property <[LayoutOption]> layouts;
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
+    // ---- drag / tear-off strip preview ----
+    in property <bool> drop-strip-active: false;
+    in property <length> drop-tab-x: 0px;
+    in property <bool> drop-tab-active: false;
 
     callback select-tab(int);
     callback close-tab(int);
     callback new-tab();
     callback begin-rename(int);
     callback rename-tab(int, string);
+    callback tab-grab(int);
+    callback tab-geom(int, length, length);
     callback new-window();
     callback move-pane-new-window();
     callback set-layout(int);
@@ -232,6 +250,21 @@ export component TopBar inherits Rectangle {
         y: parent.height - 1px;
         height: 1px;
         background: Theme.border;
+    }
+
+    // drag/tear-off: a faint wash while the strip is a drop target + an insertion caret at
+    // the slot the dragged tab/pane will land in. Visual only (no TouchArea → click-through).
+    if root.drop-strip-active : Rectangle {
+        background: Theme.brand;
+        opacity: 0.08;
+    }
+    if root.drop-tab-active : Rectangle {
+        x: root.drop-tab-x - 1.5px;
+        y: 4px;
+        width: 3px;
+        height: 24px;
+        border-radius: 1.5px;
+        background: Theme.brand;
     }
 
     HorizontalLayout {
@@ -272,6 +305,8 @@ export component TopBar inherits Rectangle {
                     close => { root.close-tab(idx); }
                     begin-rename => { root.begin-rename(idx); }
                     commit-rename(t) => { root.rename-tab(idx, t); }
+                    grab => { root.tab-grab(idx); }
+                    report-geom(x, w) => { root.tab-geom(idx, x, w); }
                 }
 
                 // new tab

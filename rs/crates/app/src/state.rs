@@ -384,11 +384,17 @@ impl State {
         ))
     }
 
-    /// Re-host a detached session in the active tab: build a fresh terminal grid, prime
-    /// it from the session's **replay buffer** (recent scrollback — so no blank pane and
-    /// no PTY restart), and rebind it to the existing `uid`, then focus it.
+    /// Re-host a detached session at the end of the active tab (see [`Self::adopt_pane_at`]).
     pub fn adopt_pane(&mut self, mgr: &SessionManager, det: DetachedPane) {
-        let idx = self.active_tab().panes.len();
+        let at = self.active_tab().panes.len();
+        self.adopt_pane_at(mgr, det, at);
+    }
+
+    /// Re-host a detached session in the active tab at insertion index `at`: build a fresh
+    /// terminal grid, prime it from the session's **replay buffer** (recent scrollback — so
+    /// no blank pane and no PTY restart), rebind it to the existing `uid`, and focus it.
+    /// `at` is clamped to `0..=len`, so a stitch can insert the pane at a hovered slot.
+    pub fn adopt_pane_at(&mut self, mgr: &SessionManager, det: DetachedPane, at: usize) {
         let (cols, rows) = (80u16, 24u16);
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
@@ -396,11 +402,10 @@ impl State {
         if let Some(replay) = mgr.replay(&det.uid) {
             pane.feed(&replay);
         }
-        let accent = det.pinned_accent.unwrap_or_else(|| theme::accent_for(idx));
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
-            accent,
+            accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at)),
             pane,
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
@@ -412,14 +417,100 @@ impl State {
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
+        let at = at.min(t.panes.len());
         t.sizes = if auto {
-            equal_sizes(idx + 1)
+            equal_sizes(t.panes.len() + 1)
         } else {
-            insert_size(&t.sizes, idx)
+            insert_size(&t.sizes, at)
         };
-        t.panes.push(ps);
-        t.focused = idx;
+        t.panes.insert(at, ps);
+        t.focused = at;
         t.zoomed = None;
+        t.relabel();
+        self.dirty = true;
+    }
+
+    /// Re-host a detached session as a **brand-new tab** (dock-as-tab on a tear-off drop):
+    /// append a fresh tab, switch to it, and adopt the pane into it.
+    pub fn adopt_pane_as_tab(&mut self, mgr: &SessionManager, det: DetachedPane) {
+        let tab = self.fresh_tab();
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.editing_tab = -1;
+        self.adopt_pane(mgr, det);
+    }
+
+    /// Detach a **specific** pane (by `uid`) from the active tab for re-hosting elsewhere
+    /// — like [`Self::detach_focused`] but targets the dragged pane rather than the focused
+    /// one. Returns the rebind info + whether this window still has panes; `None` if the
+    /// uid isn't in the active tab.
+    pub fn detach_uid(&mut self, uid: &str) -> Option<(DetachedPane, bool)> {
+        let ti = self.active;
+        let idx = self.tabs.get(ti)?.panes.iter().position(|p| p.uid == uid)?;
+        let (ps, alive) = self.take_pane_in(ti, idx)?;
+        Some((
+            DetachedPane { uid: ps.uid, title: ps.title, pinned_accent: ps.pinned_accent },
+            alive,
+        ))
+    }
+
+    /// Move pane `from` to insertion index `to` within the active tab (in-window reorder),
+    /// carrying its split size with it so the layout stays stable. Focus follows the moved
+    /// pane. No-op when the move is a no-op or the indices are out of range.
+    pub fn reorder_pane(&mut self, from: usize, to: usize) {
+        let t = self.active_tab_mut();
+        let n = t.panes.len();
+        if from >= n || to > n {
+            return;
+        }
+        // Translate the insertion index into the post-removal slot.
+        let dest = if to > from { to - 1 } else { to };
+        if dest == from {
+            return;
+        }
+        let pane = t.panes.remove(from);
+        t.panes.insert(dest, pane);
+        if t.sizes.len() == n {
+            let s = t.sizes.remove(from);
+            t.sizes.insert(dest, s);
+        }
+        t.focused = dest;
+        t.zoomed = match t.zoomed {
+            Some(z) if z == from => Some(dest),
+            _ => t.zoomed,
+        };
+        t.relabel();
+        self.dirty = true;
+    }
+
+    /// Move tab `from` to index `to` (in-strip tab reorder), keeping the same tab active.
+    pub fn reorder_tab(&mut self, from: usize, to: usize) {
+        let n = self.tabs.len();
+        if from >= n || to > n {
+            return;
+        }
+        let dest = if to > from { to - 1 } else { to };
+        if dest == from {
+            return;
+        }
+        let active_title_idx = self.active;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(dest, tab);
+        // Keep the previously-active tab active across the shuffle.
+        self.active = if active_title_idx == from {
+            dest
+        } else {
+            // recompute where the old active landed
+            let mut a = active_title_idx;
+            if from < a {
+                a -= 1;
+            }
+            if dest <= a {
+                a += 1;
+            }
+            a.min(self.tabs.len() - 1)
+        };
+        self.editing_tab = -1;
         self.dirty = true;
     }
 
@@ -540,6 +631,12 @@ impl State {
             }
         }
         self.dirty = true;
+    }
+
+    /// Whether the active tab tiles as rows (so a stitch edge band runs along the
+    /// vertical axis → top/bottom rather than left/right). Used by the drag hit-test.
+    pub fn active_is_rows(&self) -> bool {
+        self.active_tab().effective() == Layout::Rows
     }
 
     /// The current active tab's draggable dividers (empty when zoomed).

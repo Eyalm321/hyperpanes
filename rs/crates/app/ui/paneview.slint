@@ -112,7 +112,15 @@ export component PaneView inherits Rectangle {
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
     in property <[ProjectItem]> projects;
+    // ---- drag / tear-off slot preview (area-relative logical px) ----
+    in property <length> drop-rect-x: 0px;
+    in property <length> drop-rect-y: 0px;
+    in property <length> drop-rect-w: 0px;
+    in property <length> drop-rect-h: 0px;
+    in property <int> drop-rect-edge: 0;   // 0 left · 1 right · 2 top · 3 bottom
+    in property <bool> drop-rect-active: false;
 
+    callback pane-grab(int);
     callback key(int, KeyMsg);
     callback focus-pane(int);
     callback area-resized(length, length);
@@ -161,8 +169,17 @@ export component PaneView inherits Rectangle {
                     height: 26px;
                     // bottom hairline
                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
-                    // header click focuses the pane (sits under the buttons)
-                    TouchArea { clicked => { root.focus-pane(idx); tp.focus(); } }
+                    // header click focuses the pane (sits under the buttons); a press also
+                    // arms a drag — the drag pump promotes it past the threshold (else it
+                    // stays a plain click).
+                    TouchArea {
+                        clicked => { root.focus-pane(idx); tp.focus(); }
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                root.pane-grab(idx);
+                            }
+                        }
+                    }
 
                     HorizontalLayout {
                         padding-left: 8px;
@@ -243,6 +260,32 @@ export component PaneView inherits Rectangle {
         for d in root.dividers : DividerHandle {
             desc: d;
             drag(i, main, vert, dx, dy) => { root.divider-drag(i, main, vert, dx, dy); }
+        }
+
+        // drag/tear-off slot preview: a tinted highlight over the hovered tile + a thick
+        // accent bar on the near edge marking exactly where the pane will land.
+        if root.drop-rect-active : Rectangle {
+            x: root.drop-rect-x;
+            y: root.drop-rect-y;
+            width: root.drop-rect-w;
+            height: root.drop-rect-h;
+            background: Theme.brand;
+            opacity: 0.12;
+            border-radius: 7px;
+            border-width: 2px;
+            border-color: Theme.brand;
+            // near-edge marker (left/right → vertical bar; top/bottom → horizontal bar)
+            Rectangle {
+                background: Theme.brand;
+                border-radius: 2px;
+                width: (root.drop-rect-edge == 0 || root.drop-rect-edge == 1) ? 4px : parent.width;
+                height: (root.drop-rect-edge == 0 || root.drop-rect-edge == 1) ? parent.height : 4px;
+                x: root.drop-rect-edge == 1 ? parent.width - self.width
+                 : root.drop-rect-edge == 0 ? 0px
+                 : 0px;
+                y: root.drop-rect-edge == 3 ? parent.height - self.height
+                 : 0px;
+            }
         }
 
         // empty-state hint
