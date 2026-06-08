@@ -410,6 +410,16 @@ impl TerminalPane {
         }
     }
 
+    /// Read the system clipboard for a right-click / Ctrl+V paste, raising a "Pasted …"
+    /// indicator. Returns the text the caller should write to this pane's session (the controller
+    /// doesn't own the session transport), or `None` when the clipboard is empty/unavailable.
+    pub fn paste_from_clipboard(&mut self) -> Option<String> {
+        let text = self.clipboard.paste()?;
+        let n = text.chars().count();
+        self.set_toast(format!("Pasted {} char{}", n, if n == 1 { "" } else { "s" }));
+        Some(text)
+    }
+
     // ---- Copy/paste indicator ("toast") -----------------------------------------------------
 
     /// Raise a transient indicator over the pane (e.g. "Copied 12 chars to clipboard"). It

@@ -195,6 +195,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // plain Ctrl+C with no selection → fall through to SIGINT below
             }
+            // Paste: Ctrl+V / Ctrl+Shift+V reads the clipboard into the pane (matches Electron).
+            let is_paste =
+                msg.control && (msg.text.eq_ignore_ascii_case("v") || msg.text == "\u{16}");
+            if is_paste {
+                let text = {
+                    let mut guard = state.borrow_mut();
+                    guard.as_mut().and_then(|st| {
+                        if idx < st.panes.len() {
+                            st.panes[idx].pane.paste_from_clipboard()
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let (Some(text), Some(uid)) = (text, uids.get(idx)) {
+                    mgr.write(uid, &text);
+                }
+                return; // paste is never forwarded to the shell as a Ctrl+V byte
+            }
             if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
                 if let Some(uid) = uids.get(idx) {
                     mgr.write(uid, &String::from_utf8_lossy(&bytes));
@@ -354,6 +373,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     row.selection_rects = to_hirects(Vec::new());
                     model.set_row_data(idx, row);
                 }
+            }
+        });
+    }
+
+    // ---- right-click paste: clipboard → this pane's session (with a "Pasted …" indicator) ----
+    {
+        let state = state.clone();
+        let mgr = mgr.clone();
+        let uids = uids.clone();
+        app.on_paste_requested(move |idx| {
+            let idx = idx as usize;
+            let text = {
+                let mut guard = state.borrow_mut();
+                guard.as_mut().and_then(|st| {
+                    if idx < st.panes.len() {
+                        st.panes[idx].pane.paste_from_clipboard()
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let (Some(text), Some(uid)) = (text, uids.get(idx)) {
+                mgr.write(uid, &text);
             }
         });
     }
