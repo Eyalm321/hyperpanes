@@ -486,6 +486,8 @@ export component PaneView inherits Rectangle {
                         search-count: pane.search-count;
                         // transient bottom-right indicator (copy/paste + Ctrl-zoom font %)
                         toast: pane.toast;
+                        // live terminal font px → toast + search box scale with zoom
+                        term-font-px: pane.font-px;
                         search-edited(q) => { root.pane-search-edited(idx, q); }
                         search-next => { root.pane-search-next(idx); }
                         search-prev => { root.pane-search-prev(idx); }

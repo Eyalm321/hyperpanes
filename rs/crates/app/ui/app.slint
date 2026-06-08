@@ -50,6 +50,10 @@ export component AppWindow inherits Window {
     in property <bool> fullscreen-hint: false;
     // True while Esc is held → keeps the hint up and fills its progress bar.
     in property <bool> esc-holding: false;
+    // Terminal font zoom factor (current font px / 14px base; 1.0 at default zoom). The
+    // transient app indicators (the fullscreen hint, the zoom hud) scale by it so they
+    // grow/shrink with the terminal font, just like the in-pane toast.
+    in property <float> zoom-factor: 1.0;
     // ---- Wave-2 appearance prefs ----
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -417,9 +421,10 @@ export component AppWindow inherits Window {
     // fullscreen (a brief flash) and again whenever Esc is being held.
     if root.fullscreen : Rectangle {
         // Fixed size — a sizeless Rectangle in a Window fills it (which would
-        // centre the content mid-screen), so pin width/height and place it.
-        width: 280px;
-        height: 38px;
+        // centre the content mid-screen), so pin width/height and place it. Scaled by the
+        // terminal zoom factor so the whole hint grows/shrinks with the font, staying centred.
+        width: 280px * root.zoom-factor;
+        height: 38px * root.zoom-factor;
         x: (parent.width - self.width) / 2;
         y: parent.height - self.height - 28px;
         opacity: (root.fullscreen-hint || root.esc-holding) ? 1.0 : 0.0;
@@ -427,31 +432,31 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             alignment: center;
-            spacing: 7px;
+            spacing: 7px * root.zoom-factor;
 
             // text line (centred row)
             HorizontalLayout {
                 alignment: center;
-                spacing: 5px;
+                spacing: 5px * root.zoom-factor;
                 Text {
                     text: "Hold";
                     color: #cdd6f4;
-                    font-size: 12px;
+                    font-size: 12px * root.zoom-factor;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
                 Rectangle {
                     background: #cdd6f424;          // foreground @ ~14% alpha
-                    border-radius: 5px;
+                    border-radius: 5px * root.zoom-factor;
                     HorizontalLayout {
-                        padding-left: 6px;
-                        padding-right: 6px;
-                        padding-top: 1px;
-                        padding-bottom: 1px;
+                        padding-left: 6px * root.zoom-factor;
+                        padding-right: 6px * root.zoom-factor;
+                        padding-top: 1px * root.zoom-factor;
+                        padding-bottom: 1px * root.zoom-factor;
                         Text {
                             text: "Esc";
                             color: #cdd6f4;
-                            font-size: 12px;
+                            font-size: 12px * root.zoom-factor;
                             font-weight: 700;
                         }
                     }
@@ -459,7 +464,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: "to exit fullscreen";
                     color: #cdd6f4;
-                    font-size: 12px;
+                    font-size: 12px * root.zoom-factor;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
@@ -469,15 +474,15 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 alignment: center;
                 Rectangle {
-                    width: 168px;
-                    height: 3px;
-                    border-radius: 2px;
+                    width: 168px * root.zoom-factor;
+                    height: 3px * root.zoom-factor;
+                    border-radius: 2px * root.zoom-factor;
                     background: #cdd6f424;
                     clip: true;
                     Rectangle {
                         x: 0;
                         height: parent.height;
-                        border-radius: 2px;
+                        border-radius: 2px * root.zoom-factor;
                         background: #cdd6f4;
                         width: root.esc-holding ? parent.width : 0px;
                         animate width {

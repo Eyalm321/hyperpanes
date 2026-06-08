@@ -37,6 +37,9 @@ export struct PaneItem {
     search-count: string,
     // transient bottom-right indicator: copy/paste confirmations + the Ctrl-zoom font "%".
     toast: string,
+    // the terminal font size in effect (logical px) — the live zoom / focused-pane font-size
+    // state. Drives the widget's `term-font-px` so the toast + search box scale with zoom.
+    font-px: length,
     // Whether the pane's shell has exited (drives the single-layout taskbar's "exited"
     // badge). The native app removes a pane the moment its session exits, so this is
     // structurally always false today — kept for Electron parity / a future status model.

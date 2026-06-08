@@ -125,6 +125,7 @@ fn pane_item(
     editing: bool,
     show_frame: bool,
     show_dot: bool,
+    font_px: f32,
 ) -> PaneItem {
     let (x, y, w, h) = ps.rect;
     // Project the clickable-path hover overlay (if any) into the model row.
@@ -163,6 +164,8 @@ fn pane_item(
         search_open,
         search_count,
         toast: ps.last_toast.clone().into(),
+        // The live terminal font px (logical) — drives the widget's indicator scaling.
+        font_px,
         // The native app drops a pane the moment its session exits, so a live pane is never
         // "exited"; the field exists for the taskbar's Electron-parity badge.
         exited: false,
@@ -308,6 +311,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     // panes
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
+    let font_px = state.settings.font_px;
     let editing_pane = state.editing_pane;
     let t = state.active_tab();
     let focused = t.focused;
@@ -315,7 +319,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .panes
         .iter()
         .enumerate()
-        .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot))
+        .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot, font_px))
         .collect();
     sync_model(&ui.panes, items);
 
@@ -339,6 +343,8 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_zoomed(state.active_tab().zoomed.is_some());
     app.set_fullscreen(state.fullscreen);
     app.set_esc_holding(state.esc_holding);
+    // Terminal zoom factor (current font px / base) → scales the fullscreen hint + zoom hud.
+    app.set_zoom_factor(state.settings.font_px / prefs::DEFAULT_FONT_PX);
     // Single-layout pane taskbar gate (the hidden-panes strip; see State::taskbar_visible).
     app.set_taskbar_visible(state.taskbar_visible());
 
@@ -736,6 +742,7 @@ pub fn pump(
     // pane's override folds over, and which pane (if any) is being renamed inline.
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
+    let font_px = state.settings.font_px;
     let editing_pane = state.editing_pane;
     let active = state.active;
     let focused = state.tabs[active].focused;
@@ -785,7 +792,7 @@ pub fn pump(
         if i < ui.panes.row_count() {
             ui.panes.set_row_data(
                 i,
-                pane_item(ps, i == focused, i as i32 == editing_pane, show_frame, show_dot),
+                pane_item(ps, i == focused, i as i32 == editing_pane, show_frame, show_dot, font_px),
             );
         }
     }
