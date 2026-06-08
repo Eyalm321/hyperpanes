@@ -1054,6 +1054,48 @@ impl App {
         // Ctrl+wheel over a pane → zoom the terminal font (same command as Ctrl+= / Ctrl+-).
         cb_i32!(on_pane_font_zoom, Command::FontZoom);
 
+        // text selection: drag to select, copy-on-release (the widget reports logical-px
+        // points; the controller hit-tests against the pane's surface + font cell metrics).
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_selection_begin(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_selection_begin(i as usize, x, y);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_selection_update(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_selection_update(i as usize, x, y);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_selection_end(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_selection_end(i as usize);
+                }
+            });
+        }
+
+        // right-click in a pane body → paste the clipboard into that pane's session (mirrors
+        // Electron; routed through the command path so it uses the session manager).
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_paste(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::PastePane(i as usize));
+                }
+            });
+        }
+
         // in-pane search box (opened from the pane context menu)
         {
             let app = app.clone();

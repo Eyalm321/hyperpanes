@@ -260,6 +260,12 @@ export component PaneView inherits Rectangle {
     callback pane-link-activated(int, length, length, bool);
     // Ctrl+wheel over a pane body → zoom the terminal font (±1 px per notch).
     callback pane-font-zoom(int);
+    // text selection (drag to select; copy-on-release) routed from the focused pane.
+    callback pane-selection-begin(int, length, length);
+    callback pane-selection-update(int, length, length);
+    callback pane-selection-end(int);
+    // right-click in a pane body → paste the clipboard into that pane's session.
+    callback pane-paste(int);
     // in-pane search box (opened from the pane menu's "Search…")
     callback pane-search-edited(int, string);
     callback pane-search-next(int);
@@ -484,8 +490,16 @@ export component PaneView inherits Rectangle {
                         // in-pane search box (controller-driven; opened from the pane menu)
                         search-open: pane.search-open;
                         search-count: pane.search-count;
+                        // drag-to-select highlight rects (controller-driven, per tick)
+                        selection-rects: pane.selection-rects;
                         // transient bottom-right indicator (copy/paste + Ctrl-zoom font %)
                         toast: pane.toast;
+                        // live terminal font px → toast + search box scale with zoom
+                        term-font-px: pane.font-px;
+                        selection-begin(x, y) => { root.pane-selection-begin(idx, x, y); }
+                        selection-update(x, y) => { root.pane-selection-update(idx, x, y); }
+                        selection-end => { root.pane-selection-end(idx); }
+                        paste-requested => { root.pane-paste(idx); }
                         search-edited(q) => { root.pane-search-edited(idx, q); }
                         search-next => { root.pane-search-next(idx); }
                         search-prev => { root.pane-search-prev(idx); }

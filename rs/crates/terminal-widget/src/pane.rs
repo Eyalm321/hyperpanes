@@ -458,6 +458,12 @@ impl TerminalPane {
         Some(text)
     }
 
+    /// Pin the viewport back to the live edge (display offset 0) so the cursor is visible at the
+    /// end of whatever was just written — e.g. after a paste, regardless of scrollback position.
+    pub fn scroll_to_bottom(&mut self) {
+        self.grid.scroll_to_bottom();
+    }
+
     // ---- Copy/paste indicator ("toast") -----------------------------------------------------
 
     /// Raise a transient indicator over the pane (e.g. "Copied 12 chars to clipboard"). It

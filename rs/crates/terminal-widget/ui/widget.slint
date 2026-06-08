@@ -58,10 +58,12 @@ component HaloText inherits Rectangle {
 // A small icon button for the search box (↑ / ↓ / ×), matching the Electron `.hp-search-btn`.
 component SearchBtn inherits Rectangle {
     in property <string> label;
+    // Scale (1.0 at default zoom) so the search controls grow/shrink with the terminal font.
+    in property <float> scale: 1.0;
     callback clicked();
-    width: 22px;
-    height: 22px;
-    border-radius: 5px;
+    width: 22px * root.scale;
+    height: 22px * root.scale;
+    border-radius: 5px * root.scale;
     background: btn-ta.has-hover ? #2a2e42 : transparent;
     btn-ta := TouchArea {
         clicked => { root.clicked(); }
@@ -72,7 +74,7 @@ component SearchBtn inherits Rectangle {
         // Pin a font that carries the ↑ ↓ × glyphs — the default font is missing some,
         // which left buttons rendering as blank/tofu.
         font-family: "Segoe UI Symbol";
-        font-size: 13px;
+        font-size: 13px * root.scale;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -104,6 +106,14 @@ export component TerminalPane inherits Rectangle {
     in property <string> toast: "";
     in property <color> toast-fg: #c0caf5;
     in property <color> toast-halo: #16161e;
+
+    // --- terminal font size in effect (logical px), driven by the app's zoom / focused-pane
+    //     font-size state. The transient indicators (copy/paste toast + the in-pane search box)
+    //     scale with it so they grow when the terminal is zoomed in and shrink when zoomed out.
+    //     Default = the app's 14px base, so `ind-scale` is 1.0 (no regression) at default zoom.
+    in property <length> term-font-px: 14px;
+    // Indicator scale relative to the 14px base font (1.0 at default zoom).
+    property <float> ind-scale: root.term-font-px / 14px;
 
     // --- in-pane search (Ctrl+F): the box anchored top-right + the match highlights ---
     in property <bool> search-open: false;
@@ -215,13 +225,15 @@ export component TerminalPane inherits Rectangle {
     }
 
     // Drag-selection highlight (one rect per row-span), painted over the terminal surface but
-    // under the link/search overlays and chrome.
+    // under the link/search overlays and chrome. A NEUTRAL contrast overlay (a translucent
+    // wash of the terminal foreground), NOT the pane accent — so selected text reads clearly
+    // and a coloured (e.g. red) pane doesn't tint its selection.
     for r in root.selection-rects: Rectangle {
         x: r.x;
         y: r.y;
         width: r.w;
         height: r.h;
-        background: root.accent.with-alpha(0.30);
+        background: #c0caf5.with-alpha(0.28);
     }
 
     // Search-match highlights: every visible match dimmed, the active one accented + outlined.
@@ -324,7 +336,9 @@ export component TerminalPane inherits Rectangle {
         text: root.toast;
         fg-color: root.toast-fg;
         halo: root.toast-halo;
-        size: 13px;
+        // "Reads like the terminal itself" → track the terminal font px (≈13px at the 14px
+        // base), with a floor so it stays legible when zoomed all the way out.
+        size: max(10px, 13px * root.ind-scale);
     }
 
     // In-pane search box (Ctrl+F), anchored top-right — ports `SearchBox.tsx` / `.hp-search`.
@@ -334,8 +348,10 @@ export component TerminalPane inherits Rectangle {
         width: boxrow.preferred-width;
         x: parent.width - self.width - 14px;
         y: 6px;
-        height: 30px;
-        border-radius: 7px;
+        // Box + text scale with the terminal font (parity with the toast) so the search box
+        // grows/shrinks proportionally when the terminal is zoomed.
+        height: 30px * root.ind-scale;
+        border-radius: 7px * root.ind-scale;
         background: #1a1b26;
         border-width: 1px;
         border-color: #2a2e42;
@@ -344,21 +360,21 @@ export component TerminalPane inherits Rectangle {
         // Swallow presses so a click in the box doesn't begin a selection on the surface.
         TouchArea {}
         boxrow := HorizontalLayout {
-            padding: 4px;
-            spacing: 3px;
+            padding: 4px * root.ind-scale;
+            spacing: 3px * root.ind-scale;
             // Query input.
             Rectangle {
-                width: 150px;
-                border-radius: 5px;
+                width: 150px * root.ind-scale;
+                border-radius: 5px * root.ind-scale;
                 background: #16161e;
                 border-width: 1px;
                 border-color: query.has-focus ? root.accent : #2a2e42;
                 query := TextInput {
-                    x: 7px;
-                    width: parent.width - 14px;
+                    x: 7px * root.ind-scale;
+                    width: parent.width - 14px * root.ind-scale;
                     vertical-alignment: center;
                     color: #c0caf5;
-                    font-size: 12px;
+                    font-size: 12px * root.ind-scale;
                     font-family: "Consolas";
                     single-line: true;
                     // Grab focus the moment the box appears (Ctrl+F → type immediately).
@@ -387,20 +403,23 @@ export component TerminalPane inherits Rectangle {
                 width: self.preferred-width + 4px;
                 text: root.search-count;
                 color: #565f89;
-                font-size: 11px;
+                font-size: 11px * root.ind-scale;
                 horizontal-alignment: center;
             }
             // Prev / next / close.
             SearchBtn {
                 label: "↑";
+                scale: root.ind-scale;
                 clicked => { root.search-prev(); }
             }
             SearchBtn {
                 label: "↓";
+                scale: root.ind-scale;
                 clicked => { root.search-next(); }
             }
             SearchBtn {
                 label: "×";
+                scale: root.ind-scale;
                 clicked => { root.search-closed(); }
             }
         }
