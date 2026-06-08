@@ -1,17 +1,25 @@
-//! Idle glow — the AI-pane quiescence effect (the native port of
-//! `src/renderer/components/idle-effects.ts`).
+//! Idle glow — the AI-pane quiescence effect, a faithful native port of
+//! `src/renderer/components/idle-effects.ts`.
 //!
 //! When a pane has produced no output for `idle_alert_seconds` (its agent finished and
-//! is waiting), its frame softly glows. The glow's *opacity* is animated here, per pane,
-//! every pump tick (the deterministic styles read a free-running clock; firefly is driven
-//! by a small per-pane PRNG, the native equivalent of the renderer's `setTimeout` pulses).
-//! `paneview` projects the current alpha into the `PaneItem.glow` model field, and
-//! `paneview.slint` draws an accent-tinted ring + halo at that opacity.
+//! is waiting), its frame softly glows. This module reproduces the renderer's Web
+//! Animations feel *exactly*: each style is one pulse's opacity **keyframes** + an
+//! **easing**, played for a (possibly random) **duration**, repeated on a (possibly
+//! random) **period** after a one-off **start delay**. The dark gap between blinks is
+//! `period − duration`, so a continuous style sets `period == duration` and an irregular
+//! one (firefly) leaves a random gap. `solid` holds a constant opacity with no animation.
+//!
+//! The renderer drives this with real wall-clock time + `Math.random()`; we mirror that
+//! with a monotonic [`Instant`] clock + a per-pane xorshift PRNG (seeded from the pane uid
+//! so two idle panes never blink in lockstep). `paneview` projects the current alpha into
+//! the `PaneItem.glow` model field each tick, and `paneview.slint` draws an accent-tinted
+//! ring + halo at that opacity.
 
 use std::time::{Duration, Instant};
 
 /// One glow style. The token is what's persisted in [`crate::prefs::Settings::idle_effect`];
-/// the order matches [`Self::OPTIONS`] (the picker list).
+/// the order matches [`Self::OPTIONS`] (the picker list) and the renderer's
+/// `IDLE_EFFECT_NAMES`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleEffect {
     /// Irregular soft blinks with random dark gaps — keeps catching the eye.
@@ -20,26 +28,29 @@ pub enum IdleEffect {
     Pulse,
     /// Faster, insistent on/off blink — a louder nudge.
     Blink,
+    /// A failing fluorescent tube: stutter-strikes, catches, buzzes lit, then re-strikes.
+    Fluorescent,
     /// No animation — a constant soft glow that just holds until you act.
     Solid,
 }
 
 impl IdleEffect {
-    /// The picker options as `(token, label)` in display order — a subset of the renderer's
-    /// `IDLE_EFFECT_LABELS` (the styles the native ring can reproduce).
-    pub const OPTIONS: [(&'static str, &'static str); 4] = [
+    /// The picker options as `(token, label)` in display order — a 1:1 mirror of the
+    /// renderer's `IDLE_EFFECT_LABELS` (every style the native ring reproduces).
+    pub const OPTIONS: [(&'static str, &'static str); 5] = [
         ("firefly", "Firefly (random)"),
         ("pulse", "Pulse (steady)"),
         ("blink", "Blink (insistent)"),
+        ("fluorescent", "Fluorescent (flicker)"),
         ("solid", "Solid glow"),
     ];
 
-    /// Parse a persisted token, defaulting to Firefly for an unknown/empty value (so an
-    /// older blob or a renderer-only style like `fluorescent` still resolves to something).
+    /// Parse a persisted token, defaulting to Firefly for an unknown/empty value.
     pub fn from_token(s: &str) -> Self {
         match s {
             "pulse" => Self::Pulse,
             "blink" => Self::Blink,
+            "fluorescent" => Self::Fluorescent,
             "solid" => Self::Solid,
             _ => Self::Firefly,
         }
@@ -51,6 +62,7 @@ impl IdleEffect {
             Self::Firefly => "firefly",
             Self::Pulse => "pulse",
             Self::Blink => "blink",
+            Self::Fluorescent => "fluorescent",
             Self::Solid => "solid",
         }
     }
@@ -59,28 +71,65 @@ impl IdleEffect {
     pub fn index(self) -> usize {
         Self::OPTIONS.iter().position(|(t, _)| *t == self.token()).unwrap_or(0)
     }
+
+    /// Whether one pulse interpolates its keyframes linearly (fluorescent — snappy/electric)
+    /// rather than with `ease-in-out` (every other animated style).
+    fn linear(self) -> bool {
+        matches!(self, Self::Fluorescent)
+    }
 }
 
-/// `sin(πx)` — a smooth 0→1→0 hump over `x ∈ [0,1]` (the swell shape every animated style
-/// uses for one pulse).
-fn hump(x: f32) -> f32 {
-    (x.clamp(0.0, 1.0) * std::f32::consts::PI).sin()
+/// CSS `ease-in-out` (`cubic-bezier(0.42, 0, 0.58, 1)`), approximated by smoothstep — a
+/// monotonic 0→1 curve that's visually indistinguishable for an opacity fade.
+fn ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
-/// Per-pane glow animation state. The deterministic styles are stateless (computed from a
-/// wall-clock phase); firefly carries a tiny PRNG + the current segment schedule.
+/// Interpolate an opacity keyframe list at progress `t ∈ [0,1]`. `stops` are `(offset,
+/// opacity)` pairs sorted by ascending offset (a hard WAAPI requirement). `linear` selects
+/// the per-segment easing.
+fn interp(stops: &[(f32, f32)], t: f32, linear: bool) -> f32 {
+    if stops.is_empty() {
+        return 0.0;
+    }
+    let t = t.clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 1 < stops.len() && t > stops[i + 1].0 {
+        i += 1;
+    }
+    let (o0, a0) = stops[i];
+    let (o1, a1) = if i + 1 < stops.len() { stops[i + 1] } else { stops[i] };
+    if o1 <= o0 {
+        return a1;
+    }
+    let local = ((t - o0) / (o1 - o0)).clamp(0.0, 1.0);
+    let e = if linear { local } else { ease_in_out(local) };
+    a0 + (a1 - a0) * e
+}
+
+/// Per-pane glow animation state — a single self-scheduling pulse loop (the native
+/// equivalent of the renderer's `runIdleEffect` `setTimeout` loop). The deterministic
+/// styles regenerate identical cycles; firefly/fluorescent re-roll their timing (and
+/// fluorescent its keyframes) each cycle from the per-pane PRNG.
 pub struct Glow {
     /// The opacity currently shown (0 = no glow), projected into the model each tick.
     pub alpha: f32,
     /// xorshift64 state — seeded per pane so two idle panes don't blink in lockstep.
     rng: u64,
-    /// Firefly: end of the current segment (a lit pulse or a dark gap).
-    seg_end: Option<Instant>,
-    /// Firefly: start + length (ms) of the current lit pulse (`None`/0 during a dark gap).
-    pulse_start: Option<Instant>,
-    pulse_ms: f32,
-    /// Firefly: whether the current segment is a lit pulse (vs a dark gap).
-    pulsing: bool,
+    /// The effect the current schedule was built for (so a pref change restarts it).
+    effect: Option<IdleEffect>,
+    /// During the one-off start delay (before the first pulse): hold dark until this instant.
+    pending_until: Option<Instant>,
+    /// Start of the current pulse/cycle (`None` until the first one begins).
+    cycle_start: Option<Instant>,
+    /// This cycle's pulse length (ms) and start-to-start period (ms); the dark gap is the
+    /// difference.
+    dur_ms: f32,
+    period_ms: f32,
+    /// This cycle's opacity keyframes (`(offset, opacity)`, ascending) and easing flag.
+    stops: Vec<(f32, f32)>,
+    linear: bool,
 }
 
 impl Glow {
@@ -89,10 +138,13 @@ impl Glow {
         Glow {
             alpha: 0.0,
             rng: seed | 1, // never 0 (xorshift would stick)
-            seg_end: None,
-            pulse_start: None,
-            pulse_ms: 0.0,
-            pulsing: false,
+            effect: None,
+            pending_until: None,
+            cycle_start: None,
+            dur_ms: 0.0,
+            period_ms: 0.0,
+            stops: Vec::new(),
+            linear: false,
         }
     }
 
@@ -107,70 +159,144 @@ impl Glow {
         ((x >> 40) as f32) / ((1u32 << 24) as f32)
     }
 
-    /// Advance the animation and return the alpha to display. `idle` gates the glow on the
-    /// pane's quiescence; when it goes false the glow resets to dark. `now`/`now_ms` are a
-    /// shared monotonic instant + wall-clock-ms read once per tick.
-    pub fn update(&mut self, effect: IdleEffect, idle: bool, now: Instant, now_ms: u64) -> f32 {
-        if !idle {
-            self.alpha = 0.0;
-            self.seg_end = None;
-            self.pulse_start = None;
-            self.pulsing = false;
-            return 0.0;
-        }
-        self.alpha = match effect {
-            // constant soft glow.
-            IdleEffect::Solid => 0.5,
-            // 2.2 s breathing between 0.12 and 0.70 (no dark gap).
-            IdleEffect::Pulse => {
-                let p = (now_ms % 2200) as f32 / 2200.0;
-                0.12 + 0.58 * hump(p)
-            }
-            // 0.94 s cycle: a 0.42 s on-swell to full, then dark.
-            IdleEffect::Blink => {
-                let p = (now_ms % 940) as f32;
-                if p < 420.0 {
-                    hump(p / 420.0)
-                } else {
-                    0.0
-                }
-            }
-            IdleEffect::Firefly => self.firefly(now),
-        };
-        self.alpha
+    /// `base + rand()*spread` — the renderer's `rand(base, spread)`.
+    fn rand_range(&mut self, base: f32, spread: f32) -> f32 {
+        base + self.rand() * spread
     }
 
-    /// Firefly: alternate random lit pulses (≈0.85–1.4 s, peaking ~0.8) with random dark
-    /// gaps (≈0.85–2.6 s), the native port of the renderer's randomized `setTimeout` loop.
-    fn firefly(&mut self, now: Instant) -> f32 {
-        // First call: wait a short randomized beat before the first blink.
-        if self.seg_end.is_none() {
-            let delay = 350.0 + self.rand() * 500.0;
-            self.seg_end = Some(now + Duration::from_millis(delay as u64));
-            self.pulsing = false;
+    /// Reset to dark (idle ended or no effect armed).
+    fn reset(&mut self) {
+        self.alpha = 0.0;
+        self.effect = None;
+        self.pending_until = None;
+        self.cycle_start = None;
+    }
+
+    /// The one-off start delay (ms) before the first pulse of `e`.
+    fn start_delay_for(&mut self, e: IdleEffect) -> f32 {
+        match e {
+            IdleEffect::Firefly => self.rand_range(350.0, 500.0),
+            IdleEffect::Fluorescent => self.rand_range(100.0, 220.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Begin a fresh pulse cycle of `e` at `now`: roll this cycle's duration, period and
+    /// keyframes from the PRNG (the deterministic styles roll the same values every time).
+    fn begin_cycle(&mut self, e: IdleEffect, now: Instant) {
+        let dur = match e {
+            IdleEffect::Firefly => self.rand_range(850.0, 550.0),
+            IdleEffect::Pulse => 2200.0,
+            IdleEffect::Blink => 420.0,
+            IdleEffect::Fluorescent => self.rand_range(2600.0, 1600.0),
+            IdleEffect::Solid => 0.0,
+        };
+        // period − duration is the dark gap; fluorescent loops (period == duration), dropping
+        // out at the boundary to re-strike.
+        let period = match e {
+            IdleEffect::Firefly => self.rand_range(1700.0, 2600.0),
+            IdleEffect::Pulse => 2200.0,
+            IdleEffect::Blink => 940.0,
+            IdleEffect::Fluorescent => dur,
+            IdleEffect::Solid => 0.0,
+        };
+        let stops = match e {
+            // 0 → 0.8 @ 0.4 → 0
+            IdleEffect::Firefly => vec![(0.0, 0.0), (0.4, 0.8), (1.0, 0.0)],
+            // 0.12 → 0.7 @ 0.5 → 0.12  (back-to-back swells, no dark gap)
+            IdleEffect::Pulse => vec![(0.0, 0.12), (0.5, 0.7), (1.0, 0.12)],
+            // 0 → 1 @ 0.5 → 0
+            IdleEffect::Blink => vec![(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)],
+            IdleEffect::Fluorescent => self.fluorescent_stops(),
+            IdleEffect::Solid => vec![(0.0, 0.5), (1.0, 0.5)],
+        };
+        self.dur_ms = dur;
+        self.period_ms = period.max(1.0);
+        self.stops = stops;
+        self.linear = e.linear();
+        self.cycle_start = Some(now);
+    }
+
+    /// A struggling fluorescent tube (the native port of the renderer's
+    /// `fluorescentKeyframes`): a burst of rapid strike-flashes with dark gaps, then it
+    /// catches and holds lit (with a faint buzz and one mid-cycle stutter). Levels are
+    /// re-rolled each cycle so it never reads as a fixed loop; the offsets stay fixed and
+    /// strictly ascending.
+    fn fluorescent_stops(&mut self) -> Vec<(f32, f32)> {
+        let lit = 0.36 + self.rand() * 0.1; // the level it settles to once "on"
+        let flash = |r: f32| 0.75 + r * 0.25; // a strike flash from a [0,1) roll
+        let (f1, f2, f3, f4) = (
+            flash(self.rand()),
+            flash(self.rand()),
+            flash(self.rand()),
+            flash(self.rand()),
+        );
+        vec![
+            (0.0, 0.0),
+            (0.02, f1),
+            (0.05, 0.04),
+            (0.08, f2),
+            (0.11, 0.0),
+            (0.15, f3),
+            (0.19, 0.1),
+            (0.26, lit), // catches and holds
+            (0.46, lit),
+            (0.48, f4), // a sudden mid-cycle stutter
+            (0.5, 0.06),
+            (0.54, lit),
+            (0.78, lit * 0.88), // faint buzz
+            (1.0, lit),
+        ]
+    }
+
+    /// Advance the animation and return the alpha to display. `idle` gates the glow on the
+    /// pane's quiescence; when it goes false the glow resets to dark. `now` is a shared
+    /// monotonic instant read once per tick.
+    pub fn update(&mut self, effect: IdleEffect, idle: bool, now: Instant) -> f32 {
+        if !idle {
+            self.reset();
             return 0.0;
         }
-        if now >= self.seg_end.unwrap() {
-            if self.pulsing {
-                // lit pulse ended → start a dark gap.
-                self.pulsing = false;
-                self.pulse_start = None;
-                let gap = 850.0 + self.rand() * 1750.0;
-                self.seg_end = Some(now + Duration::from_millis(gap as u64));
-            } else {
-                // dark gap ended → start a lit pulse.
-                self.pulsing = true;
-                self.pulse_ms = 850.0 + self.rand() * 550.0;
-                self.pulse_start = Some(now);
-                self.seg_end = Some(now + Duration::from_millis(self.pulse_ms as u64));
+        // Solid: a constant hold, no schedule. Marking the effect means switching away from
+        // it later restarts with a fresh start delay.
+        if effect == IdleEffect::Solid {
+            self.effect = Some(IdleEffect::Solid);
+            self.pending_until = None;
+            self.cycle_start = None;
+            self.alpha = 0.5;
+            return 0.5;
+        }
+        // (Re)start the schedule when the effect changed or nothing is armed yet.
+        if self.effect != Some(effect)
+            || (self.cycle_start.is_none() && self.pending_until.is_none())
+        {
+            self.effect = Some(effect);
+            let delay = self.start_delay_for(effect);
+            self.pending_until = Some(now + Duration::from_millis(delay as u64));
+            self.cycle_start = None;
+            self.alpha = 0.0;
+            return 0.0;
+        }
+        // Hold dark through the start delay, then begin the first pulse.
+        if let Some(p) = self.pending_until {
+            if now < p {
+                self.alpha = 0.0;
+                return 0.0;
             }
+            self.pending_until = None;
+            self.begin_cycle(effect, now);
         }
-        if self.pulsing {
-            let t = now.duration_since(self.pulse_start.unwrap()).as_secs_f32() * 1000.0;
-            hump(t / self.pulse_ms) * 0.8
-        } else {
-            0.0
+        // Roll to the next cycle once the period elapses.
+        let mut e = now.saturating_duration_since(self.cycle_start.unwrap()).as_secs_f32() * 1000.0;
+        if e >= self.period_ms {
+            self.begin_cycle(effect, now);
+            e = 0.0;
         }
+        // Within the pulse: interpolate the keyframes; past it (firefly/blink gap) the last
+        // keyframe (0) holds dark until the next cycle.
+        let t = if self.dur_ms > 0.0 { (e / self.dur_ms).min(1.0) } else { 1.0 };
+        self.alpha = interp(&self.stops, t, self.linear);
+        self.alpha
     }
 }
 
@@ -254,8 +380,10 @@ mod tests {
             assert_eq!(e.token(), *tok);
             assert_eq!(e.index(), i);
         }
-        // Unknown / renderer-only styles fall back to firefly.
-        assert_eq!(IdleEffect::from_token("fluorescent"), IdleEffect::Firefly);
+        // fluorescent is now a real, selectable style (it was renderer-only before).
+        assert_eq!(IdleEffect::from_token("fluorescent"), IdleEffect::Fluorescent);
+        // Unknown / empty falls back to firefly.
+        assert_eq!(IdleEffect::from_token("nope"), IdleEffect::Firefly);
         assert_eq!(IdleEffect::from_token(""), IdleEffect::Firefly);
     }
 
@@ -263,29 +391,81 @@ mod tests {
     fn not_idle_is_dark() {
         let mut g = Glow::new(seed_from("pane-0"));
         let now = Instant::now();
-        assert_eq!(g.update(IdleEffect::Pulse, false, now, 1234), 0.0);
-        assert_eq!(g.update(IdleEffect::Solid, false, now, 1234), 0.0);
+        assert_eq!(g.update(IdleEffect::Pulse, false, now), 0.0);
+        assert_eq!(g.update(IdleEffect::Solid, false, now), 0.0);
     }
 
     #[test]
-    fn solid_holds_and_pulse_breathes_in_range() {
+    fn solid_holds_immediately() {
         let mut g = Glow::new(seed_from("pane-1"));
         let now = Instant::now();
-        assert!((g.update(IdleEffect::Solid, true, now, 0) - 0.5).abs() < 1e-6);
-        // Pulse stays within its [0.12, 0.70] envelope across the cycle.
-        for ms in (0..2200).step_by(50) {
-            let a = g.update(IdleEffect::Pulse, true, now, ms);
-            assert!((0.11..=0.71).contains(&a), "pulse alpha {a} at {ms}ms out of range");
+        assert!((g.update(IdleEffect::Solid, true, now) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pulse_breathes_in_range() {
+        let mut g = Glow::new(seed_from("pane-2"));
+        let start = Instant::now();
+        // First call arms the schedule (0 start delay), the second begins the cycle at
+        // `start`; thereafter it breathes within its [0.12, 0.70] envelope.
+        g.update(IdleEffect::Pulse, true, start);
+        g.update(IdleEffect::Pulse, true, start);
+        let mut peak = 0.0f32;
+        for step in 0..120 {
+            let now = start + Duration::from_millis(step * 50);
+            let a = g.update(IdleEffect::Pulse, true, now);
+            assert!((0.119..=0.701).contains(&a), "pulse alpha {a} at step {step} out of range");
+            peak = peak.max(a);
+        }
+        assert!(peak > 0.6, "pulse never swelled (peak {peak})");
+    }
+
+    #[test]
+    fn blink_peaks_then_goes_dark() {
+        let mut g = Glow::new(seed_from("pane-3"));
+        let start = Instant::now();
+        // Arm + begin the cycle at `start` (0 start delay), then sample mid-swell (~210ms,
+        // the keyframe peak at offset 0.5 of the 420ms pulse) and in the dark gap (~700ms,
+        // past the pulse but before the 940ms period rolls over).
+        g.update(IdleEffect::Blink, true, start);
+        g.update(IdleEffect::Blink, true, start);
+        let near_peak = g.update(IdleEffect::Blink, true, start + Duration::from_millis(210));
+        let in_gap = g.update(IdleEffect::Blink, true, start + Duration::from_millis(700));
+        assert!(near_peak > 0.9, "blink should peak near 1.0 mid-swell (got {near_peak})");
+        assert_eq!(in_gap, 0.0, "blink should be dark in the gap");
+    }
+
+    #[test]
+    fn firefly_alpha_is_bounded() {
+        let mut g = Glow::new(seed_from("pane-4"));
+        let start = Instant::now();
+        for step in 0..400 {
+            let now = start + Duration::from_millis(step * 25);
+            let a = g.update(IdleEffect::Firefly, true, now);
+            assert!((0.0..=0.8001).contains(&a), "firefly alpha {a} out of range");
         }
     }
 
     #[test]
-    fn blink_goes_dark_in_the_gap() {
-        let mut g = Glow::new(seed_from("pane-2"));
-        let now = Instant::now();
-        // Peak near the middle of the on-swell, dark in the tail of the cycle.
-        assert!(g.update(IdleEffect::Blink, true, now, 210) > 0.9);
-        assert_eq!(g.update(IdleEffect::Blink, true, now, 700), 0.0);
+    fn fluorescent_alpha_is_bounded() {
+        let mut g = Glow::new(seed_from("pane-5"));
+        let start = Instant::now();
+        for step in 0..600 {
+            let now = start + Duration::from_millis(step * 20);
+            let a = g.update(IdleEffect::Fluorescent, true, now);
+            // flashes reach ~1.0; nothing ever exceeds it or goes negative.
+            assert!((0.0..=1.0001).contains(&a), "fluorescent alpha {a} out of range");
+        }
+    }
+
+    #[test]
+    fn effect_change_restarts_cleanly() {
+        let mut g = Glow::new(seed_from("pane-6"));
+        let start = Instant::now();
+        g.update(IdleEffect::Solid, true, start);
+        // Switching solid → blink re-arms (dark during the fresh start window).
+        let a = g.update(IdleEffect::Blink, true, start);
+        assert_eq!(a, 0.0);
     }
 
     #[test]
@@ -308,16 +488,5 @@ mod tests {
             Some("second")
         );
         assert_eq!(sniff_osc_title("no title here"), None);
-    }
-
-    #[test]
-    fn firefly_alpha_is_bounded() {
-        let mut g = Glow::new(seed_from("pane-3"));
-        let start = Instant::now();
-        for step in 0..400 {
-            let now = start + Duration::from_millis(step * 25);
-            let a = g.update(IdleEffect::Firefly, true, now, step * 25);
-            assert!((0.0..=0.8001).contains(&a), "firefly alpha {a} out of range");
-        }
     }
 }

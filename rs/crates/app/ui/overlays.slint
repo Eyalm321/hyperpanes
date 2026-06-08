@@ -323,8 +323,9 @@ export component OverlayLayer inherits Rectangle {
     in property <[PrefOption]> idle-effects;
     in property <string> idle-effect-label;
     in property <int> idle-seconds: 10;
-    // keybindings list (read-only mirror of the default keymap)
+    // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> keybindings;
+    in property <bool> keybinds-overridden: false;  // any binding overridden → show "Reset all"
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -335,6 +336,11 @@ export component OverlayLayer inherits Rectangle {
     callback pref-text(int, string); // (kind, value) — string-valued settings
     callback pref-done();            // commit the appearance draft + close (Done / Save)
     callback pref-confirm(int);      // 0 keep · 1 discard · 2 save
+    // keybindings editor
+    callback pref-rebind(string);                    // start capturing binding `id`
+    callback pref-capture(bool, bool, bool, string); // (ctrl, alt, shift, key-text)
+    callback pref-reset-binding(string);             // reset binding `id` to default
+    callback pref-reset-all-bindings();
 
     callback dismiss();
 
@@ -762,11 +768,30 @@ export component OverlayLayer inherits Rectangle {
                         } // end AI features panel
 
                         // ===================== Keybindings =====================
-                        // Read-only list of the default chords, grouped by category and shown
-                        // as <kbd> chips — styled like the Electron Preferences › Keybindings
-                        // tab. (The native keymap is fixed; rebinding is a future bonus.)
+                        // Editable list of the EFFECTIVE keymap (overrides over defaults),
+                        // grouped by category and shown as <kbd> chips — styled like the
+                        // Electron Preferences › Keybindings tab. Click a row to capture a new
+                        // chord; an overridden row shows a Reset; "Reset all" clears every
+                        // override. The override always wins in the live key router.
                         if prefs.sel == 3 : VerticalLayout {
                             spacing: 2px;
+
+                            // header: hint + Reset all (only when something is overridden)
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "Click a shortcut to rebind it";
+                                    color: Theme.faint;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                if root.keybinds-overridden : Pill {
+                                    label: "Reset all";
+                                    clicked => { root.pref-reset-all-bindings(); }
+                                }
+                            }
+
                             for kb[i] in root.keybindings : VerticalLayout {
                                 spacing: 2px;
                                 // group heading above the first row of each category
@@ -777,9 +802,12 @@ export component OverlayLayer inherits Rectangle {
                                     font-weight: 600;
                                 }
                                 Rectangle {
-                                    height: 34px;
+                                    height: 36px;
                                     border-radius: 6px;
-                                    background: kbta.has-hover ? Theme.surface : transparent;
+                                    border-width: kb.capturing ? 1px : 0px;
+                                    border-color: Theme.accent;
+                                    background: kb.capturing ? Theme.surface2
+                                              : (kbta.has-hover ? Theme.surface : transparent);
                                     HorizontalLayout {
                                         padding-left: 10px;
                                         padding-right: 10px;
@@ -792,17 +820,24 @@ export component OverlayLayer inherits Rectangle {
                                             horizontal-stretch: 1;
                                             overflow: elide;
                                         }
-                                        // chord chips: one <kbd> per part (Ctrl / Shift / P)
-                                        HorizontalLayout {
+                                        // capture prompt OR the chord chips
+                                        if kb.capturing : Text {
+                                            text: "Press a chord…  Esc to cancel";
+                                            color: Theme.accent;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                        if !kb.capturing : HorizontalLayout {
                                             spacing: 4px;
                                             alignment: end;
                                             for part in kb.parts : VerticalLayout {
                                                 alignment: center;
                                                 Rectangle {
-                                                    background: Theme.surface2;
+                                                    background: kb.overridden ? Theme.accent.with-alpha(0.18) : Theme.surface2;
                                                     border-radius: 5px;
                                                     border-width: 1px;
-                                                    border-color: Theme.border;
+                                                    border-color: kb.overridden ? Theme.accent : Theme.border;
                                                     HorizontalLayout {
                                                         padding-left: 7px;
                                                         padding-right: 7px;
@@ -818,8 +853,45 @@ export component OverlayLayer inherits Rectangle {
                                                 }
                                             }
                                         }
+                                        // per-row reset (only when overridden and not capturing)
+                                        if kb.overridden && !kb.capturing : VerticalLayout {
+                                            alignment: center;
+                                            rb := Rectangle {
+                                                width: 22px;
+                                                height: 22px;
+                                                border-radius: 5px;
+                                                background: rta.has-hover ? Theme.surface2 : transparent;
+                                                Text {
+                                                    text: "↺";
+                                                    color: rta.has-hover ? Theme.text : Theme.subtext;
+                                                    font-size: 14px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                rta := TouchArea { clicked => { root.pref-reset-binding(kb.id); } }
+                                            }
+                                        }
                                     }
-                                    kbta := TouchArea {}
+                                    kbta := TouchArea { clicked => { root.pref-rebind(kb.id); } }
+
+                                    // While capturing, grab the keyboard and forward each combo
+                                    // to the controller (which builds the chord + saves it). A
+                                    // bare modifier is swallowed so it doesn't prematurely bind.
+                                    if kb.capturing : FocusScope {
+                                        init => { self.focus(); }
+                                        key-pressed(e) => {
+                                            if (e.text == Key.Control || e.text == Key.Shift
+                                                || e.text == Key.Alt || e.text == Key.Meta) {
+                                                return EventResult.accept;
+                                            }
+                                            root.pref-capture(
+                                                e.modifiers.control || e.modifiers.meta,
+                                                e.modifiers.alt,
+                                                e.modifiers.shift,
+                                                e.text);
+                                            return EventResult.accept;
+                                        }
+                                    }
                                 }
                             }
                         } // end Keybindings panel

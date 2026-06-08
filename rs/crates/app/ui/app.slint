@@ -70,8 +70,9 @@ export component AppWindow inherits Window {
     in property <[PrefOption]> pref-idle-effects;
     in property <string> pref-idle-effect-label;
     in property <int> pref-idle-seconds: 10;
-    // keybindings list (read-only)
+    // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
+    in property <bool> pref-keybinds-overridden: false;
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
@@ -142,6 +143,11 @@ export component AppWindow inherits Window {
     callback pref-text(int, string);
     callback pref-done();
     callback pref-confirm(int);
+    // keybindings editor: start capturing a rebind, deliver a captured chord, reset one / all.
+    callback pref-rebind(string);                  // start capturing binding `id`
+    callback pref-capture(bool, bool, bool, string); // (ctrl, alt, shift, key-text)
+    callback pref-reset-binding(string);           // reset binding `id` to default
+    callback pref-reset-all-bindings();
     callback overlay-dismiss();
     // ---- sidebar rail ----
     callback open-project(int);
@@ -291,6 +297,7 @@ export component AppWindow inherits Window {
             idle-effect-label: root.pref-idle-effect-label;
             idle-seconds: root.pref-idle-seconds;
             keybindings: root.pref-keybindings;
+            keybinds-overridden: root.pref-keybinds-overridden;
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;
@@ -305,6 +312,10 @@ export component AppWindow inherits Window {
             pref-text(k, v) => { root.pref-text(k, v); }
             pref-done => { root.pref-done(); }
             pref-confirm(a) => { root.pref-confirm(a); }
+            pref-rebind(id) => { root.pref-rebind(id); }
+            pref-capture(c, a, s, t) => { root.pref-capture(c, a, s, t); }
+            pref-reset-binding(id) => { root.pref-reset-binding(id); }
+            pref-reset-all-bindings => { root.pref-reset-all-bindings(); }
             dismiss => { root.overlay-dismiss(); }
         }
     }

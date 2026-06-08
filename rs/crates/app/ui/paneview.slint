@@ -280,6 +280,17 @@ export component PaneView inherits Rectangle {
                         geometry-changed(w, h) => { root.pane-geometry(idx, w, h); }
                         link-moved(x, y) => { root.pane-link-moved(idx, x, y); }
                         link-exited => { root.pane-link-exited(idx); }
+                        // Click anywhere in the pane body (incl. blank terminal area) focuses
+                        // it. Today the widget reports every left-down through `link-activated`
+                        // (the focus side-effect below), so clicking blank space already
+                        // focuses pane `idx`.
+                        //
+                        // FROZEN CONTRACT (lands at fan-in): the terminal-io track adds a
+                        // dedicated `focus-requested` callback to TerminalPane, fired on
+                        // mouse-down. Once it's on the widget, uncomment the line below — it's
+                        // the canonical focus wire and is robust even if `link-activated`
+                        // narrows to real links only:
+                        //   focus-requested => { root.focus-pane(idx); }
                         link-activated(x, y, ctrl) => {
                             root.focus-pane(idx);
                             root.pane-link-activated(idx, x, y, ctrl);

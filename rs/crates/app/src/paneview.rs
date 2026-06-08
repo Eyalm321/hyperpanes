@@ -136,6 +136,9 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
     let cw = state.font.cell_w;
     let ch = state.font.cell_h;
     let active = state.active;
+    // Fullscreen solos the focused pane (OS fullscreen + bars hidden in app.slint), like
+    // Electron's `fullscreenPaneId`: one pane fills the screen, the rest go invisible.
+    let fullscreen = state.fullscreen;
     let tab = &mut state.tabs[active];
     let n = tab.panes.len();
     if n == 0 {
@@ -164,6 +167,13 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
             p.applied = (cols, rows);
         }
     };
+
+    // Fullscreen wins over zoom: solo the focused pane, full-area.
+    if fullscreen {
+        let f = tab.focused.min(n - 1);
+        place(&mut tab.panes[f], 0.0, 0.0, aw, ah);
+        return;
+    }
 
     if let Some(z) = tab.zoomed {
         if z < n {
@@ -418,24 +428,32 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_pref_idle_effect_label(idle_label.into());
     app.set_pref_idle_seconds(state.settings.idle_alert_seconds as i32);
 
-    // keybindings list (read-only mirror of the default keymap), grouped by category and
-    // rendered as <kbd> chips — styled like the Electron Preferences → Keybindings tab.
+    // keybindings list (the EFFECTIVE keymap — overrides over defaults), grouped by category
+    // and rendered as <kbd> chips. Each row is editable: click to capture a new chord, with a
+    // per-row reset when overridden. `capturing` marks the row currently capturing input.
+    let capturing = state.capturing_binding.clone();
     let mut prev_cat = "";
-    let keybindings: Vec<KeybindingItem> = crate::keybindings::binding_rows()
+    let keybindings: Vec<KeybindingItem> = state
+        .keymap
+        .rows()
         .into_iter()
         .map(|r| {
             let group_first = r.category != prev_cat;
             prev_cat = r.category;
             let parts: Vec<SharedString> = r.parts.into_iter().map(Into::into).collect();
             KeybindingItem {
+                id: r.id.into(),
                 label: r.label.into(),
                 parts: ModelRc::from(Rc::new(VecModel::from(parts))),
                 category: r.category.into(),
                 group_first,
+                overridden: r.overridden,
+                capturing: capturing.as_deref() == Some(r.id),
             }
         })
         .collect();
     sync_model(&ui.keybindings, keybindings);
+    app.set_pref_keybinds_overridden(state.keymap.any_overridden());
 
     // Dialog appearance scalars come from the draft view; the actual panes keep the
     // committed show_frame/show_dot until Done.
@@ -510,7 +528,7 @@ pub fn pump(
         // Animate the idle-glow demo for the AI-features preview: always "idle" so the
         // selected effect plays continuously (the .slint only shows it on the AI tab).
         let eff = crate::glow::IdleEffect::from_token(&state.settings.idle_effect);
-        let a = state.preview_glow.update(eff, true, Instant::now(), crate::glow::now_epoch_ms());
+        let a = state.preview_glow.update(eff, true, Instant::now());
         app.set_pref_preview_glow(a);
     }
 
@@ -543,7 +561,7 @@ pub fn pump(
                 Some(ms) => glow_now_ms.saturating_sub(ms) >= idle_threshold_ms,
                 None => false,
             };
-        ps.glow.update(idle_effect, idle, glow_now, glow_now_ms);
+        ps.glow.update(idle_effect, idle, glow_now);
         let glow_changed = (ps.glow.alpha - prev_glow).abs() > 0.004;
 
         if !ps.visible {

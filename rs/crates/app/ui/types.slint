@@ -72,15 +72,19 @@ export struct PrefOption {
     active: bool,
 }
 
-// One row in the Preferences → Keybindings list (read-only mirror of the default keymap,
-// styled like the Electron app): a human label, the chord as `<kbd>`-chip parts (e.g.
-// ["Ctrl","Shift","P"]), its category, and whether it's the first row of that category
-// (so the view draws the group heading above it).
+// One row in the Preferences → Keybindings editor (the EFFECTIVE keymap — overrides over
+// defaults): a stable `id` (keys the rebind/reset callbacks), a human label, the chord as
+// `<kbd>`-chip parts (e.g. ["Ctrl","Shift","P"]), its category, whether it's the first row of
+// that category (so the view draws the group heading above it), whether the user has
+// overridden it (shows a reset affordance), and whether it's currently capturing a new chord.
 export struct KeybindingItem {
+    id: string,
     label: string,
     parts: [string],
     category: string,
     group-first: bool,
+    overridden: bool,
+    capturing: bool,
 }
 
 // One frame-palette choice in the Appearance picker: a label plus its 8 slot colors,

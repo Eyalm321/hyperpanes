@@ -157,30 +157,34 @@ pub(crate) fn forwardable(text: &str) -> bool {
     })
 }
 
-/// Translate a key event into a [`keybindings::KeyTok`] (the modifier-agnostic key
-/// token). Arrows + F11 map directly; letters are normalised — with Ctrl held Slint
-/// reports the control char (Ctrl+A = U+0001 … Ctrl+Z = U+001A), so map it back, and
-/// lowercase plain letters so a chord matches regardless of Shift.
-fn key_tok(msg: &KeyMsg) -> Option<keybindings::KeyTok> {
+/// Translate a key event's text into a [`keybindings::KeyTok`] (the modifier-agnostic key
+/// token). Arrows + F11 map directly; letters are normalised — with Ctrl held Slint reports
+/// the control char (Ctrl+A = U+0001 … Ctrl+Z = U+001A), so map it back, and lowercase plain
+/// letters so a chord matches regardless of Shift. Shared by the router and the keybindings
+/// editor's chord capture.
+pub(crate) fn key_tok_from_text(text: &str, control: bool) -> Option<keybindings::KeyTok> {
     use keybindings::KeyTok;
-    if is_key(&msg.text, Key::LeftArrow) {
+    if is_key(text, Key::LeftArrow) {
         return Some(KeyTok::Left);
     }
-    if is_key(&msg.text, Key::RightArrow) {
+    if is_key(text, Key::RightArrow) {
         return Some(KeyTok::Right);
     }
-    if is_key(&msg.text, Key::UpArrow) {
+    if is_key(text, Key::UpArrow) {
         return Some(KeyTok::Up);
     }
-    if is_key(&msg.text, Key::DownArrow) {
+    if is_key(text, Key::DownArrow) {
         return Some(KeyTok::Down);
     }
-    if is_key(&msg.text, Key::F11) {
+    if is_key(text, Key::F11) {
         return Some(KeyTok::F11);
     }
-    let c = msg.text.chars().next()?;
+    let c = text.chars().next()?;
     let u = c as u32;
-    let letter = if (1..=26).contains(&u) {
+    // Only remap a control codepoint back to a letter when Ctrl is actually held (Ctrl+A =
+    // U+0001 … Ctrl+Z = U+001A). Gating on `control` keeps plain special keys (Tab=U+0009,
+    // Enter=U+000A, …) from masquerading as letters — important for the rebind capture path.
+    let letter = if control && (1..=26).contains(&u) {
         (b'a' + (u as u8) - 1) as char
     } else {
         c.to_ascii_lowercase()
@@ -192,8 +196,13 @@ fn key_tok(msg: &KeyMsg) -> Option<keybindings::KeyTok> {
     }
 }
 
-/// Resolve a key event to a bound [`Command`] via the keybindings table.
-pub(crate) fn route_chord(msg: &KeyMsg) -> Option<Command> {
+fn key_tok(msg: &KeyMsg) -> Option<keybindings::KeyTok> {
+    key_tok_from_text(&msg.text, msg.control)
+}
+
+/// Resolve a key event to a bound [`Command`] via the user's keymap (overrides win over
+/// defaults — see [`keybindings::Keymap::match_chord`]).
+pub(crate) fn route_chord(keymap: &keybindings::Keymap, msg: &KeyMsg) -> Option<Command> {
     let tok = key_tok(msg)?;
-    keybindings::match_chord(msg.control, msg.alt, msg.shift, tok)
+    keymap.match_chord(msg.control, msg.alt, msg.shift, tok)
 }
