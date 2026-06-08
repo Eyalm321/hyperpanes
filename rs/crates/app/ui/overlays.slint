@@ -53,6 +53,13 @@ component PrefToggle inherits Rectangle {
     }
 }
 
+// A section header inside the preferences card (mirrors Electron's `.hp-kb-group-title`).
+component SectionTitle inherits Text {
+    color: Theme.subtext;
+    font-size: 11px;
+    font-weight: 700;
+}
+
 // A small pill button (font ± and family chips).
 component Pill inherits Rectangle {
     in property <string> label;
@@ -208,9 +215,13 @@ export component OverlayLayer inherits Rectangle {
     }
 
     // ===== preferences =====
+    // Structured to mirror Electron's `PreferencesDialog` section grouping (Appearance,
+    // then Terminal). Only settings whose underlying feature exists in the native build
+    // are rendered; deferred ones are marked `TODO(phase5)` (no dead controls). The card
+    // auto-sizes to its content (no scroll machinery needed at this size).
     if root.kind == 2 : Rectangle {
-        width: 460px;
-        height: 360px;
+        width: 520px;
+        height: min(body.preferred-height, parent.height - 60px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         background: Theme.mantle;
@@ -220,11 +231,12 @@ export component OverlayLayer inherits Rectangle {
         drop-shadow-blur: 48px;
         drop-shadow-color: Theme.scrim;
         drop-shadow-offset-y: 18px;
+        clip: true;
         TouchArea {}
 
-        VerticalLayout {
+        body := VerticalLayout {
             padding: 18px;
-            spacing: 14px;
+            spacing: 12px;
 
             HorizontalLayout {
                 Text {
@@ -241,8 +253,11 @@ export component OverlayLayer inherits Rectangle {
                 }
             }
 
-            // ---- font family ----
-            Text { text: "Terminal font"; color: Theme.subtext; font-size: 11px; font-weight: 700; }
+            // ===================== Appearance =====================
+            SectionTitle { text: "Appearance"; }
+
+            // ---- terminal font family ----
+            Text { text: "Terminal font"; color: Theme.faint; font-size: 11px; }
             HorizontalLayout {
                 spacing: 6px;
                 for opt[i] in root.families : Pill {
@@ -276,8 +291,6 @@ export component OverlayLayer inherits Rectangle {
                 Pill { label: "+"; clicked => { root.pref-action(1, 1); } }
             }
 
-            Rectangle { height: 1px; background: Theme.border; }
-
             // ---- frame / dot toggles ----
             PrefToggle {
                 label: "Pane frame border";
@@ -289,6 +302,12 @@ export component OverlayLayer inherits Rectangle {
                 on: root.show-dot;
                 toggled(v) => { root.pref-action(3, v ? 1 : 0); }
             }
+
+            // TODO(phase5): terminal color-theme picker — needs a terminal-widget palette/theme
+            //   API (TermGrid has a fixed 256-colour palette today, no setter). Persist + expose
+            //   once the widget gains `set_palette`/a theme table.
+            // TODO(phase5): idle-glow settings (idleAlert / idleEffect / idleAlertSeconds) — the
+            //   AI-pane glow effect isn't built in the native shell yet.
 
             Rectangle { vertical-stretch: 1; }
         }
