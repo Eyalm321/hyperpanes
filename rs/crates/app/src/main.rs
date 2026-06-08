@@ -18,7 +18,11 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod command;
+mod keybindings;
+mod palette;
 mod paneview;
+mod prefs;
+mod sidebar;
 mod state;
 mod theme;
 mod window;
@@ -27,7 +31,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use hyperpanes_core::layout::navigate::Direction;
 use hyperpanes_core::layout::presets::DividerKind;
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
 use hyperpanes_terminal_widget::encode_key;
@@ -134,11 +137,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tabs: Rc::new(VecModel::default()),
         dividers: Rc::new(VecModel::default()),
         layouts: Rc::new(VecModel::default()),
+        palette: Rc::new(VecModel::default()),
+        projects: Rc::new(VecModel::default()),
+        families: Rc::new(VecModel::default()),
     });
     app.set_panes(ModelRc::from(ui.panes.clone()));
     app.set_tabs(ModelRc::from(ui.tabs.clone()));
     app.set_dividers(ModelRc::from(ui.dividers.clone()));
     app.set_layouts(ModelRc::from(ui.layouts.clone()));
+    app.set_palette(ModelRc::from(ui.palette.clone()));
+    app.set_projects(ModelRc::from(ui.projects.clone()));
+    app.set_pref_families(ModelRc::from(ui.families.clone()));
 
     let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
     let area: Rc<RefCell<(f32, f32)>> = Rc::new(RefCell::new((0.0, 0.0)));
@@ -232,6 +241,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.on_rename_tab(move |i, t| ctx.run(Command::RenameTab(i, t.to_string())));
     }
 
+    // ---- Wave-2 overlay callbacks (each maps to a Command) ----
+    {
+        let ctx = ctx.clone();
+        app.on_palette_query(move |q| ctx.run(Command::PaletteQuery(q.to_string())));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_palette_nav(move |d| ctx.run(Command::PaletteNav(d)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_palette_activate(move || ctx.run(Command::PaletteActivate));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_palette_pick(move |i| ctx.run(Command::PaletteSelect(i as usize)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_open_project(move |i| ctx.run(Command::OpenProject(i as usize)));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_overlay_dismiss(move || ctx.run(Command::CloseOverlay));
+    }
+    {
+        let ctx = ctx.clone();
+        // (kind, arg) → a typed Setting (see ui/overlays.slint).
+        app.on_pref_action(move |kind, arg| {
+            let setting = match kind {
+                0 => state::Setting::FontFamily(arg as usize),
+                1 => state::Setting::FontDelta(arg),
+                2 => state::Setting::ShowFrame(arg != 0),
+                3 => state::Setting::ShowDot(arg != 0),
+                _ => return,
+            };
+            ctx.run(Command::ApplySetting(setting));
+        });
+    }
+    // Top-bar menu entries that open the overlays (mouse access alongside the chords).
+    {
+        let ctx = ctx.clone();
+        app.on_open_palette(move || ctx.run(Command::PaletteOpen));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_open_prefs(move || ctx.run(Command::PrefsOpen));
+    }
+    {
+        let ctx = ctx.clone();
+        app.on_toggle_sidebar(move || ctx.run(Command::ToggleSidebar));
+    }
+
     // ---- divider drag: cursor offset from seam centre → size-fraction delta ----
     {
         let ctx = ctx.clone();
@@ -271,18 +333,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 msg.text.as_str(),
                 msg.text.chars().map(|c| c as u32).collect::<Vec<_>>()
             ));
-            // F11 → toggle OS fullscreen (app-reserved; never forwarded).
-            if is_key(&msg.text, Key::F11) {
-                ctx.run(Command::ToggleFullscreen);
-                return;
-            }
+            // App chords come from the keybindings table (Seam #2). Ctrl+Shift is
+            // fully app-reserved: run the mapped command (if any) and ALWAYS swallow —
+            // never forward to the shell (each chord can also emit a phantom control
+            // char; swallowing stops it leaking).
             if msg.control && msg.shift {
-                // Ctrl+Shift is app-reserved: run the mapped command (if any) and
-                // ALWAYS swallow — never forward to the shell. (Each chord can also
-                // emit a phantom control-char event; swallowing stops it leaking.)
-                if let Some(cmd) = shortcut(&msg) {
+                if let Some(cmd) = route_chord(&msg) {
                     ctx.run(cmd);
                 }
+                return;
+            }
+            // Other modifier chords (Alt+… focus moves, bare F11) — run + swallow. Plain
+            // keys (incl. bare arrows) don't match any binding and fall through.
+            if let Some(cmd) = route_chord(&msg) {
+                ctx.run(cmd);
                 return;
             }
             // Escape: a tap goes to the shell; HOLDING it in fullscreen exits
@@ -389,6 +453,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if std::env::var_os("HYPERPANES_DEMO").is_some() {
                     demo_seed(&mut st, &mgr);
                 }
+                // Screenshot scaffolding: open a named overlay at launch so each
+                // Wave-2 feature can be captured deterministically.
+                if let Some(which) = std::env::var_os("HYPERPANES_OPEN") {
+                    let cmd = match which.to_string_lossy().as_ref() {
+                        "palette" => Some(Command::PaletteOpen),
+                        "prefs" => Some(Command::PrefsOpen),
+                        "sidebar" => Some(Command::ToggleSidebar),
+                        _ => None,
+                    };
+                    if let Some(cmd) = cmd {
+                        dispatch(&mut st, cmd, &mgr);
+                    }
+                }
                 *state.borrow_mut() = Some(st);
             }
 
@@ -470,42 +547,43 @@ fn forwardable(text: &str) -> bool {
     })
 }
 
-/// Map a Ctrl+Shift chord to a command (the Wave-1 keyboard surface).
-fn shortcut(msg: &KeyMsg) -> Option<Command> {
-    let is = |k: Key| -> bool {
-        let s: SharedString = k.into();
-        msg.text == s
+/// Translate a key event into a [`keybindings::KeyTok`] (the modifier-agnostic key
+/// token). Arrows + F11 map directly; letters are normalised — with Ctrl held Slint
+/// reports the control char (Ctrl+A = U+0001 … Ctrl+Z = U+001A), so map it back, and
+/// lowercase plain letters so a chord matches regardless of Shift.
+fn key_tok(msg: &KeyMsg) -> Option<keybindings::KeyTok> {
+    use keybindings::KeyTok;
+    if is_key(&msg.text, Key::LeftArrow) {
+        return Some(KeyTok::Left);
+    }
+    if is_key(&msg.text, Key::RightArrow) {
+        return Some(KeyTok::Right);
+    }
+    if is_key(&msg.text, Key::UpArrow) {
+        return Some(KeyTok::Up);
+    }
+    if is_key(&msg.text, Key::DownArrow) {
+        return Some(KeyTok::Down);
+    }
+    if is_key(&msg.text, Key::F11) {
+        return Some(KeyTok::F11);
+    }
+    let c = msg.text.chars().next()?;
+    let u = c as u32;
+    let letter = if (1..=26).contains(&u) {
+        (b'a' + (u as u8) - 1) as char
+    } else {
+        c.to_ascii_lowercase()
     };
-    if is(Key::LeftArrow) {
-        return Some(Command::FocusDir(Direction::Left));
+    if letter.is_ascii_alphabetic() {
+        Some(KeyTok::Letter(letter))
+    } else {
+        None
     }
-    if is(Key::RightArrow) {
-        return Some(Command::FocusDir(Direction::Right));
-    }
-    if is(Key::UpArrow) {
-        return Some(Command::FocusDir(Direction::Up));
-    }
-    if is(Key::DownArrow) {
-        return Some(Command::FocusDir(Direction::Down));
-    }
-    // With Ctrl held, Slint reports `text` as the control char (Ctrl+A = U+0001
-    // … Ctrl+Z = U+001A), not the letter — map it back. Plain letters (no ctrl
-    // remap) are lowercased so the chord matches regardless of Shift.
-    let letter = msg.text.chars().next().map(|c| {
-        let u = c as u32;
-        if (1..=26).contains(&u) {
-            (b'a' + (u as u8) - 1) as char
-        } else {
-            c.to_ascii_lowercase()
-        }
-    });
-    match letter {
-        Some('t') => Some(Command::NewTab),
-        Some('n') => Some(Command::NewPane),
-        Some('w') => Some(Command::CloseFocused),
-        Some('l') => Some(Command::CycleLayout),
-        Some('z') => Some(Command::ToggleZoom),
-        Some('f') => Some(Command::ToggleFullscreen),
-        _ => None,
-    }
+}
+
+/// Resolve a key event to a bound [`Command`] via the keybindings table.
+fn route_chord(msg: &KeyMsg) -> Option<Command> {
+    let tok = key_tok(msg)?;
+    keybindings::match_chord(msg.control, msg.alt, msg.shift, tok)
 }

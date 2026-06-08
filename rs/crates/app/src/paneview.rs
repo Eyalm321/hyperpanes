@@ -15,9 +15,12 @@ use slint::{Model, VecModel};
 use std::rc::Rc;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::state::{PaneState, State};
+use crate::state::{Overlay, PaneState, State};
 use crate::theme;
-use crate::{AppWindow, DividerItem, LayoutOption, PaneItem, TabItem};
+use crate::{
+    AppWindow, DividerItem, LayoutOption, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
+};
+use crate::prefs;
 
 /// Thickness (logical px) of the draggable divider hit-area.
 const DIVIDER_THICK: f32 = 10.0;
@@ -37,6 +40,10 @@ pub struct Ui {
     pub tabs: Rc<VecModel<TabItem>>,
     pub dividers: Rc<VecModel<DividerItem>>,
     pub layouts: Rc<VecModel<LayoutOption>>,
+    // ---- Wave-2 overlay models ----
+    pub palette: Rc<VecModel<PaletteItem>>,
+    pub projects: Rc<VecModel<ProjectItem>>,
+    pub families: Rc<VecModel<PrefOption>>,
 }
 
 /// Push `items` into `model`, reusing the existing elements when the row count is
@@ -225,6 +232,46 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_zoomed(state.active_tab().zoomed.is_some());
     app.set_fullscreen(state.fullscreen);
     app.set_esc_holding(state.esc_holding);
+
+    // ---- Wave-2 overlay projection ----
+    let kind = match state.overlay {
+        Overlay::None => 0,
+        Overlay::Palette => 1,
+        Overlay::Prefs => 2,
+        Overlay::Sidebar => 3,
+    };
+    app.set_overlay_kind(kind);
+
+    // command palette rows + selection
+    let palette: Vec<PaletteItem> = state
+        .palette_rows()
+        .into_iter()
+        .map(|(title, subtitle)| PaletteItem { title, subtitle })
+        .collect();
+    sync_model(&ui.palette, palette);
+    app.set_palette_sel(state.palette_sel as i32);
+
+    // preferences scalars + the installed font-family options
+    let families: Vec<PrefOption> = prefs::available_families()
+        .into_iter()
+        .map(|(id, label)| PrefOption {
+            id: id as i32,
+            label: label.into(),
+            active: id == state.settings.font_family,
+        })
+        .collect();
+    sync_model(&ui.families, families);
+    app.set_pref_fontpx(state.settings.font_px.round() as i32);
+    app.set_show_frame(state.settings.show_frame);
+    app.set_show_dot(state.settings.show_dot);
+
+    // sidebar / projects rows
+    let projects: Vec<ProjectItem> = state
+        .project_rows()
+        .into_iter()
+        .map(|(name, color)| ProjectItem { name, color })
+        .collect();
+    sync_model(&ui.projects, projects);
 }
 
 /// One UI-thread tick: drain session output into the panes, resync if dirty,
@@ -263,12 +310,20 @@ pub fn pump(
                     return false;
                 }
             }
-            SessionEvent::Cwd { .. } => {}
+            SessionEvent::Cwd { cwd, .. } => {
+                // Pane cd'd → remember its git project (feeds the sidebar).
+                state.note_cwd(&cwd);
+            }
         }
     }
 
     // ---- expire a held-Esc once auto-repeat stops (no key-release event) ----
     state.tick_esc();
+
+    // ---- apply a pending font reload (we own the DPI scale here) ----
+    if state.font_reload {
+        state.reload_font(scale);
+    }
 
     // ---- resync models when state changed ----
     if state.dirty {

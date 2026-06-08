@@ -10,13 +10,13 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { KeyMsg } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
-export { PaneItem, TabItem, DividerItem, LayoutOption, KeyMsg }
+export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeyMsg }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";
@@ -42,7 +42,16 @@ export component AppWindow inherits Window {
     in property <bool> fullscreen-hint: false;
     // True while Esc is held → keeps the hint up and fills its progress bar.
     in property <bool> esc-holding: false;
-    in property <bool> overlay-visible: false;
+    // ---- Wave-2 appearance prefs ----
+    in property <bool> show-frame: true;
+    in property <bool> show-dot: true;
+    // ---- Wave-2 overlay panels (0 none · 1 palette · 2 prefs · 3 sidebar) ----
+    in property <int> overlay-kind: 0;
+    in property <[PaletteItem]> palette;
+    in property <int> palette-sel: 0;
+    in property <[PrefOption]> pref-families;
+    in property <int> pref-fontpx: 14;
+    in property <[ProjectItem]> projects;
 
     // ---- outputs (Rust subscribes; each maps to a Command) ----
     callback key(int, KeyMsg);
@@ -69,6 +78,18 @@ export component AppWindow inherits Window {
     callback min-window();
     callback max-window();
     callback close-window();
+    // Wave-2 overlay callbacks (each maps to a Command)
+    callback palette-query(string);
+    callback palette-nav(int);
+    callback palette-activate();
+    callback palette-pick(int);
+    callback pref-action(int, int);
+    callback open-project(int);
+    callback overlay-dismiss();
+    // top-bar menu → overlays
+    callback open-palette();
+    callback open-prefs();
+    callback toggle-sidebar();
 
     VerticalLayout {
         spacing: 0px;
@@ -88,6 +109,9 @@ export component AppWindow inherits Window {
             rename-tab(i, t) => { root.rename-tab(i, t); }
             set-layout(l) => { root.set-layout(l); }
             new-pane => { root.new-pane(); }
+            open-palette => { root.open-palette(); }
+            open-prefs => { root.open-prefs(); }
+            toggle-sidebar => { root.toggle-sidebar(); }
             toggle-zoom => { root.toggle-zoom(); }
             toggle-fullscreen => { root.toggle-fullscreen(); }
             start-drag => { root.start-drag(); }
@@ -102,7 +126,16 @@ export component AppWindow inherits Window {
             dividers: root.dividers;
             zoomed: root.zoomed;
             fullscreen: root.fullscreen;
-            overlay-visible: root.overlay-visible;
+            show-frame: root.show-frame;
+            show-dot: root.show-dot;
+            overlay-kind: root.overlay-kind;
+            palette: root.palette;
+            palette-sel: root.palette-sel;
+            pref-families: root.pref-families;
+            pref-fontpx: root.pref-fontpx;
+            pref-frame: root.show-frame;
+            pref-dot: root.show-dot;
+            projects: root.projects;
 
             key(i, m) => { root.key(i, m); }
             focus-pane(i) => { root.focus-pane(i); }
@@ -111,6 +144,13 @@ export component AppWindow inherits Window {
             pane-zoom(i) => { root.pane-zoom(i); }
             pane-fullscreen(i) => { root.pane-fullscreen(i); }
             pane-close(i) => { root.pane-close(i); }
+            palette-query(q) => { root.palette-query(q); }
+            palette-nav(d) => { root.palette-nav(d); }
+            palette-activate => { root.palette-activate(); }
+            palette-pick(i) => { root.palette-pick(i); }
+            pref-action(k, a) => { root.pref-action(k, a); }
+            open-project(i) => { root.open-project(i); }
+            overlay-dismiss => { root.overlay-dismiss(); }
         }
     }
 

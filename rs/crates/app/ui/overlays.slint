@@ -1,0 +1,371 @@
+// Wave-2 overlay panels (Seam #3): the command palette, preferences dialog, and
+// sidebar/projects panel that mount into PaneView's overlay slot. One `OverlayLayer`
+// fills the scrim area and shows exactly one panel based on `kind`:
+//
+//   kind 1 = command palette  (centred search card)
+//   kind 2 = preferences      (centred settings card)
+//   kind 3 = sidebar/projects (left-anchored rail panel)
+//
+// All state is owned by the Rust controller; this is pure projection + callbacks that
+// each map to a `Command`. Keyboard focus is grabbed by the palette query input so the
+// chords/text route here (not the panes) while open.
+
+import { Theme } from "theme.slint";
+import { PaletteItem, ProjectItem, PrefOption } from "types.slint";
+
+// A small labelled toggle switch (frame/dot prefs).
+component PrefToggle inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    callback toggled(bool);
+    height: 30px;
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            track := Rectangle {
+                width: 40px;
+                height: 22px;
+                border-radius: 11px;
+                background: root.on ? Theme.accent : Theme.surface2;
+                animate background { duration: 120ms; }
+                Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 8px;
+                    background: #ffffff;
+                    y: (parent.height - self.height) / 2;
+                    x: root.on ? parent.width - self.width - 3px : 3px;
+                    animate x { duration: 120ms; easing: ease-out; }
+                }
+                TouchArea { clicked => { root.toggled(!root.on); } }
+            }
+        }
+    }
+}
+
+// A small pill button (font ± and family chips).
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked;
+    height: 28px;
+    min-width: 28px;
+    border-radius: 6px;
+    background: root.active ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.label;
+            color: root.active ? #11111b : Theme.text;
+            font-size: 12px;
+            font-weight: root.active ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component OverlayLayer inherits Rectangle {
+    // 0 none · 1 palette · 2 prefs · 3 sidebar
+    in property <int> kind: 0;
+
+    // palette
+    in property <[PaletteItem]> palette;
+    in property <int> palette-sel: 0;
+    callback palette-query(string);
+    callback palette-nav(int);       // ±1
+    callback palette-activate();
+    callback palette-pick(int);      // hover/click row i
+
+    // preferences
+    in property <[PrefOption]> families;
+    in property <int> font-px: 14;
+    in property <bool> show-frame: true;
+    in property <bool> show-dot: true;
+    callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
+
+    // sidebar / projects
+    in property <[ProjectItem]> projects;
+    callback open-project(int);
+
+    callback dismiss();
+
+    // ===== command palette =====
+    if root.kind == 1 : Rectangle {
+        width: 560px;
+        height: min(440px, parent.height - 80px);
+        x: (parent.width - self.width) / 2;
+        y: 90px;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        clip: true;
+        // stop scrim clicks behind the card from dismissing
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+
+            // query input
+            Rectangle {
+                height: 38px;
+                border-radius: 8px;
+                background: Theme.bg;
+                border-width: 1px;
+                border-color: Theme.accent;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    qi := TextInput {
+                        color: Theme.text;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        init => { qi.focus(); }
+                        edited => { root.palette-query(self.text); }
+                        key-pressed(e) => {
+                            if (e.text == Key.UpArrow) { root.palette-nav(-1); return EventResult.accept; }
+                            if (e.text == Key.DownArrow) { root.palette-nav(1); return EventResult.accept; }
+                            if (e.text == Key.Return) { root.palette-activate(); return EventResult.accept; }
+                            if (e.text == Key.Escape) { root.dismiss(); return EventResult.accept; }
+                            return EventResult.reject;
+                        }
+                    }
+                }
+                // placeholder
+                Text {
+                    x: 12px;
+                    text: "Type a command…";
+                    color: Theme.faint;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    visible: qi.text == "";
+                }
+            }
+
+            // results list (clipped; query narrows quickly)
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 1px;
+                    if root.palette.length == 0 : Text {
+                        text: "No matching commands";
+                        color: Theme.faint;
+                        font-size: 13px;
+                        height: 40px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                    for row[i] in root.palette : Rectangle {
+                        height: 34px;
+                        border-radius: 7px;
+                        background: i == root.palette-sel ? Theme.surface2 : transparent;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            Text {
+                                text: row.title;
+                                color: Theme.text;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: row.subtitle;
+                                color: Theme.faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                        ta := TouchArea {
+                            clicked => { root.palette-pick(i); root.palette-activate(); }
+                            moved => { root.palette-pick(i); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== preferences =====
+    if root.kind == 2 : Rectangle {
+        width: 460px;
+        height: 360px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 14px;
+
+            HorizontalLayout {
+                Text {
+                    text: "Preferences";
+                    color: Theme.text;
+                    font-size: 16px;
+                    font-weight: 700;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                Pill {
+                    label: "Done";
+                    clicked => { root.dismiss(); }
+                }
+            }
+
+            // ---- font family ----
+            Text { text: "Terminal font"; color: Theme.subtext; font-size: 11px; font-weight: 700; }
+            HorizontalLayout {
+                spacing: 6px;
+                for opt[i] in root.families : Pill {
+                    label: opt.label;
+                    active: opt.active;
+                    clicked => { root.pref-action(0, opt.id); }
+                }
+            }
+
+            // ---- font size ----
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: "Font size";
+                    color: Theme.text;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Pill { label: "−"; clicked => { root.pref-action(1, -1); } }
+                Rectangle {
+                    width: 48px;
+                    Text {
+                        text: root.font-px + " px";
+                        color: Theme.text;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Pill { label: "+"; clicked => { root.pref-action(1, 1); } }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // ---- frame / dot toggles ----
+            PrefToggle {
+                label: "Pane frame border";
+                on: root.show-frame;
+                toggled(v) => { root.pref-action(2, v ? 1 : 0); }
+            }
+            PrefToggle {
+                label: "Pane color dot";
+                on: root.show-dot;
+                toggled(v) => { root.pref-action(3, v ? 1 : 0); }
+            }
+
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+
+    // ===== sidebar / projects (left-anchored rail panel) =====
+    if root.kind == 3 : Rectangle {
+        width: 260px;
+        height: parent.height - 16px;
+        x: 8px;
+        y: 8px;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 40px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-x: 10px;
+        clip: true;
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 8px;
+
+            Text {
+                text: "Projects";
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            Text {
+                text: "Repos you cd into show up here.";
+                color: Theme.faint;
+                font-size: 11px;
+                visible: root.projects.length == 0;
+                wrap: word-wrap;
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 2px;
+                    for p[i] in root.projects : Rectangle {
+                        height: 34px;
+                        border-radius: 7px;
+                        background: pa.has-hover ? Theme.surface2 : transparent;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 9px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    border-radius: 5px;
+                                    background: p.color;
+                                }
+                            }
+                            Text {
+                                text: p.name;
+                                color: Theme.text;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                        pa := TouchArea { clicked => { root.open-project(i); } }
+                    }
+                }
+            }
+        }
+    }
+}
