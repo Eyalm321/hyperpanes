@@ -20,15 +20,15 @@ use serde::{Deserialize, Serialize};
 /// the Electron dropdown exactly; a missing font simply falls back when loaded. A "Custom…"
 /// entry (handled in the UI) lets the user type any font-file path. Selection is persisted
 /// by value.
-pub const FONT_OPTIONS: [(&str, &str); 8] = [
+pub const FONT_OPTIONS: [(&str, &str); 7] = [
     ("System default (Consolas)", ""),
     ("Cascadia Code", "CascadiaCode.ttf"),
     ("Cascadia Mono", "CascadiaMono.ttf"),
     ("Consolas", "consola.ttf"),
     ("Courier New", "cour.ttf"),
+    // Fira Code + JetBrains Mono are baked in (see BUNDLED_FONTS), so they always render.
     ("Fira Code", "FiraCode-Regular.ttf"),
     ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
-    ("Menlo", "Menlo.ttc"), // macOS font; absent on Windows → falls back (parity entry)
 ];
 
 /// The fallback font path used when nothing else resolves (always present on Windows).
@@ -39,13 +39,44 @@ pub fn is_custom_font(font: &str) -> bool {
     !font.is_empty() && !FONT_OPTIONS.iter().any(|(_, v)| *v == font)
 }
 
-/// The directories scanned for the candidate font files: the system font folder plus the
-/// per-user font folder (where user-installed fonts land on modern Windows).
+/// Fonts shipped with hyperpanes (OFL 1.1, baked into the binary) so they're always
+/// available regardless of what the user has installed. Extracted to [`bundled_font_dir`]
+/// on startup (see [`init_bundled_fonts`]); their file names match the [`FONT_OPTIONS`]
+/// values so the picker resolves them. Licenses live in `assets/fonts/*-OFL.txt`.
+pub const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
+    ("FiraCode-Regular.ttf", include_bytes!("../assets/fonts/FiraCode-Regular.ttf")),
+    ("JetBrainsMono-Regular.ttf", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
+];
+
+/// Where the baked-in fonts are extracted: `%APPDATA%\hyperpanes\fonts`.
+pub fn bundled_font_dir() -> std::path::PathBuf {
+    paths::user_data_dir().join("fonts")
+}
+
+/// Extract the baked-in fonts to [`bundled_font_dir`] (writing each only when missing or a
+/// different size, so an app update refreshes them). Best-effort; call once at startup before
+/// any font is resolved. A failure just means those fonts fall back like an uninstalled one.
+pub fn init_bundled_fonts() {
+    let dir = bundled_font_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    for (name, bytes) in BUNDLED_FONTS {
+        let p = dir.join(name);
+        let stale = std::fs::metadata(&p).map(|m| m.len() as usize != bytes.len()).unwrap_or(true);
+        if stale {
+            let _ = std::fs::write(&p, bytes);
+        }
+    }
+}
+
+/// The directories scanned for the candidate font files: the system font folder, the per-user
+/// font folder (where user-installed fonts land on modern Windows), and the baked-in font dir
+/// (so the shipped OFL fonts always resolve even when not installed).
 fn font_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = vec![std::path::PathBuf::from("C:/Windows/Fonts")];
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         dirs.push(std::path::Path::new(&local).join("Microsoft").join("Windows").join("Fonts"));
     }
+    dirs.push(bundled_font_dir());
     dirs
 }
 
@@ -210,7 +241,7 @@ mod tests {
         // The fixed list mirrors the renderer (System default first) and every value
         // resolves to a loadable .ttf/.ttc (missing fonts fall back to Consolas).
         assert_eq!(FONT_OPTIONS[0].1, "");
-        assert!(FONT_OPTIONS.len() >= 8);
+        assert!(FONT_OPTIONS.len() >= 7);
         for (_, value) in FONT_OPTIONS {
             let p = resolve_or_default(value);
             assert!(p.ends_with(".ttf") || p.ends_with(".ttc"), "unresolved: {value} -> {p}");
