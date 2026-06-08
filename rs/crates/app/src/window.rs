@@ -100,12 +100,12 @@ mod imp {
         if msg == WM_SETCURSOR {
             let d = DRAG_CURSOR.load(Ordering::Relaxed);
             if d != 0 {
-                SetCursor(HCURSOR(d as *mut c_void));
+                SetCursor(Some(HCURSOR(d as *mut c_void)));
                 return LRESULT(1); // TRUE → handled; stop default cursor processing.
             }
             let hv = HOVER_CURSOR.load(Ordering::Relaxed);
             if hv != 0 && (lparam.0 as u32 & 0xffff) == HTCLIENT as u32 {
-                SetCursor(HCURSOR(hv as *mut c_void));
+                SetCursor(Some(HCURSOR(hv as *mut c_void)));
                 return LRESULT(1);
             }
         }
@@ -119,7 +119,7 @@ mod imp {
             if d != 0 {
                 let old: WNDPROC = core::mem::transmute(OLD_WNDPROC.load(Ordering::Relaxed));
                 let r = CallWindowProcW(old, h, msg, wparam, lparam);
-                SetCursor(HCURSOR(d as *mut c_void));
+                SetCursor(Some(HCURSOR(d as *mut c_void)));
                 return r;
             }
         }
@@ -204,7 +204,7 @@ mod imp {
             );
             let _ = SetWindowPos(
                 h,
-                HWND::default(),
+                None,
                 0,
                 0,
                 0,
@@ -219,7 +219,7 @@ mod imp {
         unsafe {
             let h = hwnd(raw);
             let _ = ReleaseCapture();
-            SendMessageW(h, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as usize), LPARAM(0));
+            SendMessageW(h, WM_NCLBUTTONDOWN, Some(WPARAM(HTCAPTION as usize)), Some(LPARAM(0)));
         }
     }
 
@@ -238,7 +238,7 @@ mod imp {
             }
             if c != 0 {
                 DRAG_CURSOR.store(c, Ordering::Relaxed);
-                SetCursor(HCURSOR(c as *mut c_void));
+                SetCursor(Some(HCURSOR(c as *mut c_void)));
             }
             if raw != 0 {
                 SetCapture(hwnd(raw));
@@ -262,7 +262,7 @@ mod imp {
             let c = load_cursor(GRAB_CUR_BYTES, "hp_grab.cur", &GRAB_CUR);
             if c != 0 && HOVER_CURSOR.swap(c, Ordering::Relaxed) != c {
                 unsafe {
-                    SetCursor(HCURSOR(c as *mut c_void));
+                    SetCursor(Some(HCURSOR(c as *mut c_void)));
                 }
             }
         } else {
@@ -300,7 +300,7 @@ mod imp {
     #[allow(dead_code)]
     pub fn close(raw: isize) {
         unsafe {
-            let _ = PostMessageW(hwnd(raw), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(hwnd(raw)), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
 
@@ -331,7 +331,7 @@ mod imp {
             } = mi.rcMonitor;
             let _ = SetWindowPos(
                 h,
-                HWND_TOP,
+                Some(HWND_TOP),
                 left,
                 top,
                 right - left,
@@ -349,7 +349,7 @@ mod imp {
             let _ = SetWindowPlacement(h, &saved.0);
             let _ = SetWindowPos(
                 h,
-                HWND::default(),
+                None,
                 0,
                 0,
                 0,

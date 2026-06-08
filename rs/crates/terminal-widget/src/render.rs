@@ -384,12 +384,12 @@ impl GpuRenderer {
 
         let bg_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("bg-pl"),
-            bind_group_layouts: &[&bg_layout],
+            bind_group_layouts: &[Some(&bg_layout)],
             immediate_size: 0,
         });
         let glyph_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("glyph-pl"),
-            bind_group_layouts: &[&glyph_layout],
+            bind_group_layouts: &[Some(&glyph_layout)],
             immediate_size: 0,
         });
 
