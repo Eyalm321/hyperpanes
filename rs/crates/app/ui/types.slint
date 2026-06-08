@@ -5,7 +5,15 @@
 export struct PaneItem {
     surface: image,
     title: string,
+    // optional secondary line under the label (user subtitle / ambient-AI line).
+    subtitle: string,
     accent: color,
+    // resolved per-pane chrome (the per-pane override already folded over the global pref
+    // by the controller): a clean new pane is frame/dot OFF; a git-project pane is ON.
+    show-frame: bool,
+    show-dot: bool,
+    // true while this pane's label is being edited inline (double-click the header).
+    editing: bool,
     x: length,
     y: length,
     w: length,

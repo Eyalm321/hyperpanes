@@ -44,15 +44,6 @@ pub fn git_root_of(cwd: &str) -> Option<PathBuf> {
     None
 }
 
-/// A pane reported a new working directory: if it sits inside a git repo, remember the
-/// repo root (or bump its recency) and return the refreshed, newest-first list. Returns
-/// `None` when the cwd isn't in a repo (nothing changed).
-pub fn note_cwd(cwd: &str) -> Option<Vec<Project>> {
-    let root = git_root_of(cwd)?;
-    projects::upsert_project_by_root(&root.to_string_lossy());
-    Some(list())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
