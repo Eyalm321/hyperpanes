@@ -1,0 +1,3 @@
+# Build outputs / fetched tools — never commit binaries.
+dist/
+.tools/
