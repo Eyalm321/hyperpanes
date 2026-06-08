@@ -1120,10 +1120,14 @@ impl App {
                             .unwrap_or_default(),
                     ),
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
+                    // idle-glow settings — apply immediately (not drafted).
+                    10 => crate::state::Setting::IdleAlert(arg != 0),
+                    11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),
+                    12 => crate::state::Setting::IdleSeconds(arg),
                     _ => return,
                 };
                 // Appearance settings (0–4, 9 = theme) edit the draft (commit on Done);
-                // General/Terminal settings (5–6) apply immediately, matching the renderer.
+                // General/Terminal/idle settings apply immediately, matching the renderer.
                 let cmd = if kind <= 4 || kind == 9 {
                     Command::DraftSetting(setting)
                 } else {

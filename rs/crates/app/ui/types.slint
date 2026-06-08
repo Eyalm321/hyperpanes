@@ -12,6 +12,9 @@ export struct PaneItem {
     h: length,
     visible: bool,
     focused: bool,
+    // idle-glow opacity (0 = no glow): the animated alpha of the pane's accent ring once
+    // it has been output-quiet past the idle threshold (driven by the controller per tick).
+    glow: float,
     // clickable-path hover overlay (driven by the controller after hit-testing the grid).
     link-visible: bool,
     link-x: length,
@@ -67,6 +70,13 @@ export struct PrefOption {
     id: int,
     label: string,
     active: bool,
+}
+
+// One row in the Preferences → Keybindings list: a human label + its chord text
+// (e.g. "Command palette" / "Ctrl+Shift+P"), formatted by Rust from the default keymap.
+export struct KeybindingItem {
+    label: string,
+    chord: string,
 }
 
 // One frame-palette choice in the Appearance picker: a label plus its 8 slot colors,

@@ -22,6 +22,7 @@
 mod app;
 mod command;
 mod drag;
+mod glow;
 mod keybindings;
 mod palette;
 mod paneview;

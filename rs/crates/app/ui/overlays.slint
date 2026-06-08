@@ -13,7 +13,7 @@
 // chords/text route here (not the panes) while open.
 
 import { Theme } from "theme.slint";
-import { PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
+import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem } from "types.slint";
 
 // A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
 // used to mark the active option in the pickers. Same Path-with-commands pattern the window
@@ -298,6 +298,13 @@ export component OverlayLayer inherits Rectangle {
     in property <[FramePaletteOption]> frame-palettes;
     in property <[PrefOption]> shells;
     in property <string> shell-label;
+    // idle-glow (AI-pane quiescence glow)
+    in property <bool> idle-alert: true;
+    in property <[PrefOption]> idle-effects;
+    in property <string> idle-effect-label;
+    in property <int> idle-seconds: 10;
+    // keybindings list (read-only mirror of the default keymap)
+    in property <[KeybindingItem]> keybindings;
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -459,6 +466,7 @@ export component OverlayLayer inherits Rectangle {
                     }
                     NavItem { label: "Appearance"; active: prefs.sel == 0; clicked => { prefs.sel = 0; } }
                     NavItem { label: "Terminal"; active: prefs.sel == 1; clicked => { prefs.sel = 1; } }
+                    NavItem { label: "Keybindings"; active: prefs.sel == 2; clicked => { prefs.sel = 2; } }
                     Rectangle { vertical-stretch: 1; }
                 }
             }
@@ -627,8 +635,46 @@ export component OverlayLayer inherits Rectangle {
                 toggled(v) => { root.pref-action(3, v ? 1 : 0); }
             }
 
-            // TODO(phase5): idle-glow settings (idleAlert / idleEffect / idleAlertSeconds) — the
-            //   AI-pane glow effect isn't built in the native shell yet.
+            // ---- idle glow (a pane softly glows once its agent goes quiet) ----
+            Rectangle { height: 1px; background: Theme.border; }
+            Text { text: "Idle glow"; color: Theme.faint; font-size: 11px; }
+            PrefToggle {
+                label: "Glow quiet panes";
+                on: root.idle-alert;
+                toggled(v) => { root.pref-action(10, v ? 1 : 0); }
+            }
+            // Effect + threshold only matter when the glow is on.
+            if root.idle-alert : VerticalLayout {
+                spacing: 12px;
+                Text { text: "Glow effect"; color: Theme.faint; font-size: 11px; }
+                FontDropdown {
+                    options: root.idle-effects;
+                    current-label: root.idle-effect-label;
+                    selected(id) => { root.pref-action(11, id); }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Idle after";
+                        color: Theme.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Pill { label: "−"; clicked => { root.pref-action(12, -1); } }
+                    Rectangle {
+                        width: 52px;
+                        Text {
+                            text: root.idle-seconds + " s";
+                            color: Theme.text;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Pill { label: "+"; clicked => { root.pref-action(12, 1); } }
+                }
+            }
 
                         } // end Appearance panel
 
@@ -694,6 +740,58 @@ export component OverlayLayer inherits Rectangle {
             // TODO(phase5): Ambient AI section (local Ollama) — not in the native shell yet.
 
                         } // end Terminal panel
+
+                        // ===================== Keybindings =====================
+                        // Read-only list of every default chord (mirrors the keymap the
+                        // router actually fires; editing is a future bonus).
+                        if prefs.sel == 2 : VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "Default keyboard shortcuts";
+                                color: Theme.faint;
+                                font-size: 11px;
+                            }
+                            for kb[i] in root.keybindings : Rectangle {
+                                height: 32px;
+                                border-radius: 6px;
+                                background: Math.mod(i, 2) == 0 ? transparent : Theme.bg;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    Text {
+                                        text: kb.label;
+                                        color: Theme.text;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    // chord chip
+                                    Rectangle {
+                                        background: Theme.surface2;
+                                        border-radius: 5px;
+                                        border-width: 1px;
+                                        border-color: Theme.border;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                padding-top: 3px;
+                                                padding-bottom: 3px;
+                                                Text {
+                                                    text: kb.chord;
+                                                    color: Theme.text;
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } // end Keybindings panel
                         } // close scrolling body layout (pbody)
                     } // close Flickable
                 }

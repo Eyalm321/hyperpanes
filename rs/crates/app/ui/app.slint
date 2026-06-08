@@ -10,7 +10,7 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption, KeybindingItem } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
@@ -18,7 +18,7 @@ import { SidebarRail } from "sidebar.slint";
 import { KeyMsg } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
-export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeyMsg }
+export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, KeyMsg }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";
@@ -64,6 +64,13 @@ export component AppWindow inherits Window {
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
     in property <string> pref-shell-label;
+    // idle-glow prefs
+    in property <bool> pref-idle-alert: true;
+    in property <[PrefOption]> pref-idle-effects;
+    in property <string> pref-idle-effect-label;
+    in property <int> pref-idle-seconds: 10;
+    // keybindings list (read-only)
+    in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
@@ -277,6 +284,11 @@ export component AppWindow inherits Window {
             frame-palettes: root.pref-palettes;
             shells: root.pref-shells;
             shell-label: root.pref-shell-label;
+            idle-alert: root.pref-idle-alert;
+            idle-effects: root.pref-idle-effects;
+            idle-effect-label: root.pref-idle-effect-label;
+            idle-seconds: root.pref-idle-seconds;
+            keybindings: root.pref-keybindings;
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;

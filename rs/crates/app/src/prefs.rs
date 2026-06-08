@@ -105,6 +105,12 @@ pub const MIN_FONT_PX: f32 = 8.0;
 pub const MAX_FONT_PX: f32 = 32.0;
 pub const DEFAULT_FONT_PX: f32 = 14.0;
 
+/// Idle-alert threshold bounds (seconds a pane must stay output-quiet before it glows),
+/// mirroring `useSettings`' `setIdleAlertSeconds` clamp.
+pub const MIN_IDLE_SECONDS: u32 = 2;
+pub const MAX_IDLE_SECONDS: u32 = 120;
+pub const DEFAULT_IDLE_SECONDS: u32 = 10;
+
 /// Persisted app-wide preferences (native MVP subset of the renderer `Settings`).
 /// Every field has a sensible default so an older/partial blob never breaks load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,6 +146,15 @@ pub struct Settings {
     /// Whether the right-edge sidebar rail (quick-pane + git-projects history) is
     /// shown. Hidden in fullscreen regardless of this. Mirrors `useSettings.showSidebar`.
     pub show_sidebar: bool,
+    /// Whether a pane softly glows its frame once its agent/shell has gone output-quiet
+    /// for [`Self::idle_alert_seconds`] (the AI-pane quiescence glow). Mirrors `idleAlert`.
+    pub idle_alert: bool,
+    /// The active glow style token (firefly / pulse / blink / solid). Stored by name so
+    /// the list can grow without invalidating the blob. Mirrors `idleEffect`.
+    pub idle_effect: String,
+    /// How long a pane must stay output-quiet before it glows, in seconds (clamped to
+    /// [`MIN_IDLE_SECONDS`]..=[`MAX_IDLE_SECONDS`]). Mirrors `idleAlertSeconds`.
+    pub idle_alert_seconds: u32,
 }
 
 impl Default for Settings {
@@ -156,6 +171,9 @@ impl Default for Settings {
             editor_command: String::new(),
             scrollback: 5000,
             show_sidebar: true,
+            idle_alert: true,
+            idle_effect: String::from("firefly"),
+            idle_alert_seconds: DEFAULT_IDLE_SECONDS,
         }
     }
 }

@@ -17,8 +17,8 @@ use std::rc::Rc;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
-    AppWindow, DividerItem, FramePaletteOption, LayoutOption, PaletteItem, PaneItem, PrefOption,
-    ProjectItem, TabItem,
+    AppWindow, DividerItem, FramePaletteOption, KeybindingItem, LayoutOption, PaletteItem, PaneItem,
+    PrefOption, ProjectItem, TabItem,
 };
 use crate::prefs;
 
@@ -48,6 +48,8 @@ pub struct Ui {
     pub palettes: Rc<VecModel<FramePaletteOption>>,
     pub shells: Rc<VecModel<PrefOption>>,
     pub themes: Rc<VecModel<PrefOption>>,
+    pub idle_effects: Rc<VecModel<PrefOption>>,
+    pub keybindings: Rc<VecModel<KeybindingItem>>,
 }
 
 impl Ui {
@@ -64,6 +66,8 @@ impl Ui {
             palettes: Rc::new(VecModel::default()),
             shells: Rc::new(VecModel::default()),
             themes: Rc::new(VecModel::default()),
+            idle_effects: Rc::new(VecModel::default()),
+            keybindings: Rc::new(VecModel::default()),
         })
     }
 
@@ -79,6 +83,8 @@ impl Ui {
         app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
         app.set_pref_shells(ModelRc::from(self.shells.clone()));
         app.set_pref_themes(ModelRc::from(self.themes.clone()));
+        app.set_pref_idle_effects(ModelRc::from(self.idle_effects.clone()));
+        app.set_pref_keybindings(ModelRc::from(self.keybindings.clone()));
     }
 }
 
@@ -112,6 +118,7 @@ fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
         h,
         visible: ps.visible,
         focused,
+        glow: ps.glow.alpha,
         link_visible: link.is_some(),
         link_x: link.map(|l| l.x).unwrap_or(0.0),
         link_y: link.map(|l| l.y).unwrap_or(0.0),
@@ -392,6 +399,32 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.shells, shells);
     app.set_pref_shell_label(shell_label.into());
 
+    // idle-glow: the effect picker (active = the saved token) + the toggle/threshold scalars.
+    let active_effect = crate::glow::IdleEffect::from_token(&state.settings.idle_effect);
+    let mut idle_label = crate::glow::IdleEffect::OPTIONS[0].1.to_string();
+    let idle_effects: Vec<PrefOption> = crate::glow::IdleEffect::OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(id, (_, label))| {
+            let active = id == active_effect.index();
+            if active {
+                idle_label = (*label).to_string();
+            }
+            PrefOption { id: id as i32, label: (*label).into(), active }
+        })
+        .collect();
+    sync_model(&ui.idle_effects, idle_effects);
+    app.set_pref_idle_alert(state.settings.idle_alert);
+    app.set_pref_idle_effect_label(idle_label.into());
+    app.set_pref_idle_seconds(state.settings.idle_alert_seconds as i32);
+
+    // keybindings list (read-only mirror of the default keymap) — label + chord per row.
+    let keybindings: Vec<KeybindingItem> = crate::keybindings::binding_rows()
+        .into_iter()
+        .map(|(label, chord)| KeybindingItem { label: label.into(), chord: chord.into() })
+        .collect();
+    sync_model(&ui.keybindings, keybindings);
+
     // Dialog appearance scalars come from the draft view; the actual panes keep the
     // committed show_frame/show_dot until Done.
     app.set_pref_fontpx(view_px.round() as i32);
@@ -462,6 +495,13 @@ pub fn pump(
         }
     }
 
+    // ---- idle-glow inputs (read once per tick) ----
+    let idle_on = state.settings.idle_alert;
+    let idle_effect = crate::glow::IdleEffect::from_token(&state.settings.idle_effect);
+    let idle_threshold_ms = state.settings.idle_alert_seconds as u64 * 1000;
+    let glow_now = Instant::now();
+    let glow_now_ms = crate::glow::now_epoch_ms();
+
     // ---- render dirty (visible) panes of the active tab → model ----
     let active = state.active;
     let focused = state.tabs[active].focused;
@@ -471,19 +511,36 @@ pub fn pump(
     let mut rendered = false;
     for i in 0..n {
         let ps = &mut tab.panes[i];
+        // Advance this pane's idle glow every tick. A pane is "idle" once it's been
+        // output-quiet past the threshold (the agent finished + is waiting); the alpha
+        // animates while idle and resets to 0 otherwise.
+        let prev_glow = ps.glow.alpha;
+        let idle = idle_on
+            && ps.visible
+            && match mgr.last_output_at(&ps.uid) {
+                Some(ms) => glow_now_ms.saturating_sub(ms) >= idle_threshold_ms,
+                None => false,
+            };
+        ps.glow.update(idle_effect, idle, glow_now, glow_now_ms);
+        let glow_changed = (ps.glow.alpha - prev_glow).abs() > 0.004;
+
         if !ps.visible {
             let _ = ps.pane.take_dirty();
             continue;
         }
         let focus_blink = i == focused && blink_changed;
-        if !ps.pane.take_dirty() && !focus_blink {
+        let pane_dirty = ps.pane.take_dirty();
+        // Repaint the surface only for terminal/cursor changes; a glow-only change just
+        // re-pushes the (unchanged) surface with the new alpha.
+        if pane_dirty || focus_blink {
+            ps.surface = ps.pane.render(font, &opts);
+            rendered = true;
+        } else if !glow_changed {
             continue;
         }
-        ps.surface = ps.pane.render(font, &opts);
         if i < ui.panes.row_count() {
             ui.panes.set_row_data(i, pane_item(ps, i == focused));
         }
-        rendered = true;
     }
     if rendered {
         state.frames += 1;

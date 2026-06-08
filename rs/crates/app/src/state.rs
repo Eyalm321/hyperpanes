@@ -25,6 +25,7 @@ use hyperpanes_terminal_widget::{Font, RenderOpts, SoftwareRenderer, TerminalPan
 use slint::{Color, Image, SharedString};
 
 use crate::command::Command;
+use crate::glow::Glow;
 use crate::palette::{self, Entry};
 use crate::prefs::{self, Settings};
 use crate::sidebar::{self, Project};
@@ -69,6 +70,12 @@ pub enum Setting {
     ClickablePaths(bool),
     /// Set the editor-command template used to open clicked paths ("" = auto).
     EditorCommand(String),
+    /// Toggle the idle-glow (AI-pane quiescence glow).
+    IdleAlert(bool),
+    /// Select the glow style by index into `glow::IdleEffect::OPTIONS`.
+    IdleEffect(usize),
+    /// Nudge the idle threshold (seconds) by ±N, clamped to the supported range.
+    IdleSeconds(i32),
 }
 
 /// The in-dialog draft of the **appearance** settings. While Preferences is open these edit
@@ -124,6 +131,9 @@ pub struct PaneState {
     /// position (logical px within the surface) for tooltip placement. `None` = no link.
     pub link: Option<hyperpanes_terminal_widget::LinkHit>,
     pub link_cursor: (f32, f32),
+    /// Idle-glow animation state — its `alpha` (0 when not glowing) is projected into the
+    /// pane model each tick once the pane has been output-quiet past the idle threshold.
+    pub glow: Glow,
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -391,6 +401,7 @@ impl State {
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        let glow = Glow::new(crate::glow::seed_from(&uid));
         Some(PaneState {
             uid,
             title: format!("{}", idx + 1).into(),
@@ -406,6 +417,7 @@ impl State {
             surf: (0.0, 0.0),
             link: None,
             link_cursor: (0.0, 0.0),
+            glow,
         })
     }
 
@@ -542,6 +554,7 @@ impl State {
         if let Some(replay) = mgr.replay(&det.uid) {
             pane.feed(&replay);
         }
+        let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
@@ -557,6 +570,7 @@ impl State {
             surf: (0.0, 0.0),
             link: None,
             link_cursor: (0.0, 0.0),
+            glow,
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -1030,7 +1044,12 @@ impl State {
             Setting::ShowFrame(on) => d.show_frame = on,
             Setting::ShowDot(on) => d.show_dot = on,
             // Non-appearance settings never reach the draft.
-            Setting::DefaultShell(_) | Setting::ClickablePaths(_) | Setting::EditorCommand(_) => {}
+            Setting::DefaultShell(_)
+            | Setting::ClickablePaths(_)
+            | Setting::EditorCommand(_)
+            | Setting::IdleAlert(_)
+            | Setting::IdleEffect(_)
+            | Setting::IdleSeconds(_) => {}
         }
         self.dirty = true;
     }
@@ -1140,6 +1159,17 @@ impl State {
             Setting::ShowDot(on) => self.settings.show_dot = on,
             Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
             Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
+            Setting::IdleAlert(on) => self.settings.idle_alert = on,
+            Setting::IdleEffect(idx) => {
+                if let Some((token, _)) = crate::glow::IdleEffect::OPTIONS.get(idx) {
+                    self.settings.idle_effect = (*token).to_string();
+                }
+            }
+            Setting::IdleSeconds(d) => {
+                let next = (self.settings.idle_alert_seconds as i32 + d)
+                    .clamp(prefs::MIN_IDLE_SECONDS as i32, prefs::MAX_IDLE_SECONDS as i32);
+                self.settings.idle_alert_seconds = next as u32;
+            }
         }
         prefs::save(&self.settings);
         self.dirty = true;

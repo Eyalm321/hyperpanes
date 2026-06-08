@@ -41,6 +41,36 @@ impl Chord {
     fn matches(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> bool {
         self.ctrl == ctrl && self.alt == alt && self.shift == shift && self.key == key
     }
+
+    /// Human chord label, e.g. `Ctrl+Shift+P` or `Alt+←` — the native port of the
+    /// renderer's `comboLabel` (modifiers in Ctrl→Alt→Shift order, then the key). Drives
+    /// the Preferences → Keybindings list.
+    pub fn label(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        let key_owned;
+        let key = match self.key {
+            KeyTok::Letter(c) => {
+                key_owned = c.to_ascii_uppercase().to_string();
+                key_owned.as_str()
+            }
+            KeyTok::Left => "←",
+            KeyTok::Right => "→",
+            KeyTok::Up => "↑",
+            KeyTok::Down => "↓",
+            KeyTok::F11 => "F11",
+        };
+        parts.push(key);
+        parts.join("+")
+    }
 }
 
 /// One default binding: a chord, its human label (for a future keybindings view), and
@@ -89,6 +119,15 @@ pub fn default_bindings() -> Vec<Binding> {
     ]
 }
 
+/// The default bindings as `(label, chord)` display pairs, in table order — the data the
+/// Preferences → Keybindings list renders (read-only mirror of [`default_bindings`]).
+pub fn binding_rows() -> Vec<(String, String)> {
+    default_bindings()
+        .iter()
+        .map(|b| (b.label.to_string(), b.chord.label()))
+        .collect()
+}
+
 /// Find the command bound to the given modifier+key combo, if any.
 pub fn match_chord(ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
     default_bindings()
@@ -120,6 +159,25 @@ mod tests {
     #[test]
     fn unbound_combo_is_none() {
         assert!(match_chord(false, false, false, KeyTok::Letter('q')).is_none());
+    }
+
+    #[test]
+    fn chord_labels_format() {
+        assert_eq!(
+            Chord::new(true, false, true, KeyTok::Letter('p')).label(),
+            "Ctrl+Shift+P"
+        );
+        assert_eq!(Chord::new(false, true, false, KeyTok::Left).label(), "Alt+←");
+        assert_eq!(Chord::new(false, false, false, KeyTok::F11).label(), "F11");
+    }
+
+    #[test]
+    fn binding_rows_cover_every_default() {
+        let rows = binding_rows();
+        assert_eq!(rows.len(), default_bindings().len());
+        // Each row is a non-empty label + chord (e.g. "Command palette" / "Ctrl+Shift+P").
+        assert!(rows.iter().all(|(l, c)| !l.is_empty() && !c.is_empty()));
+        assert!(rows.iter().any(|(l, c)| l == "Command palette" && c == "Ctrl+Shift+P"));
     }
 
     #[test]
