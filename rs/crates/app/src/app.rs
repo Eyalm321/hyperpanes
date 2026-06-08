@@ -72,6 +72,10 @@ pub struct App {
     /// True until the very first window is seeded (so the demo/screenshot env seeding
     /// applies only once, to window 0).
     first_seed: Cell<bool>,
+    /// Guards the one-shot `HYPERPANES_MULTIWIN` screenshot scaffold.
+    scaffold_done: Cell<bool>,
+    /// Monotonic tick counter (only used to delay the screenshot scaffold).
+    ticks: Cell<u64>,
 }
 
 impl App {
@@ -82,6 +86,8 @@ impl App {
             erx: RefCell::new(erx),
             next_id: Cell::new(0),
             first_seed: Cell::new(true),
+            scaffold_done: Cell::new(false),
+            ticks: Cell::new(0),
         })
     }
 
@@ -215,6 +221,26 @@ impl App {
         // 3. Render each window from its own state.
         for w in &windows {
             self.pump_window(w);
+        }
+
+        // 3b. One-shot screenshot scaffold: after a short settle (so the shells have
+        // printed their banner into the replay buffer), re-host window 0's focused pane
+        // into a fresh window — proving re-host shows real replayed scrollback.
+        self.ticks.set(self.ticks.get() + 1);
+        if !self.scaffold_done.get()
+            && self.ticks.get() > 350 // ≈2.8 s at 8 ms/tick
+            && std::env::var_os("HYPERPANES_MULTIWIN").is_some()
+        {
+            if let Some(w0) = windows.first() {
+                let ready = {
+                    let st = w0.state.borrow();
+                    !st.tabs.is_empty() && st.active_tab().panes.len() >= 2
+                };
+                if ready {
+                    self.scaffold_done.set(true);
+                    self.run_command(w0, Command::MovePaneToNewWindow);
+                }
+            }
         }
 
         // 4. Reap windows that asked to close; quit when the last one goes.
