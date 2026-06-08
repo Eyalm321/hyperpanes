@@ -94,11 +94,116 @@ component PaneBtn inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// ---- single-layout pane taskbar (the native port of PaneTaskbar.tsx) ----
+
+// One pane button in the strip: a colour dot + the pane label (+ an "exited" badge). The
+// active button is the currently-shown pane (group.focusedId). Left-click shows the pane,
+// middle-click closes it, right-click opens the pane menu (the `inTaskbar` variant).
+component TaskItem inherits Rectangle {
+    in property <PaneItem> p;
+    callback show();
+    callback close();
+    callback context(length, length);
+
+    min-width: 78px;
+    max-width: 220px;
+    horizontal-stretch: 0;
+    height: 26px;
+    border-radius: 6px;
+    background: root.p.focused ? Theme.surface2 : (ta.has-hover ? Theme.surface : transparent);
+    border-width: root.p.focused ? 1px : 0px;
+    border-color: root.p.accent;
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 6px;
+        // colour dot (pane.color)
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.p.accent;
+            }
+        }
+        Text {
+            text: root.p.title == "" ? "pane" : root.p.title;
+            color: root.p.focused ? Theme.text : Theme.subtext;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        // "exited" badge (shown if the pane's shell has exited)
+        if root.p.exited : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                background: #f38ba822;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding-left: 5px;
+                    padding-right: 5px;
+                    Text {
+                        text: "exited";
+                        color: Theme.danger;
+                        font-size: 9px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    ta := TouchArea {
+        clicked => { root.show(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
+                root.close();
+            }
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.context(self.absolute-position.x + self.mouse-x,
+                             self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+}
+
+component PaneTaskbar inherits Rectangle {
+    in property <[PaneItem]> panes;
+    callback show(int);
+    callback close(int);
+    callback context(int, length, length);
+
+    height: 34px;
+    background: Theme.mantle;
+    // top hairline
+    Rectangle { y: 0; height: 1px; background: Theme.border; }
+
+    HorizontalLayout {
+        padding: 4px;
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 4px;
+        alignment: start;
+        for pane[idx] in root.panes : TaskItem {
+            p: pane;
+            show => { root.show(idx); }
+            close => { root.close(idx); }
+            context(x, y) => { root.context(idx, x, y); }
+        }
+    }
+}
+
 export component PaneView inherits Rectangle {
     in property <[PaneItem]> panes;
     in property <[DividerItem]> dividers;
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
+    // Single-layout pane taskbar: show the bottom strip (Rust gates it to layout==single,
+    // panes>1, not fullscreen). The strip reuses the `panes` model.
+    in property <bool> taskbar-visible: false;
     // Wave-2 appearance prefs applied to the panes themselves.
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -137,6 +242,7 @@ export component PaneView inherits Rectangle {
 
     callback pane-grab(int);
     callback pane-context(int, length, length);   // right-click the header → open the pane menu
+    callback taskbar-context(int, length, length); // right-click a taskbar button → pane menu (inTaskbar)
     callback key(int, KeyMsg);
     callback focus-pane(int);
     callback area-resized(length, length);
@@ -173,9 +279,13 @@ export component PaneView inherits Rectangle {
     background: Theme.bg;
     clip: true;
 
-    area := Rectangle {
-        changed width => { root.area-resized(self.width, self.height); }
-        changed height => { root.area-resized(self.width, self.height); }
+    VerticalLayout {
+        spacing: 0px;
+
+        area := Rectangle {
+            vertical-stretch: 1;
+            changed width => { root.area-resized(self.width, self.height); }
+            changed height => { root.area-resized(self.width, self.height); }
 
         // Electron `.hp-pane`: 7px radius, 1px border (accent when focused), the
         // pane bg, no drop shadow — a 26px header bar (title + zoom/fullscreen/
@@ -468,6 +578,16 @@ export component PaneView inherits Rectangle {
             text: "starting shell…";
             color: #44444f;
             font-size: 14px;
+        }
+        }   // end `area`
+
+        // single-layout pane taskbar (hidden panes strip) — sits below the pane area so the
+        // panes reflow above it (area-resized fires with the reduced height).
+        if root.taskbar-visible : PaneTaskbar {
+            panes: root.panes;
+            show(i) => { root.focus-pane(i); }
+            close(i) => { root.pane-close(i); }
+            context(i, x, y) => { root.taskbar-context(i, x, y); }
         }
     }
 

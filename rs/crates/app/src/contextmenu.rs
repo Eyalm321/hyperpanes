@@ -120,8 +120,13 @@ impl Build {
     }
 }
 
-/// Build the pane header menu for active-tab pane `idx`.
-pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
+/// Build the pane menu for active-tab pane `idx`. Shared by the pane header (`in_taskbar`
+/// false) and the single-layout taskbar (`in_taskbar` true) — the native port of
+/// `buildPaneMenu(paneId, groupId, { inTaskbar })`. In the taskbar variant a leading
+/// **Show** row is prepended (left-click already shows the pane, but it's offered as the
+/// default row) and the **Maximize/Restore** row is dropped (maximize is meaningless when
+/// the single preset already fills the area).
+pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) -> CtxMenu {
     let mut b = Build::new();
     let t = state.active_tab();
     let global_frame = state.settings.show_frame;
@@ -144,6 +149,12 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
     let zoom_sc = state.keymap.label_for("pane.toggleZoom").unwrap_or_default();
     let full_sc = state.keymap.label_for("pane.toggleFullscreen").unwrap_or_default();
 
+    // Taskbar variant: a leading "Show" row (focus → the single preset shows it) + separator.
+    if in_taskbar {
+        b.item("Show", Command::FocusPane(idx));
+        b.sep();
+    }
+
     b.item("New Pane…", Command::NewPane);
     b.item("Rename…", Command::BeginRenamePane(idx as i32));
     b.row("Change Color", "", "", false, false, false, false, sub::COLOR, None);
@@ -151,10 +162,13 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
     b.row("Show Dot", "", "", dot_on, true, false, false, sub::NONE, Some(Command::SetPaneDot(idx, !dot_on)));
     b.row("Mute AI Summary", "", "", muted, true, false, false, sub::NONE, Some(Command::ToggleMuteAi(idx)));
     b.sep();
-    b.row(
-        if zoomed { "Restore" } else { "Maximize" },
-        &zoom_sc, "", false, false, false, false, sub::NONE, Some(Command::ZoomPane(idx)),
-    );
+    // Maximize is meaningless on the taskbar's single surface, so it's dropped there.
+    if !in_taskbar {
+        b.row(
+            if zoomed { "Restore" } else { "Maximize" },
+            &zoom_sc, "", false, false, false, false, sub::NONE, Some(Command::ZoomPane(idx)),
+        );
+    }
     b.row(
         if fullscreen { "Exit Fullscreen" } else { "Fullscreen" },
         &full_sc, "", false, false, false, false, sub::NONE, Some(Command::FullscreenPane(idx)),

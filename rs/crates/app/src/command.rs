@@ -99,6 +99,9 @@ pub enum Command {
     // ---- context-menu lifecycle ----
     /// Open the pane context menu for pane `0` at window-logical `(1, 2)`.
     OpenPaneContext(usize, f32, f32),
+    /// Open the single-layout taskbar's pane menu for pane `0` at `(1, 2)` (the `inTaskbar`
+    /// variant: a leading Show row, no Maximize).
+    OpenTaskbarContext(usize, f32, f32),
     /// Open the tab context menu for tab `0` at window-logical `(1, 2)`.
     OpenTabContext(usize, f32, f32),
     /// Dismiss the open context menu.
@@ -276,6 +279,7 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         // ---- context-menu lifecycle ----
         Command::OpenPaneContext(i, x, y) => state.open_pane_context(i, x, y),
+        Command::OpenTaskbarContext(i, x, y) => state.open_taskbar_context(i, x, y),
         Command::OpenTabContext(i, x, y) => state.open_tab_context(i, x, y),
         Command::CloseContext => state.close_context(),
         // ---- multi-window ----

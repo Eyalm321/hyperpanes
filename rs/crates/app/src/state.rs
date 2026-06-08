@@ -1793,7 +1793,16 @@ impl State {
     /// the focused pane or active tab.
     pub fn open_pane_context(&mut self, idx: usize, x: f32, y: f32) {
         if idx < self.active_tab().panes.len() {
-            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y));
+            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, false));
+            self.dirty = true;
+        }
+    }
+
+    /// Open the single-layout taskbar's pane menu for pane `idx` (the `inTaskbar` variant:
+    /// a leading Show row, no Maximize), anchored at window-logical `(x, y)`.
+    pub fn open_taskbar_context(&mut self, idx: usize, x: f32, y: f32) {
+        if idx < self.active_tab().panes.len() {
+            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, true));
             self.dirty = true;
         }
     }
@@ -2282,6 +2291,15 @@ impl State {
                 self.dirty = true;
             }
         }
+    }
+
+    /// Whether the single-layout pane taskbar should show: the active tab uses the explicit
+    /// `single` preset, has more than one pane, and we're not in fullscreen. (The single
+    /// preset renders only the focused pane, so the strip is how the hidden panes stay
+    /// reachable — the native port of Electron's `PaneTaskbar` gate.)
+    pub fn taskbar_visible(&self) -> bool {
+        let t = self.active_tab();
+        t.layout == Layout::Single && t.panes.len() > 1 && !self.fullscreen
     }
 }
 

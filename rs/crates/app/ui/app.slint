@@ -41,6 +41,8 @@ export component AppWindow inherits Window {
     in property <string> hud: "";
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
+    // single-layout pane taskbar gate (Rust: layout==single, panes>1, not fullscreen).
+    in property <bool> taskbar-visible: false;
     // Our own OS-maximized flag (synced from Win32). Named `win-maximized` to avoid colliding
     // with Slint 1.17's new builtin `Window.maximized`, which we don't use (custom frameless window).
     in property <bool> win-maximized: false;
@@ -187,6 +189,7 @@ export component AppWindow inherits Window {
     callback toggle-sidebar();
     // ---- context menus ----
     callback pane-context(int, length, length);   // right-click pane `i` at (x, y)
+    callback taskbar-context(int, length, length); // right-click taskbar button `i` at (x, y)
     callback tab-context(int, length, length);    // right-click tab `i` at (x, y)
     callback ctx-pick(int);        // a plain top-level menu row
     callback ctx-swatch(int);      // Change-Color swatch
@@ -249,6 +252,7 @@ export component AppWindow inherits Window {
                 dividers: root.dividers;
                 zoomed: root.zoomed;
                 fullscreen: root.fullscreen;
+                taskbar-visible: root.taskbar-visible;
                 show-frame: root.show-frame;
                 show-dot: root.show-dot;
                 drop-rect-x: root.drop-rect-x;
@@ -260,6 +264,7 @@ export component AppWindow inherits Window {
 
                 pane-grab(i) => { root.pane-grab(i); }
                 pane-context(i, x, y) => { root.pane-context(i, x, y); }
+                taskbar-context(i, x, y) => { root.taskbar-context(i, x, y); }
                 key(i, m) => { root.key(i, m); }
                 focus-pane(i) => { root.focus-pane(i); }
                 area-resized(w, h) => { root.area-resized(w, h); }

@@ -163,6 +163,9 @@ fn pane_item(
         search_open,
         search_count,
         toast: ps.last_toast.clone().into(),
+        // The native app drops a pane the moment its session exits, so a live pane is never
+        // "exited"; the field exists for the taskbar's Electron-parity badge.
+        exited: false,
     }
 }
 
@@ -335,6 +338,8 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_zoomed(state.active_tab().zoomed.is_some());
     app.set_fullscreen(state.fullscreen);
     app.set_esc_holding(state.esc_holding);
+    // Single-layout pane taskbar gate (the hidden-panes strip; see State::taskbar_visible).
+    app.set_taskbar_visible(state.taskbar_visible());
 
     // ---- Wave-2 overlay projection ----
     let kind = match state.overlay {
