@@ -147,6 +147,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Focus signal: any mouse-down in a pane fires `focus-requested` (the frozen contract the
+    // real app wires to focus the pane). The demo just logs it to prove it fires.
+    {
+        app.on_focus_requested(move |idx| {
+            eprintln!("[demo] focus-requested → pane {idx}");
+        });
+    }
+
     // Key input: encode and write to the focused pane's session.
     {
         let mgr = mgr.clone();

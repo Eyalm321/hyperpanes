@@ -35,6 +35,11 @@ export component TerminalPane inherits Rectangle {
     in property <length> link-tip-y;
 
     // --- outputs (the controller subscribes to these) ---
+    // Any mouse-down inside the pane → the app should focus this pane. FROZEN CONTRACT:
+    // the `pane-ux` agent connects `on_focus_requested(...)` to route focus here. Keep the
+    // exact name. Fires for every button (left/right/middle) so a right-click-to-paste also
+    // focuses, mirroring the Electron pane behavior.
+    callback focus-requested();
     // A key was pressed while this pane had focus → encode to PTY bytes and write.
     callback key(KeyMsg);
     // The pane's on-screen size changed (logical px) → recompute cols/rows and resize.
@@ -77,10 +82,14 @@ export component TerminalPane inherits Rectangle {
             if (!self.has-hover) { root.link-exited(); }
         }
         pointer-event(e) => {
-            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
-                fs.focus();
-                root.link-activated(self.mouse-x, self.mouse-y,
-                                    e.modifiers.control || e.modifiers.meta);
+            if (e.kind == PointerEventKind.down) {
+                // ANY mouse-down focuses the pane (the frozen `focus-requested` contract).
+                root.focus-requested();
+                if (e.button == PointerEventButton.left) {
+                    fs.focus();
+                    root.link-activated(self.mouse-x, self.mouse-y,
+                                        e.modifiers.control || e.modifiers.meta);
+                }
             }
         }
     }
@@ -177,6 +186,9 @@ export component DemoWindow inherits Window {
     in property <[PaneVisual]> panes;
     in property <string> hud: "";
 
+    // (pane index) — a mouse-down landed in this pane → focus it. Mirrors the per-pane
+    // `focus-requested` (frozen) contract the real app wires per-instance.
+    callback focus-requested(int);
     // (pane index, key) — routed from whichever pane has focus.
     callback key(int, KeyMsg);
     // (pane index, width, height) — geometry of a pane changed.
@@ -212,6 +224,7 @@ export component DemoWindow inherits Window {
             link-tip: pane.link-tip;
             link-tip-x: pane.link-tip-x;
             link-tip-y: pane.link-tip-y;
+            focus-requested => { root.focus-requested(idx); }
             key(m) => { root.key(idx, m); }
             geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }
             link-moved(x, y) => { root.link-moved(idx, x, y); }
