@@ -18,6 +18,7 @@
 //! * [`keys::encode_key`] — Slint key event → PTY bytes.
 //! * [`ui`] — the compiled Slint components (`TerminalPane`, `DemoWindow`).
 
+pub mod clipboard;
 pub mod font;
 pub mod grid;
 pub mod keys;

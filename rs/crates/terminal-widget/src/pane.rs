@@ -20,6 +20,7 @@
 //! The `Font` is passed in at render time so a whole fleet of panes can share one glyph
 //! cache (it is `&mut` because rasterization is lazy/cached).
 
+use crate::clipboard::Clipboard;
 use crate::font::Font;
 use crate::grid::TermGrid;
 use crate::links::extract_path_candidates;
@@ -28,6 +29,11 @@ use crate::selection::{self, Selection};
 use hyperpanes_core::paths::{self, OpenResult, ResolveResult};
 use slint::Image;
 use std::collections::HashMap;
+use std::time::Instant;
+
+/// How long a copy/paste indicator ("toast") stays up, in ms — matches the Electron pane's
+/// 1.6s auto-dismiss in `Terminal.tsx`.
+const TOAST_MS: u128 = 1600;
 
 /// Controller for a single terminal pane: grid model + a pluggable renderer.
 pub struct TerminalPane {
@@ -44,6 +50,12 @@ pub struct TerminalPane {
     /// `None` until a press starts one; a non-dragged selection (a plain click) is held but
     /// renders nothing, so the same press can still resolve to a link click.
     selection: Option<Selection>,
+    /// System clipboard handle for copy-on-select / right-click paste (kept open for the pane's
+    /// life — see [`crate::clipboard`]).
+    clipboard: Clipboard,
+    /// The transient copy/paste indicator ("toast") + when it was raised; auto-expires after
+    /// [`TOAST_MS`]. Drained by [`toast_text`](Self::toast_text).
+    toast: Option<(String, Instant)>,
 }
 
 /// A resolved, on-disk-verified link under the cursor: where to draw the hover underline (in the
@@ -83,6 +95,8 @@ impl TerminalPane {
             cwd: None,
             verified: HashMap::new(),
             selection: None,
+            clipboard: Clipboard::new(),
+            toast: None,
         }
     }
 
@@ -342,6 +356,80 @@ impl TerminalPane {
             None => return Vec::new(),
         };
         selection::selection_rects(sel, cols, cell_w, cell_h)
+    }
+
+    /// The text covered by the active *dragged* selection, reconstructed from the grid snapshot
+    /// (one char per cell, blanks as spaces, each line right-trimmed, rows joined by `\n`).
+    /// `None` when there's no real selection. Exact for ASCII (the same wide-glyph caveat as the
+    /// link extractor).
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return None,
+        };
+        let (start, end) = sel.ordered();
+        let snap = self.grid.snapshot();
+        if snap.cols == 0 {
+            return None;
+        }
+        let last_col = snap.cols - 1;
+        let mut lines = Vec::new();
+        for row in start.row..=end.row.min(snap.rows.saturating_sub(1)) {
+            let col_start = if row == start.row { start.col } else { 0 };
+            let col_end = if row == end.row { end.col } else { last_col };
+            let mut line = String::new();
+            for col in col_start..=col_end.min(last_col) {
+                let ch = snap.cell(col, row).ch;
+                line.push(if ch == '\0' { ' ' } else { ch });
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        let text = lines.join("\n");
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Copy the current selection to the system clipboard and raise a "Copied …" indicator
+    /// (the copy-on-select behavior, also bound to Ctrl+C / Ctrl+Shift+C). Returns the number of
+    /// characters copied, or `None` if there was no selection or the clipboard was unavailable.
+    pub fn copy_selection(&mut self) -> Option<usize> {
+        let text = self.selection_text()?;
+        let n = text.chars().count();
+        if self.clipboard.copy(&text) {
+            self.set_toast(format!(
+                "Copied {} char{} to clipboard",
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    // ---- Copy/paste indicator ("toast") -----------------------------------------------------
+
+    /// Raise a transient indicator over the pane (e.g. "Copied 12 chars to clipboard"). It
+    /// auto-expires after [`TOAST_MS`]; poll it each frame with [`toast_text`](Self::toast_text).
+    pub fn set_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    /// The indicator text to display right now, or `None` once it has expired (which also clears
+    /// it). Call this every frame and push the result to the pane's `toast` property.
+    pub fn toast_text(&mut self) -> Option<String> {
+        let expired = match &self.toast {
+            Some((_, at)) => at.elapsed().as_millis() >= TOAST_MS,
+            None => return None,
+        };
+        if expired {
+            self.toast = None;
+            return None;
+        }
+        self.toast.as_ref().map(|(m, _)| m.clone())
     }
 }
 

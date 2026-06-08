@@ -117,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             link_tip_x: 0.0,
             link_tip_y: 0.0,
             selection_rects: ModelRc::new(VecModel::default()),
+            toast: Default::default(),
         });
     }
     app.set_panes(ModelRc::from(model.clone()));
@@ -157,6 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Shared per-pane controller state (lazily initialized once geometry + any GPU device are in
+    // hand). Declared up here so the input callbacks below can reach the panes (copy/paste/search).
+    let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
+
     // Focus signal: any mouse-down in a pane fires `focus-requested` (the frozen contract the
     // real app wires to focus the pane). The demo just logs it to prove it fires.
     {
@@ -165,12 +170,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Key input: encode and write to the focused pane's session.
+    // Key input: encode and write to the focused pane's session — except the copy combos, which
+    // are intercepted here (matching Electron): Ctrl+C / Ctrl+Shift+C copy the selection. Ctrl+C
+    // with no selection still passes through as SIGINT; Ctrl+Shift+C with no selection is a no-op.
     {
         let mgr = mgr.clone();
         let uids = uids.clone();
+        let state = state.clone();
         app.on_key(move |idx, msg: KeyMsg| {
             let idx = idx as usize;
+            let is_copy =
+                msg.control && (msg.text.eq_ignore_ascii_case("c") || msg.text == "\u{3}");
+            if is_copy {
+                let mut guard = state.borrow_mut();
+                if let Some(st) = guard.as_mut() {
+                    if idx < st.panes.len() && st.panes[idx].pane.selection_is_drag() {
+                        st.panes[idx].pane.copy_selection();
+                        return; // consumed by copy
+                    }
+                }
+                drop(guard);
+                if msg.shift {
+                    return; // Ctrl+Shift+C with no selection: nothing to send
+                }
+                // plain Ctrl+C with no selection → fall through to SIGINT below
+            }
             if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
                 if let Some(uid) = uids.get(idx) {
                     mgr.write(uid, &String::from_utf8_lossy(&bytes));
@@ -178,8 +202,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
-    let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
 
     // ---- clickable file paths: hover hit-testing + click open/copy ----
     // The widget reports pointer moves/clicks (logical px within the surface); we hit-test the
@@ -321,9 +343,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if idx >= st.panes.len() {
                 return;
             }
-            // A real drag keeps its highlight (and, once wired, copies). A stationary click
-            // clears the zero-size selection so it doesn't linger or block the next click.
-            if !st.panes[idx].pane.selection_is_drag() {
+            // A real drag copies to the clipboard (copy-on-select) and keeps its highlight; the
+            // controller raises the "Copied …" toast. A stationary click clears the zero-size
+            // selection so it doesn't linger or block the next click.
+            if st.panes[idx].pane.selection_is_drag() {
+                st.panes[idx].pane.copy_selection();
+            } else {
                 st.panes[idx].pane.selection_clear();
                 if let Some(mut row) = model.row_data(idx) {
                     row.selection_rects = to_hirects(Vec::new());
@@ -518,6 +543,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if rendered {
                 st.frames += 1;
+            }
+
+            // ---------- copy/paste indicator: poll each pane's expiring toast → model ----------
+            for i in 0..st.panes.len() {
+                let t: slint::SharedString =
+                    st.panes[i].pane.toast_text().unwrap_or_default().into();
+                if let Some(mut row) = model.row_data(i) {
+                    if row.toast != t {
+                        row.toast = t;
+                        model.set_row_data(i, row);
+                    }
+                }
             }
 
             // ---------- HUD ----------

@@ -24,6 +24,37 @@ export struct HiRect {
     h: length,
 }
 
+// Bare terminal-font text with a soft halo (four background-colour copies behind the glyphs),
+// no box — the Slint analogue of the Electron `.hp-toast` `text-shadow` treatment. Used for the
+// copy/paste indicator so it reads like the terminal itself over whatever output sits behind it.
+component HaloText inherits Rectangle {
+    in property <string> text;
+    in property <color> fg-color;
+    in property <color> halo;
+    in property <length> size: 13px;
+    width: fg.width;
+    height: fg.height;
+    for off in [
+        { x: -1px, y: 0px }, { x: 1px, y: 0px },
+        { x: 0px, y: -1px }, { x: 0px, y: 1px },
+    ]: Text {
+        x: off.x;
+        y: off.y;
+        text: root.text;
+        color: root.halo;
+        font-size: root.size;
+        font-family: "Consolas";
+        font-weight: 700;
+    }
+    fg := Text {
+        text: root.text;
+        color: root.fg-color;
+        font-size: root.size;
+        font-family: "Consolas";
+        font-weight: 700;
+    }
+}
+
 export component TerminalPane inherits Rectangle {
     // --- inputs (the controller / parent layout drive these) ---
     in property <image> surface;
@@ -45,6 +76,11 @@ export component TerminalPane inherits Rectangle {
 
     // --- text selection overlay (the controller fills these after a drag hit-test) ---
     in property <[HiRect]> selection-rects;
+
+    // --- copy/paste indicator ("Copied …" / "Pasted …"), bottom-right, terminal-font + halo ---
+    in property <string> toast: "";
+    in property <color> toast-fg: #c0caf5;
+    in property <color> toast-halo: #16161e;
 
     // --- outputs (the controller subscribes to these) ---
     // Any mouse-down inside the pane → the app should focus this pane. FROZEN CONTRACT:
@@ -211,6 +247,16 @@ export component TerminalPane inherits Rectangle {
             }
         }
     }
+
+    // Copy/paste indicator, bottom-right — bare terminal-font text with a halo (matches Electron).
+    if root.toast != "": HaloText {
+        x: parent.width - self.width - 10px;
+        y: parent.height - self.height - 8px;
+        text: root.toast;
+        fg-color: root.toast-fg;
+        halo: root.toast-halo;
+        size: 13px;
+    }
 }
 
 export struct PaneVisual {
@@ -227,6 +273,8 @@ export struct PaneVisual {
     link-tip-y: length,
     // drag-selection highlight rects (set by the demo after a selection hit-test).
     selection-rects: [HiRect],
+    // copy/paste indicator text (set by the demo; empty = hidden).
+    toast: string,
 }
 
 export component DemoWindow inherits Window {
@@ -277,6 +325,7 @@ export component DemoWindow inherits Window {
             link-tip-x: pane.link-tip-x;
             link-tip-y: pane.link-tip-y;
             selection-rects: pane.selection-rects;
+            toast: pane.toast;
             focus-requested => { root.focus-requested(idx); }
             key(m) => { root.key(idx, m); }
             geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }

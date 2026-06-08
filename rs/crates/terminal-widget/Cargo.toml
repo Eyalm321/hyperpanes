@@ -31,6 +31,9 @@ etagere = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 anyhow = "1.0.102"
 
+# System clipboard for copy-on-select / right-click paste (matches the Electron behavior).
+arboard = "3"
+
 # Drives the SessionManager (its per-session async driver tasks + batch timers). Match
 # core's feature set so the runtime has time/sync/macros available.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
