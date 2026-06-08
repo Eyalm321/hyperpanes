@@ -28,21 +28,6 @@ component PlusIcon inherits Rectangle {
     Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.6px; width: 11px; border-radius: 1px; background: ink; }
 }
 
-// two overlapping rounded squares → "open new window"
-component NewWindowIcon inherits Rectangle {
-    in property <color> ink;
-    width: 16px;
-    height: 16px;
-    Rectangle {
-        x: 4px; y: 1px; width: 9px; height: 9px;
-        border-width: 1.4px; border-color: ink; border-radius: 2px; background: transparent;
-    }
-    Rectangle {
-        x: 1px; y: 5px; width: 9px; height: 9px;
-        border-width: 1.4px; border-color: ink; border-radius: 2px; background: Theme.mantle;
-    }
-}
-
 component MinIcon inherits Rectangle {
     in property <color> ink;
     width: 16px;
@@ -58,6 +43,24 @@ component MaxIcon inherits Rectangle {
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
         width: 10px; height: 10px;
         border-width: 1.4px; border-color: ink; border-radius: 1.5px; background: transparent;
+    }
+}
+
+// "restore down" glyph — two overlapping squares (shown on the max button when the
+// window is maximized). Reuses the look of the former new-window button.
+component RestoreIcon inherits Rectangle {
+    in property <color> ink;
+    width: 16px;
+    height: 16px;
+    // back square (upper-right)
+    Rectangle {
+        x: 6px; y: 3px; width: 7px; height: 7px;
+        border-width: 1.4px; border-color: ink; border-radius: 1.5px; background: transparent;
+    }
+    // front square (lower-left), filled with the bar bg to mask the overlap
+    Rectangle {
+        x: 3px; y: 6px; width: 7px; height: 7px;
+        border-width: 1.4px; border-color: ink; border-radius: 1.5px; background: Theme.mantle;
     }
 }
 
@@ -80,27 +83,47 @@ component TabChip inherits Rectangle {
     in property <string> title;
     in property <bool> active;
     in property <bool> editing;
+    in property <bool> spring-hover: false;   // a dragged pane is hovering this tab
     callback select();
     callback close();
     callback begin-rename();
     callback commit-rename(string);
+    callback grab();                         // a press on the tab — arm a reorder drag
+    callback report-geom(length, length);    // window-x + width, for hit-testing
+
+    // Report this tab's window geometry to the controller so the drag pump can hit-test
+    // the strip without Slint pointer delivery. Read from a Timer (imperatively, outside
+    // the layout pass) — reading `absolute-position` inside a reactive *binding* during
+    // layout trips Slint's "Recursion detected" cycle guard.
+    Timer {
+        interval: 250ms;
+        running: true;
+        triggered => { root.report-geom(root.absolute-position.x, root.width); }
+    }
 
     min-width: 96px;
     max-width: 200px;
     horizontal-stretch: 0;
-    // active tab adopts the pane-area bg (reads connected); hover lifts to surface.
-    background: root.active ? Theme.bg : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
+    // active tab adopts the pane-area bg (reads connected); hover lifts to surface; a
+    // spring-hover (dragged pane resting over it) glows in the brand accent.
+    background: root.spring-hover ? Theme.brand.with-alpha(0.14)
+              : root.active ? Theme.bg
+              : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
     border-top-left-radius: 9px;
     border-top-right-radius: 9px;
-    border-width: root.active ? 1px : 0px;
-    border-color: Theme.border;
+    border-width: root.spring-hover ? 2px : (root.active ? 1px : 0px);
+    border-color: root.spring-hover ? Theme.brand : Theme.border;
 
     ta := TouchArea {
+        // The hand cursor over a tab is driven from Win32 (window.rs) so it's a real hand.
         clicked => { root.select(); }
         double-clicked => { root.begin-rename(); }
         pointer-event(e) => {
             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.middle) {
                 root.close();
+            }
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.grab();
             }
         }
     }
@@ -205,12 +228,20 @@ export component TopBar inherits Rectangle {
     in property <[LayoutOption]> layouts;
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
+    in property <bool> maximized: false;   // OS window is maximized → show the restore icon
+    // ---- drag / tear-off strip preview ----
+    in property <bool> drop-strip-active: false;
+    in property <length> drop-tab-x: 0px;
+    in property <bool> drop-tab-active: false;
+    in property <int> drop-tab-idx: -1;
 
     callback select-tab(int);
     callback close-tab(int);
     callback new-tab();
     callback begin-rename(int);
     callback rename-tab(int, string);
+    callback tab-grab(int);
+    callback tab-geom(int, length, length);
     callback new-window();
     callback move-pane-new-window();
     callback set-layout(int);
@@ -232,6 +263,20 @@ export component TopBar inherits Rectangle {
         y: parent.height - 1px;
         height: 1px;
         background: Theme.border;
+    }
+
+    // drag/tear-off: a faint wash while the strip is a drop target + an insertion caret at
+    // the slot the dragged tab/pane will land in. Visual only (no TouchArea → click-through).
+    if root.drop-strip-active : Rectangle {
+        background: Theme.brand.with-alpha(0.10);
+    }
+    if root.drop-tab-active : Rectangle {
+        x: root.drop-tab-x - 1.5px;
+        y: 4px;
+        width: 3px;
+        height: 24px;
+        border-radius: 1.5px;
+        background: Theme.brand;
     }
 
     HorizontalLayout {
@@ -268,10 +313,13 @@ export component TopBar inherits Rectangle {
                     title: tab.title;
                     active: tab.active;
                     editing: root.editing-tab == idx;
+                    spring-hover: root.drop-tab-idx == idx;
                     select => { root.select-tab(idx); }
                     close => { root.close-tab(idx); }
                     begin-rename => { root.begin-rename(idx); }
                     commit-rename(t) => { root.rename-tab(idx, t); }
+                    grab => { root.tab-grab(idx); }
+                    report-geom(x, w) => { root.tab-geom(idx, x, w); }
                 }
 
                 // new tab
@@ -302,23 +350,6 @@ export component TopBar inherits Rectangle {
             }
         }
 
-        // ===== new OS window =====
-        VerticalLayout {
-            alignment: center;
-            nw-btn := Rectangle {
-                width: 32px;
-                height: 26px;
-                border-radius: 6px;
-                background: nwa.has-hover ? Theme.surface2 : transparent;
-                NewWindowIcon {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    ink: nwa.has-hover ? Theme.text : Theme.subtext;
-                }
-                nwa := TouchArea { clicked => { root.new-window(); } }
-            }
-        }
-
         // ===== window controls (flush right corner) =====
         Rectangle {
             width: 1px;
@@ -340,7 +371,12 @@ export component TopBar inherits Rectangle {
             Rectangle {
                 width: 44px;
                 background: maxh.has-hover ? Theme.surface2 : transparent;
-                MaxIcon {
+                if !root.maximized : MaxIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: maxh.has-hover ? Theme.text : Theme.subtext;
+                }
+                if root.maximized : RestoreIcon {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     ink: maxh.has-hover ? Theme.text : Theme.subtext;

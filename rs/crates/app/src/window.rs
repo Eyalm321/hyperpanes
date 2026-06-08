@@ -23,8 +23,47 @@ mod imp {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::*;
+
+    /// The custom hand cursors (white fist / open hand with a dark outline), embedded so
+    /// the binary stays a single file. Written to temp + `LoadCursorFromFileW`'d on first
+    /// use; the resulting HCURSOR is cached in [`GRABBING_CUR`] / [`GRAB_CUR`].
+    const GRABBING_CUR_BYTES: &[u8] = include_bytes!("../cursors/grabbing.cur");
+    const GRAB_CUR_BYTES: &[u8] = include_bytes!("../cursors/grab.cur");
+    static GRABBING_CUR: AtomicIsize = AtomicIsize::new(0);
+    static GRAB_CUR: AtomicIsize = AtomicIsize::new(0);
+
+    /// The "grab" (open-hand) cursor to show while merely *hovering* a drag handle (pane
+    /// header / tab), `0` = none. Honored by the subclass on `WM_SETCURSOR` over the client
+    /// area — so it overrides Slint/winit's fallback (which isn't a hand on Windows).
+    static HOVER_CURSOR: AtomicIsize = AtomicIsize::new(0);
+
+    /// Lazily materialize an embedded `.cur` into a usable HCURSOR (write-to-temp +
+    /// `LoadCursorFromFileW`), caching it in `cell`. Returns `0` on failure.
+    fn load_cursor(bytes: &[u8], file: &str, cell: &AtomicIsize) -> isize {
+        let cached = cell.load(Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let path = std::env::temp_dir().join(file);
+        if std::fs::write(&path, bytes).is_err() {
+            return 0;
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0)).collect();
+        unsafe {
+            match LoadCursorFromFileW(PCWSTR(wide.as_ptr())) {
+                Ok(h) => {
+                    cell.store(h.0 as isize, Ordering::Relaxed);
+                    h.0 as isize
+                }
+                Err(_) => 0,
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     pub struct SavedPlacement(WINDOWPLACEMENT);
@@ -32,6 +71,12 @@ mod imp {
     /// The window proc we replaced (winit's), chained to for every message we
     /// don't handle ourselves.
     static OLD_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+    /// The cursor (HCURSOR as isize) to force globally while a tear-off drag is in flight;
+    /// `0` = none. Set by [`begin_drag_cursor`], honored by the subclass on `WM_SETCURSOR`
+    /// so the drag cursor holds even out over the desktop / other apps (we capture the mouse
+    /// so every `WM_SETCURSOR` routes to the source window's proc).
+    static DRAG_CURSOR: AtomicIsize = AtomicIsize::new(0);
 
     fn hwnd(raw: isize) -> HWND {
         HWND(raw as *mut c_void)
@@ -47,6 +92,61 @@ mod imp {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // Cursor overrides for the tear-off interaction:
+        //   * a drag in flight forces the "grabbing" (closed-hand) cursor everywhere (the
+        //     mouse is captured to this window, so every WM_SETCURSOR routes here);
+        //   * merely hovering a drag handle shows the "grab" (open-hand) cursor over the
+        //     client area, overriding winit's non-hand fallback.
+        if msg == WM_SETCURSOR {
+            let d = DRAG_CURSOR.load(Ordering::Relaxed);
+            if d != 0 {
+                SetCursor(HCURSOR(d as *mut c_void));
+                return LRESULT(1); // TRUE → handled; stop default cursor processing.
+            }
+            let hv = HOVER_CURSOR.load(Ordering::Relaxed);
+            if hv != 0 && (lparam.0 as u32 & 0xffff) == HTCLIENT as u32 {
+                SetCursor(HCURSOR(hv as *mut c_void));
+                return LRESULT(1);
+            }
+        }
+        // During a drag the mouse is captured to this window, which suppresses WM_SETCURSOR
+        // — yet winit/Slint still re-applies its own cursor on each move (e.g. the resize
+        // cursor over a pane divider), clobbering our grabbing cursor. Re-assert it after
+        // the default handling of every move so the grabbing hand always wins (same message
+        // → no flicker).
+        if msg == WM_MOUSEMOVE {
+            let d = DRAG_CURSOR.load(Ordering::Relaxed);
+            if d != 0 {
+                let old: WNDPROC = core::mem::transmute(OLD_WNDPROC.load(Ordering::Relaxed));
+                let r = CallWindowProcW(old, h, msg, wparam, lparam);
+                SetCursor(HCURSOR(d as *mut c_void));
+                return r;
+            }
+        }
+        // Constrain a maximized borderless window to the monitor **work area** (not the
+        // full monitor). Without this, Windows maximizes a frame-stripped window to the
+        // whole monitor with an off-screen overhang on every edge — which covers the
+        // taskbar (making it unclickable) and leaves an unpainted "chrome" strip in the
+        // overhang. Pinning ptMaxPosition/ptMaxSize to the work area fixes both.
+        if msg == WM_GETMINMAXINFO {
+            let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                let mmi = lparam.0 as *mut MINMAXINFO;
+                let work = mi.rcWork;
+                let monr = mi.rcMonitor;
+                (*mmi).ptMaxPosition.x = work.left - monr.left;
+                (*mmi).ptMaxPosition.y = work.top - monr.top;
+                (*mmi).ptMaxSize.x = work.right - work.left;
+                (*mmi).ptMaxSize.y = work.bottom - work.top;
+                (*mmi).ptMaxTrackSize.x = work.right - work.left;
+                (*mmi).ptMaxTrackSize.y = work.bottom - work.top;
+            }
+            return LRESULT(0);
+        }
         if msg == WM_NCCALCSIZE && wparam.0 != 0 {
             if IsZoomed(h).as_bool() {
                 let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
@@ -123,6 +223,53 @@ mod imp {
         }
     }
 
+    /// Begin forcing the tear-off drag cursor globally: load the 4-way "move" cursor, set
+    /// it now, and capture the mouse to `raw` so every `WM_SETCURSOR` (over any window or
+    /// the desktop) routes to our subclass and keeps the cursor consistent for the whole
+    /// drag. (Win32 has no closed-hand system cursor; the move cursor reads as "carrying".)
+    pub fn begin_drag_cursor(raw: isize) {
+        // Custom closed-hand "grabbing" cursor; fall back to the 4-way move if it won't load.
+        let mut c = load_cursor(GRABBING_CUR_BYTES, "hp_grabbing.cur", &GRABBING_CUR);
+        unsafe {
+            if c == 0 {
+                if let Ok(cur) = LoadCursorW(None, IDC_SIZEALL) {
+                    c = cur.0 as isize;
+                }
+            }
+            if c != 0 {
+                DRAG_CURSOR.store(c, Ordering::Relaxed);
+                SetCursor(HCURSOR(c as *mut c_void));
+            }
+            if raw != 0 {
+                SetCapture(hwnd(raw));
+            }
+        }
+    }
+
+    /// Stop forcing the drag cursor and release the mouse capture (drop / cancel).
+    pub fn end_drag_cursor(_raw: isize) {
+        DRAG_CURSOR.store(0, Ordering::Relaxed);
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+    }
+
+    /// Show / hide the open-hand "grab" cursor while hovering a drag handle (not dragging).
+    /// Sets it immediately and records it so the subclass keeps it on subsequent
+    /// `WM_SETCURSOR`s until cleared.
+    pub fn set_hover_cursor(on: bool) {
+        if on {
+            let c = load_cursor(GRAB_CUR_BYTES, "hp_grab.cur", &GRAB_CUR);
+            if c != 0 && HOVER_CURSOR.swap(c, Ordering::Relaxed) != c {
+                unsafe {
+                    SetCursor(HCURSOR(c as *mut c_void));
+                }
+            }
+        } else {
+            HOVER_CURSOR.store(0, Ordering::Relaxed);
+        }
+    }
+
     pub fn minimize(raw: isize) {
         unsafe {
             let _ = ShowWindow(hwnd(raw), SW_MINIMIZE);
@@ -138,6 +285,14 @@ mod imp {
                 let _ = ShowWindow(h, SW_MAXIMIZE);
             }
         }
+    }
+
+    /// Whether the window is currently maximized (drives the restore-vs-maximize icon).
+    pub fn is_maximized(raw: isize) -> bool {
+        if raw == 0 {
+            return false;
+        }
+        unsafe { IsZoomed(hwnd(raw)).as_bool() }
     }
 
     /// Post `WM_CLOSE` to a window. Unused by the managed multi-window close path
@@ -212,8 +367,14 @@ mod imp {
     }
     pub fn make_frameless(_raw: isize) {}
     pub fn start_drag(_raw: isize) {}
+    pub fn begin_drag_cursor(_raw: isize) {}
+    pub fn end_drag_cursor(_raw: isize) {}
+    pub fn set_hover_cursor(_on: bool) {}
     pub fn minimize(_raw: isize) {}
     pub fn toggle_max(_raw: isize) {}
+    pub fn is_maximized(_raw: isize) -> bool {
+        false
+    }
     pub fn close(_raw: isize) {}
     pub fn enter_fullscreen(_raw: isize) -> Option<super::SavedPlacement> {
         Some(())
