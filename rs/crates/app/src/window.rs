@@ -140,6 +140,9 @@ mod imp {
         }
     }
 
+    /// Post `WM_CLOSE` to a window. Unused by the managed multi-window close path
+    /// (which flags the window for reaping), kept for completeness of the Win32 glue.
+    #[allow(dead_code)]
     pub fn close(raw: isize) {
         unsafe {
             let _ = PostMessageW(hwnd(raw), WM_CLOSE, WPARAM(0), LPARAM(0));

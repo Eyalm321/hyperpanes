@@ -39,6 +39,16 @@ pub enum Overlay {
     Sidebar,
 }
 
+/// A session detached from its window for re-hosting in another (Wave-1 multi-window
+/// plumbing). Carries only the session `uid` + chrome; the PTY stays alive centrally in
+/// the [`SessionManager`], so re-hosting is a replay-into-a-fresh-grid, never a restart.
+#[derive(Debug, Clone)]
+pub struct DetachedPane {
+    pub uid: String,
+    pub title: SharedString,
+    pub pinned_accent: Option<Color>,
+}
+
 /// A single preferences edit, carried by `Command::ApplySetting`. Keeps the `Command`
 /// enum flat (one variant) while still typing each field of [`Settings`].
 #[derive(Debug, Clone, Copy)]
@@ -294,16 +304,18 @@ impl State {
         self.close_pane_in(self.active, idx, mgr)
     }
 
-    /// Close pane `idx` of tab `ti`, killing its session. An emptied tab is
-    /// dropped; closing the last pane of the last tab returns `false` (caller
-    /// quits). Works for background tabs too (used by self-exiting shells).
-    pub fn close_pane_in(&mut self, ti: usize, idx: usize, mgr: &SessionManager) -> bool {
+    /// Remove pane `idx` of tab `ti` **without** killing its session, returning the
+    /// removed [`PaneState`] and whether the window still has panes (`false` = the
+    /// workspace emptied → the caller should close the window). An emptied non-last tab
+    /// is dropped. Shared by [`Self::close_pane_in`] (which then kills the session) and
+    /// pane re-host (which keeps the session alive to rebind it in another window).
+    fn take_pane_in(&mut self, ti: usize, idx: usize) -> Option<(PaneState, bool)> {
         if ti >= self.tabs.len() {
-            return true;
+            return None;
         }
         let t = &mut self.tabs[ti];
         if idx >= t.panes.len() {
-            return true;
+            return None;
         }
         let ps = t.panes.remove(idx);
         let auto = t.layout == Layout::Auto;
@@ -312,11 +324,22 @@ impl State {
         } else {
             remove_size(&t.sizes, idx)
         };
-        let empty = t.panes.is_empty();
-        mgr.kill(&ps.uid);
-        if empty {
-            // No panes left → drop the whole tab.
-            return self.close_tab(ti, mgr);
+        self.dirty = true;
+        if t.panes.is_empty() {
+            if self.tabs.len() <= 1 {
+                // Last pane of the last tab → workspace emptied. Leave the empty tab in
+                // place (the window is about to close).
+                return Some((ps, false));
+            }
+            // Drop the now-empty tab and fix the active index.
+            self.tabs.remove(ti);
+            if self.active >= self.tabs.len() {
+                self.active = self.tabs.len() - 1;
+            } else if ti < self.active {
+                self.active -= 1;
+            }
+            self.editing_tab = -1;
+            return Some((ps, true));
         }
         let t = &mut self.tabs[ti];
         if t.focused >= t.panes.len() {
@@ -330,8 +353,83 @@ impl State {
             other => other,
         };
         t.relabel();
+        Some((ps, true))
+    }
+
+    /// Close pane `idx` of tab `ti`, killing its session. An emptied tab is
+    /// dropped; closing the last pane of the last tab returns `false` (caller
+    /// quits). Works for background tabs too (used by self-exiting shells).
+    pub fn close_pane_in(&mut self, ti: usize, idx: usize, mgr: &SessionManager) -> bool {
+        match self.take_pane_in(ti, idx) {
+            Some((ps, alive)) => {
+                mgr.kill(&ps.uid);
+                alive
+            }
+            None => true,
+        }
+    }
+
+    /// Detach the focused pane of the active tab for re-hosting in another window:
+    /// remove it **without** killing its session (the PTY stays alive centrally),
+    /// returning the rebind info + whether this window still has panes. `None` when the
+    /// active tab has no panes.
+    pub fn detach_focused(&mut self, mgr: &SessionManager) -> Option<(DetachedPane, bool)> {
+        let _ = mgr; // sessions are NOT touched here — that's the whole point of detach.
+        let ti = self.active;
+        let idx = self.tabs.get(ti)?.focused;
+        let (ps, alive) = self.take_pane_in(ti, idx)?;
+        Some((
+            DetachedPane { uid: ps.uid, title: ps.title, pinned_accent: ps.pinned_accent },
+            alive,
+        ))
+    }
+
+    /// Re-host a detached session in the active tab: build a fresh terminal grid, prime
+    /// it from the session's **replay buffer** (recent scrollback — so no blank pane and
+    /// no PTY restart), and rebind it to the existing `uid`, then focus it.
+    pub fn adopt_pane(&mut self, mgr: &SessionManager, det: DetachedPane) {
+        let idx = self.active_tab().panes.len();
+        let (cols, rows) = (80u16, 24u16);
+        let mut pane =
+            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        // Replay the rolling buffer so the re-hosted pane shows recent output instantly.
+        if let Some(replay) = mgr.replay(&det.uid) {
+            pane.feed(&replay);
+        }
+        let accent = det.pinned_accent.unwrap_or_else(|| theme::accent_for(idx));
+        let ps = PaneState {
+            uid: det.uid,
+            title: det.title,
+            accent,
+            pane,
+            applied: (cols as usize, rows as usize),
+            surface: Image::default(),
+            rect: (0.0, 0.0, 0.0, 0.0),
+            visible: true,
+            started: true, // the session is already running — don't re-send any startup.
+            startup: None,
+            pinned_accent: det.pinned_accent,
+        };
+        let auto = self.active_tab().layout == Layout::Auto;
+        let t = self.active_tab_mut();
+        t.sizes = if auto {
+            equal_sizes(idx + 1)
+        } else {
+            insert_size(&t.sizes, idx)
+        };
+        t.panes.push(ps);
+        t.focused = idx;
+        t.zoomed = None;
         self.dirty = true;
-        true
+    }
+
+    /// Every live session uid this window hosts (used to kill them when the window
+    /// closes — in Wave 1 each session is referenced by exactly one window).
+    pub fn session_uids(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .flat_map(|t| t.panes.iter().map(|p| p.uid.clone()))
+            .collect()
     }
 
     /// A session exited on its own — drop its pane wherever it lives. Returns

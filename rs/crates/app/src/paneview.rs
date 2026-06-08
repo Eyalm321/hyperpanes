@@ -8,12 +8,11 @@ use std::time::{Duration, Instant};
 use hyperpanes_core::layout::presets::{
     compute_tiles, effective_layout, DividerKind, Orientation,
 };
-use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
+use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
 
-use slint::{Model, VecModel};
+use slint::{Model, ModelRc, VecModel};
 use std::rc::Rc;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
@@ -34,7 +33,8 @@ const PANE_GAP: f32 = 3.0;
 const PANE_CHROME_W: f32 = 6.0; // 2px borders + 4px left pad
 const PANE_CHROME_H: f32 = 32.0; // 2px borders + 26px header + 4px top/bottom pad
 
-/// The Slint models the controller owns and the resync writes into.
+/// The Slint models a single window owns and its resync writes into. Each OS window has
+/// its own `Ui` (its own model set), so windows are fully independent.
 pub struct Ui {
     pub panes: Rc<VecModel<PaneItem>>,
     pub tabs: Rc<VecModel<TabItem>>,
@@ -44,6 +44,32 @@ pub struct Ui {
     pub palette: Rc<VecModel<PaletteItem>>,
     pub projects: Rc<VecModel<ProjectItem>>,
     pub families: Rc<VecModel<PrefOption>>,
+}
+
+impl Ui {
+    /// A fresh, empty model set for one window.
+    pub fn new() -> Rc<Ui> {
+        Rc::new(Ui {
+            panes: Rc::new(VecModel::default()),
+            tabs: Rc::new(VecModel::default()),
+            dividers: Rc::new(VecModel::default()),
+            layouts: Rc::new(VecModel::default()),
+            palette: Rc::new(VecModel::default()),
+            projects: Rc::new(VecModel::default()),
+            families: Rc::new(VecModel::default()),
+        })
+    }
+
+    /// Bind this window's models to its `AppWindow` instance.
+    pub fn attach(&self, app: &AppWindow) {
+        app.set_panes(ModelRc::from(self.panes.clone()));
+        app.set_tabs(ModelRc::from(self.tabs.clone()));
+        app.set_dividers(ModelRc::from(self.dividers.clone()));
+        app.set_layouts(ModelRc::from(self.layouts.clone()));
+        app.set_palette(ModelRc::from(self.palette.clone()));
+        app.set_projects(ModelRc::from(self.projects.clone()));
+        app.set_pref_families(ModelRc::from(self.families.clone()));
+    }
 }
 
 /// Push `items` into `model`, reusing the existing elements when the row count is
@@ -274,9 +300,10 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.projects, projects);
 }
 
-/// One UI-thread tick: drain session output into the panes, resync if dirty,
-/// blink the cursor, render dirty visible panes, refresh the HUD. Returns `false`
-/// when the workspace has emptied (caller should quit).
+/// One UI-thread render tick for a **single window**: resync if dirty, blink the
+/// cursor, render dirty visible panes, refresh the HUD. Session output is drained
+/// centrally (see [`crate::app::App::tick`]) and fed into panes before this runs, so the
+/// pump no longer touches the event channel — that's what lets one engine feed N windows.
 pub fn pump(
     app: &AppWindow,
     state: &mut State,
@@ -284,39 +311,7 @@ pub fn pump(
     area: (f32, f32),
     scale: f32,
     mgr: &SessionManager,
-    erx: &mut UnboundedReceiver<SessionEvent>,
-) -> bool {
-    // ---- drain session events into the panes (across all tabs) ----
-    while let Ok(ev) = erx.try_recv() {
-        match ev {
-            SessionEvent::Data { uid, data } => {
-                if let Some((ti, pi)) = state.find_pane(&uid) {
-                    let pc = &mut state.tabs[ti].panes[pi];
-                    pc.pane.feed(&data);
-                    let replies = pc.pane.take_replies();
-                    if !replies.is_empty() {
-                        mgr.write(&uid, &String::from_utf8_lossy(&replies));
-                    }
-                    if !pc.started {
-                        pc.started = true;
-                        if let Some(cmd) = pc.startup.take() {
-                            mgr.write(&uid, &cmd);
-                        }
-                    }
-                }
-            }
-            SessionEvent::Exit { uid, .. } => {
-                if !state.pane_exited(&uid, mgr) {
-                    return false;
-                }
-            }
-            SessionEvent::Cwd { cwd, .. } => {
-                // Pane cd'd → remember its git project (feeds the sidebar).
-                state.note_cwd(&cwd);
-            }
-        }
-    }
-
+) {
     // ---- expire a held-Esc once auto-repeat stops (no key-release event) ----
     state.tick_esc();
 
@@ -386,6 +381,4 @@ pub fn pump(
         state.frames = 0;
         state.last_hud = Instant::now();
     }
-
-    true
 }

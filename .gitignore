@@ -27,3 +27,6 @@ target/
 .fanout/
 # per-worktree handoff copied in by make-worktrees.ps1 (context, never committed)
 FANOUT-HANDOFF.md
+_mw_shot1.png
+_mw_win*.png
+_mw2_win*.png

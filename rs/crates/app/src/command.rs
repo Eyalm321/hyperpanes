@@ -11,7 +11,7 @@ use hyperpanes_core::layout::navigate::Direction;
 use hyperpanes_core::layout::presets::{DividerKind, Layout};
 use hyperpanes_core::session_manager::SessionManager;
 
-use crate::state::{Setting, State};
+use crate::state::{DetachedPane, Setting, State};
 use crate::theme;
 
 /// An action against the workspace. Construct these from any input source.
@@ -39,6 +39,11 @@ pub enum Command {
     SwitchTab(usize),
     BeginRename(i32),
     RenameTab(i32, String),
+    // ---- multi-window (Phase 4) ----
+    /// Open a fresh OS window with an empty tab.
+    NewWindow,
+    /// Re-host the focused pane in a new OS window (replay-primed, no PTY restart).
+    MovePaneToNewWindow,
     // ---- Wave-2 overlays (Seam #3) ----
     /// Dismiss whatever overlay panel is open.
     CloseOverlay,
@@ -59,14 +64,21 @@ pub enum Command {
     OpenProject(usize),
 }
 
-/// A side effect the controller must apply outside the state (UI/window layer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A side effect the controller must apply outside the state (UI/window layer). The
+/// multi-window layer ([`crate::app`]) applies these against the owning window + the
+/// app-level window registry.
+#[derive(Debug)]
 pub enum Effect {
     None,
-    /// The workspace is empty — hide/close the window.
+    /// The workspace is empty — close this window (and quit when it was the last).
     Quit,
-    /// Apply OS fullscreen (true) or restore (false).
+    /// Apply OS fullscreen (true) or restore (false) to this window.
     SetFullscreen(bool),
+    /// Open a fresh empty OS window.
+    NewWindow,
+    /// Re-host `det` in a new OS window; `source_alive` is `false` when detaching it
+    /// emptied this window (so the controller closes it).
+    MoveToNewWindow { det: DetachedPane, source_alive: bool },
 }
 
 /// The keyboard layout-cycle order (skips `single`, which the menu still offers).
@@ -125,6 +137,13 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SwitchTab(i) => state.switch_tab(i),
         Command::BeginRename(i) => state.begin_rename(i),
         Command::RenameTab(i, t) => state.rename_tab(i, &t),
+        // ---- multi-window ----
+        Command::NewWindow => return Effect::NewWindow,
+        Command::MovePaneToNewWindow => {
+            if let Some((det, source_alive)) = state.detach_focused(mgr) {
+                return Effect::MoveToNewWindow { det, source_alive };
+            }
+        }
         // ---- Wave-2 overlays ----
         Command::CloseOverlay => state.close_overlay(),
         Command::PaletteOpen => state.open_palette(),
