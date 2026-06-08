@@ -53,11 +53,27 @@ component PrefToggle inherits Rectangle {
     }
 }
 
-// A section header inside the preferences card (mirrors Electron's `.hp-kb-group-title`).
-component SectionTitle inherits Text {
-    color: Theme.subtext;
-    font-size: 11px;
-    font-weight: 700;
+// A category row in the preferences left-nav rail (mirrors Electron's `.hp-prefs-tab`).
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+    height: 32px;
+    border-radius: 6px;
+    background: root.active ? Theme.surface2 : (ta.has-hover ? Theme.surface : transparent);
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.label;
+            color: root.active ? Theme.text : Theme.subtext;
+            font-size: 12px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
 }
 
 // A small pill button (font ± and family chips).
@@ -224,42 +240,58 @@ export component OverlayLayer inherits Rectangle {
     // then Terminal). Only settings whose underlying feature exists in the native build
     // are rendered; deferred ones are marked `TODO(phase5)` (no dead controls). The card
     // auto-sizes to its content (no scroll machinery needed at this size).
-    if root.kind == 2 : Rectangle {
-        width: 520px;
-        height: min(body.preferred-height, parent.height - 60px);
+    if root.kind == 2 : prefs := Rectangle {
+        width: min(780px, parent.width - 40px);
+        height: min(600px, parent.height - 60px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         background: Theme.mantle;
         border-radius: 12px;
         border-width: 1px;
         border-color: Theme.border;
-        drop-shadow-blur: 48px;
+        drop-shadow-blur: 64px;
         drop-shadow-color: Theme.scrim;
-        drop-shadow-offset-y: 18px;
+        drop-shadow-offset-y: 24px;
         clip: true;
+        // selected category: 0 = Appearance · 1 = Terminal
+        property <int> sel: 0;
         TouchArea {}
 
-        body := VerticalLayout {
-            padding: 18px;
-            spacing: 12px;
-
-            HorizontalLayout {
-                Text {
-                    text: "Preferences";
-                    color: Theme.text;
-                    font-size: 16px;
-                    font-weight: 700;
-                    horizontal-stretch: 1;
-                    vertical-alignment: center;
-                }
-                Pill {
-                    label: "Done";
-                    clicked => { root.dismiss(); }
+        HorizontalLayout {
+            // ---- left category rail (mirrors Electron `.hp-prefs-tabs`) ----
+            Rectangle {
+                width: 168px;
+                background: Theme.bg;
+                Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border; }
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 2px;
+                    Text {
+                        text: "Preferences";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        height: 34px;
+                        vertical-alignment: center;
+                    }
+                    NavItem { label: "Appearance"; active: prefs.sel == 0; clicked => { prefs.sel = 0; } }
+                    NavItem { label: "Terminal"; active: prefs.sel == 1; clicked => { prefs.sel = 1; } }
+                    Rectangle { vertical-stretch: 1; }
                 }
             }
+            // ---- main column: body + footer ----
+            VerticalLayout {
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+                        alignment: start;
 
-            // ===================== Appearance =====================
-            SectionTitle { text: "Appearance"; }
+                        // ===================== Appearance =====================
+                        if prefs.sel == 0 : VerticalLayout {
+                            spacing: 12px;
 
             // ---- frame color palette (pane dot + border) ----
             Text { text: "Frame color palette"; color: Theme.faint; font-size: 11px; }
@@ -361,8 +393,11 @@ export component OverlayLayer inherits Rectangle {
             // TODO(phase5): idle-glow settings (idleAlert / idleEffect / idleAlertSeconds) — the
             //   AI-pane glow effect isn't built in the native shell yet.
 
-            // ===================== Terminal =====================
-            SectionTitle { text: "Terminal"; }
+                        } // end Appearance panel
+
+                        // ===================== Terminal =====================
+                        if prefs.sel == 1 : VerticalLayout {
+                            spacing: 12px;
 
             // ---- default shell (applies to new panes & restarts) ----
             Text { text: "Default shell"; color: Theme.faint; font-size: 11px; }
@@ -424,7 +459,27 @@ export component OverlayLayer inherits Rectangle {
             //   wired into the native shell yet.
             // TODO(phase5): Ambient AI section (local Ollama) — not in the native shell yet.
 
-            Rectangle { vertical-stretch: 1; }
+                        } // end Terminal panel
+
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+                // ---- footer (Done) ----
+                Rectangle {
+                    height: 56px;
+                    Rectangle { width: 100%; height: 1px; background: Theme.border; }
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Pill {
+                            label: "Done";
+                            active: true;
+                            clicked => { root.dismiss(); }
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -321,7 +321,9 @@ export component PaneView inherits Rectangle {
     // Mounted here so the slot lives in the tree and Wave-2 work never restructures the
     // pane-area layout.
     if root.overlay-kind != 0 : Rectangle {
-        background: #00000080;
+        // Frosted-glass backdrop (Electron's `.hp-frosted-backdrop`). Slint has no true
+        // backdrop blur, so this is a tinted, mostly-opaque dark "glass" approximation.
+        background: #0b0c12cc;
         // scrim click dismisses the overlay (the panels eat their own clicks)
         TouchArea { clicked => { root.overlay-dismiss(); } }
         OverlayLayer {
