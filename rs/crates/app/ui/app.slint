@@ -10,15 +10,16 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption, KeybindingItem } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
 import { SidebarRail } from "sidebar.slint";
+import { ContextMenu } from "contextmenu.slint";
 import { KeyMsg } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
-export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, KeyMsg }
+export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";
@@ -86,6 +87,17 @@ export component AppWindow inherits Window {
     in property <[ProjectItem]> projects;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
     in property <bool> sidebar-open: false;  // projects flyout expanded
+    // ---- context menus (pane header / tab strip) ----
+    in property <int> ctx-kind: 0;           // 0 none · 1 pane · 2 tab
+    in property <length> ctx-x: 0px;         // anchor (window-logical)
+    in property <length> ctx-y: 0px;
+    in property <[MenuEntry]> ctx-entries;
+    in property <[color]> ctx-swatches;      // Change-Color palette slots
+    in property <int> ctx-cur-swatch: -1;    // pane's color index in ctx-swatches, or -1
+    in property <bool> ctx-frame: false;
+    in property <bool> ctx-dot: false;
+    in property <[CtxTab]> ctx-tabs;         // Move-to-Tab destinations
+    in property <[LayoutOption]> ctx-layouts; // Layout submenu (for the target tab)
     // ---- Wave-2 drag / tear-off previews (driven by the drag pump) ----
     in property <bool> drop-win-active: false;    // this window is a cross-window tear target
     in property <bool> drop-strip-active: false;  // the tab strip is a drop target
@@ -115,6 +127,11 @@ export component AppWindow inherits Window {
     callback pane-link-moved(int, length, length);
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
+    // in-pane search (opened from the pane context menu)
+    callback pane-search-edited(int, string);
+    callback pane-search-next(int);
+    callback pane-search-prev(int);
+    callback pane-search-closed(int);
     // tabs
     callback select-tab(int);
     callback close-tab(int);
@@ -164,6 +181,17 @@ export component AppWindow inherits Window {
     callback open-palette();
     callback open-prefs();
     callback toggle-sidebar();
+    // ---- context menus ----
+    callback pane-context(int, length, length);   // right-click pane `i` at (x, y)
+    callback tab-context(int, length, length);    // right-click tab `i` at (x, y)
+    callback ctx-pick(int);        // a plain top-level menu row
+    callback ctx-swatch(int);      // Change-Color swatch
+    callback ctx-swatch-none();    // Change-Color "no color"
+    callback ctx-frame-set(bool);
+    callback ctx-dot-set(bool);
+    callback ctx-move-tab(int);    // Move-to-Tab destination (real tab index)
+    callback ctx-layout(int);      // Layout option id
+    callback ctx-dismiss();
 
     VerticalLayout {
         spacing: 0px;
@@ -185,6 +213,7 @@ export component AppWindow inherits Window {
             tab-geom(i, x, w) => { root.tab-geom(i, x, w); }
             select-tab(i) => { root.select-tab(i); }
             close-tab(i) => { root.close-tab(i); }
+            tab-context(i, x, y) => { root.tab-context(i, x, y); }
             new-tab => { root.new-tab(); }
             begin-rename(i) => { root.begin-rename(i); }
             rename-tab(i, t) => { root.rename-tab(i, t); }
@@ -226,6 +255,7 @@ export component AppWindow inherits Window {
                 drop-rect-active: root.drop-rect-active;
 
                 pane-grab(i) => { root.pane-grab(i); }
+                pane-context(i, x, y) => { root.pane-context(i, x, y); }
                 key(i, m) => { root.key(i, m); }
                 focus-pane(i) => { root.focus-pane(i); }
                 area-resized(w, h) => { root.area-resized(w, h); }
@@ -239,6 +269,10 @@ export component AppWindow inherits Window {
                 pane-link-moved(i, x, y) => { root.pane-link-moved(i, x, y); }
                 pane-link-exited(i) => { root.pane-link-exited(i); }
                 pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
+                pane-search-edited(i, q) => { root.pane-search-edited(i, q); }
+                pane-search-next(i) => { root.pane-search-next(i); }
+                pane-search-prev(i) => { root.pane-search-prev(i); }
+                pane-search-closed(i) => { root.pane-search-closed(i); }
             }
 
             // Shown whenever the setting is on AND not fullscreen (mirrors
@@ -325,6 +359,31 @@ export component AppWindow inherits Window {
             pref-reset-all-bindings => { root.pref-reset-all-bindings(); }
             dismiss => { root.overlay-dismiss(); }
         }
+    }
+
+    // ===== context menu (pane header / tab strip) =====
+    // Mounted at the window root so it overlays the top bar, panes + sidebar and its click-away
+    // catcher covers the whole window. Recreated each open (so its submenu state resets).
+    if root.ctx-kind != 0 : ContextMenu {
+        width: 100%;
+        height: 100%;
+        menu-x: root.ctx-x;
+        menu-y: root.ctx-y;
+        entries: root.ctx-entries;
+        swatches: root.ctx-swatches;
+        cur-swatch: root.ctx-cur-swatch;
+        frame-on: root.ctx-frame;
+        dot-on: root.ctx-dot;
+        tabs: root.ctx-tabs;
+        layouts: root.ctx-layouts;
+        pick(i) => { root.ctx-pick(i); }
+        swatch(i) => { root.ctx-swatch(i); }
+        swatch-none => { root.ctx-swatch-none(); }
+        set-frame(v) => { root.ctx-frame-set(v); }
+        set-dot(v) => { root.ctx-dot-set(v); }
+        move-tab(i) => { root.ctx-move-tab(i); }
+        set-layout(i) => { root.ctx-layout(i); }
+        dismiss => { root.ctx-dismiss(); }
     }
 
     // ===== cross-window tear-off target glow =====

@@ -273,6 +273,16 @@ impl Keymap {
         self.overrides.contains_key(id)
     }
 
+    /// The effective chord label (e.g. `Ctrl+Shift+Z`) for binding `id` — the native port of the
+    /// renderer's `comboLabel(combos[id])`, used to annotate context-menu rows. `None` for an
+    /// unknown id.
+    pub fn label_for(&self, id: &str) -> Option<String> {
+        default_bindings()
+            .iter()
+            .find(|b| b.id == id)
+            .map(|b| self.effective(id, b.chord).label())
+    }
+
     /// Find the command bound to a live modifier+key combo, consulting each binding's
     /// **effective** chord (override wins over default), first match in table order.
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {

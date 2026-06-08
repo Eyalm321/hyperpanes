@@ -11,7 +11,7 @@ use hyperpanes_core::layout::navigate::Direction;
 use hyperpanes_core::layout::presets::{DividerKind, Layout};
 use hyperpanes_core::session_manager::SessionManager;
 
-use crate::state::{DetachedPane, Setting, State};
+use crate::state::{DetachedPane, DetachedTab, Setting, State};
 use crate::theme;
 
 /// An action against the workspace. Construct these from any input source.
@@ -43,6 +43,55 @@ pub enum Command {
     BeginRenamePane(i32),
     /// Commit pane `0`'s label to `1` (blank keeps the prior label).
     RenamePane(i32, String),
+    // ---- pane context-menu actions (target a specific pane by active-tab index) ----
+    /// Recolor pane `0` to swatch `1` of the active frame palette (pins it + frame/dot on).
+    RecolorPane(usize, usize),
+    /// Set pane `0`'s per-pane frame override to `1`.
+    SetPaneFrame(usize, bool),
+    /// Set pane `0`'s per-pane dot override to `1`.
+    SetPaneDot(usize, bool),
+    /// Toggle whether pane `0`'s ambient-AI summary line is muted.
+    ToggleMuteAi(usize),
+    /// Maximize/restore (zoom-in-tab) pane `0`.
+    ZoomPane(usize),
+    /// Fullscreen/exit-fullscreen pane `0`.
+    FullscreenPane(usize),
+    /// Restart pane `0`'s shell (kills + respawns its session in place).
+    RestartPane(usize),
+    /// Open the in-pane search box on pane `0`.
+    SearchPane(usize),
+    /// Copy pane `0`'s current selection to the clipboard.
+    CopyPane(usize),
+    /// Paste the clipboard into pane `0`'s session.
+    PastePane(usize),
+    /// Select all of pane `0`'s viewport.
+    SelectAllPane(usize),
+    /// Clear pane `0`'s screen + scrollback.
+    ClearPane(usize),
+    /// Move pane `0` into a brand-new tab (disabled when its tab has <2 panes).
+    MovePaneToNewTab(usize),
+    /// Move pane `0` into existing tab `1`.
+    MovePaneToTab(usize, usize),
+    // ---- tab context-menu actions (target a specific tab by index) ----
+    /// Duplicate tab `0` (a fresh tab with the same number of panes + its layout).
+    DuplicateTab(usize),
+    /// Close every tab except tab `0`.
+    CloseOtherTabs(usize),
+    /// Close every tab to the right of tab `0`.
+    CloseTabsToRight(usize),
+    /// Reopen the most-recently closed tab (replay-primed; no-op when none).
+    ReopenClosedTab,
+    /// Set tab `0`'s layout to `1`.
+    SetTabLayout(usize, Layout),
+    /// Move the whole of tab `0` to a new OS window.
+    MoveTabToNewWindow(usize),
+    // ---- context-menu lifecycle ----
+    /// Open the pane context menu for pane `0` at window-logical `(1, 2)`.
+    OpenPaneContext(usize, f32, f32),
+    /// Open the tab context menu for tab `0` at window-logical `(1, 2)`.
+    OpenTabContext(usize, f32, f32),
+    /// Dismiss the open context menu.
+    CloseContext,
     // ---- multi-window (Phase 4) ----
     /// Open a fresh OS window with an empty tab.
     NewWindow,
@@ -102,6 +151,9 @@ pub enum Effect {
     /// Re-host `det` in a new OS window; `source_alive` is `false` when detaching it
     /// emptied this window (so the controller closes it).
     MoveToNewWindow { det: DetachedPane, source_alive: bool },
+    /// Re-host a whole tab (its panes, title + layout) in a new OS window. `source_alive`
+    /// is `false` when moving it emptied this window.
+    MoveTabToNewWindow { tab: DetachedTab, source_alive: bool },
 }
 
 /// The keyboard layout-cycle order (skips `single`, which the menu still offers).
@@ -161,7 +213,9 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::ResizeDivider { kind, index, delta } => state.resize_divider(kind, index, delta),
         Command::NewTab => state.new_tab(mgr),
         Command::CloseTab(i) => {
-            if !state.close_tab(i, mgr) {
+            // Reopenable close: with ≥2 tabs the tab is parked (sessions alive) on the closed
+            // stack; closing the last tab still kills + quits.
+            if !state.close_tab_menu(i, mgr) {
                 return Effect::Quit;
             }
         }
@@ -170,6 +224,41 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::RenameTab(i, t) => state.rename_tab(i, &t),
         Command::BeginRenamePane(i) => state.begin_rename_pane(i),
         Command::RenamePane(i, t) => state.rename_pane(i, &t),
+        // ---- pane context-menu actions ----
+        Command::RecolorPane(i, swatch) => state.recolor_pane(i, swatch),
+        Command::SetPaneFrame(i, on) => state.set_pane_frame(i, on),
+        Command::SetPaneDot(i, on) => state.set_pane_dot(i, on),
+        Command::ToggleMuteAi(i) => state.toggle_mute_ai(i),
+        Command::ZoomPane(i) => state.zoom_pane(i),
+        Command::FullscreenPane(i) => {
+            state.focus_pane(i);
+            let on = !state.fullscreen;
+            state.set_fullscreen(on);
+            return Effect::SetFullscreen(on);
+        }
+        Command::RestartPane(i) => state.restart_pane(i, mgr),
+        Command::SearchPane(i) => state.open_search(i),
+        Command::CopyPane(i) => state.copy_pane(i),
+        Command::PastePane(i) => state.paste_pane(i, mgr),
+        Command::SelectAllPane(i) => state.select_all_pane(i),
+        Command::ClearPane(i) => state.clear_pane(i),
+        Command::MovePaneToNewTab(i) => state.move_pane_to_new_tab(i, mgr),
+        Command::MovePaneToTab(i, t) => state.move_pane_to_tab(i, t, mgr),
+        // ---- tab context-menu actions ----
+        Command::DuplicateTab(i) => state.duplicate_tab(i, mgr),
+        Command::CloseOtherTabs(i) => state.close_other_tabs(i, mgr),
+        Command::CloseTabsToRight(i) => state.close_tabs_to_right(i, mgr),
+        Command::ReopenClosedTab => state.reopen_closed_tab(mgr),
+        Command::SetTabLayout(i, l) => state.set_tab_layout(i, l),
+        Command::MoveTabToNewWindow(i) => {
+            if let Some((tab, source_alive)) = state.detach_tab(i) {
+                return Effect::MoveTabToNewWindow { tab, source_alive };
+            }
+        }
+        // ---- context-menu lifecycle ----
+        Command::OpenPaneContext(i, x, y) => state.open_pane_context(i, x, y),
+        Command::OpenTabContext(i, x, y) => state.open_tab_context(i, x, y),
+        Command::CloseContext => state.close_context(),
         // ---- multi-window ----
         Command::NewWindow => return Effect::NewWindow,
         Command::MovePaneToNewWindow => {

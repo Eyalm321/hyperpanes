@@ -31,6 +31,10 @@ export struct PaneItem {
     link-tip: string,
     link-tip-x: length,
     link-tip-y: length,
+    // in-pane search box (opened from the pane menu's "Search…"): whether it's showing + the
+    // match counter text (e.g. "2 / 5").
+    search-open: bool,
+    search-count: string,
 }
 
 // One tab (workspace group) chip in the strip.
@@ -93,6 +97,28 @@ export struct KeybindingItem {
     group-first: bool,
     overridden: bool,
     capturing: bool,
+}
+
+// ===== context menus (pane header / tab strip) =====
+
+// One row of a cursor-anchored context menu. Built fresh by the controller on each right-click
+// so its gating + checkmarks are live. `kind`: -1 separator · 0 plain item · 2 Change-Color
+// submenu · 3 Move-to-Tab submenu · 4 Layout submenu.
+export struct MenuEntry {
+    label: string,
+    shortcut: string,
+    glyph: string,
+    kind: int,
+    checked: bool,
+    show-check: bool,
+    disabled: bool,
+    danger: bool,
+}
+
+// One destination row in the pane menu's "Move to Tab" submenu (label + the real tab index).
+export struct CtxTab {
+    label: string,
+    idx: int,
 }
 
 // One frame-palette choice in the Appearance picker: a label plus its 8 slot colors,

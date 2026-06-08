@@ -55,6 +55,18 @@ pub struct DetachedPane {
     pub show_dot: Option<bool>,
 }
 
+/// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
+/// closed-tab stack (for "Reopen Closed Tab"). Like [`DetachedPane`] the sessions stay alive
+/// centrally, so re-hosting is a replay-into-fresh-grids, never a restart.
+#[derive(Debug, Clone)]
+pub struct DetachedTab {
+    pub title: SharedString,
+    pub layout: Layout,
+    pub sizes: Vec<f64>,
+    pub main_fraction: f64,
+    pub panes: Vec<DetachedPane>,
+}
+
 /// A single preferences edit, carried by `Command::ApplySetting`. Keeps the `Command`
 /// enum flat (one variant) while still typing each field of [`Settings`].
 #[derive(Debug, Clone)]
@@ -155,6 +167,9 @@ pub struct PaneState {
     /// AI/agent CLI so the idle glow only arms on agent panes (mirrors `isAiPane`). "" until
     /// the shell sets a title.
     pub shell_title: String,
+    /// Whether the pane's ambient-AI summary line is muted (the pane menu's "Mute AI Summary"
+    /// toggle; mirrors the renderer's `ui.aiMuted` set). New panes default unmuted.
+    pub ai_muted: bool,
 }
 
 impl PaneState {
@@ -307,6 +322,13 @@ pub struct State {
     /// True while Esc is being held — drives the hint + its progress fill.
     pub esc_holding: bool,
     esc_fired: bool,
+    // ---- context menus (Phase-5 parity) ----
+    /// The open cursor-anchored context menu (pane header / tab strip), if any. Built fresh on
+    /// each right-click so its gating + checkmarks reflect the moment it opened.
+    pub ctx: Option<crate::contextmenu::CtxMenu>,
+    /// Most-recently-closed tabs (sessions kept alive centrally) for "Reopen Closed Tab",
+    /// newest last. Capped — evicted entries' sessions are killed.
+    pub closed_tabs: Vec<DetachedTab>,
 }
 
 /// What the key router should do with an Escape press.
@@ -369,6 +391,8 @@ impl State {
             esc_hold_start: None,
             esc_holding: false,
             esc_fired: false,
+            ctx: None,
+            closed_tabs: Vec::new(),
         };
         let tab = s.fresh_tab();
         s.tabs.push(tab);
@@ -578,6 +602,7 @@ impl State {
             link_cursor: (0.0, 0.0),
             glow,
             shell_title: String::new(),
+            ai_muted: false,
         })
     }
 
@@ -742,6 +767,7 @@ impl State {
             link_cursor: (0.0, 0.0),
             glow,
             shell_title: String::new(),
+            ai_muted: false,
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -863,6 +889,13 @@ impl State {
         self.tabs
             .iter()
             .flat_map(|t| t.panes.iter().map(|p| p.uid.clone()))
+            // Tabs parked on the closed-tab stack keep their sessions alive (for reopen), so
+            // they must be killed when the window closes too — else they'd leak.
+            .chain(
+                self.closed_tabs
+                    .iter()
+                    .flat_map(|t| t.panes.iter().map(|p| p.uid.clone())),
+            )
             .collect()
     }
 
@@ -1670,6 +1703,507 @@ impl State {
             return true;
         }
         false
+    }
+}
+
+/// Phase-5: context menus + the actions they invoke. Kept in its own `impl` block so the
+/// right-click feature reads as one unit (it only ever calls the same mutate→set-dirty seam).
+impl State {
+    // ---- context-menu lifecycle ----
+
+    /// Open the pane header menu for active-tab pane `idx`, anchored at window-logical `(x, y)`.
+    /// Built fresh so gating + checkmarks reflect the moment of the right-click; never changes
+    /// the focused pane or active tab.
+    pub fn open_pane_context(&mut self, idx: usize, x: f32, y: f32) {
+        if idx < self.active_tab().panes.len() {
+            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y));
+            self.dirty = true;
+        }
+    }
+
+    /// Open the tab-strip menu for tab `idx`, anchored at window-logical `(x, y)`.
+    pub fn open_tab_context(&mut self, idx: usize, x: f32, y: f32) {
+        if idx < self.tabs.len() {
+            self.ctx = Some(crate::contextmenu::tab_menu(self, idx, x, y));
+            self.dirty = true;
+        }
+    }
+
+    /// Dismiss the open context menu (select / Esc / click-away).
+    pub fn close_context(&mut self) {
+        if self.ctx.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Whether a context menu is currently open.
+    pub fn ctx_open(&self) -> bool {
+        self.ctx.is_some()
+    }
+
+    /// The command bound to top-level context row `row`, if any (separators / submenu headers
+    /// have none).
+    pub fn ctx_command(&self, row: usize) -> Option<Command> {
+        self.ctx.as_ref().and_then(|c| c.commands.get(row).cloned().flatten())
+    }
+
+    /// The open menu's target index (pane idx for a pane menu, tab idx for a tab menu).
+    pub fn ctx_target(&self) -> Option<usize> {
+        self.ctx.as_ref().map(|c| c.target)
+    }
+
+    // ---- pane chrome actions ----
+
+    /// Recolor active-tab pane `idx` to swatch `swatch` of the current frame palette: adopt the
+    /// color, pin it, and turn the per-pane frame + dot ON (mirrors `ColorSwatches`' pickColor).
+    pub fn recolor_pane(&mut self, idx: usize, swatch: usize) {
+        let palette = self.settings.frame_palette;
+        let colors = theme::frame_palette(palette);
+        let Some((r, g, b)) = colors.get(swatch).copied() else {
+            return;
+        };
+        let color = Color::from_rgb_u8(r, g, b);
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.accent = color;
+            p.pinned_accent = Some(color);
+            p.show_frame = Some(true);
+            p.show_dot = Some(true);
+            self.dirty = true;
+        }
+    }
+
+    /// Set pane `idx`'s per-pane frame override.
+    pub fn set_pane_frame(&mut self, idx: usize, on: bool) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.show_frame = Some(on);
+            self.dirty = true;
+        }
+    }
+
+    /// Set pane `idx`'s per-pane dot override.
+    pub fn set_pane_dot(&mut self, idx: usize, on: bool) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.show_dot = Some(on);
+            self.dirty = true;
+        }
+    }
+
+    /// Toggle whether pane `idx`'s ambient-AI summary line is muted.
+    pub fn toggle_mute_ai(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.ai_muted = !p.ai_muted;
+            self.dirty = true;
+        }
+    }
+
+    /// Maximize/restore (zoom-in-tab) pane `idx`. Focuses it first, then toggles its zoom.
+    pub fn zoom_pane(&mut self, idx: usize) {
+        let t = self.active_tab_mut();
+        if idx >= t.panes.len() {
+            return;
+        }
+        t.focused = idx;
+        t.zoomed = if t.zoomed == Some(idx) { None } else { Some(idx) };
+        self.dirty = true;
+    }
+
+    /// Open the in-pane search box on pane `idx`.
+    pub fn open_search(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_open();
+            self.dirty = true;
+        }
+    }
+
+    /// Set pane `idx`'s search query (find-as-you-type).
+    pub fn pane_search_query(&mut self, idx: usize, query: &str) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_set_query(query);
+            self.dirty = true;
+        }
+    }
+
+    /// Step pane `idx`'s search to the next/previous match.
+    pub fn pane_search_step(&mut self, idx: usize, forward: bool) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_step(forward);
+            self.dirty = true;
+        }
+    }
+
+    /// Close pane `idx`'s search box.
+    pub fn pane_search_close(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_close();
+            self.dirty = true;
+        }
+    }
+
+    /// Copy pane `idx`'s current selection to the clipboard (no-op without a selection).
+    pub fn copy_pane(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.copy_selection();
+            self.dirty = true;
+        }
+    }
+
+    /// Paste the clipboard into pane `idx`'s session (the widget owns the clipboard; the
+    /// controller owns the transport, so we write the returned text via the manager).
+    pub fn paste_pane(&mut self, idx: usize, mgr: &SessionManager) {
+        let payload = self
+            .active_tab_mut()
+            .panes
+            .get_mut(idx)
+            .and_then(|p| p.pane.paste_from_clipboard().map(|t| (p.uid.clone(), t)));
+        if let Some((uid, text)) = payload {
+            mgr.write(&uid, &text);
+            self.dirty = true;
+        }
+    }
+
+    /// Select all of pane `idx`'s viewport.
+    pub fn select_all_pane(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.select_all();
+            self.dirty = true;
+        }
+    }
+
+    /// Clear pane `idx`'s screen + scrollback.
+    pub fn clear_pane(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.clear();
+            self.dirty = true;
+        }
+    }
+
+    /// Restart pane `idx`'s shell: spawn a fresh session, swap it into the pane slot (resetting
+    /// the grid), and kill the old session. The cwd resets to the default (we don't track a
+    /// per-pane cwd), otherwise chrome (title / color / frame) is preserved.
+    pub fn restart_pane(&mut self, idx: usize, mgr: &SessionManager) {
+        let (cols, rows) = match self.active_tab().panes.get(idx) {
+            Some(p) => p.applied,
+            None => return,
+        };
+        let (cols, rows) = (cols.max(2) as u16, rows.max(1) as u16);
+        let uid = format!("pane-{}", self.next_uid);
+        self.next_uid += 1;
+        let shell = if self.settings.default_shell.is_empty() {
+            None
+        } else {
+            Some(self.settings.default_shell.clone())
+        };
+        let shell_path = shell
+            .clone()
+            .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
+        let integration = hyperpanes_core::shell_integration::integration_for(
+            &shell_path,
+            &hyperpanes_core::shell_integration::shell_integration_dir(),
+        )
+        .map(|si| hyperpanes_core::session_manager::Integration {
+            args: si.args,
+            env: si.env.into_iter().collect(),
+        });
+        if let Err(e) = mgr.create(SpawnOptions {
+            uid: uid.clone(),
+            cols: Some(cols),
+            rows: Some(rows),
+            pane_id: Some(uid.clone()),
+            cwd: None,
+            shell,
+            integration,
+            ..Default::default()
+        }) {
+            eprintln!("[hyperpanes] failed to restart {uid}: {e}");
+            return;
+        }
+        let mut newgrid =
+            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        newgrid.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            let old = std::mem::replace(&mut p.uid, uid);
+            mgr.kill(&old);
+            p.pane = newgrid;
+            p.applied = (cols as usize, rows as usize);
+            p.started = false;
+            p.startup = None;
+            p.shell_title = String::new();
+            p.surface = Image::default();
+        }
+        self.dirty = true;
+    }
+
+    // ---- move panes across tabs ----
+
+    /// Remove active-tab pane `idx` **without** killing its session, as a [`DetachedPane`] (the
+    /// session stays alive centrally for replay-primed re-host). An emptied tab is dropped by
+    /// [`Self::take_pane_in`], which also fixes the active index.
+    fn detach_pane_idx(&mut self, idx: usize) -> Option<DetachedPane> {
+        let (ps, _alive) = self.take_pane_in(self.active, idx)?;
+        Some(DetachedPane {
+            uid: ps.uid,
+            title: ps.title,
+            subtitle: ps.subtitle,
+            pinned_accent: ps.pinned_accent,
+            show_frame: ps.show_frame,
+            show_dot: ps.show_dot,
+        })
+    }
+
+    /// Adopt a detached session at the end of tab `ti` **without** changing the active tab
+    /// (re-host into a background tab — replay-primed, no PTY restart). Used by move-to-tab +
+    /// reopen-closed-tab.
+    fn adopt_into_tab(&mut self, mgr: &SessionManager, det: DetachedPane, ti: usize) {
+        if ti >= self.tabs.len() {
+            return;
+        }
+        let palette = self.settings.frame_palette;
+        let (cols, rows) = (80u16, 24u16);
+        let mut pane =
+            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        if let Some(replay) = mgr.replay(&det.uid) {
+            pane.feed(&replay);
+        }
+        let glow = Glow::new(crate::glow::seed_from(&det.uid));
+        let at = self.tabs[ti].panes.len();
+        let accent = det
+            .pinned_accent
+            .unwrap_or_else(|| theme::accent_for(at, palette));
+        let ps = PaneState {
+            uid: det.uid,
+            title: det.title,
+            subtitle: det.subtitle,
+            show_frame: det.show_frame,
+            show_dot: det.show_dot,
+            accent,
+            pane,
+            applied: (cols as usize, rows as usize),
+            surface: Image::default(),
+            rect: (0.0, 0.0, 0.0, 0.0),
+            visible: true,
+            started: true,
+            startup: None,
+            pinned_accent: det.pinned_accent,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
+            glow,
+            shell_title: String::new(),
+            ai_muted: false,
+        };
+        let auto = self.tabs[ti].layout == Layout::Auto;
+        let t = &mut self.tabs[ti];
+        t.sizes = if auto {
+            equal_sizes(at + 1)
+        } else {
+            insert_size(&t.sizes, at)
+        };
+        t.panes.push(ps);
+        t.zoomed = None;
+        t.relabel(palette);
+        self.dirty = true;
+    }
+
+    /// Move active-tab pane `idx` into a brand-new tab (the pane menu's "Move to New Tab",
+    /// gated to ≥2 panes so the source tab survives), switching to it.
+    pub fn move_pane_to_new_tab(&mut self, idx: usize, mgr: &SessionManager) {
+        if self.active_tab().panes.len() < 2 {
+            return;
+        }
+        let Some(dp) = self.detach_pane_idx(idx) else {
+            return;
+        };
+        let tab = self.fresh_tab();
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.editing_tab = -1;
+        self.adopt_pane(mgr, dp);
+    }
+
+    /// Move active-tab pane `idx` into existing tab `target` (the "Move to Tab" submenu), without
+    /// switching away from the current tab. Handles the source tab being dropped when its last
+    /// pane leaves (which shifts `target` when the source sat before it).
+    pub fn move_pane_to_tab(&mut self, idx: usize, target: usize, mgr: &SessionManager) {
+        if target >= self.tabs.len() || target == self.active {
+            return;
+        }
+        let src = self.active;
+        let before = self.tabs.len();
+        let Some(dp) = self.detach_pane_idx(idx) else {
+            return;
+        };
+        let mut target = target;
+        if self.tabs.len() < before && src < target {
+            target -= 1;
+        }
+        if target >= self.tabs.len() {
+            return;
+        }
+        self.adopt_into_tab(mgr, dp, target);
+    }
+
+    // ---- tab actions ----
+
+    /// Duplicate tab `idx`: a fresh tab adopting its layout + title with the same number of
+    /// (fresh-shell) panes, switched to. (Sessions aren't cloned — the renderer spawns new
+    /// shells too.)
+    pub fn duplicate_tab(&mut self, idx: usize, mgr: &SessionManager) {
+        let Some(src) = self.tabs.get(idx) else {
+            return;
+        };
+        let layout = src.layout;
+        let n = src.panes.len().max(1);
+        let title = src.title.clone();
+        let mut tab = self.fresh_tab();
+        tab.layout = layout;
+        tab.title = title;
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.editing_tab = -1;
+        for _ in 0..n {
+            self.add_pane(mgr);
+        }
+    }
+
+    /// Park a closed tab on the reopen stack, capping it (evicted entries' sessions are killed).
+    fn push_closed(&mut self, tab: DetachedTab, mgr: &SessionManager) {
+        const CLOSED_STACK_CAP: usize = 10;
+        self.closed_tabs.push(tab);
+        while self.closed_tabs.len() > CLOSED_STACK_CAP {
+            let evicted = self.closed_tabs.remove(0);
+            for p in &evicted.panes {
+                mgr.kill(&p.uid);
+            }
+        }
+    }
+
+    /// Detach the whole of tab `idx` (its panes as live [`DetachedPane`]s, plus title/layout/
+    /// sizes) for re-hosting or parking. Requires ≥2 tabs; fixes the active index. Returns the
+    /// detached tab + `source_alive` (always `true` here — other tabs remain).
+    pub fn detach_tab(&mut self, idx: usize) -> Option<(DetachedTab, bool)> {
+        if idx >= self.tabs.len() || self.tabs.len() < 2 {
+            return None;
+        }
+        let tab = self.tabs.remove(idx);
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        } else if idx < self.active {
+            self.active -= 1;
+        }
+        self.editing_tab = -1;
+        self.dirty = true;
+        let panes = tab
+            .panes
+            .into_iter()
+            .map(|p| DetachedPane {
+                uid: p.uid,
+                title: p.title,
+                subtitle: p.subtitle,
+                pinned_accent: p.pinned_accent,
+                show_frame: p.show_frame,
+                show_dot: p.show_dot,
+            })
+            .collect();
+        Some((
+            DetachedTab {
+                title: tab.title,
+                layout: tab.layout,
+                sizes: tab.sizes,
+                main_fraction: tab.main_fraction,
+                panes,
+            },
+            true,
+        ))
+    }
+
+    /// Close tab `idx` reopenably: with ≥2 tabs it's parked (sessions alive) on the closed stack;
+    /// the last tab is killed for real (returns `false` → the window quits).
+    pub fn close_tab_menu(&mut self, idx: usize, mgr: &SessionManager) -> bool {
+        if self.tabs.len() >= 2 {
+            if let Some((det, _)) = self.detach_tab(idx) {
+                self.push_closed(det, mgr);
+            }
+            true
+        } else {
+            self.close_tab(idx, mgr)
+        }
+    }
+
+    /// Close every tab except `idx` (all reopenable). Removes from the highest index down so the
+    /// surviving indices stay valid.
+    pub fn close_other_tabs(&mut self, idx: usize, mgr: &SessionManager) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        let mut others: Vec<usize> = (0..self.tabs.len()).filter(|&i| i != idx).collect();
+        others.sort_unstable_by(|a, b| b.cmp(a));
+        for i in others {
+            self.close_tab_menu(i, mgr);
+        }
+    }
+
+    /// Close every tab to the right of `idx` (all reopenable), highest index first.
+    pub fn close_tabs_to_right(&mut self, idx: usize, mgr: &SessionManager) {
+        let mut i = self.tabs.len();
+        while i > idx + 1 {
+            i -= 1;
+            self.close_tab_menu(i, mgr);
+        }
+    }
+
+    /// Reopen the most-recently closed tab (replay-primed; its sessions were kept alive), as a
+    /// fresh tab switched to. No-op when the stack is empty.
+    pub fn reopen_closed_tab(&mut self, mgr: &SessionManager) {
+        let Some(det) = self.closed_tabs.pop() else {
+            return;
+        };
+        let mut tab = Tab::empty(det.title.clone());
+        tab.layout = det.layout;
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.editing_tab = -1;
+        let ti = self.active;
+        for dp in det.panes {
+            self.adopt_into_tab(mgr, dp, ti);
+        }
+        if det.sizes.len() == self.tabs[ti].panes.len() {
+            self.tabs[ti].sizes = det.sizes;
+        }
+        self.tabs[ti].main_fraction = det.main_fraction;
+        if !self.tabs[ti].panes.is_empty() {
+            self.tabs[ti].focused = 0;
+        }
+        self.dirty = true;
+    }
+
+    /// Fill a freshly-spawned window's initial (empty) tab with a detached tab's panes + its
+    /// title/layout/sizes (the seed for the tab menu's "Move to New Window"). Replay-primed.
+    pub fn adopt_tab(&mut self, mgr: &SessionManager, det: DetachedTab) {
+        let ti = self.active;
+        self.tabs[ti].title = det.title;
+        self.tabs[ti].layout = det.layout;
+        for dp in det.panes {
+            self.adopt_into_tab(mgr, dp, ti);
+        }
+        if det.sizes.len() == self.tabs[ti].panes.len() {
+            self.tabs[ti].sizes = det.sizes;
+        }
+        self.tabs[ti].main_fraction = det.main_fraction;
+        if !self.tabs[ti].panes.is_empty() {
+            self.tabs[ti].focused = 0;
+        }
+        self.dirty = true;
+    }
+
+    /// Set tab `idx`'s layout (the tab menu's Layout submenu).
+    pub fn set_tab_layout(&mut self, idx: usize, layout: Layout) {
+        if let Some(t) = self.tabs.get_mut(idx) {
+            if t.layout != layout {
+                t.layout = layout;
+                self.dirty = true;
+            }
+        }
     }
 }
 

@@ -21,6 +21,7 @@
 
 mod app;
 mod command;
+mod contextmenu;
 mod drag;
 mod glow;
 mod keybindings;

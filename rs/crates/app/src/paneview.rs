@@ -11,14 +11,15 @@ use hyperpanes_core::layout::presets::{
 use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
 
-use slint::{Model, ModelRc, SharedString, VecModel};
+use slint::{Color, Model, ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
+use crate::contextmenu::CtxKind;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
-    AppWindow, DividerItem, FramePaletteOption, KeybindingItem, LayoutOption, PaletteItem, PaneItem,
-    PrefOption, ProjectItem, TabItem,
+    AppWindow, CtxTab, DividerItem, FramePaletteOption, KeybindingItem, LayoutOption, MenuEntry,
+    PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
 };
 use crate::prefs;
 
@@ -50,6 +51,11 @@ pub struct Ui {
     pub themes: Rc<VecModel<PrefOption>>,
     pub idle_effects: Rc<VecModel<PrefOption>>,
     pub keybindings: Rc<VecModel<KeybindingItem>>,
+    // ---- context-menu models ----
+    pub ctx_entries: Rc<VecModel<MenuEntry>>,
+    pub ctx_swatches: Rc<VecModel<Color>>,
+    pub ctx_tabs: Rc<VecModel<CtxTab>>,
+    pub ctx_layouts: Rc<VecModel<LayoutOption>>,
 }
 
 impl Ui {
@@ -68,6 +74,10 @@ impl Ui {
             themes: Rc::new(VecModel::default()),
             idle_effects: Rc::new(VecModel::default()),
             keybindings: Rc::new(VecModel::default()),
+            ctx_entries: Rc::new(VecModel::default()),
+            ctx_swatches: Rc::new(VecModel::default()),
+            ctx_tabs: Rc::new(VecModel::default()),
+            ctx_layouts: Rc::new(VecModel::default()),
         })
     }
 
@@ -85,6 +95,10 @@ impl Ui {
         app.set_pref_themes(ModelRc::from(self.themes.clone()));
         app.set_pref_idle_effects(ModelRc::from(self.idle_effects.clone()));
         app.set_pref_keybindings(ModelRc::from(self.keybindings.clone()));
+        app.set_ctx_entries(ModelRc::from(self.ctx_entries.clone()));
+        app.set_ctx_swatches(ModelRc::from(self.ctx_swatches.clone()));
+        app.set_ctx_tabs(ModelRc::from(self.ctx_tabs.clone()));
+        app.set_ctx_layouts(ModelRc::from(self.ctx_layouts.clone()));
     }
 }
 
@@ -116,6 +130,14 @@ fn pane_item(
     // Project the clickable-path hover overlay (if any) into the model row.
     let (lx, ly) = ps.link_cursor;
     let link = ps.link.as_ref();
+    // In-pane search box state (opened from the pane menu's "Search…").
+    let search_open = ps.pane.search_is_open();
+    let (cur, total) = ps.pane.search_count();
+    let search_count: SharedString = if !search_open || total == 0 {
+        SharedString::new()
+    } else {
+        format!("{cur} / {total}").into()
+    };
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
@@ -138,6 +160,8 @@ fn pane_item(
         link_tip: link.map(|l| l.tip.clone()).unwrap_or_default().into(),
         link_tip_x: lx + 12.0,
         link_tip_y: ly + 16.0,
+        search_open,
+        search_count,
     }
 }
 
@@ -490,6 +514,104 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .map(|(name, color)| ProjectItem { name, color })
         .collect();
     sync_model(&ui.projects, projects);
+
+    // ---- context menu (pane header / tab strip) ----
+    let ctx_kind = match state.ctx.as_ref() {
+        None => 0,
+        Some(c) => match c.kind {
+            CtxKind::Pane => 1,
+            CtxKind::Tab => 2,
+        },
+    };
+    app.set_ctx_kind(ctx_kind);
+    if let Some(c) = state.ctx.as_ref() {
+        app.set_ctx_x(c.x);
+        app.set_ctx_y(c.y);
+        let entries: Vec<MenuEntry> = c
+            .entries
+            .iter()
+            .map(|e| MenuEntry {
+                label: e.label.clone(),
+                shortcut: e.shortcut.clone(),
+                glyph: e.glyph.clone(),
+                kind: e.kind,
+                checked: e.checked,
+                show_check: e.show_check,
+                disabled: e.disabled,
+                danger: e.danger,
+            })
+            .collect();
+        sync_model(&ui.ctx_entries, entries);
+
+        match c.kind {
+            CtxKind::Pane => {
+                // Change-Color swatches = the active frame palette's slots; the selected ring
+                // tracks whichever slot matches the pane's current color (when frame is on).
+                let slots = theme::frame_palette(state.settings.frame_palette);
+                let swatches: Vec<Color> = slots
+                    .iter()
+                    .map(|(r, g, b)| Color::from_rgb_u8(*r, *g, *b))
+                    .collect();
+                sync_model(&ui.ctx_swatches, swatches);
+                let t = state.active_tab();
+                let (frame_on, dot_on, cur_swatch) = match t.panes.get(c.target) {
+                    Some(p) => {
+                        let cur = slots
+                            .iter()
+                            .position(|(r, g, b)| Color::from_rgb_u8(*r, *g, *b) == p.accent)
+                            .map(|i| i as i32)
+                            .unwrap_or(-1);
+                        (
+                            p.frame_on(state.settings.show_frame),
+                            p.dot_on(state.settings.show_dot),
+                            cur,
+                        )
+                    }
+                    None => (false, false, -1),
+                };
+                app.set_ctx_frame(frame_on);
+                app.set_ctx_dot(dot_on);
+                app.set_ctx_cur_swatch(cur_swatch);
+                // Move-to-Tab destinations = every tab other than the pane's (active) tab.
+                let tabs: Vec<CtxTab> = state
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != state.active)
+                    .map(|(i, t)| CtxTab {
+                        label: if t.title.is_empty() {
+                            "workspace".into()
+                        } else {
+                            t.title.clone()
+                        },
+                        idx: i as i32,
+                    })
+                    .collect();
+                sync_model(&ui.ctx_tabs, tabs);
+                sync_model(&ui.ctx_layouts, Vec::new());
+            }
+            CtxKind::Tab => {
+                // Layout submenu reflects the TARGET tab's layout (checkmark on current).
+                let cur = state
+                    .tabs
+                    .get(c.target)
+                    .map(|t| t.layout)
+                    .unwrap_or_else(|| state.active_tab().layout);
+                let layouts: Vec<LayoutOption> = theme::LAYOUT_MENU
+                    .iter()
+                    .map(|l| LayoutOption {
+                        id: theme::layout_id(*l),
+                        label: theme::layout_name(*l).into(),
+                        glyph: theme::layout_glyph(*l).into(),
+                        active: *l == cur,
+                    })
+                    .collect();
+                sync_model(&ui.ctx_layouts, layouts);
+                sync_model(&ui.ctx_swatches, Vec::new());
+                sync_model(&ui.ctx_tabs, Vec::new());
+            }
+        }
+    }
 }
 
 /// One UI-thread render tick for a **single window**: resync if dirty, blink the

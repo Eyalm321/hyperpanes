@@ -31,7 +31,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::command::{dispatch, set_layout_from_id, Command, Effect};
 use crate::drag::{self, DragKind, DragState, Hover};
 use crate::paneview::{self, Ui};
-use crate::state::{DetachedPane, EscOutcome, State};
+use crate::state::{DetachedPane, DetachedTab, EscOutcome, State};
 use crate::{theme, window, AppWindow, KeyMsg};
 
 /// Logical height of the top bar (where a tab-strip drop lands). Hidden in fullscreen,
@@ -49,6 +49,8 @@ pub enum PendingSeed {
     EmptyTab,
     /// Re-host a session detached from another window (replay-primed, no PTY restart).
     Adopt(DetachedPane),
+    /// Re-host a whole tab (its panes + title/layout) detached from another window.
+    AdoptTab(DetachedTab),
     /// Already seeded — nothing to do.
     Done,
 }
@@ -191,6 +193,12 @@ impl App {
             Effect::NewWindow => self.spawn_window(PendingSeed::EmptyTab),
             Effect::MoveToNewWindow { det, source_alive } => {
                 self.spawn_window(PendingSeed::Adopt(det));
+                if !source_alive {
+                    win.closing.set(true);
+                }
+            }
+            Effect::MoveTabToNewWindow { tab, source_alive } => {
+                self.spawn_window(PendingSeed::AdoptTab(tab));
                 if !source_alive {
                     win.closing.set(true);
                 }
@@ -376,6 +384,9 @@ impl App {
                                 // The rail is persistent; open its projects flyout so a
                                 // screenshot exercises the full surface.
                                 "sidebar" => Some(Command::ToggleProjects),
+                                // Open a context menu at a fixed anchor (screenshot scaffold).
+                                "panemenu" => Some(Command::OpenPaneContext(0, 380.0, 150.0)),
+                                "tabmenu" => Some(Command::OpenTabContext(0, 90.0, 44.0)),
                                 _ => None,
                             };
                             if let Some(cmd) = cmd {
@@ -385,6 +396,7 @@ impl App {
                     }
                 }
                 PendingSeed::Adopt(det) => win.state.borrow_mut().adopt_pane(&self.mgr, det),
+                PendingSeed::AdoptTab(det) => win.state.borrow_mut().adopt_tab(&self.mgr, det),
                 PendingSeed::Done => {}
             }
         }
@@ -411,6 +423,11 @@ impl App {
         let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
         if let Some(cmd) = cmd {
             self.run_command(win, cmd);
+            return;
+        }
+        // Escape closes an open context menu first (it sits above everything else).
+        if crate::is_key(&msg.text, Key::Escape) && win.state.borrow().ctx_open() {
+            self.run_command(win, Command::CloseContext);
             return;
         }
         // Escape while an overlay is open closes it; Preferences routes through the
@@ -1021,6 +1038,44 @@ impl App {
             });
         }
 
+        // in-pane search box (opened from the pane context menu)
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_edited(move |i, q| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_query(i as usize, &q);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_next(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_step(i as usize, true);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_prev(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_step(i as usize, false);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_closed(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_close(i as usize);
+                }
+            });
+        }
+
         // tabs
         cb0!(on_new_tab, Command::NewTab);
         cb_usize!(on_select_tab, Command::SwitchTab);
@@ -1040,6 +1095,112 @@ impl App {
         // multi-window
         cb0!(on_new_window, Command::NewWindow);
         cb0!(on_move_pane_new_window, Command::MovePaneToNewWindow);
+
+        // ---- context menus (pane header / tab strip) ----
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_context(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenPaneContext(i as usize, x, y));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_tab_context(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenTabContext(i as usize, x, y));
+                }
+            });
+        }
+        // A top-level row: run its command, then dismiss the menu.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_pick(move |row| {
+                if let Some(w) = app.window_by_id(id) {
+                    let cmd = w.state.borrow().ctx_command(row as usize);
+                    if let Some(cmd) = cmd {
+                        app.run_command(&w, cmd);
+                    }
+                    app.run_command(&w, Command::CloseContext);
+                }
+            });
+        }
+        // Change-Color submenu — these keep the menu open (live preview), like the renderer.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_swatch(move |sw| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::RecolorPane(t, sw as usize));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_swatch_none(move || {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetPaneFrame(t, false));
+                        app.run_command(&w, Command::SetPaneDot(t, false));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_frame_set(move |on| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetPaneFrame(t, on));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_dot_set(move |on| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetPaneDot(t, on));
+                    }
+                }
+            });
+        }
+        // Move-to-Tab + Layout submenus — perform, then dismiss.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_move_tab(move |tab| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
+                    }
+                    app.run_command(&w, Command::CloseContext);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_layout(move |lid| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetTabLayout(t, theme::layout_from_id(lid)));
+                    }
+                    app.run_command(&w, Command::CloseContext);
+                }
+            });
+        }
+        cb0!(on_ctx_dismiss, Command::CloseContext);
 
         // ---- drag / tear-off (Wave 2) ----
         // A pane header / tab was pressed: arm a drag from the *global* cursor (the pump
