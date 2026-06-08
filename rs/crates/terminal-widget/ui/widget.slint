@@ -15,6 +15,15 @@ export struct KeyMsg {
     shift: bool,
 }
 
+// A highlight rectangle in the pane's logical-px space (selection / search overlays). The
+// controller hit-tests the grid and hands these over; the pane just paints them.
+export struct HiRect {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
 export component TerminalPane inherits Rectangle {
     // --- inputs (the controller / parent layout drive these) ---
     in property <image> surface;
@@ -34,6 +43,9 @@ export component TerminalPane inherits Rectangle {
     in property <length> link-tip-x;
     in property <length> link-tip-y;
 
+    // --- text selection overlay (the controller fills these after a drag hit-test) ---
+    in property <[HiRect]> selection-rects;
+
     // --- outputs (the controller subscribes to these) ---
     // Any mouse-down inside the pane → the app should focus this pane. FROZEN CONTRACT:
     // the `pane-ux` agent connects `on_focus_requested(...)` to route focus here. Keep the
@@ -49,7 +61,17 @@ export component TerminalPane inherits Rectangle {
     // Pointer left the surface → clear any hover link.
     callback link-exited();
     // Surface clicked (logical px, ctrl/cmd held) → open (plain) or copy (ctrl) the path there.
+    // Fired on left-button *release*; the controller no-ops it when the press was a drag.
     callback link-activated(length, length, bool);
+
+    // --- text selection (drag to select; copy-on-release) ---
+    // Left button pressed (logical px) → begin a selection anchored here.
+    callback selection-begin(length, length);
+    // Pointer dragged with the left button down (logical px) → extend the selection head.
+    callback selection-update(length, length);
+    // Left button released → finish the selection (the controller copies it if it was a drag,
+    // else clears it so a plain click stays a click).
+    callback selection-end();
 
     forward-focus: fs;
 
@@ -72,12 +94,19 @@ export component TerminalPane inherits Rectangle {
         image-rendering: pixelated;
     }
 
-    // Click anywhere on the pane to focus it (so the keyboard routes here), and drive the
-    // clickable-path link layer: report pointer moves for hover hit-testing and clicks (with the
-    // ctrl/cmd modifier) for open/copy. A pointer cursor signals a live link.
-    link-ta := TouchArea {
-        mouse-cursor: root.link-visible ? pointer : default;
-        moved => { root.link-moved(self.mouse-x, self.mouse-y); }
+    // The pane's pointer layer: focus-on-press, drag-to-select, hover hit-testing for clickable
+    // paths, and (on release) link open/copy. A pointer cursor signals a live link; otherwise an
+    // I-beam, since the surface is selectable text.
+    ta := TouchArea {
+        mouse-cursor: root.link-visible ? pointer : text;
+        moved => {
+            // While the button is held, a move is a selection drag; otherwise it's a hover.
+            if (self.pressed) {
+                root.selection-update(self.mouse-x, self.mouse-y);
+            } else {
+                root.link-moved(self.mouse-x, self.mouse-y);
+            }
+        }
         changed has-hover => {
             if (!self.has-hover) { root.link-exited(); }
         }
@@ -87,11 +116,27 @@ export component TerminalPane inherits Rectangle {
                 root.focus-requested();
                 if (e.button == PointerEventButton.left) {
                     fs.focus();
-                    root.link-activated(self.mouse-x, self.mouse-y,
-                                        e.modifiers.control || e.modifiers.meta);
+                    root.selection-begin(self.mouse-x, self.mouse-y);
                 }
             }
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                // Finish the selection first (copies it if it was a drag), then — only if it
+                // wasn't a drag — let it resolve as a link click.
+                root.selection-end();
+                root.link-activated(self.mouse-x, self.mouse-y,
+                                    e.modifiers.control || e.modifiers.meta);
+            }
         }
+    }
+
+    // Drag-selection highlight (one rect per row-span), painted over the terminal surface but
+    // under the link/search overlays and chrome.
+    for r in root.selection-rects: Rectangle {
+        x: r.x;
+        y: r.y;
+        width: r.w;
+        height: r.h;
+        background: root.accent.with-alpha(0.30);
     }
 
     // Hover underline drawn over the terminal surface, spanning the path's columns.
@@ -180,6 +225,8 @@ export struct PaneVisual {
     link-tip: string,
     link-tip-x: length,
     link-tip-y: length,
+    // drag-selection highlight rects (set by the demo after a selection hit-test).
+    selection-rects: [HiRect],
 }
 
 export component DemoWindow inherits Window {
@@ -199,6 +246,11 @@ export component DemoWindow inherits Window {
     callback link-exited(int);
     // (pane index, x, y, ctrl) — pane clicked → open (plain) or copy (ctrl) the path there.
     callback link-activated(int, length, length, bool);
+    // (pane index, x, y) — selection drag began / extended in a pane.
+    callback selection-begin(int, length, length);
+    callback selection-update(int, length, length);
+    // (pane index) — selection drag finished in a pane.
+    callback selection-end(int);
 
     title: "hyperpanes — terminal-widget demo";
     preferred-width: 1280px;
@@ -224,12 +276,16 @@ export component DemoWindow inherits Window {
             link-tip: pane.link-tip;
             link-tip-x: pane.link-tip-x;
             link-tip-y: pane.link-tip-y;
+            selection-rects: pane.selection-rects;
             focus-requested => { root.focus-requested(idx); }
             key(m) => { root.key(idx, m); }
             geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }
             link-moved(x, y) => { root.link-moved(idx, x, y); }
             link-exited => { root.link-exited(idx); }
             link-activated(x, y, ctrl) => { root.link-activated(idx, x, y, ctrl); }
+            selection-begin(x, y) => { root.selection-begin(idx, x, y); }
+            selection-update(x, y) => { root.selection-update(idx, x, y); }
+            selection-end => { root.selection-end(idx); }
         }
     }
 

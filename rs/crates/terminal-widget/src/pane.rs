@@ -24,6 +24,7 @@ use crate::font::Font;
 use crate::grid::TermGrid;
 use crate::links::extract_path_candidates;
 use crate::render::{PaneRenderer, RenderOpts};
+use crate::selection::{self, Selection};
 use hyperpanes_core::paths::{self, OpenResult, ResolveResult};
 use slint::Image;
 use std::collections::HashMap;
@@ -39,6 +40,10 @@ pub struct TerminalPane {
     /// paths are cached (negatives aren't), so a file the shell creates becomes clickable on the
     /// next hover — mirroring the Electron renderer's `verified` map.
     verified: HashMap<String, ResolveResult>,
+    /// The live drag-selection, if any (our own cell-range model — see [`crate::selection`]).
+    /// `None` until a press starts one; a non-dragged selection (a plain click) is held but
+    /// renders nothing, so the same press can still resolve to a link click.
+    selection: Option<Selection>,
 }
 
 /// A resolved, on-disk-verified link under the cursor: where to draw the hover underline (in the
@@ -77,6 +82,7 @@ impl TerminalPane {
             renderer,
             cwd: None,
             verified: HashMap::new(),
+            selection: None,
         }
     }
 
@@ -276,6 +282,66 @@ impl TerminalPane {
         }
         let res = paths::open_resolved_path(&hit.abs_path, hit.line, hit.col, editor_command);
         Some(LinkAction::Opened(res))
+    }
+
+    // ---- Text selection ---------------------------------------------------------------------
+    //
+    // Drag to select a cell range; the controller turns it into highlight rects (for the Slint
+    // overlay) and, on release, the selected text (copy-on-select — see `copy_selection`). The
+    // model is our own (`crate::selection`) rather than alacritty's, kept in viewport cells.
+
+    /// The (clamped) viewport cell under a logical-px point. Unlike [`locate`](Self::locate),
+    /// this never returns `None` for an in-pane drag that strays past an edge — it clamps to the
+    /// nearest cell so a selection can run to the grid border.
+    fn cell_at_clamped(&self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<selection::Cell> {
+        let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
+        let col = (x / cell_w).floor().clamp(0.0, (cols - 1) as f32) as usize;
+        let row = (y / cell_h).floor().clamp(0.0, (rows - 1) as f32) as usize;
+        Some(selection::Cell { col, row })
+    }
+
+    /// Begin a drag-selection anchored at the (logical-px) press point. Replaces any prior
+    /// selection. The selection only starts *rendering* once the drag leaves the anchor cell, so
+    /// a click that doesn't move still falls through to a link activation.
+    pub fn selection_begin(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
+        self.selection = self.cell_at_clamped(x, y, surf_w, surf_h).map(Selection::new);
+    }
+
+    /// Extend the active selection's head to the (logical-px) cursor point during a drag.
+    pub fn selection_update(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
+        let c = match self.cell_at_clamped(x, y, surf_w, surf_h) {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(sel) = self.selection.as_mut() {
+            sel.update(c);
+        }
+    }
+
+    /// Drop the current selection (and its highlight).
+    pub fn selection_clear(&mut self) {
+        self.selection = None;
+    }
+
+    /// True once the active selection has actually been dragged across cells (i.e. it's a real
+    /// selection, not a stationary click). The caller uses this to choose copy-vs-click on release.
+    pub fn selection_is_drag(&self) -> bool {
+        self.selection.map_or(false, |s| s.dragged)
+    }
+
+    /// Highlight rectangles (logical px) for the active *dragged* selection over a surface of
+    /// `surf_w`×`surf_h`. Empty for no selection or a non-dragged click — so a plain click never
+    /// leaves a stray one-cell highlight.
+    pub fn selection_rects(&self, surf_w: f32, surf_h: f32) -> Vec<(f32, f32, f32, f32)> {
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return Vec::new(),
+        };
+        let (cell_w, cell_h, cols, _rows) = match self.cell_logical(surf_w, surf_h) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        selection::selection_rects(sel, cols, cell_w, cell_h)
     }
 }
 

@@ -24,6 +24,7 @@ pub mod keys;
 pub mod links;
 pub mod pane;
 pub mod render;
+pub mod selection;
 
 /// The compiled Slint components. Wave-2's `app-shell` imports the **`TerminalPane`**
 /// component directly from `ui/widget.slint`; this module re-exposes the generated Rust
@@ -42,3 +43,4 @@ pub use keys::encode_key;
 pub use links::{extract_path_candidates, PathCandidate};
 pub use pane::{cells_for_px, LinkAction, LinkHit, TerminalPane};
 pub use render::{GpuRenderer, PaneRenderer, RenderOpts, SoftwareRenderer};
+pub use selection::{Cell as SelectionCell, Selection};

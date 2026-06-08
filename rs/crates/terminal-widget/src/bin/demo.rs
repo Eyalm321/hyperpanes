@@ -15,7 +15,7 @@
 //! Flags: `--software` (both panes software) · `--gpu` (both GPU).
 
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager, SpawnOptions};
-use hyperpanes_terminal_widget::ui::{DemoWindow, KeyMsg, PaneVisual};
+use hyperpanes_terminal_widget::ui::{DemoWindow, HiRect, KeyMsg, PaneVisual};
 use hyperpanes_terminal_widget::{
     cells_for_px, encode_key, Font, GpuRenderer, LinkAction, PaneRenderer, RenderOpts,
     SoftwareRenderer, TerminalPane,
@@ -116,9 +116,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             link_tip: Default::default(),
             link_tip_x: 0.0,
             link_tip_y: 0.0,
+            selection_rects: ModelRc::new(VecModel::default()),
         });
     }
     app.set_panes(ModelRc::from(model.clone()));
+
+    // Build a Slint `[HiRect]` model from controller-reported (x,y,w,h) rects.
+    fn to_hirects(rects: Vec<(f32, f32, f32, f32)>) -> ModelRc<HiRect> {
+        let v: Vec<HiRect> = rects
+            .into_iter()
+            .map(|(x, y, w, h)| HiRect { x, y, w, h })
+            .collect();
+        ModelRc::new(VecModel::from(v))
+    }
 
     // Capture Slint's wgpu Device/Queue once rendering is set up.
     let gpu_slot: Rc<RefCell<Option<(wgpu::Device, wgpu::Queue)>>> = Rc::new(RefCell::new(None));
@@ -235,6 +245,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if idx >= st.panes.len() {
                 return;
             }
+            // A release that ended a drag-selection isn't a link click — let it pass.
+            if st.panes[idx].pane.selection_is_drag() {
+                return;
+            }
             let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
             // Empty editor command → core picks VS Code (if on PATH) else the guarded OS default.
             match st.panes[idx].pane.activate_link(x, y, w, h, ctrl, "") {
@@ -249,6 +263,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 None => {}
+            }
+        });
+    }
+
+    // ---- text selection: drag to select, copy on release (copy added with the indicator) ----
+    {
+        let state = state.clone();
+        let geom = geom.clone();
+        app.on_selection_begin(move |idx, x, y| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
+            st.panes[idx].pane.selection_begin(x, y, w, h);
+        });
+    }
+    {
+        let state = state.clone();
+        let geom = geom.clone();
+        let model = model.clone();
+        app.on_selection_update(move |idx, x, y| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
+            st.panes[idx].pane.selection_update(x, y, w, h);
+            let rects = st.panes[idx].pane.selection_rects(w, h);
+            if let Some(mut row) = model.row_data(idx) {
+                row.selection_rects = to_hirects(rects);
+                model.set_row_data(idx, row);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let model = model.clone();
+        app.on_selection_end(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            // A real drag keeps its highlight (and, once wired, copies). A stationary click
+            // clears the zero-size selection so it doesn't linger or block the next click.
+            if !st.panes[idx].pane.selection_is_drag() {
+                st.panes[idx].pane.selection_clear();
+                if let Some(mut row) = model.row_data(idx) {
+                    row.selection_rects = to_hirects(Vec::new());
+                    model.set_row_data(idx, row);
+                }
             }
         });
     }
