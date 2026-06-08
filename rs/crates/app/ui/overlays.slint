@@ -196,16 +196,15 @@ component FontDropdown inherits Rectangle {
         }
         VerticalLayout {
             alignment: center;
-            // Static (always down): Slint has no PopupWindow is-open/close event to flip it
-            // back reliably, so the built-in ComboBox keeps it static too (slint-ui #456).
-            Chevron {}
+            // Points up while the dropdown is open, down when closed — driven by the
+            // PopupWindow.is-open property (our slint fork; slint-ui/slint#12000).
+            Chevron { up: popup.is-open; }
         }
     }
     ta := TouchArea { clicked => { popup.show(); } }
     popup := PopupWindow {
         // Default close-on-click: clicking an option or anywhere outside dismisses the popup.
-        // (Slint 1.16 exposes no close event, so the chevron reliably shows up-on-open and
-        // down-on-select; an outside dismiss leaves it up until the next open.)
+        // The chevron binds to `popup.is-open`, so it flips back down on every close path.
         x: 0;
         y: parent.height + 4px;
         width: root.width;
