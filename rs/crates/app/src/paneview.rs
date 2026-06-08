@@ -18,8 +18,8 @@ use crate::contextmenu::CtxKind;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
-    AppWindow, CtxTab, DividerItem, FramePaletteOption, KeybindingItem, LayoutOption, MenuEntry,
-    PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
+    AppWindow, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem, LayoutOption,
+    MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
 };
 use crate::prefs;
 
@@ -131,6 +131,14 @@ fn pane_item(
     // Project the clickable-path hover overlay (if any) into the model row.
     let (lx, ly) = ps.link_cursor;
     let link = ps.link.as_ref();
+    // Drag-to-select highlight rects, hit-tested against the pane's on-screen surface size.
+    let (sw, sh) = ps.surf;
+    let selection_rects: Vec<HiRect> = ps
+        .pane
+        .selection_rects(sw, sh)
+        .into_iter()
+        .map(|(x, y, w, h)| HiRect { x, y, w, h })
+        .collect();
     // In-pane search box state (opened from the pane menu's "Search…").
     let search_open = ps.pane.search_is_open();
     let (cur, total) = ps.pane.search_count();
@@ -161,6 +169,7 @@ fn pane_item(
         link_tip: link.map(|l| l.tip.clone()).unwrap_or_default().into(),
         link_tip_x: lx + 12.0,
         link_tip_y: ly + 16.0,
+        selection_rects: ModelRc::from(Rc::new(VecModel::from(selection_rects))),
         search_open,
         search_count,
         toast: ps.last_toast.clone().into(),
@@ -176,8 +185,6 @@ fn pane_item(
 /// changed). Honors zoom (solo the zoomed pane full-area).
 fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &SessionManager) {
     let (aw, ah) = area;
-    let cw = state.font.cell_w;
-    let ch = state.font.cell_h;
     let active = state.active;
     // Fullscreen solos the focused pane (OS fullscreen + bars hidden in app.slint), like
     // Electron's `fullscreenPaneId`: one pane fills the screen, the rest go invisible.
@@ -199,10 +206,11 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
         let gh = (h - 2.0 * PANE_GAP).max(1.0);
         p.rect = (gx, gy, gw, gh);
         p.visible = true;
-        // size the grid to the terminal body (frame chrome removed) so cells match.
+        // size the grid to the terminal body (frame chrome removed) so cells match. Each pane
+        // uses its OWN font cell metrics (per-pane zoom), so panes can differ in cols/rows.
         let tw = (gw - PANE_CHROME_W).max(1.0);
         let th = (gh - PANE_CHROME_H).max(1.0);
-        let (cols, rows) = cells_for_px(tw * scale, th * scale, cw, ch);
+        let (cols, rows) = cells_for_px(tw * scale, th * scale, p.font.cell_w, p.font.cell_h);
         if (cols, rows) != p.applied {
             if p.pane.resize(cols, rows) {
                 mgr.resize(&p.uid, cols as u16, rows as u16);
@@ -311,7 +319,6 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     // panes
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
-    let font_px = state.settings.font_px;
     let editing_pane = state.editing_pane;
     let t = state.active_tab();
     let focused = t.focused;
@@ -319,7 +326,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .panes
         .iter()
         .enumerate()
-        .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot, font_px))
+        .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot, p.font_px))
         .collect();
     sync_model(&ui.panes, items);
 
@@ -343,8 +350,13 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_zoomed(state.active_tab().zoomed.is_some());
     app.set_fullscreen(state.fullscreen);
     app.set_esc_holding(state.esc_holding);
-    // Terminal zoom factor (current font px / base) → scales the fullscreen hint + zoom hud.
-    app.set_zoom_factor(state.settings.font_px / prefs::DEFAULT_FONT_PX);
+    // Terminal zoom factor of the FOCUSED pane (its font px / base) → scales the fullscreen
+    // hint (fullscreen solos the focused pane), tracking that pane's per-pane zoom.
+    let focused_px = {
+        let t = state.active_tab();
+        t.panes.get(t.focused).map(|p| p.font_px).unwrap_or(prefs::DEFAULT_FONT_PX)
+    };
+    app.set_zoom_factor(focused_px / prefs::DEFAULT_FONT_PX);
     // Single-layout pane taskbar gate (the hidden-panes strip; see State::taskbar_visible).
     app.set_taskbar_visible(state.taskbar_visible());
 
@@ -690,10 +702,27 @@ pub fn pump(
     // ---- expire a held-Esc once auto-repeat stops (no key-release event) ----
     state.tick_esc();
 
-    // ---- apply a pending font reload (we own the DPI scale here) ----
-    if state.font_reload {
+    // ---- apply pending font reloads (we own the DPI scale here) ----
+    // A DPI scale change (or a font-family / base-size pref change → `font_reload`) reloads
+    // the base font + every pane's font at its own per-pane `font_px`.
+    if state.font_reload || (scale - state.last_scale).abs() > 1e-3 {
         state.reload_font(scale);
     }
+    // Per-pane zoom: reload any focused-pane Ctrl± change (marked via `font_dirty`) at the
+    // current scale BEFORE resync, so relayout re-grids that pane at its new cell metrics.
+    {
+        let path = state.settings.font_path();
+        for t in &mut state.tabs {
+            for p in &mut t.panes {
+                if p.font_dirty {
+                    p.font = theme::load_font_at(&path, p.font_px, scale);
+                    p.font_dirty = false;
+                    p.applied = (0, 0); // force a reflow + repaint at the new cell size
+                }
+            }
+        }
+    }
+    state.last_scale = scale;
 
     // ---- resync models when state changed ----
     if state.dirty {
@@ -742,11 +771,9 @@ pub fn pump(
     // pane's override folds over, and which pane (if any) is being renamed inline.
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
-    let font_px = state.settings.font_px;
     let editing_pane = state.editing_pane;
     let active = state.active;
     let focused = state.tabs[active].focused;
-    let font = &mut state.font;
     let tab = &mut state.tabs[active];
     let n = tab.panes.len();
     let mut rendered = false;
@@ -784,7 +811,7 @@ pub fn pump(
         // Repaint the surface only for terminal/cursor changes; a glow-only or toast-only
         // change just re-pushes the (unchanged) surface with the new alpha / indicator.
         if pane_dirty || focus_blink {
-            ps.surface = ps.pane.render(font, &opts);
+            ps.surface = ps.pane.render(&mut ps.font, &opts);
             rendered = true;
         } else if !glow_changed && !toast_changed {
             continue;
@@ -792,7 +819,7 @@ pub fn pump(
         if i < ui.panes.row_count() {
             ui.panes.set_row_data(
                 i,
-                pane_item(ps, i == focused, i as i32 == editing_pane, show_frame, show_dot, font_px),
+                pane_item(ps, i == focused, i as i32 == editing_pane, show_frame, show_dot, ps.font_px),
             );
         }
     }

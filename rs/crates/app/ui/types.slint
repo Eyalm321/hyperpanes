@@ -1,6 +1,8 @@
 // Data rows shared between the Rust controller and the .slint views. The Rust
 // side computes every geometry (logical px) and pushes these as models.
 
+import { HiRect } from "@widgets";
+
 // One tiled pane: the rendered terminal surface + its placement + chrome state.
 export struct PaneItem {
     surface: image,
@@ -31,6 +33,9 @@ export struct PaneItem {
     link-tip: string,
     link-tip-x: length,
     link-tip-y: length,
+    // drag-to-select highlight rects (one per row-span), hit-tested by the controller from the
+    // pane's surface size + font cell metrics; painted over the terminal surface by the widget.
+    selection-rects: [HiRect],
     // in-pane search box (opened from the pane menu's "Search…"): whether it's showing + the
     // match counter text (e.g. "2 / 5").
     search-open: bool,

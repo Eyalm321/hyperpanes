@@ -55,6 +55,9 @@ pub struct DetachedPane {
     /// stays tinted, and a clean pane stays clean). `None` = inherit the global pref.
     pub show_frame: Option<bool>,
     pub show_dot: Option<bool>,
+    /// The pane's per-pane zoom (terminal font px), carried across a re-host so a zoomed pane
+    /// keeps its size when torn off / moved.
+    pub font_px: f32,
 }
 
 /// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
@@ -176,6 +179,17 @@ pub struct PaneState {
     /// copy/paste confirmations + the Ctrl-zoom font %), cached so the pump can detect a
     /// change and update/clear the row even when the surface itself isn't dirty.
     pub last_toast: String,
+    /// The pane's OWN terminal font size (logical px) — per-pane zoom. Ctrl+= / − / 0 adjust
+    /// the FOCUSED pane only (Electron parity); a new pane starts at the configured base
+    /// (`Settings::font_px`). Drives both the rendered glyphs and the indicator scaling.
+    pub font_px: f32,
+    /// The font loaded at `font_px × DPI-scale` (its own glyph cache + cell metrics), so each
+    /// pane renders — and reflows — at its own zoom level independently of its neighbours.
+    pub font: hyperpanes_terminal_widget::Font,
+    /// Set when `font_px` changed → the pump reloads `font` at the current DPI scale and
+    /// forces a repaint on the next tick (a DPI / family / base-size change reloads via
+    /// [`State::reload_font`] instead).
+    pub font_dirty: bool,
 }
 
 impl PaneState {
@@ -249,7 +263,12 @@ impl Tab {
 
 /// The whole window's workspace state.
 pub struct State {
+    /// The base font (loaded at the configured `font_px`) — the template a new pane copies its
+    /// size from; per-pane rendering uses each pane's own [`PaneState::font`].
     pub font: hyperpanes_terminal_widget::Font,
+    /// The DPI scale of the last pump tick, so pane fonts (created/zoomed outside the pump,
+    /// where the scale isn't known) can be loaded at the right physical size.
+    pub last_scale: f32,
     pub tabs: Vec<Tab>,
     pub active: usize,
     next_uid: usize,
@@ -356,6 +375,7 @@ impl State {
     pub fn new(font: hyperpanes_terminal_widget::Font) -> Self {
         let mut s = State {
             font,
+            last_scale: 1.0,
             tabs: Vec::new(),
             active: 0,
             next_uid: 0,
@@ -592,6 +612,9 @@ impl State {
         } else {
             format!("pane {}", idx + 1)
         };
+        // Each pane owns its font (per-pane zoom); start at the configured base size.
+        let font_px = self.settings.font_px;
+        let font = theme::load_font_at(&self.settings.font_path(), font_px, self.last_scale);
         Some(PaneState {
             uid,
             title: label.into(),
@@ -614,6 +637,9 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            font_px,
+            font,
+            font_dirty: false,
         })
     }
 
@@ -732,6 +758,7 @@ impl State {
                 pinned_accent: ps.pinned_accent,
                 show_frame: ps.show_frame,
                 show_dot: ps.show_dot,
+                font_px: ps.font_px,
             },
             alive,
         ))
@@ -758,6 +785,7 @@ impl State {
             pane.feed(&replay);
         }
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
+        let font = theme::load_font_at(&self.settings.font_path(), det.font_px, self.last_scale);
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
@@ -780,6 +808,9 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            font_px: det.font_px,
+            font,
+            font_dirty: false,
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -823,6 +854,7 @@ impl State {
                 pinned_accent: ps.pinned_accent,
                 show_frame: ps.show_frame,
                 show_dot: ps.show_dot,
+                font_px: ps.font_px,
             },
             alive,
         ))
@@ -1095,34 +1127,43 @@ impl State {
         self.switch_tab(next);
     }
 
-    /// Nudge the global terminal font size by `delta` px (clamped), re-gridding every pane on
-    /// the next pump — the Ctrl+= / Ctrl+- font-zoom keybindings (and Ctrl+wheel).
+    /// Nudge the FOCUSED pane's terminal font size by `delta` px (clamped) — the Ctrl+= /
+    /// Ctrl+- font-zoom keybindings (and Ctrl+wheel). Zoom is per-pane (Electron parity): only
+    /// the focused pane re-grids; its neighbours keep their own size. The pump reloads the
+    /// pane's font at the current DPI scale (via `font_dirty`) and re-flows it.
     pub fn font_zoom(&mut self, delta: i32) {
-        let next = Settings::clamp_font(self.settings.font_px + delta as f32);
-        if next != self.settings.font_px {
-            self.settings.font_px = next;
-            prefs::save(&self.settings);
-            self.font_reload = true;
-        }
-        self.show_zoom_toast();
-    }
-
-    /// Reset the global terminal font size to its default — the Ctrl+0 keybinding.
-    pub fn font_reset(&mut self) {
-        if self.settings.font_px != prefs::DEFAULT_FONT_PX {
-            self.settings.font_px = prefs::DEFAULT_FONT_PX;
-            prefs::save(&self.settings);
-            self.font_reload = true;
-        }
-        self.show_zoom_toast();
-    }
-
-    /// Flash the current font scale as a `%` indicator in the focused pane's bottom-right —
-    /// the same transient "toast" the widget uses for copy/paste confirmations.
-    fn show_zoom_toast(&mut self) {
-        let pct = (self.settings.font_px / prefs::DEFAULT_FONT_PX * 100.0).round() as i32;
         let f = self.active_tab().focused;
         if let Some(p) = self.active_tab_mut().panes.get_mut(f) {
+            let next = Settings::clamp_font(p.font_px + delta as f32);
+            if next != p.font_px {
+                p.font_px = next;
+                p.font_dirty = true;
+            }
+        }
+        self.show_zoom_toast();
+    }
+
+    /// Reset the FOCUSED pane's terminal font size to the configured base — the Ctrl+0
+    /// keybinding. Only the focused pane is affected (per-pane zoom).
+    pub fn font_reset(&mut self) {
+        let base = self.settings.font_px;
+        let f = self.active_tab().focused;
+        if let Some(p) = self.active_tab_mut().panes.get_mut(f) {
+            if p.font_px != base {
+                p.font_px = base;
+                p.font_dirty = true;
+            }
+        }
+        self.show_zoom_toast();
+    }
+
+    /// Flash the focused pane's current zoom as a `%` indicator in its bottom-right — the same
+    /// transient "toast" the widget uses for copy/paste confirmations. Percentage is relative
+    /// to the default font size, matching the Electron zoom badge.
+    fn show_zoom_toast(&mut self) {
+        let f = self.active_tab().focused;
+        if let Some(p) = self.active_tab_mut().panes.get_mut(f) {
+            let pct = (p.font_px / prefs::DEFAULT_FONT_PX * 100.0).round() as i32;
             p.pane.set_toast(format!("{pct}%"));
         }
         self.dirty = true;
@@ -1474,6 +1515,13 @@ impl State {
                 let next = Settings::clamp_font(self.settings.font_px + d as f32);
                 if next != self.settings.font_px {
                     self.settings.font_px = next;
+                    // The Appearance font-size pref sets the base for everything: re-base every
+                    // pane to it (resetting any per-pane zoom), then reload all fonts.
+                    for t in &mut self.tabs {
+                        for p in &mut t.panes {
+                            p.font_px = next;
+                        }
+                    }
                     self.font_reload = true;
                 }
             }
@@ -1576,13 +1624,17 @@ impl State {
         self.dirty = true;
     }
 
-    /// Reload the terminal font from the current settings at DPI `scale`, forcing every
-    /// pane to re-grid at the new cell metrics (resets each pane's `applied`). Called by
-    /// the pump (which owns the scale) when `font_reload` is set.
+    /// Reload the base font + EVERY pane's font (each at its own per-pane `font_px`) from the
+    /// current settings at DPI `scale`, forcing every pane to re-grid at the new cell metrics
+    /// (resets each pane's `applied`). Called by the pump (which owns the scale) on a DPI
+    /// change or when `font_reload` is set (a font-family / base-size pref change).
     pub fn reload_font(&mut self, scale: f32) {
-        self.font = theme::load_font_at(&self.settings.font_path(), self.settings.font_px, scale);
+        let path = self.settings.font_path();
+        self.font = theme::load_font_at(&path, self.settings.font_px, scale);
         for t in &mut self.tabs {
             for p in &mut t.panes {
+                p.font = theme::load_font_at(&path, p.font_px, scale);
+                p.font_dirty = false;
                 p.applied = (0, 0); // force a reflow at the new cell size
             }
         }
@@ -1963,6 +2015,44 @@ impl State {
         }
     }
 
+    // ---- text selection (drag-to-select; copy-on-release) ----
+    // The widget reports pointer-down/drag/up in the pane's logical-px space; the controller
+    // hit-tests against the pane's on-screen surface size (`surf`, recorded from the widget's
+    // geometry callback) and the pane's own font cell metrics. Marking `dirty` re-runs resync,
+    // which re-projects the selection highlight rects into the pane model each tick.
+
+    /// Begin a selection in pane `idx` at the pressed point (logical px within the surface).
+    pub fn pane_selection_begin(&mut self, idx: usize, x: f32, y: f32) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            let (w, h) = p.surf;
+            p.pane.selection_begin(x, y, w, h);
+            self.dirty = true;
+        }
+    }
+
+    /// Extend the in-progress selection in pane `idx` to the dragged point.
+    pub fn pane_selection_update(&mut self, idx: usize, x: f32, y: f32) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            let (w, h) = p.surf;
+            p.pane.selection_update(x, y, w, h);
+            self.dirty = true;
+        }
+    }
+
+    /// Finish a selection in pane `idx`: a real drag copies to the clipboard (raising the
+    /// "Copied …" toast) and keeps its highlight; a stationary click clears the zero-size
+    /// selection so it doesn't linger or block the next click.
+    pub fn pane_selection_end(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            if p.pane.selection_is_drag() {
+                p.pane.copy_selection();
+            } else {
+                p.pane.selection_clear();
+            }
+            self.dirty = true;
+        }
+    }
+
     /// Clear pane `idx`'s screen + scrollback.
     pub fn clear_pane(&mut self, idx: usize) {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
@@ -2041,6 +2131,7 @@ impl State {
             pinned_accent: ps.pinned_accent,
             show_frame: ps.show_frame,
             show_dot: ps.show_dot,
+            font_px: ps.font_px,
         })
     }
 
@@ -2064,6 +2155,7 @@ impl State {
         let accent = det
             .pinned_accent
             .unwrap_or_else(|| theme::accent_for(at, palette));
+        let font = theme::load_font_at(&self.settings.font_path(), det.font_px, self.last_scale);
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
@@ -2086,6 +2178,9 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            font_px: det.font_px,
+            font,
+            font_dirty: false,
         };
         let auto = self.tabs[ti].layout == Layout::Auto;
         let t = &mut self.tabs[ti];
@@ -2198,6 +2293,7 @@ impl State {
                 pinned_accent: p.pinned_accent,
                 show_frame: p.show_frame,
                 show_dot: p.show_dot,
+                font_px: p.font_px,
             })
             .collect();
         Some((
@@ -2483,6 +2579,8 @@ impl State {
             _ if idx == 0 => "shell".to_string(),
             _ => format!("pane {}", idx + 1),
         };
+        let font_px = self.settings.font_px;
+        let font = theme::load_font_at(&self.settings.font_path(), font_px, self.last_scale);
         Some(PaneState {
             uid,
             title: label.into(),
@@ -2505,6 +2603,9 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            font_px,
+            font,
+            font_dirty: false,
         })
     }
 }

@@ -16,10 +16,10 @@ import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
 import { SidebarRail } from "sidebar.slint";
 import { ContextMenu } from "contextmenu.slint";
-import { KeyMsg } from "@widgets";
+import { KeyMsg, HiRect } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
-export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg }
+export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg, HiRect }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";
@@ -135,6 +135,10 @@ export component AppWindow inherits Window {
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
     callback pane-font-zoom(int);   // Ctrl+wheel over a pane → zoom the terminal font
+    // text selection (drag to select; copy-on-release)
+    callback pane-selection-begin(int, length, length);
+    callback pane-selection-update(int, length, length);
+    callback pane-selection-end(int);
     // in-pane search (opened from the pane context menu)
     callback pane-search-edited(int, string);
     callback pane-search-next(int);
@@ -285,6 +289,9 @@ export component AppWindow inherits Window {
                 pane-link-exited(i) => { root.pane-link-exited(i); }
                 pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
                 pane-font-zoom(d) => { root.pane-font-zoom(d); }
+                pane-selection-begin(i, x, y) => { root.pane-selection-begin(i, x, y); }
+                pane-selection-update(i, x, y) => { root.pane-selection-update(i, x, y); }
+                pane-selection-end(i) => { root.pane-selection-end(i); }
                 pane-search-edited(i, q) => { root.pane-search-edited(i, q); }
                 pane-search-next(i) => { root.pane-search-next(i); }
                 pane-search-prev(i) => { root.pane-search-prev(i); }
