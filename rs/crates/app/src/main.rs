@@ -29,6 +29,7 @@ mod paneview;
 mod prefs;
 mod sidebar;
 mod state;
+mod tetris;
 mod theme;
 mod window;
 

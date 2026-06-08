@@ -312,6 +312,11 @@ impl App {
                 let mut st = w.state.borrow_mut();
                 if let Some((ti, pi)) = st.find_pane(&uid) {
                     let pc = &mut st.tabs[ti].panes[pi];
+                    // Sniff the shell's OSC window title so the idle glow can tell an agent
+                    // pane (claude, etc.) from a plain shell (app-side; no core change).
+                    if let Some(title) = crate::glow::sniff_osc_title(&data) {
+                        pc.shell_title = title;
+                    }
                     pc.pane.feed(&data);
                     let replies = pc.pane.take_replies();
                     if !replies.is_empty() {

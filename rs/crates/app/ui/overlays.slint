@@ -116,7 +116,9 @@ component AppearancePreview inherits Rectangle {
     in property <bool> show-frame;
     in property <bool> show-dot;
     in property <color> bg;
-    height: 134px;
+    // idle-glow demo opacity (0 = none): when > 0 the frame glows in the accent, so the
+    // AI-features tab can preview the chosen effect live (firefly/pulse/blink/solid).
+    in property <float> glow: 0;
     border-radius: 8px;
     background: root.bg;
     border-width: root.show-frame ? 1px : 0px;
@@ -152,8 +154,10 @@ component AppearancePreview inherits Rectangle {
                 }
             }
         }
-        // the real, locked terminal surface (rendered by the controller in the drafted
-        // font + theme), letterboxed on the theme background.
+        // the real, locked terminal surface (rendered by the controller in the drafted font
+        // + theme) — the self-playing Tetris animation + font-preview HUD. Stretched to fill
+        // the whole panel (the grid aspect is tuned to the column, so the blocks stay close
+        // to square).
         Rectangle {
             background: root.bg;
             clip: true;
@@ -163,10 +167,25 @@ component AppearancePreview inherits Rectangle {
                 width: parent.width - 8px;
                 height: parent.height - 8px;
                 source: root.surface;
-                image-fit: contain;
+                image-fit: fill;
                 image-rendering: pixelated;
-                horizontal-alignment: left;
             }
+        }
+    }
+    // idle-glow demo ring on the frame (same look as a real glowing pane), driven by `glow`.
+    Rectangle {
+        visible: root.glow > 0.01;
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: root.accent.with-alpha(root.glow);
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: root.accent.with-alpha(root.glow * 0.45);
         }
     }
 }
@@ -293,6 +312,7 @@ export component OverlayLayer inherits Rectangle {
     in property <image> preview-surface;
     in property <color> preview-accent;
     in property <color> preview-bg;
+    in property <float> preview-glow: 0;   // animated idle-glow demo opacity (AI-features tab)
     in property <[PrefOption]> themes;
     in property <string> theme-label;
     in property <[FramePaletteOption]> frame-palettes;
@@ -431,7 +451,7 @@ export component OverlayLayer inherits Rectangle {
     // are rendered; deferred ones are marked `TODO(phase5)` (no dead controls). The card
     // auto-sizes to its content (no scroll machinery needed at this size).
     if root.kind == 2 : prefs := Rectangle {
-        width: min(780px, parent.width - 40px);
+        width: min(820px, parent.width - 40px);
         height: min(600px, parent.height - 60px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -466,32 +486,14 @@ export component OverlayLayer inherits Rectangle {
                     }
                     NavItem { label: "Appearance"; active: prefs.sel == 0; clicked => { prefs.sel = 0; } }
                     NavItem { label: "Terminal"; active: prefs.sel == 1; clicked => { prefs.sel = 1; } }
-                    NavItem { label: "Keybindings"; active: prefs.sel == 2; clicked => { prefs.sel = 2; } }
+                    NavItem { label: "AI features"; active: prefs.sel == 2; clicked => { prefs.sel = 2; } }
+                    NavItem { label: "Keybindings"; active: prefs.sel == 3; clicked => { prefs.sel = 3; } }
                     Rectangle { vertical-stretch: 1; }
                 }
             }
-            // ---- main column: pinned preview + scrolling body + pinned footer ----
+            // ---- center column: scrolling controls + pinned footer ----
             VerticalLayout {
-                // The Appearance preview is pinned (sticky) above the scroll area, so a
-                // change stays visible while the controls below scroll (mirrors Electron).
-                // `vertical-stretch: 0` keeps it snug (it must not share the extra height
-                // with the scrolling body, or the box would float with a gap under the title).
-                if prefs.sel == 0 : VerticalLayout {
-                    vertical-stretch: 0;
-                    alignment: start;
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    padding-top: 16px;
-                    spacing: 8px;
-                    Text { text: "Preview"; color: Theme.faint; font-size: 11px; }
-                    AppearancePreview {
-                        surface: root.preview-surface;
-                        accent: root.preview-accent;
-                        show-frame: root.show-frame;
-                        show-dot: root.show-dot;
-                        bg: root.preview-bg;
-                    }
-                }
+                horizontal-stretch: 1;
                 Rectangle {
                     vertical-stretch: 1;
                     clip: true;
@@ -635,47 +637,6 @@ export component OverlayLayer inherits Rectangle {
                 toggled(v) => { root.pref-action(3, v ? 1 : 0); }
             }
 
-            // ---- idle glow (a pane softly glows once its agent goes quiet) ----
-            Rectangle { height: 1px; background: Theme.border; }
-            Text { text: "Idle glow"; color: Theme.faint; font-size: 11px; }
-            PrefToggle {
-                label: "Glow quiet panes";
-                on: root.idle-alert;
-                toggled(v) => { root.pref-action(10, v ? 1 : 0); }
-            }
-            // Effect + threshold only matter when the glow is on.
-            if root.idle-alert : VerticalLayout {
-                spacing: 12px;
-                Text { text: "Glow effect"; color: Theme.faint; font-size: 11px; }
-                FontDropdown {
-                    options: root.idle-effects;
-                    current-label: root.idle-effect-label;
-                    selected(id) => { root.pref-action(11, id); }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        text: "Idle after";
-                        color: Theme.text;
-                        font-size: 13px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Pill { label: "−"; clicked => { root.pref-action(12, -1); } }
-                    Rectangle {
-                        width: 52px;
-                        Text {
-                            text: root.idle-seconds + " s";
-                            color: Theme.text;
-                            font-size: 13px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    Pill { label: "+"; clicked => { root.pref-action(12, 1); } }
-                }
-            }
-
                         } // end Appearance panel
 
                         // ===================== Terminal =====================
@@ -741,54 +702,124 @@ export component OverlayLayer inherits Rectangle {
 
                         } // end Terminal panel
 
-                        // ===================== Keybindings =====================
-                        // Read-only list of every default chord (mirrors the keymap the
-                        // router actually fires; editing is a future bonus).
+                        // ===================== AI features =====================
                         if prefs.sel == 2 : VerticalLayout {
-                            spacing: 4px;
-                            Text {
-                                text: "Default keyboard shortcuts";
-                                color: Theme.faint;
-                                font-size: 11px;
-                            }
-                            for kb[i] in root.keybindings : Rectangle {
-                                height: 32px;
-                                border-radius: 6px;
-                                background: Math.mod(i, 2) == 0 ? transparent : Theme.bg;
-                                HorizontalLayout {
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    spacing: 8px;
-                                    Text {
-                                        text: kb.label;
-                                        color: Theme.text;
-                                        font-size: 12px;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        overflow: elide;
-                                    }
-                                    // chord chip
-                                    Rectangle {
-                                        background: Theme.surface2;
-                                        border-radius: 5px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
-                                        VerticalLayout {
-                                            alignment: center;
-                                            HorizontalLayout {
-                                                padding-left: 8px;
-                                                padding-right: 8px;
-                                                padding-top: 3px;
-                                                padding-bottom: 3px;
-                                                Text {
-                                                    text: kb.chord;
-                                                    color: Theme.text;
-                                                    font-size: 11px;
-                                                    font-weight: 600;
+                            spacing: 12px;
+
+            Text { text: "Idle glow"; color: Theme.faint; font-size: 11px; }
+            // Mirrors Electron's "Idle glow for AI panes" — only an agent pane (one whose
+            // shell title names claude/aider/etc.) glows once it goes output-quiet.
+            PrefToggle {
+                label: "Idle glow for AI panes";
+                on: root.idle-alert;
+                toggled(v) => { root.pref-action(10, v ? 1 : 0); }
+            }
+            Text {
+                text: "soft glow when an agent (claude, etc.) goes quiet";
+                color: Theme.faint;
+                font-size: 11px;
+            }
+            // Effect + threshold only matter when the glow is on.
+            if root.idle-alert : VerticalLayout {
+                spacing: 12px;
+                Text { text: "Glow effect"; color: Theme.faint; font-size: 11px; }
+                FontDropdown {
+                    options: root.idle-effects;
+                    current-label: root.idle-effect-label;
+                    selected(id) => { root.pref-action(11, id); }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Idle after";
+                            color: Theme.text;
+                            font-size: 13px;
+                        }
+                        Text {
+                            text: "silence before an agent pane glows";
+                            color: Theme.faint;
+                            font-size: 11px;
+                        }
+                    }
+                    Pill { label: "−"; clicked => { root.pref-action(12, -1); } }
+                    Rectangle {
+                        width: 56px;
+                        Text {
+                            text: root.idle-seconds + "s";
+                            color: Theme.text;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Pill { label: "+"; clicked => { root.pref-action(12, 1); } }
+                }
+            }
+
+                        } // end AI features panel
+
+                        // ===================== Keybindings =====================
+                        // Read-only list of the default chords, grouped by category and shown
+                        // as <kbd> chips — styled like the Electron Preferences › Keybindings
+                        // tab. (The native keymap is fixed; rebinding is a future bonus.)
+                        if prefs.sel == 3 : VerticalLayout {
+                            spacing: 2px;
+                            for kb[i] in root.keybindings : VerticalLayout {
+                                spacing: 2px;
+                                // group heading above the first row of each category
+                                if kb.group-first : Text {
+                                    text: kb.category;
+                                    color: Theme.faint;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                }
+                                Rectangle {
+                                    height: 34px;
+                                    border-radius: 6px;
+                                    background: kbta.has-hover ? Theme.surface : transparent;
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 8px;
+                                        Text {
+                                            text: kb.label;
+                                            color: Theme.text;
+                                            font-size: 13px;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        // chord chips: one <kbd> per part (Ctrl / Shift / P)
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            alignment: end;
+                                            for part in kb.parts : VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    background: Theme.surface2;
+                                                    border-radius: 5px;
+                                                    border-width: 1px;
+                                                    border-color: Theme.border;
+                                                    HorizontalLayout {
+                                                        padding-left: 7px;
+                                                        padding-right: 7px;
+                                                        padding-top: 3px;
+                                                        padding-bottom: 3px;
+                                                        Text {
+                                                            text: part;
+                                                            color: Theme.text;
+                                                            font-size: 11px;
+                                                            font-weight: 600;
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                    kbta := TouchArea {}
                                 }
                             }
                         } // end Keybindings panel
@@ -808,6 +839,35 @@ export component OverlayLayer inherits Rectangle {
                             active: true;
                             clicked => { root.pref-done(); }
                         }
+                    }
+                }
+            }
+            // ---- right preview column (Appearance + AI features only) ----
+            // A tall, persistent preview pane. On Appearance it shows the drafted terminal
+            // look; on AI features the frame glows with the selected idle effect so you can
+            // see firefly/pulse/blink/solid before applying. Hidden on Terminal/Keybindings
+            // (the center column then takes the full width).
+            if prefs.sel == 0 || prefs.sel == 2 : Rectangle {
+                width: 180px;
+                background: Theme.mantle;
+                Rectangle { x: 0; width: 1px; background: Theme.border; }
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+                    Text {
+                        text: prefs.sel == 2 ? "Idle glow preview" : "Preview";
+                        color: Theme.faint;
+                        font-size: 11px;
+                    }
+                    AppearancePreview {
+                        vertical-stretch: 1;
+                        surface: root.preview-surface;
+                        accent: root.preview-accent;
+                        show-frame: root.show-frame;
+                        show-dot: root.show-dot;
+                        bg: root.preview-bg;
+                        // glow only on the AI-features tab (Appearance previews the look, not the glow).
+                        glow: prefs.sel == 2 ? root.preview-glow : 0;
                     }
                 }
             }

@@ -134,6 +134,10 @@ pub struct PaneState {
     /// Idle-glow animation state — its `alpha` (0 when not glowing) is projected into the
     /// pane model each tick once the pane has been output-quiet past the idle threshold.
     pub glow: Glow,
+    /// The pane's latest OSC window title (sniffed from pty output), used to detect an
+    /// AI/agent CLI so the idle glow only arms on agent panes (mirrors `isAiPane`). "" until
+    /// the shell sets a title.
+    pub shell_title: String,
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -222,6 +226,13 @@ pub struct State {
     preview_cursor: bool,
     /// The latest rendered preview image (shown in the Appearance preview).
     pub preview_surface: Image,
+    /// Animates the idle-glow demo on the AI-features preview (always "idle" so the chosen
+    /// effect plays continuously while Preferences is open).
+    pub preview_glow: Glow,
+    /// The self-playing Tetris shown in the preview pane (ambient animation).
+    pub preview_tetris: crate::tetris::Tetris,
+    /// When the Tetris last advanced a frame (it steps on a fixed cadence, not every tick).
+    pub preview_tetris_last: Instant,
     /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
@@ -279,12 +290,17 @@ impl State {
             prefs_draft: None,
             prefs_confirm: false,
             font_custom: false,
-            preview_pane: TerminalPane::new(64, 7, Box::new(SoftwareRenderer::new())),
+            // Sized to the preview frame: the Tetris board (20 cols × 26 rows) plus a 2-row
+            // HUD above and below (the font preview). See `preview_frame`.
+            preview_pane: TerminalPane::new(20, 30, Box::new(SoftwareRenderer::new())),
             preview_font: None,
             preview_key: (String::new(), 0.0, 0.0),
             preview_theme: -1,
             preview_cursor: false,
             preview_surface: Image::default(),
+            preview_glow: Glow::new(0x9E37_79B9_7F4A_7C15),
+            preview_tetris: crate::tetris::Tetris::new(0x5DEE_CE2F_1234_ABCD),
+            preview_tetris_last: Instant::now(),
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
@@ -300,15 +316,10 @@ impl State {
         };
         let tab = s.fresh_tab();
         s.tabs.push(tab);
-        // Canned sample output for the appearance preview (a real, locked terminal). ANSI SGR
-        // so the terminal theme's colours show: green prompt, dim build line, blue "Finished".
-        s.preview_pane.feed(
-            "\x1b[32m$\x1b[0m cargo run\r\n\
-             \x1b[90m   Compiling hyperpanes v0.1.0\x1b[0m\r\n\
-             \x1b[34m    Finished\x1b[0m dev in 1.24s\r\n\
-             \x1b[35mthe quick brown fox\x1b[0m \x1b[36mjumps 0123\x1b[0m\r\n\
-             $ ",
-        );
+        // Seed the preview with the first composed frame so it's never blank before the
+        // first animation tick (the pump advances + re-feeds it while Preferences is open).
+        let frame = s.preview_frame();
+        s.preview_pane.feed(&frame);
         s
     }
 
@@ -344,6 +355,69 @@ impl State {
         } else {
             None
         }
+    }
+
+    /// Advance the preview's ambient Tetris on its fixed cadence, feeding the new composed
+    /// frame into the locked preview terminal so it animates. Called by the pump while
+    /// Preferences is open; cheap no-op between frames.
+    pub fn animate_preview_tetris(&mut self) {
+        if self.preview_tetris_last.elapsed() >= std::time::Duration::from_millis(90) {
+            self.preview_tetris.step();
+            let frame = self.preview_frame();
+            self.preview_pane.feed(&frame);
+            self.preview_tetris_last = Instant::now();
+        }
+    }
+
+    /// Compose the full preview frame: a 2-row Tetris HUD (score / level / lines), the board
+    /// coloured from the drafted frame palette, then a 2-row HUD (NEXT swatch + the font name
+    /// at the drafted size — so the font family/size still preview live). Reflects the
+    /// appearance DRAFT while the dialog is open (else the committed settings).
+    fn preview_frame(&self) -> String {
+        let (palette_idx, px, font_value) = match &self.prefs_draft {
+            Some(d) => (d.frame_palette, d.font_px, d.font_family.as_str()),
+            None => (self.settings.frame_palette, self.settings.font_px, self.settings.font_family.as_str()),
+        };
+        let colors = theme::frame_palette(palette_idx);
+        let (ar, ag, ab) = colors[0]; // accent = the palette's first slot
+        let t = &self.preview_tetris;
+        let board = t.render(colors);
+        let (nr, ng, nb) = colors[t.next_kind() % colors.len()];
+        let label = prefs::font_label(font_value);
+
+        let accent = format!("\x1b[38;2;{};{};{}m", ar, ag, ab);
+        let dim = "\x1b[2m";
+        let reset = "\x1b[0m";
+        let trunc = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+
+        let mut s = String::with_capacity(2400);
+        s.push_str("\x1b[H\x1b[?25l"); // home + hide cursor (it's an animation, not a prompt)
+        // top HUD: score (accent) + level/lines
+        s.push_str(&accent);
+        s.push_str(&format!("SCORE {:06}", t.score()));
+        s.push_str(reset);
+        s.push_str("\x1b[K\r\n");
+        s.push_str(dim);
+        s.push_str(&format!("LEVEL {}  LINES {}", t.level(), t.lines()));
+        s.push_str(reset);
+        s.push_str("\x1b[K\r\n");
+        // the palette-coloured board (H rows)
+        s.push_str(&board);
+        s.push_str("\r\n");
+        // bottom HUD: the NEXT piece (letter + swatch, in its colour), then font name + size
+        s.push_str(dim);
+        s.push_str("NEXT ");
+        s.push_str(reset);
+        s.push_str(&format!(
+            "\x1b[38;2;{};{};{}m{} \u{2588}\u{2588}\x1b[0m",
+            nr, ng, nb, t.next_letter()
+        ));
+        s.push_str("\x1b[K\r\n");
+        s.push_str(dim);
+        s.push_str(&format!("{}  {}px", trunc(label, 13), px as i32));
+        s.push_str(reset);
+        s.push_str("\x1b[K"); // last line: no trailing newline → never scrolls the grid
+        s
     }
 
     fn fresh_tab(&mut self) -> Tab {
@@ -418,6 +492,7 @@ impl State {
             link: None,
             link_cursor: (0.0, 0.0),
             glow,
+            shell_title: String::new(),
         })
     }
 
@@ -571,6 +646,7 @@ impl State {
             link: None,
             link_cursor: (0.0, 0.0),
             glow,
+            shell_title: String::new(),
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -1166,9 +1242,13 @@ impl State {
                 }
             }
             Setting::IdleSeconds(d) => {
-                let next = (self.settings.idle_alert_seconds as i32 + d)
-                    .clamp(prefs::MIN_IDLE_SECONDS as i32, prefs::MAX_IDLE_SECONDS as i32);
-                self.settings.idle_alert_seconds = next as u32;
+                // `d` is a ±1 step; the dial moves in whole IDLE_STEP_SECONDS jumps and
+                // snaps any odd persisted value onto the grid.
+                let step = prefs::IDLE_STEP_SECONDS as i32;
+                let cur = self.settings.idle_alert_seconds as i32;
+                let steps = (cur / step + d)
+                    .clamp(prefs::MIN_IDLE_SECONDS as i32 / step, prefs::MAX_IDLE_SECONDS as i32 / step);
+                self.settings.idle_alert_seconds = (steps * step) as u32;
             }
         }
         prefs::save(&self.settings);

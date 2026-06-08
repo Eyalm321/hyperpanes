@@ -184,6 +184,55 @@ pub fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Agent/AI CLI names that mark a pane as worth watching for idle (the native port of
+/// `useIdle.ts`'s `AI_PATTERN`). The glow only arms on a pane whose shell title contains
+/// one of these — a plain quiet shell never glows, matching the Electron behaviour.
+const AI_NAMES: [&str; 13] = [
+    "claude", "aider", "gemini", "ollama", "llm", "chatgpt", "codex", "cursor-agent", "goose",
+    "cody", "copilot", "continue",
+    // common when an agent is launched via `npx <tool>` / shows in the title:
+    "agent",
+];
+
+/// Whether `hay` (a pane's shell/OSC title) names an AI/agent CLI — a case-insensitive
+/// token match so "claude" hits but an unrelated word merely *containing* a name does not.
+pub fn is_ai_pane(hay: &str) -> bool {
+    let lower = hay.to_ascii_lowercase();
+    // Split on anything that isn't a name character so "user@host: claude" → ["user","host","claude"].
+    lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .any(|tok| AI_NAMES.contains(&tok))
+}
+
+/// Extract the last OSC window-title (`ESC ] 0|2 ; <title> BEL`/`ST`) from a pty output
+/// chunk, if any. Lets the app sniff a pane's running program app-side (an agent CLI sets
+/// the terminal title) without a core/widget change. Returns the newest title in `data`.
+pub fn sniff_osc_title(data: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    let bytes = data.as_bytes();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        // OSC introducer: ESC ] (0|2) ;
+        if bytes[i] == 0x1b && bytes[i + 1] == b']' && (bytes[i + 2] == b'0' || bytes[i + 2] == b'2')
+            && bytes[i + 3] == b';'
+        {
+            let start = i + 4;
+            // terminator: BEL (0x07) or ST (ESC \).
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != 0x07 && !(bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\') {
+                j += 1;
+            }
+            if let Ok(title) = std::str::from_utf8(&bytes[start..j]) {
+                found = Some(title.to_string());
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
 /// A cheap stable seed from a pane uid (FNV-1a) so each pane's firefly is out of phase.
 pub fn seed_from(uid: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
@@ -237,6 +286,28 @@ mod tests {
         // Peak near the middle of the on-swell, dark in the tail of the cycle.
         assert!(g.update(IdleEffect::Blink, true, now, 210) > 0.9);
         assert_eq!(g.update(IdleEffect::Blink, true, now, 700), 0.0);
+    }
+
+    #[test]
+    fn ai_pane_detection() {
+        assert!(is_ai_pane("claude"));
+        assert!(is_ai_pane("user@host: ~/proj — claude"));
+        assert!(is_ai_pane("cursor-agent"));
+        assert!(!is_ai_pane("pwsh")); // a plain shell never glows
+        assert!(!is_ai_pane("ssh-agent")); // token match, not substring
+        assert!(!is_ai_pane(""));
+    }
+
+    #[test]
+    fn osc_title_sniff() {
+        // BEL-terminated and ST-terminated, last one wins.
+        assert_eq!(sniff_osc_title("\x1b]0;claude\x07ready").as_deref(), Some("claude"));
+        assert_eq!(sniff_osc_title("a\x1b]2;build\x1b\\b").as_deref(), Some("build"));
+        assert_eq!(
+            sniff_osc_title("\x1b]0;first\x07\x1b]0;second\x07").as_deref(),
+            Some("second")
+        );
+        assert_eq!(sniff_osc_title("no title here"), None);
     }
 
     #[test]

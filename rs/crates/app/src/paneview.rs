@@ -11,7 +11,7 @@ use hyperpanes_core::layout::presets::{
 use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
 
-use slint::{Model, ModelRc, VecModel};
+use slint::{Model, ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
 use crate::state::{Overlay, PaneState, State};
@@ -418,10 +418,22 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_pref_idle_effect_label(idle_label.into());
     app.set_pref_idle_seconds(state.settings.idle_alert_seconds as i32);
 
-    // keybindings list (read-only mirror of the default keymap) — label + chord per row.
+    // keybindings list (read-only mirror of the default keymap), grouped by category and
+    // rendered as <kbd> chips — styled like the Electron Preferences → Keybindings tab.
+    let mut prev_cat = "";
     let keybindings: Vec<KeybindingItem> = crate::keybindings::binding_rows()
         .into_iter()
-        .map(|(label, chord)| KeybindingItem { label: label.into(), chord: chord.into() })
+        .map(|r| {
+            let group_first = r.category != prev_cat;
+            prev_cat = r.category;
+            let parts: Vec<SharedString> = r.parts.into_iter().map(Into::into).collect();
+            KeybindingItem {
+                label: r.label.into(),
+                parts: ModelRc::from(Rc::new(VecModel::from(parts))),
+                category: r.category.into(),
+                group_first,
+            }
+        })
         .collect();
     sync_model(&ui.keybindings, keybindings);
 
@@ -489,10 +501,17 @@ pub fn pump(
     // ---- render the appearance preview (a real, locked terminal) while Prefs is open ----
     // Caret blinks in sync with the panes' cursor.
     if state.overlay == Overlay::Prefs {
-        let cursor_on = state.cursor_on;
-        if let Some(img) = state.render_preview(scale, cursor_on) {
+        // Advance the ambient Tetris animation, then re-render the preview (no caret — it's
+        // an animation, not a prompt).
+        state.animate_preview_tetris();
+        if let Some(img) = state.render_preview(scale, false) {
             app.set_pref_preview_surface(img);
         }
+        // Animate the idle-glow demo for the AI-features preview: always "idle" so the
+        // selected effect plays continuously (the .slint only shows it on the AI tab).
+        let eff = crate::glow::IdleEffect::from_token(&state.settings.idle_effect);
+        let a = state.preview_glow.update(eff, true, Instant::now(), crate::glow::now_epoch_ms());
+        app.set_pref_preview_glow(a);
     }
 
     // ---- idle-glow inputs (read once per tick) ----
@@ -515,8 +534,11 @@ pub fn pump(
         // output-quiet past the threshold (the agent finished + is waiting); the alpha
         // animates while idle and resets to 0 otherwise.
         let prev_glow = ps.glow.alpha;
+        // Only AGENT panes glow (an agent CLI sets the shell title) — a plain quiet shell
+        // never does, matching the Electron `isAiPane && idle` gate.
         let idle = idle_on
             && ps.visible
+            && crate::glow::is_ai_pane(&ps.shell_title)
             && match mgr.last_output_at(&ps.uid) {
                 Some(ms) => glow_now_ms.saturating_sub(ms) >= idle_threshold_ms,
                 None => false,

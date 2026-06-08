@@ -72,11 +72,15 @@ export struct PrefOption {
     active: bool,
 }
 
-// One row in the Preferences → Keybindings list: a human label + its chord text
-// (e.g. "Command palette" / "Ctrl+Shift+P"), formatted by Rust from the default keymap.
+// One row in the Preferences → Keybindings list (read-only mirror of the default keymap,
+// styled like the Electron app): a human label, the chord as `<kbd>`-chip parts (e.g.
+// ["Ctrl","Shift","P"]), its category, and whether it's the first row of that category
+// (so the view draws the group heading above it).
 export struct KeybindingItem {
     label: string,
-    chord: string,
+    parts: [string],
+    category: string,
+    group-first: bool,
 }
 
 // One frame-palette choice in the Appearance picker: a label plus its 8 slot colors,
