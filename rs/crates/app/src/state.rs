@@ -592,12 +592,9 @@ impl State {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let palette = self.settings.frame_palette;
-        // Honour the default-shell preference ("" = let core pick the system default).
-        let shell = if self.settings.default_shell.is_empty() {
-            None
-        } else {
-            Some(self.settings.default_shell.clone())
-        };
+        // Honour the default-shell preference ("" = prefer pwsh when available, else core's
+        // system default).
+        let shell = prefs::effective_shell(&self.settings.default_shell);
         // Inject shell integration so the shell reports its cwd (OSC-7 for pwsh/bash, OSC
         // 9;9 for cmd). That's what lets a pane's cwd → git-project tint (and clickable-path
         // resolution) actually fire — without it pwsh never emits a cwd OSC. Additive: the
@@ -2164,11 +2161,7 @@ impl State {
         let (cols, rows) = (cols.max(2) as u16, rows.max(1) as u16);
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
-        let shell = if self.settings.default_shell.is_empty() {
-            None
-        } else {
-            Some(self.settings.default_shell.clone())
-        };
+        let shell = prefs::effective_shell(&self.settings.default_shell);
         let shell_path = shell
             .clone()
             .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
@@ -2628,13 +2621,10 @@ impl State {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let palette = self.settings.frame_palette;
-        let shell = spec.shell.clone().or_else(|| {
-            if self.settings.default_shell.is_empty() {
-                None
-            } else {
-                Some(self.settings.default_shell.clone())
-            }
-        });
+        let shell = spec
+            .shell
+            .clone()
+            .or_else(|| prefs::effective_shell(&self.settings.default_shell));
         let shell_path = shell
             .clone()
             .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
