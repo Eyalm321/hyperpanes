@@ -350,6 +350,31 @@ impl TerminalPane {
         self.selection = None;
     }
 
+    /// Select the entire viewport (every visible cell), marked `dragged` so it renders and is
+    /// copyable. This is the context menu's "Select All" — viewport-scoped (the region
+    /// [`selection_text`](Self::selection_text) can reconstruct), mirroring xterm's `selectAll`
+    /// over the on-screen buffer. A subsequent [`copy_selection`](Self::copy_selection) copies it.
+    pub fn select_all(&mut self) {
+        let (cols, rows) = self.grid_size();
+        if cols == 0 || rows == 0 {
+            self.selection = None;
+            return;
+        }
+        let mut sel = Selection::new(selection::Cell { col: 0, row: 0 });
+        sel.update(selection::Cell { col: cols - 1, row: rows - 1 });
+        self.selection = Some(sel);
+    }
+
+    /// Clear the screen **and** scrollback (the context menu's "Clear"), dropping any selection
+    /// and pinning the viewport to the bottom. Feeds the ED escapes (erase display + erase
+    /// scrollback) so it runs through the same parser path as live output — the native analog of
+    /// xterm's `term.clear()`.
+    pub fn clear(&mut self) {
+        self.selection = None;
+        self.grid.feed(b"\x1b[H\x1b[2J\x1b[3J");
+        self.grid.scroll_to_bottom();
+    }
+
     /// True once the active selection has actually been dragged across cells (i.e. it's a real
     /// selection, not a stationary click). The caller uses this to choose copy-vs-click on release.
     pub fn selection_is_drag(&self) -> bool {

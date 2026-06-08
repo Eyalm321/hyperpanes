@@ -31,7 +31,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::command::{dispatch, set_layout_from_id, Command, Effect};
 use crate::drag::{self, DragKind, DragState, Hover};
 use crate::paneview::{self, Ui};
-use crate::state::{DetachedPane, EscOutcome, State};
+use crate::state::{DetachedPane, DetachedTab, EscOutcome, State};
 use crate::{theme, window, AppWindow, KeyMsg};
 
 /// Logical height of the top bar (where a tab-strip drop lands). Hidden in fullscreen,
@@ -49,6 +49,8 @@ pub enum PendingSeed {
     EmptyTab,
     /// Re-host a session detached from another window (replay-primed, no PTY restart).
     Adopt(DetachedPane),
+    /// Re-host a whole tab (its panes + title/layout) detached from another window.
+    AdoptTab(DetachedTab),
     /// Already seeded — nothing to do.
     Done,
 }
@@ -191,6 +193,12 @@ impl App {
             Effect::NewWindow => self.spawn_window(PendingSeed::EmptyTab),
             Effect::MoveToNewWindow { det, source_alive } => {
                 self.spawn_window(PendingSeed::Adopt(det));
+                if !source_alive {
+                    win.closing.set(true);
+                }
+            }
+            Effect::MoveTabToNewWindow { tab, source_alive } => {
+                self.spawn_window(PendingSeed::AdoptTab(tab));
                 if !source_alive {
                     win.closing.set(true);
                 }
@@ -385,6 +393,7 @@ impl App {
                     }
                 }
                 PendingSeed::Adopt(det) => win.state.borrow_mut().adopt_pane(&self.mgr, det),
+                PendingSeed::AdoptTab(det) => win.state.borrow_mut().adopt_tab(&self.mgr, det),
                 PendingSeed::Done => {}
             }
         }
