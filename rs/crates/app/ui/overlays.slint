@@ -16,18 +16,31 @@ import { Theme } from "theme.slint";
 import { PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
 
 // A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
-// used to mark the active option in the pickers.
+// used to mark the active option in the pickers. Same Path-with-commands pattern the window
+// controls use (the default UI font lacks the ✓/▾ glyphs).
 component Check inherits Path {
-    in property <brush> ink: Theme.accent;
+    in property <color> ink: Theme.accent;
     width: 12px;
     height: 10px;
     viewbox-width: 12;
     viewbox-height: 10;
     stroke: root.ink;
     stroke-width: 1.6px;
-    MoveTo { x: 1; y: 5.5; }
-    LineTo { x: 4.5; y: 9; }
-    LineTo { x: 11; y: 1; }
+    fill: transparent;
+    commands: "M 1 5.5 L 4.5 9 L 11 1";
+}
+
+// A drawn down-chevron for the dropdown buttons.
+component Chevron inherits Path {
+    in property <color> ink: Theme.faint;
+    width: 9px;
+    height: 6px;
+    viewbox-width: 9;
+    viewbox-height: 6;
+    stroke: root.ink;
+    stroke-width: 1.4px;
+    fill: transparent;
+    commands: "M 1 1 L 4.5 4.5 L 8 1";
 }
 
 // A small labelled toggle switch (frame/dot prefs).
@@ -180,11 +193,9 @@ component FontDropdown inherits Rectangle {
             horizontal-stretch: 1;
             overflow: elide;
         }
-        Text {
-            text: "▾";
-            color: Theme.faint;
-            font-size: 12px;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            Chevron {}
         }
     }
     ta := TouchArea { clicked => { popup.show(); } }
