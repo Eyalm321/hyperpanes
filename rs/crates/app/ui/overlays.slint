@@ -105,7 +105,10 @@ export component OverlayLayer inherits Rectangle {
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
+    in property <bool> clickable-paths: true;
+    in property <string> editor-command: "";
     callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
+    callback pref-text(int, string); // (kind, value) — string-valued settings
 
     callback dismiss();
 
@@ -369,6 +372,49 @@ export component OverlayLayer inherits Rectangle {
                     label: opt.label;
                     active: opt.active;
                     clicked => { root.pref-action(5, opt.id); }
+                }
+            }
+
+            // ---- clickable file paths (click opens · Ctrl+click copies) ----
+            PrefToggle {
+                label: "Clickable file paths";
+                on: root.clickable-paths;
+                toggled(v) => { root.pref-action(6, v ? 1 : 0); }
+            }
+            // Editor command — only shown when clickable paths are on (mirrors the renderer).
+            if root.clickable-paths : VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: "Editor command";
+                    color: Theme.faint;
+                    font-size: 11px;
+                }
+                Rectangle {
+                    height: 32px;
+                    border-radius: 7px;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        eci := TextInput {
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            init => { eci.text = root.editor-command; }
+                            edited => { root.pref-text(7, self.text); }
+                        }
+                    }
+                    Text {
+                        x: 10px;
+                        text: "blank = auto-detect VS Code, else OS default";
+                        color: Theme.faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        visible: eci.text == "";
+                    }
                 }
             }
 

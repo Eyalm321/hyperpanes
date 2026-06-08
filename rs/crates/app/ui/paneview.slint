@@ -110,6 +110,8 @@ export component PaneView inherits Rectangle {
     in property <[PrefOption]> pref-families;
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
+    in property <bool> pref-clickable: true;
+    in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
@@ -129,12 +131,18 @@ export component PaneView inherits Rectangle {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // clickable-paths: surface geometry (for hit-testing) + hover/click reports.
+    callback pane-geometry(int, length, length);
+    callback pane-link-moved(int, length, length);
+    callback pane-link-exited(int);
+    callback pane-link-activated(int, length, length, bool);
     // Wave-2 overlay callbacks (each maps to a Command in the controller).
     callback palette-query(string);
     callback palette-nav(int);
     callback palette-activate();
     callback palette-pick(int);
     callback pref-action(int, int);
+    callback pref-text(int, string);
     callback overlay-dismiss();
 
     background: Theme.bg;
@@ -246,12 +254,21 @@ export component PaneView inherits Rectangle {
                         surface: pane.surface;
                         accent: pane.accent;
                         chrome: false;
+                        // clickable-path hover overlay (controller-driven after hit-testing)
+                        link-visible: pane.link-visible;
+                        link-x: pane.link-x;
+                        link-y: pane.link-y;
+                        link-w: pane.link-w;
+                        link-tip: pane.link-tip;
+                        link-tip-x: pane.link-tip-x;
+                        link-tip-y: pane.link-tip-y;
                         key(m) => { root.key(idx, m); }
-                    }
-                    TouchArea {
-                        clicked => {
+                        geometry-changed(w, h) => { root.pane-geometry(idx, w, h); }
+                        link-moved(x, y) => { root.pane-link-moved(idx, x, y); }
+                        link-exited => { root.pane-link-exited(idx); }
+                        link-activated(x, y, ctrl) => {
                             root.focus-pane(idx);
-                            tp.focus();
+                            root.pane-link-activated(idx, x, y, ctrl);
                         }
                     }
                 }
@@ -319,11 +336,14 @@ export component PaneView inherits Rectangle {
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;
+            clickable-paths: root.pref-clickable;
+            editor-command: root.pref-editor;
             palette-query(q) => { root.palette-query(q); }
             palette-nav(d) => { root.palette-nav(d); }
             palette-activate => { root.palette-activate(); }
             palette-pick(i) => { root.palette-pick(i); }
             pref-action(k, a) => { root.pref-action(k, a); }
+            pref-text(k, v) => { root.pref-text(k, v); }
             dismiss => { root.overlay-dismiss(); }
         }
     }

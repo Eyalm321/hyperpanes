@@ -63,6 +63,10 @@ pub enum Setting {
     FontDelta(i32),
     ShowFrame(bool),
     ShowDot(bool),
+    /// Toggle whether terminal paths are clickable.
+    ClickablePaths(bool),
+    /// Set the editor-command template used to open clicked paths ("" = auto).
+    EditorCommand(String),
 }
 
 /// One pane's controller-side state (terminal grid + placement + chrome).
@@ -83,6 +87,13 @@ pub struct PaneState {
     pub startup: Option<String>,
     /// A fixed accent (e.g. a project color) that survives relabel; `None` = by-index.
     pub pinned_accent: Option<Color>,
+    /// The terminal surface's on-screen logical size (from the widget's `geometry-changed`),
+    /// used to hit-test clickable-path hover/click coordinates. `(0,0)` until first laid out.
+    pub surf: (f32, f32),
+    /// The current clickable-path hover hit (drives the link overlay), plus the cursor
+    /// position (logical px within the surface) for tooltip placement. `None` = no link.
+    pub link: Option<hyperpanes_terminal_widget::LinkHit>,
+    pub link_cursor: (f32, f32),
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -287,6 +298,9 @@ impl State {
             started: false,
             startup: None,
             pinned_accent: accent,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
         })
     }
 
@@ -434,6 +448,9 @@ impl State {
             started: true, // the session is already running — don't re-send any startup.
             startup: None,
             pinned_accent: det.pinned_accent,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -852,6 +869,8 @@ impl State {
             Setting::DefaultShell(shell) => self.settings.default_shell = shell,
             Setting::ShowFrame(on) => self.settings.show_frame = on,
             Setting::ShowDot(on) => self.settings.show_dot = on,
+            Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
+            Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
         }
         prefs::save(&self.settings);
         self.dirty = true;
@@ -869,6 +888,70 @@ impl State {
         }
         self.font_reload = false;
         self.dirty = true;
+    }
+
+    // ---- clickable paths (terminal link hover / activation) ----
+
+    /// Record a pane's on-screen terminal-surface size (logical px) from the widget's
+    /// `geometry-changed`, used to hit-test link coordinates. `idx` is an active-tab pane.
+    pub fn set_pane_surf(&mut self, idx: usize, w: f32, h: f32) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.surf = (w, h);
+        }
+    }
+
+    /// Hover hit-test for a clickable path under the cursor (logical px within the pane
+    /// surface). Updates the pane's link-overlay state. No-op (and clears any link) when
+    /// clickable paths are disabled. `idx` is an active-tab pane.
+    pub fn pane_link_moved(&mut self, idx: usize, x: f32, y: f32) {
+        let on = self.settings.clickable_paths;
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            if !on {
+                if p.link.is_some() {
+                    p.link = None;
+                    self.dirty = true;
+                }
+                return;
+            }
+            let (w, h) = p.surf;
+            let hit = p.pane.link_at(x, y, w, h);
+            // Only repaint when the hovered link actually changes.
+            if hit != p.link {
+                p.link = hit;
+                p.link_cursor = (x, y);
+                self.dirty = true;
+            } else if p.link.is_some() {
+                p.link_cursor = (x, y); // keep the tooltip tracking the cursor
+            }
+        }
+    }
+
+    /// Clear a pane's hover link when the pointer leaves its surface.
+    pub fn pane_link_exited(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            if p.link.take().is_some() {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Activate the link under a click: open (plain) or copy (ctrl). Returns the action so
+    /// the caller can touch the OS (clipboard / launch). `None` when clickable paths are off
+    /// or the click missed a verified path. `idx` is an active-tab pane.
+    pub fn pane_link_activate(
+        &mut self,
+        idx: usize,
+        x: f32,
+        y: f32,
+        ctrl: bool,
+    ) -> Option<hyperpanes_terminal_widget::LinkAction> {
+        if !self.settings.clickable_paths {
+            return None;
+        }
+        let editor = self.settings.editor_command.clone();
+        let p = self.active_tab_mut().panes.get_mut(idx)?;
+        let (w, h) = p.surf;
+        p.pane.activate_link(x, y, w, h, ctrl, &editor)
     }
 
     // ---- sidebar / projects ----

@@ -56,6 +56,12 @@ pub struct Settings {
     pub show_frame: bool,
     /// Whether each pane shows its accent color dot in the header.
     pub show_dot: bool,
+    /// Whether file paths in terminal output are clickable (plain click opens, Ctrl+click
+    /// copies the resolved absolute path). Mirrors `Settings.clickablePaths`.
+    pub clickable_paths: bool,
+    /// Command template used to open a clicked path ("" = auto-detect VS Code, else the OS
+    /// default handler). Placeholders: `{path}` `{line}` `{col}`. Mirrors `editorCommand`.
+    pub editor_command: String,
     /// Per-pane scrollback (history lines). Persisted for forward-compat with the
     /// renderer blob; the native terminal grid currently keeps a fixed buffer.
     pub scrollback: u32,
@@ -73,6 +79,8 @@ impl Default for Settings {
             font_px: DEFAULT_FONT_PX,
             show_frame: true,
             show_dot: true,
+            clickable_paths: true,
+            editor_command: String::new(),
             scrollback: 5000,
             show_sidebar: true,
         }

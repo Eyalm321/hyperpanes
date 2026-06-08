@@ -335,7 +335,12 @@ impl App {
             }
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
-                    w.state.borrow_mut().note_cwd(&cwd);
+                    let mut st = w.state.borrow_mut();
+                    // Resolve clickable paths relative to this pane's live directory.
+                    if let Some((ti, pi)) = st.find_pane(&uid) {
+                        st.tabs[ti].panes[pi].pane.set_cwd(Some(cwd.clone()));
+                    }
+                    st.note_cwd(&cwd);
                 }
             }
         }
@@ -945,6 +950,50 @@ impl App {
             });
         }
 
+        // clickable paths: track each pane's surface size + drive hover/click hit-testing.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_geometry(move |i, w, h| {
+                if let Some(win) = app.window_by_id(id) {
+                    win.state.borrow_mut().set_pane_surf(i as usize, w, h);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_link_moved(move |i, x, y| {
+                if let Some(win) = app.window_by_id(id) {
+                    win.state.borrow_mut().pane_link_moved(i as usize, x, y);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_link_exited(move |i| {
+                if let Some(win) = app.window_by_id(id) {
+                    win.state.borrow_mut().pane_link_exited(i as usize);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_link_activated(move |i, x, y, ctrl| {
+                if let Some(win) = app.window_by_id(id) {
+                    let action = win
+                        .state
+                        .borrow_mut()
+                        .pane_link_activate(i as usize, x, y, ctrl);
+                    if let Some(hyperpanes_terminal_widget::LinkAction::Copy(path)) = action {
+                        copy_to_clipboard(&path);
+                    }
+                }
+            });
+        }
+
         // tabs
         cb0!(on_new_tab, Command::NewTab);
         cb_usize!(on_select_tab, Command::SwitchTab);
@@ -1057,6 +1106,20 @@ impl App {
                             .map(|(_, v)| v.to_string())
                             .unwrap_or_default(),
                     ),
+                    6 => crate::state::Setting::ClickablePaths(arg != 0),
+                    _ => return,
+                };
+                app.run_command(&w, Command::ApplySetting(setting));
+            });
+        }
+        // String-valued settings (editor command).
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_text(move |kind, value| {
+                let Some(w) = app.window_by_id(id) else { return };
+                let setting = match kind {
+                    7 => crate::state::Setting::EditorCommand(value.to_string()),
                     _ => return,
                 };
                 app.run_command(&w, Command::ApplySetting(setting));
@@ -1151,4 +1214,17 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
     windows
         .iter()
         .find(|w| w.state.borrow_mut().find_pane(uid).is_some())
+}
+
+/// Copy `text` to the Windows clipboard via the built-in `clip` utility (no extra crate /
+/// Win32 feature needed). Used by the Ctrl+click branch of clickable paths. Best-effort.
+pub(crate) fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if let Ok(mut child) = Command::new("clip").stdin(Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }

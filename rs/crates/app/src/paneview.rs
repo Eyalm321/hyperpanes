@@ -96,6 +96,9 @@ fn sync_model<T: Clone + 'static>(model: &VecModel<T>, items: Vec<T>) {
 /// Build a model row for pane `i`.
 fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
     let (x, y, w, h) = ps.rect;
+    // Project the clickable-path hover overlay (if any) into the model row.
+    let (lx, ly) = ps.link_cursor;
+    let link = ps.link.as_ref();
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
@@ -106,6 +109,13 @@ fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
         h,
         visible: ps.visible,
         focused,
+        link_visible: link.is_some(),
+        link_x: link.map(|l| l.x).unwrap_or(0.0),
+        link_y: link.map(|l| l.y).unwrap_or(0.0),
+        link_w: link.map(|l| l.w).unwrap_or(0.0),
+        link_tip: link.map(|l| l.tip.clone()).unwrap_or_default().into(),
+        link_tip_x: lx + 12.0,
+        link_tip_y: ly + 16.0,
     }
 }
 
@@ -328,6 +338,8 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_pref_fontpx(state.settings.font_px.round() as i32);
     app.set_show_frame(state.settings.show_frame);
     app.set_show_dot(state.settings.show_dot);
+    app.set_pref_clickable(state.settings.clickable_paths);
+    app.set_pref_editor(state.settings.editor_command.clone().into());
 
     // sidebar / projects: the rail gating + flyout state + rows
     app.set_show_sidebar(state.settings.show_sidebar);

@@ -54,6 +54,8 @@ export component AppWindow inherits Window {
     in property <[PrefOption]> pref-families;
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
+    in property <bool> pref-clickable: true;
+    in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
@@ -80,6 +82,11 @@ export component AppWindow inherits Window {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // clickable paths (terminal links)
+    callback pane-geometry(int, length, length);
+    callback pane-link-moved(int, length, length);
+    callback pane-link-exited(int);
+    callback pane-link-activated(int, length, length, bool);
     // tabs
     callback select-tab(int);
     callback close-tab(int);
@@ -110,6 +117,7 @@ export component AppWindow inherits Window {
     callback palette-activate();
     callback palette-pick(int);
     callback pref-action(int, int);
+    callback pref-text(int, string);
     callback overlay-dismiss();
     // ---- sidebar rail ----
     callback open-project(int);
@@ -184,6 +192,8 @@ export component AppWindow inherits Window {
                 pref-fontpx: root.pref-fontpx;
                 pref-frame: root.show-frame;
                 pref-dot: root.show-dot;
+                pref-clickable: root.pref-clickable;
+                pref-editor: root.pref-editor;
                 drop-rect-x: root.drop-rect-x;
                 drop-rect-y: root.drop-rect-y;
                 drop-rect-w: root.drop-rect-w;
@@ -199,11 +209,16 @@ export component AppWindow inherits Window {
                 pane-zoom(i) => { root.pane-zoom(i); }
                 pane-fullscreen(i) => { root.pane-fullscreen(i); }
                 pane-close(i) => { root.pane-close(i); }
+                pane-geometry(i, w, h) => { root.pane-geometry(i, w, h); }
+                pane-link-moved(i, x, y) => { root.pane-link-moved(i, x, y); }
+                pane-link-exited(i) => { root.pane-link-exited(i); }
+                pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
                 palette-query(q) => { root.palette-query(q); }
                 palette-nav(d) => { root.palette-nav(d); }
                 palette-activate => { root.palette-activate(); }
                 palette-pick(i) => { root.palette-pick(i); }
                 pref-action(k, a) => { root.pref-action(k, a); }
+                pref-text(k, v) => { root.pref-text(k, v); }
                 overlay-dismiss => { root.overlay-dismiss(); }
             }
 
