@@ -39,6 +39,18 @@ pub fn is_custom_font(font: &str) -> bool {
     !font.is_empty() && !FONT_OPTIONS.iter().any(|(_, v)| *v == font)
 }
 
+/// The human label for a saved font value — the matching [`FONT_OPTIONS`] label, "Custom"
+/// for a user-typed path, else the default. Used by the preview HUD.
+pub fn font_label(font: &str) -> &str {
+    if let Some((label, _)) = FONT_OPTIONS.iter().find(|(_, v)| *v == font) {
+        label
+    } else if is_custom_font(font) {
+        "Custom"
+    } else {
+        FONT_OPTIONS[0].0
+    }
+}
+
 /// Fonts shipped with hyperpanes (OFL 1.1, baked into the binary) so they're always
 /// available regardless of what the user has installed. Extracted to [`bundled_font_dir`]
 /// on startup (see [`init_bundled_fonts`]); their file names match the [`FONT_OPTIONS`]
@@ -105,6 +117,14 @@ pub const MIN_FONT_PX: f32 = 8.0;
 pub const MAX_FONT_PX: f32 = 32.0;
 pub const DEFAULT_FONT_PX: f32 = 14.0;
 
+/// Idle-alert threshold bounds (seconds a pane must stay output-quiet before it glows).
+/// The dial steps in [`IDLE_STEP_SECONDS`] jumps, so the bounds are whole multiples of it.
+pub const MIN_IDLE_SECONDS: u32 = 30;
+pub const MAX_IDLE_SECONDS: u32 = 1800;
+pub const DEFAULT_IDLE_SECONDS: u32 = 30;
+/// The ± step (seconds) the "Idle after" dial moves by.
+pub const IDLE_STEP_SECONDS: u32 = 30;
+
 /// Persisted app-wide preferences (native MVP subset of the renderer `Settings`).
 /// Every field has a sensible default so an older/partial blob never breaks load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,6 +160,15 @@ pub struct Settings {
     /// Whether the right-edge sidebar rail (quick-pane + git-projects history) is
     /// shown. Hidden in fullscreen regardless of this. Mirrors `useSettings.showSidebar`.
     pub show_sidebar: bool,
+    /// Whether a pane softly glows its frame once its agent/shell has gone output-quiet
+    /// for [`Self::idle_alert_seconds`] (the AI-pane quiescence glow). Mirrors `idleAlert`.
+    pub idle_alert: bool,
+    /// The active glow style token (firefly / pulse / blink / solid). Stored by name so
+    /// the list can grow without invalidating the blob. Mirrors `idleEffect`.
+    pub idle_effect: String,
+    /// How long a pane must stay output-quiet before it glows, in seconds (clamped to
+    /// [`MIN_IDLE_SECONDS`]..=[`MAX_IDLE_SECONDS`]). Mirrors `idleAlertSeconds`.
+    pub idle_alert_seconds: u32,
 }
 
 impl Default for Settings {
@@ -156,6 +185,9 @@ impl Default for Settings {
             editor_command: String::new(),
             scrollback: 5000,
             show_sidebar: true,
+            idle_alert: true,
+            idle_effect: String::from("firefly"),
+            idle_alert_seconds: DEFAULT_IDLE_SECONDS,
         }
     }
 }

@@ -289,6 +289,32 @@ export component PaneView inherits Rectangle {
             }
         }
 
+        // idle glow: an accent-tinted glow on the pane FRAME once it has gone output-quiet
+        // (the AI-pane quiescence effect). `pane.glow` is the animated opacity the controller
+        // computes each tick (firefly/pulse/blink/solid); 0 = no glow. Confined to the frame —
+        // a bright ring on the border plus a softer inner ring for bloom — so it never bleeds
+        // a halo over neighbouring panes or the terminal content.
+        for pane[idx] in root.panes : Rectangle {
+            visible: pane.visible && pane.glow > 0.01;
+            x: pane.x;
+            y: pane.y;
+            width: pane.w;
+            height: pane.h;
+            border-radius: 7px;
+            border-width: 2px;
+            border-color: pane.accent.with-alpha(pane.glow);
+            // softer inner ring, inset so the whole effect stays within the pane footprint.
+            Rectangle {
+                x: 2px;
+                y: 2px;
+                width: parent.width - 4px;
+                height: parent.height - 4px;
+                border-radius: 5px;
+                border-width: 1px;
+                border-color: pane.accent.with-alpha(pane.glow * 0.45);
+            }
+        }
+
         // resize seams, drawn over the panes
         for d in root.dividers : DividerHandle {
             desc: d;

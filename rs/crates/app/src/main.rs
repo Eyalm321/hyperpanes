@@ -22,12 +22,14 @@
 mod app;
 mod command;
 mod drag;
+mod glow;
 mod keybindings;
 mod palette;
 mod paneview;
 mod prefs;
 mod sidebar;
 mod state;
+mod tetris;
 mod theme;
 mod window;
 

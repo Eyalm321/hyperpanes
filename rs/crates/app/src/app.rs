@@ -312,6 +312,11 @@ impl App {
                 let mut st = w.state.borrow_mut();
                 if let Some((ti, pi)) = st.find_pane(&uid) {
                     let pc = &mut st.tabs[ti].panes[pi];
+                    // Sniff the shell's OSC window title so the idle glow can tell an agent
+                    // pane (claude, etc.) from a plain shell (app-side; no core change).
+                    if let Some(title) = crate::glow::sniff_osc_title(&data) {
+                        pc.shell_title = title;
+                    }
                     pc.pane.feed(&data);
                     let replies = pc.pane.take_replies();
                     if !replies.is_empty() {
@@ -1120,10 +1125,14 @@ impl App {
                             .unwrap_or_default(),
                     ),
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
+                    // idle-glow settings — apply immediately (not drafted).
+                    10 => crate::state::Setting::IdleAlert(arg != 0),
+                    11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),
+                    12 => crate::state::Setting::IdleSeconds(arg),
                     _ => return,
                 };
                 // Appearance settings (0–4, 9 = theme) edit the draft (commit on Done);
-                // General/Terminal settings (5–6) apply immediately, matching the renderer.
+                // General/Terminal/idle settings apply immediately, matching the renderer.
                 let cmd = if kind <= 4 || kind == 9 {
                     Command::DraftSetting(setting)
                 } else {
