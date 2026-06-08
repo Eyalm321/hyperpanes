@@ -1998,6 +1998,9 @@ impl State {
     pub fn paste_pane(&mut self, idx: usize, mgr: &SessionManager) {
         let payload = self.active_tab_mut().panes.get_mut(idx).and_then(|p| {
             let text = p.pane.paste_from_clipboard()?;
+            // Drop any active drag-selection: its highlight should clear on paste, and a
+            // lingering "live" selection could otherwise be re-copied (pasting stale text).
+            p.pane.selection_clear();
             // Snap the viewport to the live edge so the caret lands at the end of the pasted
             // text (visible), regardless of where the pane was scrolled when pasting.
             p.pane.scroll_to_bottom();
