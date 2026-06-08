@@ -225,13 +225,15 @@ export component TerminalPane inherits Rectangle {
     }
 
     // Drag-selection highlight (one rect per row-span), painted over the terminal surface but
-    // under the link/search overlays and chrome.
+    // under the link/search overlays and chrome. A NEUTRAL contrast overlay (a translucent
+    // wash of the terminal foreground), NOT the pane accent — so selected text reads clearly
+    // and a coloured (e.g. red) pane doesn't tint its selection.
     for r in root.selection-rects: Rectangle {
         x: r.x;
         y: r.y;
         width: r.w;
         height: r.h;
-        background: root.accent.with-alpha(0.30);
+        background: #c0caf5.with-alpha(0.28);
     }
 
     // Search-match highlights: every visible match dimmed, the active one accented + outlined.

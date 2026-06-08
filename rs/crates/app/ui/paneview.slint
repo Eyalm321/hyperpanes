@@ -264,6 +264,8 @@ export component PaneView inherits Rectangle {
     callback pane-selection-begin(int, length, length);
     callback pane-selection-update(int, length, length);
     callback pane-selection-end(int);
+    // right-click in a pane body → paste the clipboard into that pane's session.
+    callback pane-paste(int);
     // in-pane search box (opened from the pane menu's "Search…")
     callback pane-search-edited(int, string);
     callback pane-search-next(int);
@@ -497,6 +499,7 @@ export component PaneView inherits Rectangle {
                         selection-begin(x, y) => { root.pane-selection-begin(idx, x, y); }
                         selection-update(x, y) => { root.pane-selection-update(idx, x, y); }
                         selection-end => { root.pane-selection-end(idx); }
+                        paste-requested => { root.pane-paste(idx); }
                         search-edited(q) => { root.pane-search-edited(idx, q); }
                         search-next => { root.pane-search-next(idx); }
                         search-prev => { root.pane-search-prev(idx); }

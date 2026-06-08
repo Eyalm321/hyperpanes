@@ -1084,6 +1084,18 @@ impl App {
             });
         }
 
+        // right-click in a pane body → paste the clipboard into that pane's session (mirrors
+        // Electron; routed through the command path so it uses the session manager).
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_paste(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::PastePane(i as usize));
+                }
+            });
+        }
+
         // in-pane search box (opened from the pane context menu)
         {
             let app = app.clone();

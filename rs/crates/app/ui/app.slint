@@ -139,6 +139,7 @@ export component AppWindow inherits Window {
     callback pane-selection-begin(int, length, length);
     callback pane-selection-update(int, length, length);
     callback pane-selection-end(int);
+    callback pane-paste(int);   // right-click a pane body → paste into its session
     // in-pane search (opened from the pane context menu)
     callback pane-search-edited(int, string);
     callback pane-search-next(int);
@@ -292,6 +293,7 @@ export component AppWindow inherits Window {
                 pane-selection-begin(i, x, y) => { root.pane-selection-begin(i, x, y); }
                 pane-selection-update(i, x, y) => { root.pane-selection-update(i, x, y); }
                 pane-selection-end(i) => { root.pane-selection-end(i); }
+                pane-paste(i) => { root.pane-paste(i); }
                 pane-search-edited(i, q) => { root.pane-search-edited(i, q); }
                 pane-search-next(i) => { root.pane-search-next(i); }
                 pane-search-prev(i) => { root.pane-search-prev(i); }
