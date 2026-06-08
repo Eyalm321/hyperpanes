@@ -28,6 +28,21 @@ component PlusIcon inherits Rectangle {
     Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.6px; width: 11px; border-radius: 1px; background: ink; }
 }
 
+// two overlapping rounded squares → "open new window"
+component NewWindowIcon inherits Rectangle {
+    in property <color> ink;
+    width: 16px;
+    height: 16px;
+    Rectangle {
+        x: 4px; y: 1px; width: 9px; height: 9px;
+        border-width: 1.4px; border-color: ink; border-radius: 2px; background: transparent;
+    }
+    Rectangle {
+        x: 1px; y: 5px; width: 9px; height: 9px;
+        border-width: 1.4px; border-color: ink; border-radius: 2px; background: Theme.mantle;
+    }
+}
+
 component MinIcon inherits Rectangle {
     in property <color> ink;
     width: 16px;
@@ -196,6 +211,8 @@ export component TopBar inherits Rectangle {
     callback new-tab();
     callback begin-rename(int);
     callback rename-tab(int, string);
+    callback new-window();
+    callback move-pane-new-window();
     callback set-layout(int);
     callback new-pane();
     callback open-palette();
@@ -285,6 +302,23 @@ export component TopBar inherits Rectangle {
             }
         }
 
+        // ===== new OS window =====
+        VerticalLayout {
+            alignment: center;
+            nw-btn := Rectangle {
+                width: 32px;
+                height: 26px;
+                border-radius: 6px;
+                background: nwa.has-hover ? Theme.surface2 : transparent;
+                NewWindowIcon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: nwa.has-hover ? Theme.text : Theme.subtext;
+                }
+                nwa := TouchArea { clicked => { root.new-window(); } }
+            }
+        }
+
         // ===== window controls (flush right corner) =====
         Rectangle {
             width: 1px;
@@ -330,8 +364,8 @@ export component TopBar inherits Rectangle {
     menu-popup := PopupWindow {
         x: 8px;
         y: 36px;
-        width: 230px;
-        height: 476px;
+        width: 250px;
+        height: 536px;
 
         Rectangle {
             background: Theme.mantle;
@@ -357,6 +391,14 @@ export component TopBar inherits Rectangle {
                 MenuItem {
                     label: "New tab";
                     clicked => { root.new-tab(); menu-popup.close(); }
+                }
+                MenuItem {
+                    label: "New window";
+                    clicked => { root.new-window(); menu-popup.close(); }
+                }
+                MenuItem {
+                    label: "Move pane to new window";
+                    clicked => { root.move-pane-new-window(); menu-popup.close(); }
                 }
                 Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
 

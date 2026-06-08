@@ -112,9 +112,23 @@ pub fn build(state: &State) -> Vec<Entry> {
         Command::NewPane,
     ));
 
+    // ---- windows ----
+    cmds.push(Entry::new(
+        "New window",
+        "Open a second OS window on the shared session engine",
+        "os window monitor split",
+        Command::NewWindow,
+    ));
+
     let t = state.active_tab();
     if !t.panes.is_empty() {
         let focused = t.focused;
+        cmds.push(Entry::new(
+            "Move pane to new window",
+            "Re-host the focused pane in a new window (keeps its session)",
+            "detach tear-off rehost window",
+            Command::MovePaneToNewWindow,
+        ));
         cmds.push(Entry::new(
             if t.zoomed.is_some() { "Unzoom pane" } else { "Zoom pane" },
             "Toggle full-tab zoom of the focused pane",

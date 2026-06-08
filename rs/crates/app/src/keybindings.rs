@@ -65,6 +65,9 @@ pub fn default_bindings() -> Vec<Binding> {
         // General
         b(true, false, true, Letter('p'), "Command palette", Command::PaletteOpen),
         b(true, false, true, Letter('b'), "Toggle sidebar", Command::ToggleSidebar),
+        // Windows
+        b(true, false, true, Letter('o'), "New window", Command::NewWindow),
+        b(true, false, true, Letter('m'), "Move pane to new window", Command::MovePaneToNewWindow),
         // Tabs / panes
         b(true, false, true, Letter('t'), "New tab", Command::NewTab),
         b(true, false, true, Letter('n'), "New pane", Command::NewPane),

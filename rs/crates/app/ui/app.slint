@@ -67,6 +67,9 @@ export component AppWindow inherits Window {
     callback new-tab();
     callback begin-rename(int);
     callback rename-tab(int, string);
+    // multi-window
+    callback new-window();
+    callback move-pane-new-window();
     // panes / layout
     callback new-pane();
     callback close-focused();
@@ -107,6 +110,8 @@ export component AppWindow inherits Window {
             new-tab => { root.new-tab(); }
             begin-rename(i) => { root.begin-rename(i); }
             rename-tab(i, t) => { root.rename-tab(i, t); }
+            new-window => { root.new-window(); }
+            move-pane-new-window => { root.move-pane-new-window(); }
             set-layout(l) => { root.set-layout(l); }
             new-pane => { root.new-pane(); }
             open-palette => { root.open-palette(); }
