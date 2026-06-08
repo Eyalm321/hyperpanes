@@ -431,8 +431,24 @@ export component OverlayLayer inherits Rectangle {
                     Rectangle { vertical-stretch: 1; }
                 }
             }
-            // ---- main column: scrolling body + pinned footer ----
+            // ---- main column: pinned preview + scrolling body + pinned footer ----
             VerticalLayout {
+                // The Appearance preview is pinned (sticky) above the scroll area, so a
+                // change stays visible while the controls below scroll (mirrors Electron).
+                if prefs.sel == 0 : VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 16px;
+                    spacing: 8px;
+                    Text { text: "Preview"; color: Theme.faint; font-size: 11px; }
+                    AppearancePreview {
+                        surface: root.preview-surface;
+                        accent: root.preview-accent;
+                        show-frame: root.show-frame;
+                        show-dot: root.show-dot;
+                        bg: root.preview-bg;
+                    }
+                }
                 Rectangle {
                     vertical-stretch: 1;
                     clip: true;
@@ -449,16 +465,6 @@ export component OverlayLayer inherits Rectangle {
                         // ===================== Appearance =====================
                         if prefs.sel == 0 : VerticalLayout {
                             spacing: 12px;
-
-            // ---- live preview ----
-            Text { text: "Preview"; color: Theme.faint; font-size: 11px; }
-            AppearancePreview {
-                surface: root.preview-surface;
-                accent: root.preview-accent;
-                show-frame: root.show-frame;
-                show-dot: root.show-dot;
-                bg: root.preview-bg;
-            }
 
             // ---- frame color palette (pane dot + border) ----
             Text { text: "Frame color palette"; color: Theme.faint; font-size: 11px; }
