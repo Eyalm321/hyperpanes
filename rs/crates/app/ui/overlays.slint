@@ -15,6 +15,21 @@
 import { Theme } from "theme.slint";
 import { PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
 
+// A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
+// used to mark the active option in the pickers.
+component Check inherits Path {
+    in property <brush> ink: Theme.accent;
+    width: 12px;
+    height: 10px;
+    viewbox-width: 12;
+    viewbox-height: 10;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    MoveTo { x: 1; y: 5.5; }
+    LineTo { x: 4.5; y: 9; }
+    LineTo { x: 11; y: 1; }
+}
+
 // A small labelled toggle switch (frame/dot prefs).
 component PrefToggle inherits Rectangle {
     in property <string> label;
@@ -202,11 +217,10 @@ component FontDropdown inherits Rectangle {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        Text {
-                            text: opt.active ? "✓" : "";
-                            color: Theme.accent;
-                            font-size: 12px;
-                            vertical-alignment: center;
+                        VerticalLayout {
+                            alignment: center;
+                            width: 14px;
+                            if opt.active : Check {}
                         }
                     }
                     ita := TouchArea { clicked => { root.selected(opt.id); popup.close(); } }
@@ -506,11 +520,10 @@ export component OverlayLayer inherits Rectangle {
                                 }
                             }
                         }
-                        Text {
-                            text: opt.active ? "✓" : "";
-                            color: Theme.accent;
-                            font-size: 13px;
-                            vertical-alignment: center;
+                        VerticalLayout {
+                            alignment: center;
+                            width: 14px;
+                            if opt.active : Check {}
                         }
                     }
                     pta := TouchArea { clicked => { root.pref-action(4, opt.id); } }
