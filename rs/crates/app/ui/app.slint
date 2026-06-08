@@ -190,14 +190,10 @@ export component AppWindow inherits Window {
     // A bright inset border drawn over the whole window while it's the live target of a
     // pane being torn in from another window (click-through — the drag pump owns input).
     if root.drop-win-active : Rectangle {
-        background: transparent;
+        background: Theme.brand.with-alpha(0.06);
         border-width: 2.5px;
         border-color: Theme.brand;
         border-radius: 8px;
-        Rectangle {
-            background: Theme.brand;
-            opacity: 0.06;
-        }
     }
 
     // ===== fullscreen "Hold Esc to exit" hint (ported 1:1 from the Electron app) =====

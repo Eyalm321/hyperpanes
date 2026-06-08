@@ -87,12 +87,15 @@ component TabChip inherits Rectangle {
     callback grab();                         // a press on the tab — arm a reorder drag
     callback report-geom(length, length);    // window-x + width, for hit-testing
 
-    // Report geometry to the controller whenever the strip reflows (so the drag pump can
-    // hit-test the strip without Slint pointer delivery).
-    property <length> ax: self.absolute-position.x;
-    changed ax => { root.report-geom(self.absolute-position.x, self.width); }
-    changed width => { root.report-geom(self.absolute-position.x, self.width); }
-    init => { root.report-geom(self.absolute-position.x, self.width); }
+    // Report this tab's window geometry to the controller so the drag pump can hit-test
+    // the strip without Slint pointer delivery. Read from a Timer (imperatively, outside
+    // the layout pass) — reading `absolute-position` inside a reactive *binding* during
+    // layout trips Slint's "Recursion detected" cycle guard.
+    Timer {
+        interval: 250ms;
+        running: true;
+        triggered => { root.report-geom(root.absolute-position.x, root.width); }
+    }
 
     min-width: 96px;
     max-width: 200px;
@@ -255,8 +258,7 @@ export component TopBar inherits Rectangle {
     // drag/tear-off: a faint wash while the strip is a drop target + an insertion caret at
     // the slot the dragged tab/pane will land in. Visual only (no TouchArea → click-through).
     if root.drop-strip-active : Rectangle {
-        background: Theme.brand;
-        opacity: 0.08;
+        background: Theme.brand.with-alpha(0.10);
     }
     if root.drop-tab-active : Rectangle {
         x: root.drop-tab-x - 1.5px;

@@ -269,10 +269,10 @@ export component PaneView inherits Rectangle {
             y: root.drop-rect-y;
             width: root.drop-rect-w;
             height: root.drop-rect-h;
-            background: Theme.brand;
-            opacity: 0.12;
+            // alpha in the COLOR, not element opacity (which would also dim the border).
+            background: Theme.brand.with-alpha(0.16);
             border-radius: 7px;
-            border-width: 2px;
+            border-width: 2.5px;
             border-color: Theme.brand;
             // near-edge marker (left/right → vertical bar; top/bottom → horizontal bar)
             Rectangle {

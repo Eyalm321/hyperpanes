@@ -409,17 +409,18 @@ impl App {
     /// current global cursor. Until the cursor moves past the threshold this is just a
     /// pending click (the header's own `clicked` still focuses the pane).
     fn begin_pane_drag(self: &Rc<Self>, win: &Rc<Window>, pane_idx: usize) {
-        let snap = {
-            let st = win.state.borrow();
-            st.active_tab()
-                .panes
-                .get(pane_idx)
-                .map(|p| (p.uid.clone(), p.title.clone(), p.accent))
-        };
-        if let Some((uid, title, accent)) = snap {
+        let uid = win
+            .state
+            .borrow()
+            .active_tab()
+            .panes
+            .get(pane_idx)
+            .map(|p| p.uid.clone());
+        if let Some(uid) = uid {
+            crate::dbg_log(&format!("pane-grab win={} idx={} uid={}", win.id, pane_idx, uid));
             let mut ds = DragState::new(
                 win.id,
-                DragKind::Pane { uid, title, accent },
+                DragKind::Pane { uid },
                 drag::cursor_pos(),
             );
             // The button is down right now (this fires on pointer-down); arm immediately so
@@ -431,21 +432,19 @@ impl App {
 
     /// A tab was pressed: arm an in-window tab-reorder drag from the global cursor.
     fn begin_tab_drag(self: &Rc<Self>, win: &Rc<Window>, tab_idx: usize) {
-        let title = win
-            .state
-            .borrow()
-            .tabs
-            .get(tab_idx)
-            .map(|t| t.title.clone());
-        if let Some(title) = title {
-            let mut ds = DragState::new(
-                win.id,
-                DragKind::Tab { index: tab_idx, title },
-                drag::cursor_pos(),
-            );
-            ds.armed = drag::left_button_down();
-            *self.drag.borrow_mut() = Some(ds);
+        if tab_idx >= win.state.borrow().tabs.len() {
+            return;
         }
+        crate::dbg_log(&format!("tab-grab win={} idx={}", win.id, tab_idx));
+        // Select the grabbed tab so it's visually distinct (active chip) while dragging.
+        win.state.borrow_mut().switch_tab(tab_idx);
+        let mut ds = DragState::new(
+            win.id,
+            DragKind::Tab { index: tab_idx },
+            drag::cursor_pos(),
+        );
+        ds.armed = drag::left_button_down();
+        *self.drag.borrow_mut() = Some(ds);
     }
 
     /// Drive an in-flight drag from the global cursor: promote past the threshold, follow
@@ -484,7 +483,14 @@ impl App {
             let d = self.drag.borrow_mut().take().unwrap();
             if d.active {
                 let hover = self.compute_hover(windows, cursor);
+                crate::dbg_log(&format!(
+                    "drag release: source_win={} pane={} hover{{win={:?} strip={} pane_idx={:?} slot={} tab_slot={}}}",
+                    d.source_win, d.is_pane(), hover.win, hover.over_strip, hover.pane_idx,
+                    hover.slot_index, hover.tab_slot
+                ));
                 self.apply_drop(windows, &d, &hover, cursor);
+            } else {
+                crate::dbg_log("drag release: was a plain click (never crossed threshold)");
             }
             if let Some(g) = self.ghost.borrow().as_ref() {
                 g.hide();
@@ -500,6 +506,24 @@ impl App {
         }
 
         let hover = self.compute_hover(windows, cursor);
+
+        // Live tab reorder: a tab drag rearranges its siblings in real time (Chrome-style),
+        // so the dragged tab visibly slides between its neighbours instead of only showing a
+        // caret. The drop on release then needs no further work.
+        if !is_pane && hover.win == Some(source_id) && hover.over_strip {
+            if let Some(src) = self.window_by_id(source_id) {
+                let mut guard = self.drag.borrow_mut();
+                if let Some(DragState { kind: DragKind::Tab { index, .. }, .. }) = guard.as_mut() {
+                    let cur = *index;
+                    let slot = hover.tab_slot;
+                    let dest = if slot > cur { slot - 1 } else { slot };
+                    if dest != cur {
+                        src.state.borrow_mut().reorder_tab(cur, slot);
+                        *index = dest;
+                    }
+                }
+            }
+        }
 
         // Ghost chases the cursor once a *pane* drag has left its source window. A tab drag
         // is in-window only, so it never spawns a ghost.

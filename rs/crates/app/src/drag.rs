@@ -22,8 +22,6 @@
 //! provide the live feedback. The detach→adopt (replay-primed, no PTY restart) happens
 //! only on release, so a cancelled drag costs nothing.
 
-use slint::{Color, SharedString};
-
 /// Movement past this many **physical** px (from the press point) promotes a pending
 /// press into a real drag — below it, the gesture is just a click (focus / select).
 pub const DRAG_THRESHOLD_PX: i32 = 6;
@@ -34,18 +32,16 @@ pub const DRAG_THRESHOLD_PX: i32 = 6;
 const EDGE_BAND_FRAC: f32 = 0.3;
 const EDGE_BAND_MAX_PX: f32 = 140.0;
 
-/// What is being dragged. A snapshot taken at grab time so the source models can keep
-/// mutating (resync) without disturbing the in-flight drag.
+/// What is being dragged. Just the identity of the dragged element — the chrome (title /
+/// accent) is re-read fresh from the live pane at drop time (via `detach_uid`), so a drag
+/// never carries a stale snapshot.
 #[derive(Debug, Clone)]
 pub enum DragKind {
-    /// A pane pulled by its header. Carries the rebind info needed to re-host it.
-    Pane {
-        uid: String,
-        title: SharedString,
-        accent: Color,
-    },
-    /// A tab pulled along the strip (in-window reorder).
-    Tab { index: usize, title: SharedString },
+    /// A pane pulled by its header (by session `uid`).
+    Pane { uid: String },
+    /// A tab pulled along the strip (in-window reorder); `index` is its live position,
+    /// updated as it slides between siblings.
+    Tab { index: usize },
 }
 
 /// One in-flight drag, owned by the app while a gesture is live.
