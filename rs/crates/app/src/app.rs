@@ -1035,6 +1035,44 @@ impl App {
             });
         }
 
+        // in-pane search box (opened from the pane context menu)
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_edited(move |i, q| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_query(i as usize, &q);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_next(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_step(i as usize, true);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_prev(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_step(i as usize, false);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_search_closed(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().pane_search_close(i as usize);
+                }
+            });
+        }
+
         // tabs
         cb0!(on_new_tab, Command::NewTab);
         cb_usize!(on_select_tab, Command::SwitchTab);

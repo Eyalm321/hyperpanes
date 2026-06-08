@@ -127,6 +127,11 @@ export component AppWindow inherits Window {
     callback pane-link-moved(int, length, length);
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
+    // in-pane search (opened from the pane context menu)
+    callback pane-search-edited(int, string);
+    callback pane-search-next(int);
+    callback pane-search-prev(int);
+    callback pane-search-closed(int);
     // tabs
     callback select-tab(int);
     callback close-tab(int);
@@ -264,6 +269,10 @@ export component AppWindow inherits Window {
                 pane-link-moved(i, x, y) => { root.pane-link-moved(i, x, y); }
                 pane-link-exited(i) => { root.pane-link-exited(i); }
                 pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
+                pane-search-edited(i, q) => { root.pane-search-edited(i, q); }
+                pane-search-next(i) => { root.pane-search-next(i); }
+                pane-search-prev(i) => { root.pane-search-prev(i); }
+                pane-search-closed(i) => { root.pane-search-closed(i); }
             }
 
             // Shown whenever the setting is on AND not fullscreen (mirrors

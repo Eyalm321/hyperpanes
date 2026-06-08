@@ -1820,6 +1820,30 @@ impl State {
         }
     }
 
+    /// Set pane `idx`'s search query (find-as-you-type).
+    pub fn pane_search_query(&mut self, idx: usize, query: &str) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_set_query(query);
+            self.dirty = true;
+        }
+    }
+
+    /// Step pane `idx`'s search to the next/previous match.
+    pub fn pane_search_step(&mut self, idx: usize, forward: bool) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_step(forward);
+            self.dirty = true;
+        }
+    }
+
+    /// Close pane `idx`'s search box.
+    pub fn pane_search_close(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.search_close();
+            self.dirty = true;
+        }
+    }
+
     /// Copy pane `idx`'s current selection to the clipboard (no-op without a selection).
     pub fn copy_pane(&mut self, idx: usize) {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {

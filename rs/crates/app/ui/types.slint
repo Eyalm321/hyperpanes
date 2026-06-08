@@ -31,6 +31,10 @@ export struct PaneItem {
     link-tip: string,
     link-tip-x: length,
     link-tip-y: length,
+    // in-pane search box (opened from the pane menu's "Search…"): whether it's showing + the
+    // match counter text (e.g. "2 / 5").
+    search-open: bool,
+    search-count: string,
 }
 
 // One tab (workspace group) chip in the strip.

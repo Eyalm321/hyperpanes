@@ -152,6 +152,11 @@ export component PaneView inherits Rectangle {
     callback pane-link-moved(int, length, length);
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
+    // in-pane search box (opened from the pane menu's "Search…")
+    callback pane-search-edited(int, string);
+    callback pane-search-next(int);
+    callback pane-search-prev(int);
+    callback pane-search-closed(int);
     // Wave-2 overlay callbacks (each maps to a Command in the controller).
     callback palette-query(string);
     callback palette-nav(int);
@@ -348,6 +353,13 @@ export component PaneView inherits Rectangle {
                         link-tip: pane.link-tip;
                         link-tip-x: pane.link-tip-x;
                         link-tip-y: pane.link-tip-y;
+                        // in-pane search box (controller-driven; opened from the pane menu)
+                        search-open: pane.search-open;
+                        search-count: pane.search-count;
+                        search-edited(q) => { root.pane-search-edited(idx, q); }
+                        search-next => { root.pane-search-next(idx); }
+                        search-prev => { root.pane-search-prev(idx); }
+                        search-closed => { root.pane-search-closed(idx); }
                         key(m) => { root.key(idx, m); }
                         geometry-changed(w, h) => { root.pane-geometry(idx, w, h); }
                         link-moved(x, y) => { root.pane-link-moved(idx, x, y); }

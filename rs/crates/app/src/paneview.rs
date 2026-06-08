@@ -130,6 +130,14 @@ fn pane_item(
     // Project the clickable-path hover overlay (if any) into the model row.
     let (lx, ly) = ps.link_cursor;
     let link = ps.link.as_ref();
+    // In-pane search box state (opened from the pane menu's "Search…").
+    let search_open = ps.pane.search_is_open();
+    let (cur, total) = ps.pane.search_count();
+    let search_count: SharedString = if !search_open || total == 0 {
+        SharedString::new()
+    } else {
+        format!("{cur} / {total}").into()
+    };
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
@@ -152,6 +160,8 @@ fn pane_item(
         link_tip: link.map(|l| l.tip.clone()).unwrap_or_default().into(),
         link_tip_x: lx + 12.0,
         link_tip_y: ly + 16.0,
+        search_open,
+        search_count,
     }
 }
 
