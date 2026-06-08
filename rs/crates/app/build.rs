@@ -3,11 +3,28 @@
 //! that surfaces as `import { TerminalPane, KeyMsg } from "@widgets";`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let widget = manifest.join("../terminal-widget/ui/widget.slint");
+
+    // Deploy the shell-integration init scripts next to the built binary so
+    // `shell_integration::shell_integration_dir()` finds them at dev runtime (the
+    // `exe_dir/resources/shell-integration` candidate). Packaging does the same for
+    // release. Without these, pwsh never emits its OSC-7 cwd → the git-project tint
+    // can't fire. Best-effort: a copy failure must never fail the build.
+    let scripts = manifest.join("../../../resources/shell-integration");
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        // OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out → profile dir is 3 up.
+        if let Some(profile) = Path::new(&out_dir).ancestors().nth(3) {
+            let dst = profile.join("resources").join("shell-integration");
+            let _ = copy_dir(&scripts, &dst);
+        }
+    }
+    for f in ["hp-init.ps1", "hp-init.sh"] {
+        println!("cargo:rerun-if-changed={}", scripts.join(f).display());
+    }
 
     let mut libs: HashMap<String, PathBuf> = HashMap::new();
     libs.insert("widgets".to_string(), widget.clone());
@@ -25,4 +42,24 @@ fn main() {
         println!("cargo:rerun-if-changed={f}");
     }
     println!("cargo:rerun-if-changed={}", widget.display());
+}
+
+/// Recursively copy `src` into `dst` (best-effort; returns the first IO error). A missing
+/// `src` is a no-op so a checkout without the scripts still builds.
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }

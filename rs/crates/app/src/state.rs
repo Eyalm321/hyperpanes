@@ -515,6 +515,22 @@ impl State {
         } else {
             Some(self.settings.default_shell.clone())
         };
+        // Inject shell integration so the shell reports its cwd (OSC-7 for pwsh/bash, OSC
+        // 9;9 for cmd). That's what lets a pane's cwd → git-project tint (and clickable-path
+        // resolution) actually fire — without it pwsh never emits a cwd OSC. Additive: the
+        // resolved shell is classified, and the init script must be deployed next to the
+        // binary (build.rs in dev, packaging for release), else this is simply `None`.
+        let shell_path = shell
+            .clone()
+            .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
+        let integration = hyperpanes_core::shell_integration::integration_for(
+            &shell_path,
+            &hyperpanes_core::shell_integration::shell_integration_dir(),
+        )
+        .map(|si| hyperpanes_core::session_manager::Integration {
+            args: si.args,
+            env: si.env.into_iter().collect(),
+        });
         let (cols, rows) = (80u16, 24u16);
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
@@ -523,6 +539,7 @@ impl State {
             pane_id: Some(uid.clone()),
             cwd,
             shell,
+            integration,
             ..Default::default()
         }) {
             eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
