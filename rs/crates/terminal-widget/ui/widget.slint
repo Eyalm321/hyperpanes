@@ -69,6 +69,9 @@ component SearchBtn inherits Rectangle {
     Text {
         text: root.label;
         color: btn-ta.has-hover ? #c0caf5 : #9aa5ce;
+        // Pin a font that carries the ↑ ↓ × glyphs — the default font is missing some,
+        // which left buttons rendering as blank/tofu.
+        font-family: "Segoe UI Symbol";
         font-size: 13px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -326,6 +329,9 @@ export component TerminalPane inherits Rectangle {
 
     // In-pane search box (Ctrl+F), anchored top-right — ports `SearchBox.tsx` / `.hp-search`.
     if root.search-open: Rectangle {
+        // Hug the content (input + counter + buttons) at the top-right. Without an explicit
+        // width the Rectangle filled the whole pane, pushing `x` negative / off-screen.
+        width: boxrow.preferred-width;
         x: parent.width - self.width - 14px;
         y: 6px;
         height: 30px;
@@ -337,7 +343,7 @@ export component TerminalPane inherits Rectangle {
         drop-shadow-color: #00000073;
         // Swallow presses so a click in the box doesn't begin a selection on the surface.
         TouchArea {}
-        HorizontalLayout {
+        boxrow := HorizontalLayout {
             padding: 4px;
             spacing: 3px;
             // Query input.
@@ -394,7 +400,7 @@ export component TerminalPane inherits Rectangle {
                 clicked => { root.search-next(); }
             }
             SearchBtn {
-                label: "✕";
+                label: "×";
                 clicked => { root.search-closed(); }
             }
         }
