@@ -58,6 +58,10 @@ export component AppWindow inherits Window {
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
+    // appearance DRAFT mirrors (dialog shows these; the panes use show-frame/show-dot)
+    in property <bool> pref-frame: true;
+    in property <bool> pref-dot: true;
+    in property <bool> prefs-confirm: false;
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
@@ -119,6 +123,8 @@ export component AppWindow inherits Window {
     callback palette-pick(int);
     callback pref-action(int, int);
     callback pref-text(int, string);
+    callback pref-done();
+    callback pref-confirm(int);
     callback overlay-dismiss();
     // ---- sidebar rail ----
     callback open-project(int);
@@ -192,8 +198,9 @@ export component AppWindow inherits Window {
                 pref-palettes: root.pref-palettes;
                 pref-shells: root.pref-shells;
                 pref-fontpx: root.pref-fontpx;
-                pref-frame: root.show-frame;
-                pref-dot: root.show-dot;
+                pref-frame: root.pref-frame;
+                pref-dot: root.pref-dot;
+                prefs-confirm: root.prefs-confirm;
                 pref-clickable: root.pref-clickable;
                 pref-editor: root.pref-editor;
                 drop-rect-x: root.drop-rect-x;
@@ -221,6 +228,8 @@ export component AppWindow inherits Window {
                 palette-pick(i) => { root.palette-pick(i); }
                 pref-action(k, a) => { root.pref-action(k, a); }
                 pref-text(k, v) => { root.pref-text(k, v); }
+                pref-done => { root.pref-done(); }
+                pref-confirm(a) => { root.pref-confirm(a); }
                 overlay-dismiss => { root.overlay-dismiss(); }
             }
 

@@ -131,20 +131,27 @@ impl Settings {
     /// else the first available family, else the always-present fallback. So a font that was
     /// uninstalled (or a blank default) never loads nothing.
     pub fn font_path(&self) -> String {
-        if !self.font_family.is_empty() && std::path::Path::new(&self.font_family).exists() {
-            return self.font_family.clone();
-        }
-        available_families()
-            .into_iter()
-            .next()
-            .map(|(_, path)| path)
-            .unwrap_or_else(|| FALLBACK_FONT.to_string())
+        resolve_or_default(&self.font_family)
     }
 
     /// Clamp the base font size into the supported range.
     pub fn clamp_font(px: f32) -> f32 {
         px.clamp(MIN_FONT_PX, MAX_FONT_PX)
     }
+}
+
+/// Resolve a saved font path to an actually-loadable one: the path itself if present, else
+/// the first available family, else the always-present fallback. Shared by the live settings
+/// and the in-dialog appearance draft so both highlight the same active font.
+pub fn resolve_or_default(font: &str) -> String {
+    if !font.is_empty() && std::path::Path::new(font).exists() {
+        return font.to_string();
+    }
+    available_families()
+        .into_iter()
+        .next()
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| FALLBACK_FONT.to_string())
 }
 
 /// The monospace fonts actually installed on this machine, as `(label, path)` pairs, in

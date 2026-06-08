@@ -404,6 +404,12 @@ impl App {
             self.run_command(win, cmd);
             return;
         }
+        // Escape while an overlay is open closes it; Preferences routes through the
+        // appearance save/discard guard (so unsaved edits prompt) rather than reaching the shell.
+        if crate::is_key(&msg.text, Key::Escape) && win.state.borrow().overlay_open() {
+            self.run_command(win, Command::CloseOverlay);
+            return;
+        }
         // Escape: a tap reaches the shell; HOLDING it in fullscreen exits fullscreen.
         if crate::is_key(&msg.text, Key::Escape) {
             let outcome = win.state.borrow_mut().note_esc();
@@ -1058,6 +1064,8 @@ impl App {
         cb0!(on_toggle_projects, Command::ToggleProjects);
         cb0!(on_palette_activate, Command::PaletteActivate);
         cb0!(on_overlay_dismiss, Command::CloseOverlay);
+        cb0!(on_pref_done, Command::PrefsDone);
+        cb_i32!(on_pref_confirm, Command::PrefsConfirm);
         cb_i32!(on_palette_nav, Command::PaletteNav);
         cb_usize!(on_palette_pick, Command::PaletteSelect);
         cb_usize!(on_open_project, Command::OpenProject);
@@ -1114,7 +1122,14 @@ impl App {
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
                     _ => return,
                 };
-                app.run_command(&w, Command::ApplySetting(setting));
+                // Appearance settings (0–4) edit the draft (commit on Done); General/Terminal
+                // settings (5–6) apply immediately, matching the renderer dialog.
+                let cmd = if kind <= 4 {
+                    Command::DraftSetting(setting)
+                } else {
+                    Command::ApplySetting(setting)
+                };
+                app.run_command(&w, cmd);
             });
         }
         // String-valued settings (editor command).

@@ -69,6 +69,32 @@ pub enum Setting {
     EditorCommand(String),
 }
 
+/// The in-dialog draft of the **appearance** settings. While Preferences is open these edit
+/// the draft only — the live panes don't change until Done (mirrors the renderer's
+/// `AppearanceDraft`). General/Terminal settings (shell, clickable paths, editor) are not
+/// drafted; they apply immediately, exactly like the Electron dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrefsDraft {
+    pub font_family: String,
+    pub frame_palette: usize,
+    pub font_px: f32,
+    pub show_frame: bool,
+    pub show_dot: bool,
+}
+
+impl PrefsDraft {
+    /// Snapshot the appearance subset of `s`.
+    fn from_settings(s: &Settings) -> Self {
+        PrefsDraft {
+            font_family: s.font_family.clone(),
+            frame_palette: s.frame_palette,
+            font_px: s.font_px,
+            show_frame: s.show_frame,
+            show_dot: s.show_dot,
+        }
+    }
+}
+
 /// One pane's controller-side state (terminal grid + placement + chrome).
 pub struct PaneState {
     pub uid: String,
@@ -162,6 +188,11 @@ pub struct State {
     /// Set when the font family/size changed — the pump reloads the font (it owns the
     /// DPI scale) then clears this.
     pub font_reload: bool,
+    /// The in-dialog appearance draft (Some while Preferences is open). Appearance edits go
+    /// here and only commit to `settings` (and the panes) on Done.
+    pub prefs_draft: Option<PrefsDraft>,
+    /// Whether the "unsaved appearance changes" save/discard prompt is showing.
+    pub prefs_confirm: bool,
     /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
@@ -216,6 +247,8 @@ impl State {
             settings: prefs::load(),
             // Apply the saved font family/size on the first pump (it owns the scale).
             font_reload: true,
+            prefs_draft: None,
+            prefs_confirm: false,
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
@@ -766,10 +799,27 @@ impl State {
 
     // ---- Wave-2: overlay panels (Seam #3) ----
 
-    /// Close whatever overlay is open (a no-op when none is).
+    /// Whether any overlay panel is currently mounted.
+    pub fn overlay_open(&self) -> bool {
+        self.overlay != Overlay::None
+    }
+
+    /// Close whatever overlay is open. Preferences routes through the appearance
+    /// save/discard guard (Esc / scrim click); every other overlay closes immediately.
     pub fn close_overlay(&mut self) {
+        if self.overlay == Overlay::Prefs {
+            self.prefs_request_close();
+            return;
+        }
+        self.close_overlay_now();
+    }
+
+    /// Actually tear down the overlay (clears any appearance draft + confirm prompt).
+    fn close_overlay_now(&mut self) {
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
+            self.prefs_draft = None;
+            self.prefs_confirm = false;
             self.dirty = true;
         }
     }
@@ -836,7 +886,107 @@ impl State {
 
     pub fn open_prefs(&mut self) {
         self.overlay = Overlay::Prefs;
+        // Snapshot the appearance settings into a draft so edits preview without touching
+        // the live panes until Done.
+        self.prefs_draft = Some(PrefsDraft::from_settings(&self.settings));
+        self.prefs_confirm = false;
         self.dirty = true;
+    }
+
+    /// The appearance values the dialog should display: the draft while Preferences is open,
+    /// else the committed settings. Returns `(resolved_font_path, frame_palette, font_px,
+    /// show_frame, show_dot)`.
+    pub fn appearance_view(&self) -> (String, usize, f32, bool, bool) {
+        match &self.prefs_draft {
+            Some(d) => (
+                prefs::resolve_or_default(&d.font_family),
+                d.frame_palette,
+                d.font_px,
+                d.show_frame,
+                d.show_dot,
+            ),
+            None => (
+                self.settings.font_path(),
+                self.settings.frame_palette,
+                self.settings.font_px,
+                self.settings.show_frame,
+                self.settings.show_dot,
+            ),
+        }
+    }
+
+    /// Edit the appearance **draft** (no live change). Used for the appearance settings while
+    /// the dialog is open; a no-op if there's no draft or `s` isn't an appearance setting.
+    pub fn draft_setting(&mut self, s: Setting) {
+        let Some(d) = self.prefs_draft.as_mut() else { return };
+        match s {
+            Setting::FontFamily(path) => d.font_family = path,
+            Setting::FramePalette(idx) => d.frame_palette = idx,
+            Setting::FontDelta(delta) => d.font_px = Settings::clamp_font(d.font_px + delta as f32),
+            Setting::ShowFrame(on) => d.show_frame = on,
+            Setting::ShowDot(on) => d.show_dot = on,
+            // Non-appearance settings never reach the draft.
+            Setting::DefaultShell(_) | Setting::ClickablePaths(_) | Setting::EditorCommand(_) => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Whether the appearance draft differs from the committed settings (un-applied edits).
+    pub fn prefs_dirty(&self) -> bool {
+        match &self.prefs_draft {
+            Some(d) => *d != PrefsDraft::from_settings(&self.settings),
+            None => false,
+        }
+    }
+
+    /// Commit the appearance draft to the live settings (Done / Save): apply each changed
+    /// field via [`Self::apply_setting`] so font reload + palette remap happen, then close.
+    pub fn prefs_done(&mut self) {
+        if let Some(d) = self.prefs_draft.take() {
+            if d.font_family != self.settings.font_family {
+                self.apply_setting(Setting::FontFamily(d.font_family.clone()));
+            }
+            if d.frame_palette != self.settings.frame_palette {
+                self.apply_setting(Setting::FramePalette(d.frame_palette));
+            }
+            if d.font_px != self.settings.font_px {
+                // Apply the absolute drafted size (apply_setting takes a delta).
+                self.apply_setting(Setting::FontDelta(
+                    (d.font_px - self.settings.font_px).round() as i32,
+                ));
+            }
+            if d.show_frame != self.settings.show_frame {
+                self.apply_setting(Setting::ShowFrame(d.show_frame));
+            }
+            if d.show_dot != self.settings.show_dot {
+                self.apply_setting(Setting::ShowDot(d.show_dot));
+            }
+        }
+        self.close_overlay_now();
+    }
+
+    /// Esc / scrim click while Preferences is open: prompt to save/discard if there are
+    /// un-applied appearance edits, otherwise just close (discarding the empty draft).
+    pub fn prefs_request_close(&mut self) {
+        if self.prefs_dirty() {
+            self.prefs_confirm = true;
+            self.dirty = true;
+        } else {
+            self.close_overlay_now();
+        }
+    }
+
+    /// Resolve the save/discard prompt: 0 = keep editing · 1 = discard · 2 = save.
+    pub fn prefs_confirm_resolve(&mut self, action: i32) {
+        match action {
+            0 => {
+                self.prefs_confirm = false;
+                self.dirty = true;
+            }
+            1 => self.close_overlay_now(),       // discard the draft
+            2 => self.prefs_done(),              // commit the draft
+            _ => {}
+        }
     }
 
     /// Apply a single preferences edit: mutate the settings, persist the blob, and flag

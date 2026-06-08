@@ -59,6 +59,12 @@ pub enum Command {
     // preferences
     PrefsOpen,
     ApplySetting(Setting),
+    /// Edit the appearance draft (previews only; commits on Done).
+    DraftSetting(Setting),
+    /// Commit the appearance draft and close (the Done button / Save).
+    PrefsDone,
+    /// Resolve the save/discard prompt: 0 keep · 1 discard · 2 save.
+    PrefsConfirm(i32),
     // sidebar / projects
     /// Show/hide the whole right-edge rail.
     ToggleSidebar,
@@ -169,6 +175,9 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         Command::PrefsOpen => state.open_prefs(),
         Command::ApplySetting(s) => state.apply_setting(s),
+        Command::DraftSetting(s) => state.draft_setting(s),
+        Command::PrefsDone => state.prefs_done(),
+        Command::PrefsConfirm(a) => state.prefs_confirm_resolve(a),
         Command::ToggleSidebar => state.toggle_sidebar(),
         Command::ToggleProjects => state.toggle_projects(),
         Command::OpenProject(i) => state.open_project(i, mgr),

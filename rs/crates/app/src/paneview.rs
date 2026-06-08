@@ -293,17 +293,18 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.palette, palette);
     app.set_palette_sel(state.palette_sel as i32);
 
-    // preferences scalars + the installed font-family options (active = the resolved
-    // current font path). The picker offers each font by index; selection maps back to its
-    // path in the controller.
-    let current_font = state.settings.font_path();
+    // Appearance controls reflect the DRAFT while Preferences is open (so edits preview
+    // without touching the live panes), else the committed settings.
+    let (view_font, view_palette, view_px, view_frame, view_dot) = state.appearance_view();
+
+    // installed font-family options (active = the resolved drafted/current font path).
     let avail = prefs::available_families();
     let mut font_label = String::from("Default");
     let families: Vec<PrefOption> = avail
         .iter()
         .enumerate()
         .map(|(id, (label, path))| {
-            let active = *path == current_font;
+            let active = *path == view_font;
             if active {
                 font_label = label.clone();
             }
@@ -313,7 +314,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.families, families);
     app.set_pref_font_label(font_label.into());
 
-    // frame-palette options (label + 8 slot color chips), active = current
+    // frame-palette options (label + 8 slot color chips), active = drafted/current
     let palettes: Vec<FramePaletteOption> = theme::FRAME_PALETTES
         .iter()
         .enumerate()
@@ -325,7 +326,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             FramePaletteOption {
                 id: id as i32,
                 label: (*label).into(),
-                active: id == state.settings.frame_palette,
+                active: id == view_palette,
                 colors: ModelRc::from(Rc::new(VecModel::from(colors))),
             }
         })
@@ -344,9 +345,14 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .collect();
     sync_model(&ui.shells, shells);
 
-    app.set_pref_fontpx(state.settings.font_px.round() as i32);
+    // Dialog appearance scalars come from the draft view; the actual panes keep the
+    // committed show_frame/show_dot until Done.
+    app.set_pref_fontpx(view_px.round() as i32);
+    app.set_pref_frame(view_frame);
+    app.set_pref_dot(view_dot);
     app.set_show_frame(state.settings.show_frame);
     app.set_show_dot(state.settings.show_dot);
+    app.set_prefs_confirm(state.prefs_confirm);
     app.set_pref_clickable(state.settings.clickable_paths);
     app.set_pref_editor(state.settings.editor_command.clone().into());
 

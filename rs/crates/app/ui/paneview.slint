@@ -113,6 +113,7 @@ export component PaneView inherits Rectangle {
     in property <[PrefOption]> pref-shells;
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
+    in property <bool> prefs-confirm: false;
     in property <int> pref-fontpx: 14;
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
@@ -144,6 +145,8 @@ export component PaneView inherits Rectangle {
     callback palette-pick(int);
     callback pref-action(int, int);
     callback pref-text(int, string);
+    callback pref-done();
+    callback pref-confirm(int);
     callback overlay-dismiss();
 
     background: Theme.bg;
@@ -342,12 +345,15 @@ export component PaneView inherits Rectangle {
             show-dot: root.pref-dot;
             clickable-paths: root.pref-clickable;
             editor-command: root.pref-editor;
+            prefs-confirm: root.prefs-confirm;
             palette-query(q) => { root.palette-query(q); }
             palette-nav(d) => { root.palette-nav(d); }
             palette-activate => { root.palette-activate(); }
             palette-pick(i) => { root.palette-pick(i); }
             pref-action(k, a) => { root.pref-action(k, a); }
             pref-text(k, v) => { root.pref-text(k, v); }
+            pref-done => { root.pref-done(); }
+            pref-confirm(a) => { root.pref-confirm(a); }
             dismiss => { root.overlay-dismiss(); }
         }
     }

@@ -198,8 +198,11 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> show-dot: true;
     in property <bool> clickable-paths: true;
     in property <string> editor-command: "";
+    in property <bool> prefs-confirm: false;  // showing the unsaved-changes prompt
     callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
     callback pref-text(int, string); // (kind, value) — string-valued settings
+    callback pref-done();            // commit the appearance draft + close (Done / Save)
+    callback pref-confirm(int);      // 0 keep · 1 discard · 2 save
 
     callback dismiss();
 
@@ -547,8 +550,50 @@ export component OverlayLayer inherits Rectangle {
                         Pill {
                             label: "Done";
                             active: true;
-                            clicked => { root.dismiss(); }
+                            clicked => { root.pref-done(); }
                         }
+                    }
+                }
+            }
+        }
+
+        // ---- unsaved appearance changes prompt (Esc / scrim click with edits) ----
+        if root.prefs-confirm : Rectangle {
+            background: #00000099;
+            TouchArea {} // eat clicks behind the modal
+            Rectangle {
+                width: 380px;
+                height: confirm-body.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.mantle;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 48px;
+                drop-shadow-color: Theme.scrim;
+                drop-shadow-offset-y: 18px;
+                confirm-body := VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+                    Text {
+                        text: "Unsaved appearance changes";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "You changed appearance settings but haven't applied them. Save the changes or discard them?";
+                        color: Theme.subtext;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Pill { label: "Keep editing"; clicked => { root.pref-confirm(0); } }
+                        Pill { label: "Discard"; clicked => { root.pref-confirm(1); } }
+                        Pill { label: "Save"; active: true; clicked => { root.pref-confirm(2); } }
                     }
                 }
             }
