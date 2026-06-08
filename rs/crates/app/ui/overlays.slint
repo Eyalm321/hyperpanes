@@ -291,6 +291,31 @@ component Pill inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// A single keycap chip in the keybindings editor (the native port of the renderer's `<kbd>`).
+// `accent` tints it when the chord has been overridden by the user.
+component Kbd inherits Rectangle {
+    in property <string> text;
+    in property <bool> accent: false;
+    border-radius: 5px;
+    background: root.accent ? Theme.accent.with-alpha(0.18) : Theme.surface2;
+    border-width: 1px;
+    border-color: root.accent ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 7px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: 11px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export component OverlayLayer inherits Rectangle {
     // 0 none · 1 palette · 2 prefs
     in property <int> kind: 0;
@@ -325,6 +350,7 @@ export component OverlayLayer inherits Rectangle {
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> keybindings;
     in property <bool> keybinds-overridden: false;  // any binding overridden → show "Reset all"
+    in property <string> kb-conflict: "";            // label of the clashing binding while recording
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -338,6 +364,7 @@ export component OverlayLayer inherits Rectangle {
     // keybindings editor
     callback pref-rebind(string);                    // start capturing binding `id`
     callback pref-capture(bool, bool, bool, string); // (ctrl, alt, shift, key-text)
+    callback pref-cancel-rebind();                   // stop capturing without binding (✎→× / Esc)
     callback pref-reset-binding(string);             // reset binding `id` to default
     callback pref-reset-all-bindings();
 
@@ -805,57 +832,99 @@ export component OverlayLayer inherits Rectangle {
                                     border-radius: 6px;
                                     border-width: kb.capturing ? 1px : 0px;
                                     border-color: Theme.accent;
-                                    background: kb.capturing ? Theme.surface2
-                                              : (kbta.has-hover ? Theme.surface : transparent);
+                                    background: kb.capturing ? Theme.surface2 : transparent;
                                     HorizontalLayout {
                                         padding-left: 10px;
                                         padding-right: 10px;
                                         spacing: 8px;
                                         Text {
                                             text: kb.label;
-                                            color: Theme.text;
+                                            color: kb.static-row ? Theme.subtext : Theme.text;
                                             font-size: 13px;
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
                                             overflow: elide;
                                         }
-                                        // capture prompt OR the chord chips
-                                        if kb.capturing : Text {
-                                            text: "Press a chord…  Esc to cancel";
-                                            color: Theme.accent;
-                                            font-size: 12px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
+
+                                        // ---- combo field: recording prompt OR clickable <kbd> chips ----
+                                        if kb.capturing : VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: root.kb-conflict != "" ? "Used by " + root.kb-conflict : "Press keys…";
+                                                color: root.kb-conflict != "" ? Theme.danger : Theme.accent;
+                                                font-size: 12px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
                                         }
-                                        if !kb.capturing : HorizontalLayout {
-                                            spacing: 4px;
-                                            alignment: end;
-                                            for part in kb.parts : VerticalLayout {
+                                        if !kb.capturing : combo := Rectangle {
+                                            border-radius: 6px;
+                                            background: (!kb.static-row && cta.has-hover) ? Theme.surface : transparent;
+                                            VerticalLayout {
                                                 alignment: center;
-                                                Rectangle {
-                                                    background: kb.overridden ? Theme.accent.with-alpha(0.18) : Theme.surface2;
-                                                    border-radius: 5px;
-                                                    border-width: 1px;
-                                                    border-color: kb.overridden ? Theme.accent : Theme.border;
-                                                    HorizontalLayout {
-                                                        padding-left: 7px;
-                                                        padding-right: 7px;
-                                                        padding-top: 3px;
-                                                        padding-bottom: 3px;
-                                                        Text {
+                                                HorizontalLayout {
+                                                    padding-left: 4px;
+                                                    padding-right: 4px;
+                                                    spacing: 4px;
+                                                    alignment: end;
+                                                    // static doc row: Alt 1…9 (no rebind/reset)
+                                                    if kb.static-row : Kbd { text: "Alt"; }
+                                                    if kb.static-row : Kbd { text: "1"; }
+                                                    if kb.static-row : Text {
+                                                        text: "…";
+                                                        color: Theme.subtext;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    if kb.static-row : Kbd { text: "9"; }
+                                                    // editable rows: the effective chord as chips
+                                                    if !kb.static-row : HorizontalLayout {
+                                                        spacing: 4px;
+                                                        alignment: end;
+                                                        for part in kb.parts : Kbd {
                                                             text: part;
-                                                            color: Theme.text;
-                                                            font-size: 11px;
-                                                            font-weight: 600;
+                                                            accent: kb.overridden;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cta := TouchArea {
+                                                clicked => {
+                                                    if (!kb.static-row) { root.pref-rebind(kb.id); }
+                                                }
+                                            }
+                                        }
+
+                                        // ---- ✎ rebind / × cancel (editable rows only) ----
+                                        if !kb.static-row : VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 22px;
+                                                height: 22px;
+                                                border-radius: 5px;
+                                                background: eta.has-hover ? Theme.surface2 : transparent;
+                                                Text {
+                                                    text: kb.capturing ? "×" : "✎";
+                                                    color: eta.has-hover ? Theme.text : Theme.subtext;
+                                                    font-size: 14px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                eta := TouchArea {
+                                                    clicked => {
+                                                        if (kb.capturing) {
+                                                            root.pref-cancel-rebind();
+                                                        } else {
+                                                            root.pref-rebind(kb.id);
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                        // per-row reset (only when overridden and not capturing)
-                                        if kb.overridden && !kb.capturing : VerticalLayout {
+                                        // ---- ↺ reset to default (editable rows only) ----
+                                        if !kb.static-row : VerticalLayout {
                                             alignment: center;
-                                            rb := Rectangle {
+                                            Rectangle {
                                                 width: 22px;
                                                 height: 22px;
                                                 border-radius: 5px;
@@ -871,7 +940,6 @@ export component OverlayLayer inherits Rectangle {
                                             }
                                         }
                                     }
-                                    kbta := TouchArea { clicked => { root.pref-rebind(kb.id); } }
 
                                     // While capturing, grab the keyboard and forward each combo
                                     // to the controller (which builds the chord + saves it). A

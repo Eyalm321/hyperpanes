@@ -97,6 +97,9 @@ export struct KeybindingItem {
     group-first: bool,
     overridden: bool,
     capturing: bool,
+    // A non-rebindable documentation row (the "Focus pane by number → Alt 1…9" line): rendered
+    // as static <kbd> pills with no rebind/reset affordances.
+    static-row: bool,
 }
 
 // ===== context menus (pane header / tab strip) =====

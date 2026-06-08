@@ -271,6 +271,9 @@ pub struct State {
     /// The binding id currently capturing a new chord in the editor (`None` = not capturing).
     /// While set, that editor row grabs focus and the next key combo rebinds it.
     pub capturing_binding: Option<String>,
+    /// While capturing, the label of the binding the last-pressed chord clashes with (`None` =
+    /// no clash yet). Drives the editor's "Used by <label>" message; cleared on a clean bind.
+    pub capture_conflict: Option<String>,
     /// Set when the font family/size changed — the pump reloads the font (it owns the
     /// DPI scale) then clears this.
     pub font_reload: bool,
@@ -363,6 +366,7 @@ impl State {
             settings: prefs::load(),
             keymap: crate::keybindings::Keymap::load(),
             capturing_binding: None,
+            capture_conflict: None,
             // Apply the saved font family/size on the first pump (it owns the scale).
             font_reload: true,
             prefs_draft: None,
@@ -1072,6 +1076,39 @@ impl State {
         }
     }
 
+    /// Move the active tab by `delta` (±1), wrapping around — the Ctrl+Tab / Ctrl+Shift+Tab
+    /// keybindings. No-op with a single tab.
+    pub fn cycle_tab(&mut self, delta: i32) {
+        let n = self.tabs.len();
+        if n < 2 {
+            return;
+        }
+        let next = (self.active as i32 + delta).rem_euclid(n as i32) as usize;
+        self.switch_tab(next);
+    }
+
+    /// Nudge the global terminal font size by `delta` px (clamped), re-gridding every pane on
+    /// the next pump — the Ctrl+= / Ctrl+- font-zoom keybindings.
+    pub fn font_zoom(&mut self, delta: i32) {
+        let next = Settings::clamp_font(self.settings.font_px + delta as f32);
+        if next != self.settings.font_px {
+            self.settings.font_px = next;
+            prefs::save(&self.settings);
+            self.font_reload = true;
+            self.dirty = true;
+        }
+    }
+
+    /// Reset the global terminal font size to its default — the Ctrl+0 keybinding.
+    pub fn font_reset(&mut self) {
+        if self.settings.font_px != prefs::DEFAULT_FONT_PX {
+            self.settings.font_px = prefs::DEFAULT_FONT_PX;
+            prefs::save(&self.settings);
+            self.font_reload = true;
+            self.dirty = true;
+        }
+    }
+
     pub fn begin_rename(&mut self, idx: i32) {
         if idx >= 0 && (idx as usize) < self.tabs.len() {
             self.editing_tab = idx;
@@ -1174,6 +1211,7 @@ impl State {
             self.prefs_confirm = false;
             self.font_custom = false;
             self.capturing_binding = None;
+            self.capture_conflict = None;
             self.dirty = true;
         }
     }
@@ -1451,19 +1489,22 @@ impl State {
     /// "Press a chord…"; the next captured combo rebinds it (or Esc cancels).
     pub fn begin_rebind(&mut self, id: &str) {
         self.capturing_binding = Some(id.to_string());
+        self.capture_conflict = None;
         self.dirty = true;
     }
 
     /// Cancel an in-progress chord capture (Esc, or clicking elsewhere).
     pub fn cancel_rebind(&mut self) {
+        self.capture_conflict = None;
         if self.capturing_binding.take().is_some() {
             self.dirty = true;
         }
     }
 
     /// Handle a key captured while rebinding: Escape cancels, a bare modifier is ignored (keep
-    /// waiting for a real key), and any other combo becomes the binding's override (persisted)
-    /// and ends the capture. No-op when not capturing.
+    /// waiting for a real key), a chord already taken by another binding surfaces a "Used by …"
+    /// clash (and keeps the capture open), and any free combo becomes the binding's override
+    /// (persisted) and ends the capture. No-op when not capturing.
     pub fn capture_chord(&mut self, ctrl: bool, alt: bool, shift: bool, text: &str) {
         let Some(id) = self.capturing_binding.clone() else {
             return;
@@ -1476,8 +1517,16 @@ impl State {
         let Some(key) = crate::key_tok_from_text(text, ctrl) else {
             return;
         };
-        self.keymap.set(&id, crate::keybindings::Chord { ctrl, alt, shift, key });
+        let chord = crate::keybindings::Chord { ctrl, alt, shift, key };
+        // Clash with another binding → show "Used by <label>" and keep recording.
+        if let Some(label) = self.keymap.conflict(&id, chord) {
+            self.capture_conflict = Some(label.to_string());
+            self.dirty = true;
+            return;
+        }
+        self.keymap.set(&id, chord);
         self.capturing_binding = None;
+        self.capture_conflict = None;
         self.dirty = true;
     }
 
@@ -1486,6 +1535,7 @@ impl State {
         self.keymap.reset(id);
         if self.capturing_binding.as_deref() == Some(id) {
             self.capturing_binding = None;
+            self.capture_conflict = None;
         }
         self.dirty = true;
     }
@@ -1494,6 +1544,7 @@ impl State {
     pub fn reset_all_bindings(&mut self) {
         self.keymap.reset_all();
         self.capturing_binding = None;
+        self.capture_conflict = None;
         self.dirty = true;
     }
 

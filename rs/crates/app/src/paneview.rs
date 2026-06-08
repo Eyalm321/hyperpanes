@@ -472,7 +472,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     // per-row reset when overridden. `capturing` marks the row currently capturing input.
     let capturing = state.capturing_binding.clone();
     let mut prev_cat = "";
-    let keybindings: Vec<KeybindingItem> = state
+    let mut keybindings: Vec<KeybindingItem> = state
         .keymap
         .rows()
         .into_iter()
@@ -488,11 +488,30 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                 group_first,
                 overridden: r.overridden,
                 capturing: capturing.as_deref() == Some(r.id),
+                static_row: false,
             }
         })
         .collect();
+    // The non-rebindable "Focus pane by number → Alt 1…9" documentation row, appended right
+    // after the last Panes binding (mirrors Electron's static row under the Panes group).
+    if let Some(pos) = keybindings.iter().rposition(|k| k.category == "Panes") {
+        keybindings.insert(
+            pos + 1,
+            KeybindingItem {
+                id: SharedString::new(),
+                label: "Focus pane by number".into(),
+                parts: ModelRc::from(Rc::new(VecModel::<SharedString>::default())),
+                category: "Panes".into(),
+                group_first: false,
+                overridden: false,
+                capturing: false,
+                static_row: true,
+            },
+        );
+    }
     sync_model(&ui.keybindings, keybindings);
     app.set_pref_keybinds_overridden(state.keymap.any_overridden());
+    app.set_pref_kb_conflict(state.capture_conflict.clone().unwrap_or_default().into());
 
     // Dialog appearance scalars come from the draft view; the actual panes keep the
     // committed show_frame/show_dot until Done.

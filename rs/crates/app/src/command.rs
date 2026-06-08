@@ -28,6 +28,11 @@ pub enum Command {
     CycleLayout,
     ToggleZoom,
     ToggleFullscreen,
+    // font zoom (Ctrl+= / Ctrl+- / Ctrl+0)
+    /// Nudge the global terminal font size by `0` px (clamped), re-gridding every pane.
+    FontZoom(i32),
+    /// Reset the global terminal font size to its default.
+    FontReset,
     ResizeDivider {
         kind: DividerKind,
         index: i32,
@@ -37,6 +42,10 @@ pub enum Command {
     NewTab,
     CloseTab(usize),
     SwitchTab(usize),
+    /// Switch to the next tab, wrapping around (Ctrl+Tab).
+    NextTab,
+    /// Switch to the previous tab, wrapping around (Ctrl+Shift+Tab).
+    PrevTab,
     BeginRename(i32),
     RenameTab(i32, String),
     /// Begin editing pane `0`'s label inline (double-click on its header).
@@ -60,6 +69,8 @@ pub enum Command {
     RestartPane(usize),
     /// Open the in-pane search box on pane `0`.
     SearchPane(usize),
+    /// Open the in-pane search box on the focused pane (the Ctrl+F keybinding).
+    SearchFocused,
     /// Copy pane `0`'s current selection to the clipboard.
     CopyPane(usize),
     /// Paste the clipboard into pane `0`'s session.
@@ -210,6 +221,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             state.set_fullscreen(on);
             return Effect::SetFullscreen(on);
         }
+        Command::FontZoom(delta) => state.font_zoom(delta),
+        Command::FontReset => state.font_reset(),
         Command::ResizeDivider { kind, index, delta } => state.resize_divider(kind, index, delta),
         Command::NewTab => state.new_tab(mgr),
         Command::CloseTab(i) => {
@@ -220,6 +233,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             }
         }
         Command::SwitchTab(i) => state.switch_tab(i),
+        Command::NextTab => state.cycle_tab(1),
+        Command::PrevTab => state.cycle_tab(-1),
         Command::BeginRename(i) => state.begin_rename(i),
         Command::RenameTab(i, t) => state.rename_tab(i, &t),
         Command::BeginRenamePane(i) => state.begin_rename_pane(i),
@@ -238,6 +253,10 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         Command::RestartPane(i) => state.restart_pane(i, mgr),
         Command::SearchPane(i) => state.open_search(i),
+        Command::SearchFocused => {
+            let f = state.active_tab().focused;
+            state.open_search(f);
+        }
         Command::CopyPane(i) => state.copy_pane(i),
         Command::PastePane(i) => state.paste_pane(i, mgr),
         Command::SelectAllPane(i) => state.select_all_pane(i),

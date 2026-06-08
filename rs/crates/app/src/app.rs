@@ -1271,6 +1271,15 @@ impl App {
         {
             let app = app.clone();
             let id = win.id;
+            win.app.on_pref_cancel_rebind(move || {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().cancel_rebind();
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
             win.app.on_pref_reset_binding(move |bid| {
                 if let Some(w) = app.window_by_id(id) {
                     w.state.borrow_mut().reset_binding(&bid);

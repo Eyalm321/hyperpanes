@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-keybinds-overridden: false;
+    in property <string> pref-kb-conflict: "";
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
@@ -168,6 +169,7 @@ export component AppWindow inherits Window {
     // keybindings editor: start capturing a rebind, deliver a captured chord, reset one / all.
     callback pref-rebind(string);                  // start capturing binding `id`
     callback pref-capture(bool, bool, bool, string); // (ctrl, alt, shift, key-text)
+    callback pref-cancel-rebind();                  // stop capturing without binding
     callback pref-reset-binding(string);           // reset binding `id` to default
     callback pref-reset-all-bindings();
     callback overlay-dismiss();
@@ -339,6 +341,7 @@ export component AppWindow inherits Window {
             idle-seconds: root.pref-idle-seconds;
             keybindings: root.pref-keybindings;
             keybinds-overridden: root.pref-keybinds-overridden;
+            kb-conflict: root.pref-kb-conflict;
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;
@@ -355,6 +358,7 @@ export component AppWindow inherits Window {
             pref-confirm(a) => { root.pref-confirm(a); }
             pref-rebind(id) => { root.pref-rebind(id); }
             pref-capture(c, a, s, t) => { root.pref-capture(c, a, s, t); }
+            pref-cancel-rebind => { root.pref-cancel-rebind(); }
             pref-reset-binding(id) => { root.pref-reset-binding(id); }
             pref-reset-all-bindings => { root.pref-reset-all-bindings(); }
             dismiss => { root.overlay-dismiss(); }

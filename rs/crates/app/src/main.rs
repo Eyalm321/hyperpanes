@@ -159,12 +159,15 @@ pub(crate) fn forwardable(text: &str) -> bool {
 }
 
 /// Translate a key event's text into a [`keybindings::KeyTok`] (the modifier-agnostic key
-/// token). Arrows + F11 map directly; letters are normalised — with Ctrl held Slint reports
-/// the control char (Ctrl+A = U+0001 … Ctrl+Z = U+001A), so map it back, and lowercase plain
-/// letters so a chord matches regardless of Shift. Shared by the router and the keybindings
-/// editor's chord capture.
+/// token, the native port of the renderer's normalised `e.key`). Arrows / F11 / Tab / Enter /
+/// Escape map to their named tokens; every other printable key becomes a [`KeyTok::Char`]
+/// (letters, digits, and symbols like `=`/`-`/`0`) lower-cased so a chord matches regardless
+/// of Shift. With Ctrl held Slint reports a control char (Ctrl+A = U+0001 … Ctrl+Z = U+001A),
+/// so map that back to its letter. Shared by the router and the keybindings editor's capture.
 pub(crate) fn key_tok_from_text(text: &str, control: bool) -> Option<keybindings::KeyTok> {
     use keybindings::KeyTok;
+    // Named keys first — these must win before the Ctrl control-char remap (e.g. Ctrl+Tab
+    // arrives as U+0009 which would otherwise look like Ctrl+I).
     if is_key(text, Key::LeftArrow) {
         return Some(KeyTok::Left);
     }
@@ -180,18 +183,30 @@ pub(crate) fn key_tok_from_text(text: &str, control: bool) -> Option<keybindings
     if is_key(text, Key::F11) {
         return Some(KeyTok::F11);
     }
+    if is_key(text, Key::Tab) {
+        return Some(KeyTok::Tab);
+    }
+    if is_key(text, Key::Return) {
+        return Some(KeyTok::Enter);
+    }
+    if is_key(text, Key::Escape) {
+        return Some(KeyTok::Escape);
+    }
     let c = text.chars().next()?;
     let u = c as u32;
-    // Only remap a control codepoint back to a letter when Ctrl is actually held (Ctrl+A =
-    // U+0001 … Ctrl+Z = U+001A). Gating on `control` keeps plain special keys (Tab=U+0009,
-    // Enter=U+000A, …) from masquerading as letters — important for the rebind capture path.
-    let letter = if control && (1..=26).contains(&u) {
-        (b'a' + (u as u8) - 1) as char
-    } else {
-        c.to_ascii_lowercase()
-    };
-    if letter.is_ascii_alphabetic() {
-        Some(KeyTok::Letter(letter))
+    // Remap a control codepoint back to a letter only when Ctrl is actually held (Ctrl+A =
+    // U+0001 … Ctrl+Z = U+001A). The named-key checks above already consumed Tab/Enter/Esc.
+    if control && (1..=26).contains(&u) {
+        return Some(KeyTok::Char((b'a' + (u as u8) - 1) as char));
+    }
+    if c == ' ' {
+        return Some(KeyTok::Space);
+    }
+    let lc = c.to_ascii_lowercase();
+    let lu = lc as u32;
+    // Any other printable, non-control character is a Char token.
+    if lu >= 0x20 && lu != 0x7f && !(0xe000..=0xf8ff).contains(&lu) {
+        Some(KeyTok::Char(lc))
     } else {
         None
     }
