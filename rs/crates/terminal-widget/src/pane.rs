@@ -20,13 +20,21 @@
 //! The `Font` is passed in at render time so a whole fleet of panes can share one glyph
 //! cache (it is `&mut` because rasterization is lazy/cached).
 
+use crate::clipboard::Clipboard;
 use crate::font::Font;
 use crate::grid::TermGrid;
 use crate::links::extract_path_candidates;
 use crate::render::{PaneRenderer, RenderOpts};
+use crate::search::{self, Match};
+use crate::selection::{self, Selection};
 use hyperpanes_core::paths::{self, OpenResult, ResolveResult};
 use slint::Image;
 use std::collections::HashMap;
+use std::time::Instant;
+
+/// How long a copy/paste indicator ("toast") stays up, in ms — matches the Electron pane's
+/// 1.6s auto-dismiss in `Terminal.tsx`.
+const TOAST_MS: u128 = 1600;
 
 /// Controller for a single terminal pane: grid model + a pluggable renderer.
 pub struct TerminalPane {
@@ -39,6 +47,24 @@ pub struct TerminalPane {
     /// paths are cached (negatives aren't), so a file the shell creates becomes clickable on the
     /// next hover — mirroring the Electron renderer's `verified` map.
     verified: HashMap<String, ResolveResult>,
+    /// The live drag-selection, if any (our own cell-range model — see [`crate::selection`]).
+    /// `None` until a press starts one; a non-dragged selection (a plain click) is held but
+    /// renders nothing, so the same press can still resolve to a link click.
+    selection: Option<Selection>,
+    /// System clipboard handle for copy-on-select / right-click paste (kept open for the pane's
+    /// life — see [`crate::clipboard`]).
+    clipboard: Clipboard,
+    /// The transient copy/paste indicator ("toast") + when it was raised; auto-expires after
+    /// [`TOAST_MS`]. Drained by [`toast_text`](Self::toast_text).
+    toast: Option<(String, Instant)>,
+    /// Whether the in-pane search box (Ctrl+F) is open.
+    search_shown: bool,
+    /// The current search query (the search box text).
+    search_query: String,
+    /// All matches for `search_query` across the grid + scrollback, top to bottom.
+    search_matches: Vec<Match>,
+    /// Index into `search_matches` of the active (highlighted/revealed) match, if any.
+    search_index: Option<usize>,
 }
 
 /// A resolved, on-disk-verified link under the cursor: where to draw the hover underline (in the
@@ -77,6 +103,13 @@ impl TerminalPane {
             renderer,
             cwd: None,
             verified: HashMap::new(),
+            selection: None,
+            clipboard: Clipboard::new(),
+            toast: None,
+            search_shown: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_index: None,
         }
     }
 
@@ -276,6 +309,266 @@ impl TerminalPane {
         }
         let res = paths::open_resolved_path(&hit.abs_path, hit.line, hit.col, editor_command);
         Some(LinkAction::Opened(res))
+    }
+
+    // ---- Text selection ---------------------------------------------------------------------
+    //
+    // Drag to select a cell range; the controller turns it into highlight rects (for the Slint
+    // overlay) and, on release, the selected text (copy-on-select — see `copy_selection`). The
+    // model is our own (`crate::selection`) rather than alacritty's, kept in viewport cells.
+
+    /// The (clamped) viewport cell under a logical-px point. Unlike [`locate`](Self::locate),
+    /// this never returns `None` for an in-pane drag that strays past an edge — it clamps to the
+    /// nearest cell so a selection can run to the grid border.
+    fn cell_at_clamped(&self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<selection::Cell> {
+        let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
+        let col = (x / cell_w).floor().clamp(0.0, (cols - 1) as f32) as usize;
+        let row = (y / cell_h).floor().clamp(0.0, (rows - 1) as f32) as usize;
+        Some(selection::Cell { col, row })
+    }
+
+    /// Begin a drag-selection anchored at the (logical-px) press point. Replaces any prior
+    /// selection. The selection only starts *rendering* once the drag leaves the anchor cell, so
+    /// a click that doesn't move still falls through to a link activation.
+    pub fn selection_begin(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
+        self.selection = self.cell_at_clamped(x, y, surf_w, surf_h).map(Selection::new);
+    }
+
+    /// Extend the active selection's head to the (logical-px) cursor point during a drag.
+    pub fn selection_update(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
+        let c = match self.cell_at_clamped(x, y, surf_w, surf_h) {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(sel) = self.selection.as_mut() {
+            sel.update(c);
+        }
+    }
+
+    /// Drop the current selection (and its highlight).
+    pub fn selection_clear(&mut self) {
+        self.selection = None;
+    }
+
+    /// True once the active selection has actually been dragged across cells (i.e. it's a real
+    /// selection, not a stationary click). The caller uses this to choose copy-vs-click on release.
+    pub fn selection_is_drag(&self) -> bool {
+        self.selection.map_or(false, |s| s.dragged)
+    }
+
+    /// Highlight rectangles (logical px) for the active *dragged* selection over a surface of
+    /// `surf_w`×`surf_h`. Empty for no selection or a non-dragged click — so a plain click never
+    /// leaves a stray one-cell highlight.
+    pub fn selection_rects(&self, surf_w: f32, surf_h: f32) -> Vec<(f32, f32, f32, f32)> {
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return Vec::new(),
+        };
+        let (cell_w, cell_h, cols, _rows) = match self.cell_logical(surf_w, surf_h) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        selection::selection_rects(sel, cols, cell_w, cell_h)
+    }
+
+    /// The text covered by the active *dragged* selection, reconstructed from the grid snapshot
+    /// (one char per cell, blanks as spaces, each line right-trimmed, rows joined by `\n`).
+    /// `None` when there's no real selection. Exact for ASCII (the same wide-glyph caveat as the
+    /// link extractor).
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return None,
+        };
+        let (start, end) = sel.ordered();
+        let snap = self.grid.snapshot();
+        if snap.cols == 0 {
+            return None;
+        }
+        let last_col = snap.cols - 1;
+        let mut lines = Vec::new();
+        for row in start.row..=end.row.min(snap.rows.saturating_sub(1)) {
+            let col_start = if row == start.row { start.col } else { 0 };
+            let col_end = if row == end.row { end.col } else { last_col };
+            let mut line = String::new();
+            for col in col_start..=col_end.min(last_col) {
+                let ch = snap.cell(col, row).ch;
+                line.push(if ch == '\0' { ' ' } else { ch });
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        let text = lines.join("\n");
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Copy the current selection to the system clipboard and raise a "Copied …" indicator
+    /// (the copy-on-select behavior, also bound to Ctrl+C / Ctrl+Shift+C). Returns the number of
+    /// characters copied, or `None` if there was no selection or the clipboard was unavailable.
+    pub fn copy_selection(&mut self) -> Option<usize> {
+        let text = self.selection_text()?;
+        let n = text.chars().count();
+        if self.clipboard.copy(&text) {
+            self.set_toast(format!(
+                "Copied {} char{} to clipboard",
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    /// Read the system clipboard for a right-click / Ctrl+V paste, raising a "Pasted …"
+    /// indicator. Returns the text the caller should write to this pane's session (the controller
+    /// doesn't own the session transport), or `None` when the clipboard is empty/unavailable.
+    pub fn paste_from_clipboard(&mut self) -> Option<String> {
+        let text = self.clipboard.paste()?;
+        let n = text.chars().count();
+        self.set_toast(format!("Pasted {} char{}", n, if n == 1 { "" } else { "s" }));
+        Some(text)
+    }
+
+    // ---- Copy/paste indicator ("toast") -----------------------------------------------------
+
+    /// Raise a transient indicator over the pane (e.g. "Copied 12 chars to clipboard"). It
+    /// auto-expires after [`TOAST_MS`]; poll it each frame with [`toast_text`](Self::toast_text).
+    pub fn set_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    /// The indicator text to display right now, or `None` once it has expired (which also clears
+    /// it). Call this every frame and push the result to the pane's `toast` property.
+    pub fn toast_text(&mut self) -> Option<String> {
+        let expired = match &self.toast {
+            Some((_, at)) => at.elapsed().as_millis() >= TOAST_MS,
+            None => return None,
+        };
+        if expired {
+            self.toast = None;
+            return None;
+        }
+        self.toast.as_ref().map(|(m, _)| m.clone())
+    }
+
+    // ---- In-pane search (Ctrl+F) ------------------------------------------------------------
+    //
+    // Open a search box, type to find/highlight matches across the grid + scrollback, and step
+    // through them (Enter / Shift+Enter), revealing each by scrolling it into view. Mirrors the
+    // xterm `@xterm/addon-search` wiring in the Electron `Terminal.tsx` / `SearchBox.tsx`.
+
+    /// Open the search box (Ctrl+F). The query starts empty; type to search.
+    pub fn search_open(&mut self) {
+        self.search_shown = true;
+    }
+
+    /// Close the search box, dropping the query/matches and pinning the viewport back to the
+    /// bottom (the live prompt).
+    pub fn search_close(&mut self) {
+        self.search_shown = false;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_index = None;
+        self.grid.scroll_to_bottom();
+    }
+
+    /// Whether the search box is open.
+    pub fn search_is_open(&self) -> bool {
+        self.search_shown
+    }
+
+    /// The current query text.
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Set the query (find-as-you-type): recompute matches across the grid + scrollback, pick the
+    /// match nearest the current viewport, and scroll it into view.
+    pub fn search_set_query(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        self.search_recompute();
+        self.search_reveal_active();
+    }
+
+    /// Step to the next (`forward`) / previous match, wrapping around, and reveal it.
+    pub fn search_step(&mut self, forward: bool) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let i = self.search_index.unwrap_or(0);
+        self.search_index = Some(search::step(i, self.search_matches.len(), forward));
+        self.search_reveal_active();
+    }
+
+    /// `(current_1_based, total)` for the match counter — `(0, 0)` when there are no matches.
+    pub fn search_count(&self) -> (usize, usize) {
+        let total = self.search_matches.len();
+        let cur = self.search_index.map(|i| i + 1).unwrap_or(0);
+        (cur, total)
+    }
+
+    /// Highlight rectangles (logical px) for every match currently in the viewport, plus the
+    /// active match's rect on its own (so the pane can draw it distinctly). Matches scrolled out
+    /// of view are omitted.
+    pub fn search_view_rects(
+        &self,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> (Vec<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>) {
+        let (cell_w, cell_h, _cols, rows) = match self.cell_logical(surf_w, surf_h) {
+            Some(t) => t,
+            None => return (Vec::new(), None),
+        };
+        let off = self.grid.display_offset() as i32;
+        let mut rects = Vec::new();
+        let mut active = None;
+        for (i, m) in self.search_matches.iter().enumerate() {
+            let row = m.line + off;
+            if row < 0 || row >= rows as i32 {
+                continue;
+            }
+            let rect = (
+                m.start as f32 * cell_w,
+                row as f32 * cell_h,
+                (m.end.saturating_sub(m.start)) as f32 * cell_w,
+                cell_h,
+            );
+            if Some(i) == self.search_index {
+                active = Some(rect);
+            } else {
+                rects.push(rect);
+            }
+        }
+        (rects, active)
+    }
+
+    /// Recompute `search_matches` for the current query, choosing an initial active match nearest
+    /// the viewport top. Clears everything for an empty query.
+    fn search_recompute(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_matches.clear();
+            self.search_index = None;
+            return;
+        }
+        let lines = self.grid.history_lines();
+        self.search_matches = search::find_matches(&lines, &self.search_query);
+        self.search_index = if self.search_matches.is_empty() {
+            None
+        } else {
+            let prefer_line = -(self.grid.display_offset() as i32);
+            search::initial_index(&self.search_matches, prefer_line)
+        };
+    }
+
+    /// Scroll the active match into view (no-op if already visible or there's none).
+    fn search_reveal_active(&mut self) {
+        if let Some(m) = self.search_index.and_then(|i| self.search_matches.get(i).copied()) {
+            self.grid.scroll_to_visible(m.line);
+        }
     }
 }
 

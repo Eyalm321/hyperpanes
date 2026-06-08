@@ -15,7 +15,8 @@
 //!   * [`TermGrid::take_dirty`] — damage-gated repaint flag.
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::index::Point;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
@@ -189,6 +190,67 @@ impl TermGrid {
 
     pub fn size(&self) -> TermSize {
         self.size
+    }
+
+    // ---- Scrollback access + scrolling (for in-pane search) ---------------------------------
+
+    /// How far the viewport is scrolled up into history, in lines (0 = pinned to the bottom /
+    /// live prompt). Viewport row `r` shows absolute grid line `r - display_offset`.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Every grid line — scrollback history included — as `(absolute_line, text)`, top to bottom.
+    /// Absolute lines are negative for scrollback and `0..rows` for the live viewport (the same
+    /// numbering the snapshot/cursor use). One char per cell, blanks as spaces. Used by the
+    /// search model; O(history) so call it on query change, not per frame.
+    pub fn history_lines(&self) -> Vec<(i32, String)> {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        let mut out = Vec::with_capacity((bottom - top + 1).max(0) as usize);
+        for line_i in top..=bottom {
+            let row = &grid[Line(line_i)];
+            let mut s = String::with_capacity(cols);
+            for c in 0..cols {
+                let ch = row[Column(c)].c;
+                s.push(if ch == '\0' { ' ' } else { ch });
+            }
+            out.push((line_i, s));
+        }
+        out
+    }
+
+    /// Scroll so absolute grid `line` is visible (roughly centered), unless it already is. Marks
+    /// the grid dirty when the offset actually moves. Used to reveal the active search match.
+    pub fn scroll_to_visible(&mut self, line: i32) {
+        let (cur, hist, rows) = {
+            let g = self.term.grid();
+            (
+                g.display_offset() as i32,
+                g.history_size() as i32,
+                self.size.rows as i32,
+            )
+        };
+        let row = line + cur;
+        if row >= 0 && row < rows {
+            return; // already on screen
+        }
+        let desired = (rows / 2 - line).clamp(0, hist);
+        let delta = desired - cur;
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+            self.dirty = true;
+        }
+    }
+
+    /// Pin the viewport back to the bottom (the live prompt), e.g. when search closes.
+    pub fn scroll_to_bottom(&mut self) {
+        if self.term.grid().display_offset() != 0 {
+            self.term.scroll_display(Scroll::Bottom);
+            self.dirty = true;
+        }
     }
 
     fn resolve(&self, c: AnsiColor, default_fg: bool) -> [u8; 4] {

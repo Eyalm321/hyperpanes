@@ -15,7 +15,7 @@
 //! Flags: `--software` (both panes software) · `--gpu` (both GPU).
 
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager, SpawnOptions};
-use hyperpanes_terminal_widget::ui::{DemoWindow, KeyMsg, PaneVisual};
+use hyperpanes_terminal_widget::ui::{DemoWindow, HiRect, KeyMsg, PaneVisual};
 use hyperpanes_terminal_widget::{
     cells_for_px, encode_key, Font, GpuRenderer, LinkAction, PaneRenderer, RenderOpts,
     SoftwareRenderer, TerminalPane,
@@ -116,9 +116,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             link_tip: Default::default(),
             link_tip_x: 0.0,
             link_tip_y: 0.0,
+            selection_rects: ModelRc::new(VecModel::default()),
+            toast: Default::default(),
+            search_open: false,
+            search_count: Default::default(),
+            search_rects: ModelRc::new(VecModel::default()),
+            search_active_on: false,
+            search_active_rect: HiRect::default(),
         });
     }
     app.set_panes(ModelRc::from(model.clone()));
+
+    // Build a Slint `[HiRect]` model from controller-reported (x,y,w,h) rects.
+    fn to_hirects(rects: Vec<(f32, f32, f32, f32)>) -> ModelRc<HiRect> {
+        let v: Vec<HiRect> = rects
+            .into_iter()
+            .map(|(x, y, w, h)| HiRect { x, y, w, h })
+            .collect();
+        ModelRc::new(VecModel::from(v))
+    }
 
     // Capture Slint's wgpu Device/Queue once rendering is set up.
     let gpu_slot: Rc<RefCell<Option<(wgpu::Device, wgpu::Queue)>>> = Rc::new(RefCell::new(None));
@@ -147,12 +163,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Key input: encode and write to the focused pane's session.
+    // Shared per-pane controller state (lazily initialized once geometry + any GPU device are in
+    // hand). Declared up here so the input callbacks below can reach the panes (copy/paste/search).
+    let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
+
+    // Focus signal: any mouse-down in a pane fires `focus-requested` (the frozen contract the
+    // real app wires to focus the pane). The demo just logs it to prove it fires.
+    {
+        app.on_focus_requested(move |idx| {
+            eprintln!("[demo] focus-requested → pane {idx}");
+        });
+    }
+
+    // Key input: encode and write to the focused pane's session — except the copy combos, which
+    // are intercepted here (matching Electron): Ctrl+C / Ctrl+Shift+C copy the selection. Ctrl+C
+    // with no selection still passes through as SIGINT; Ctrl+Shift+C with no selection is a no-op.
     {
         let mgr = mgr.clone();
         let uids = uids.clone();
+        let state = state.clone();
         app.on_key(move |idx, msg: KeyMsg| {
             let idx = idx as usize;
+            // Search: Ctrl+F opens the in-pane search box (the render loop reflects it + the box
+            // grabs focus). Never forwarded to the shell.
+            let is_search =
+                msg.control && (msg.text.eq_ignore_ascii_case("f") || msg.text == "\u{6}");
+            if is_search {
+                let mut guard = state.borrow_mut();
+                if let Some(st) = guard.as_mut() {
+                    if idx < st.panes.len() {
+                        st.panes[idx].pane.search_open();
+                    }
+                }
+                return;
+            }
+            let is_copy =
+                msg.control && (msg.text.eq_ignore_ascii_case("c") || msg.text == "\u{3}");
+            if is_copy {
+                let mut guard = state.borrow_mut();
+                if let Some(st) = guard.as_mut() {
+                    if idx < st.panes.len() && st.panes[idx].pane.selection_is_drag() {
+                        st.panes[idx].pane.copy_selection();
+                        return; // consumed by copy
+                    }
+                }
+                drop(guard);
+                if msg.shift {
+                    return; // Ctrl+Shift+C with no selection: nothing to send
+                }
+                // plain Ctrl+C with no selection → fall through to SIGINT below
+            }
+            // Paste: Ctrl+V / Ctrl+Shift+V reads the clipboard into the pane (matches Electron).
+            let is_paste =
+                msg.control && (msg.text.eq_ignore_ascii_case("v") || msg.text == "\u{16}");
+            if is_paste {
+                let text = {
+                    let mut guard = state.borrow_mut();
+                    guard.as_mut().and_then(|st| {
+                        if idx < st.panes.len() {
+                            st.panes[idx].pane.paste_from_clipboard()
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let (Some(text), Some(uid)) = (text, uids.get(idx)) {
+                    mgr.write(uid, &text);
+                }
+                return; // paste is never forwarded to the shell as a Ctrl+V byte
+            }
             if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
                 if let Some(uid) = uids.get(idx) {
                     mgr.write(uid, &String::from_utf8_lossy(&bytes));
@@ -160,8 +239,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
-    let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
 
     // ---- clickable file paths: hover hit-testing + click open/copy ----
     // The widget reports pointer moves/clicks (logical px within the surface); we hit-test the
@@ -227,6 +304,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if idx >= st.panes.len() {
                 return;
             }
+            // A release that ended a drag-selection isn't a link click — let it pass.
+            if st.panes[idx].pane.selection_is_drag() {
+                return;
+            }
             let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
             // Empty editor command → core picks VS Code (if on PATH) else the guarded OS default.
             match st.panes[idx].pane.activate_link(x, y, w, h, ctrl, "") {
@@ -241,6 +322,149 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 None => {}
+            }
+        });
+    }
+
+    // ---- text selection: drag to select, copy on release (copy added with the indicator) ----
+    {
+        let state = state.clone();
+        let geom = geom.clone();
+        app.on_selection_begin(move |idx, x, y| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
+            st.panes[idx].pane.selection_begin(x, y, w, h);
+        });
+    }
+    {
+        let state = state.clone();
+        let geom = geom.clone();
+        let model = model.clone();
+        app.on_selection_update(move |idx, x, y| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
+            st.panes[idx].pane.selection_update(x, y, w, h);
+            let rects = st.panes[idx].pane.selection_rects(w, h);
+            if let Some(mut row) = model.row_data(idx) {
+                row.selection_rects = to_hirects(rects);
+                model.set_row_data(idx, row);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let model = model.clone();
+        app.on_selection_end(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            // A real drag copies to the clipboard (copy-on-select) and keeps its highlight; the
+            // controller raises the "Copied …" toast. A stationary click clears the zero-size
+            // selection so it doesn't linger or block the next click.
+            if st.panes[idx].pane.selection_is_drag() {
+                st.panes[idx].pane.copy_selection();
+            } else {
+                st.panes[idx].pane.selection_clear();
+                if let Some(mut row) = model.row_data(idx) {
+                    row.selection_rects = to_hirects(Vec::new());
+                    model.set_row_data(idx, row);
+                }
+            }
+        });
+    }
+
+    // ---- right-click paste: clipboard → this pane's session (with a "Pasted …" indicator) ----
+    {
+        let state = state.clone();
+        let mgr = mgr.clone();
+        let uids = uids.clone();
+        app.on_paste_requested(move |idx| {
+            let idx = idx as usize;
+            let text = {
+                let mut guard = state.borrow_mut();
+                guard.as_mut().and_then(|st| {
+                    if idx < st.panes.len() {
+                        st.panes[idx].pane.paste_from_clipboard()
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let (Some(text), Some(uid)) = (text, uids.get(idx)) {
+                mgr.write(uid, &text);
+            }
+        });
+    }
+
+    // ---- in-pane search: query/step/close drive the controller; the render loop reflects the
+    //      box state, match counter and highlight rects back into the model each frame ----
+    {
+        let state = state.clone();
+        app.on_search_edited(move |idx, query| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_set_query(query.as_str());
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        app.on_search_next(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_step(true);
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        app.on_search_prev(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_step(false);
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        app.on_search_closed(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_close();
+                }
             }
         });
     }
@@ -430,6 +654,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if rendered {
                 st.frames += 1;
+            }
+
+            // ---------- copy/paste indicator: poll each pane's expiring toast → model ----------
+            for i in 0..st.panes.len() {
+                let t: slint::SharedString =
+                    st.panes[i].pane.toast_text().unwrap_or_default().into();
+                if let Some(mut row) = model.row_data(i) {
+                    if row.toast != t {
+                        row.toast = t;
+                        model.set_row_data(i, row);
+                    }
+                }
+            }
+
+            // ---------- in-pane search: reflect box state + highlights into the model ----------
+            for i in 0..st.panes.len() {
+                let open = st.panes[i].pane.search_is_open();
+                if let Some(mut row) = model.row_data(i) {
+                    if open {
+                        let (w, h) = geom.borrow().get(i).copied().unwrap_or((0.0, 0.0));
+                        let (rects, active) = st.panes[i].pane.search_view_rects(w, h);
+                        let (cur, total) = st.panes[i].pane.search_count();
+                        let count = if total > 0 {
+                            format!("{cur} / {total}")
+                        } else if st.panes[i].pane.search_query().is_empty() {
+                            String::new()
+                        } else {
+                            "No results".to_string()
+                        };
+                        row.search_open = true;
+                        row.search_rects = to_hirects(rects);
+                        row.search_active_on = active.is_some();
+                        if let Some((x, y, w, h)) = active {
+                            row.search_active_rect = HiRect { x, y, w, h };
+                        }
+                        row.search_count = count.into();
+                        model.set_row_data(i, row);
+                    } else if row.search_open {
+                        // Just closed → clear the overlay state once.
+                        row.search_open = false;
+                        row.search_active_on = false;
+                        row.search_rects = to_hirects(Vec::new());
+                        row.search_count = Default::default();
+                        model.set_row_data(i, row);
+                    }
+                }
             }
 
             // ---------- HUD ----------
