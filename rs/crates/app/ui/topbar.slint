@@ -101,8 +101,10 @@ component TabChip inherits Rectangle {
         triggered => { root.report-geom(root.absolute-position.x, root.width); }
     }
 
-    min-width: 96px;
-    max-width: 200px;
+    // While renaming, grow the tab so the inline editor fits inside it (was a fixed
+    // 150px overlay that overflowed a narrow tab); the strip reflows to accommodate.
+    min-width: root.editing ? 166px : 96px;
+    max-width: root.editing ? 320px : 200px;
     horizontal-stretch: 0;
     // active tab adopts the pane-area bg (reads connected); hover lifts to surface; a
     // spring-hover (dragged pane resting over it) glows in the brand accent.
@@ -165,11 +167,11 @@ component TabChip inherits Rectangle {
         }
     }
 
-    // inline rename editor (absolute overlay → never reflows the strip)
+    // inline rename editor — sized to the (now widened) tab so it never overflows.
     if root.editing : Rectangle {
         x: 8px;
         y: (parent.height - self.height) / 2;
-        width: 150px;
+        width: parent.width - 16px;
         height: 20px;
         background: Theme.bg;
         border-radius: 4px;
