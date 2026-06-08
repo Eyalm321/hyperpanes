@@ -206,6 +206,17 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
         let gh = (h - 2.0 * PANE_GAP).max(1.0);
         p.rect = (gx, gy, gw, gh);
         p.visible = true;
+        // Seed the selection / link hit-test surface for panes whose Slint `geometry-changed`
+        // never fired. A pane created already at its final layout size (e.g. a freshly *launched*
+        // pane) doesn't trigger Slint's `changed width/height`, so `surf` stays at its (0,0)
+        // initial value — which makes `cell_at_clamped` bail and silently breaks drag-to-select.
+        // The TerminalPane widget's on-screen size is the frame minus its own insets: a 4px
+        // x-inset and 30px vertically (26px header + 2px top + 2px bottom) — see paneview.slint
+        // `tp`. Only seed when unset, so we never fight the exact size the callback reports for
+        // panes where it does fire.
+        if p.surf == (0.0, 0.0) {
+            p.surf = ((gw - 4.0).max(1.0), (gh - 30.0).max(1.0));
+        }
         // size the grid to the terminal body (frame chrome removed) so cells match. Each pane
         // uses its OWN font cell metrics (per-pane zoom), so panes can differ in cols/rows.
         let tw = (gw - PANE_CHROME_W).max(1.0);
