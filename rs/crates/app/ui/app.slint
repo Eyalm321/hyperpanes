@@ -40,7 +40,9 @@ export component AppWindow inherits Window {
     in property <string> hud: "";
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
-    in property <bool> maximized: false;
+    // Our own OS-maximized flag (synced from Win32). Named `win-maximized` to avoid colliding
+    // with Slint 1.17's new builtin `Window.maximized`, which we don't use (custom frameless window).
+    in property <bool> win-maximized: false;
     // Briefly true after entering fullscreen → flashes the "hold Esc to exit" hint.
     in property <bool> fullscreen-hint: false;
     // True while Esc is held → keeps the hint up and fills its progress bar.
@@ -156,7 +158,7 @@ export component AppWindow inherits Window {
             layouts: root.layouts;
             zoomed: root.zoomed;
             fullscreen: root.fullscreen;
-            maximized: root.maximized;
+            maximized: root.win-maximized;
             drop-strip-active: root.drop-strip-active;
             drop-tab-x: root.drop-tab-x;
             drop-tab-active: root.drop-tab-active;

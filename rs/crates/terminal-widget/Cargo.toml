@@ -13,12 +13,23 @@ publish = false
 # The headless core: consumed as a dependency (session_manager owns the live PTYs).
 hyperpanes-core = { path = "../core" }
 
-# Slint UI + its wgpu interop seam. `unstable-wgpu-28` pins wgpu 28 and exposes
-# `slint::wgpu_28` (texture import via Image::try_from + a shared Device/Queue);
+# Slint UI + its wgpu interop seam. `unstable-wgpu-29` exposes `slint::wgpu_29`
+# (texture import via Image::try_from + a shared Device/Queue);
 # `renderer-femtovg-wgpu` is the concrete wgpu renderer Slint needs at runtime.
-slint = { version = "1.16", features = ["unstable-wgpu-28", "renderer-femtovg-wgpu"] }
-# wgpu MUST match the version Slint links (28) so the Texture types are identical.
-wgpu = "28"
+# Pinned to our fork's `popup-is-open` branch for `PopupWindow.is-open` (slint-ui/slint#12000).
+# Slint master's femtovg-wgpu renderer links wgpu 29, so we use `unstable-wgpu-29` to match.
+# default-features = false (minus `accessibility`) must match the app crate — see the note there.
+slint = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open", default-features = false, features = [
+    "std",
+    "backend-default",
+    "renderer-femtovg",
+    "renderer-software",
+    "compat-1-2",
+    "unstable-wgpu-29",
+    "renderer-femtovg-wgpu",
+] }
+# wgpu MUST match the version Slint links (29) so the Texture types are identical.
+wgpu = "29"
 
 # Terminal model + VTE parser + damage tracking (same version as core — no type clash,
 # we never pass alacritty types across the core boundary).
@@ -36,7 +47,7 @@ anyhow = "1.0.102"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [build-dependencies]
-slint-build = "1.16"
+slint-build = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open" }
 
 # Optimize deps even in dev so the software renderer is smooth in the demo.
 [profile.dev.package."*"]

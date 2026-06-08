@@ -63,14 +63,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ---- Slint backend: try to get a shared wgpu 28 device (for the GPU renderer). ----
+    // ---- Slint backend: try to get a shared wgpu 29 device (for the GPU renderer). ----
     // Falls back to software-only if wgpu isn't available on this host.
     let want_gpu_backend = force != Some(Kind::Software);
     let wgpu_selected = if want_gpu_backend {
         slint::BackendSelector::new()
-            .require_wgpu_28(slint::wgpu_28::WGPUConfiguration::default())
+            .require_wgpu_29(slint::wgpu_29::WGPUConfiguration::default())
             .select()
-            .map_err(|e| eprintln!("[demo] wgpu-28 backend unavailable ({e}); software-only"))
+            .map_err(|e| eprintln!("[demo] wgpu-29 backend unavailable ({e}); software-only"))
             .is_ok()
     } else {
         false
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.window()
             .set_rendering_notifier(move |state, api| {
                 if let slint::RenderingState::RenderingSetup = state {
-                    if let slint::GraphicsAPI::WGPU28 { device, queue, .. } = api {
+                    if let slint::GraphicsAPI::WGPU29 { device, queue, .. } = api {
                         *slot.borrow_mut() = Some((device.clone(), queue.clone()));
                     }
                 }

@@ -24,7 +24,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 directories = "5"
 uuid = { version = "1", features = ["v4"] }
 # platform: single-instance (named mutex + named-pipe argv handoff)
-windows = { version = "0.58", features = [
+# 0.58 -> 0.62 to unify with the app + wgpu-hal 29 (avoids two `windows` crate versions).
+windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
   "Win32_System_Pipes",

@@ -17,8 +17,19 @@ path = "src/main.rs"
 hyperpanes-core = { path = "../core" }
 hyperpanes-terminal-widget = { path = "../terminal-widget" }
 # `raw-window-handle-06` exposes the native HWND (for the frameless-window Win32 glue).
-slint = { version = "1.16", features = [
-    "unstable-wgpu-28",
+# Pinned to our fork's `popup-is-open` branch for `PopupWindow.is-open` (slint-ui/slint#12000).
+# Slint master's femtovg-wgpu renderer links wgpu 29, so we use `unstable-wgpu-29`.
+# Slint's default features minus `accessibility`: accesskit pins `windows 0.58`, which collides with
+# wgpu-hal 29's `windows 0.62` (gpu-allocator's loose range gets dragged down to 0.58). Dropping
+# accessibility lets gpu-allocator resolve up to 0.62 and unify with wgpu-hal. Must match the
+# terminal-widget crate (feature unification is additive across the workspace).
+slint = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open", default-features = false, features = [
+    "std",
+    "backend-default",
+    "renderer-femtovg",
+    "renderer-software",
+    "compat-1-2",
+    "unstable-wgpu-29",
     "renderer-femtovg-wgpu",
     "raw-window-handle-06",
 ] }
@@ -28,8 +39,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Frameless window / custom titlebar (strip WS_CAPTION + the HTCAPTION drag trick + min/max/close)
-# — lifted from spike-tearoff.
-windows = { version = "0.58", features = [
+# — lifted from spike-tearoff. Bumped 0.58 -> 0.62 to unify with wgpu-hal 29 / gpu-allocator and
+# avoid two `windows` crate versions in the graph (which breaks wgpu-hal's d3d12 backend).
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
@@ -39,7 +51,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [build-dependencies]
-slint-build = "1.16"
+slint-build = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open" }
 
 # Keep the software renderer + UI smooth in dev (matches the terminal-widget profile).
 [profile.dev.package."*"]

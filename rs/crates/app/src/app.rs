@@ -244,7 +244,7 @@ impl App {
                     w.hwnd.set(raw);
                 }
             }
-            w.app.set_maximized(window::is_maximized(w.hwnd.get()));
+            w.app.set_win_maximized(window::is_maximized(w.hwnd.get()));
         }
 
         // 2. Drain the ONE shared event channel, routing each event to its window.

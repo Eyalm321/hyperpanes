@@ -201,7 +201,7 @@ mod imp {
                     h,
                     None,
                     None,
-                    hinst,
+                    Some(hinst),
                     None,
                 )
                 .unwrap();
@@ -217,7 +217,7 @@ mod imp {
             unsafe {
                 let _ = SetWindowPos(
                     self.hwnd,
-                    HWND_TOPMOST,
+                    Some(HWND_TOPMOST),
                     p.0 + 14,
                     p.1 + 16,
                     self.w,
