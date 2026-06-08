@@ -109,6 +109,20 @@ mod imp {
                 return LRESULT(1);
             }
         }
+        // During a drag the mouse is captured to this window, which suppresses WM_SETCURSOR
+        // — yet winit/Slint still re-applies its own cursor on each move (e.g. the resize
+        // cursor over a pane divider), clobbering our grabbing cursor. Re-assert it after
+        // the default handling of every move so the grabbing hand always wins (same message
+        // → no flicker).
+        if msg == WM_MOUSEMOVE {
+            let d = DRAG_CURSOR.load(Ordering::Relaxed);
+            if d != 0 {
+                let old: WNDPROC = core::mem::transmute(OLD_WNDPROC.load(Ordering::Relaxed));
+                let r = CallWindowProcW(old, h, msg, wparam, lparam);
+                SetCursor(HCURSOR(d as *mut c_void));
+                return r;
+            }
+        }
         if msg == WM_NCCALCSIZE && wparam.0 != 0 {
             if IsZoomed(h).as_bool() {
                 let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
@@ -249,6 +263,14 @@ mod imp {
         }
     }
 
+    /// Whether the window is currently maximized (drives the restore-vs-maximize icon).
+    pub fn is_maximized(raw: isize) -> bool {
+        if raw == 0 {
+            return false;
+        }
+        unsafe { IsZoomed(hwnd(raw)).as_bool() }
+    }
+
     /// Post `WM_CLOSE` to a window. Unused by the managed multi-window close path
     /// (which flags the window for reaping), kept for completeness of the Win32 glue.
     #[allow(dead_code)]
@@ -326,6 +348,9 @@ mod imp {
     pub fn set_hover_cursor(_on: bool) {}
     pub fn minimize(_raw: isize) {}
     pub fn toggle_max(_raw: isize) {}
+    pub fn is_maximized(_raw: isize) -> bool {
+        false
+    }
     pub fn close(_raw: isize) {}
     pub fn enter_fullscreen(_raw: isize) -> Option<super::SavedPlacement> {
         Some(())

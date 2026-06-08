@@ -38,6 +38,7 @@ export component AppWindow inherits Window {
     in property <string> hud: "";
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
+    in property <bool> maximized: false;
     // Briefly true after entering fullscreen → flashes the "hold Esc to exit" hint.
     in property <bool> fullscreen-hint: false;
     // True while Esc is held → keeps the hint up and fills its progress bar.
@@ -120,6 +121,7 @@ export component AppWindow inherits Window {
             layouts: root.layouts;
             zoomed: root.zoomed;
             fullscreen: root.fullscreen;
+            maximized: root.maximized;
             drop-strip-active: root.drop-strip-active;
             drop-tab-x: root.drop-tab-x;
             drop-tab-active: root.drop-tab-active;

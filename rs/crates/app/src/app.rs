@@ -234,7 +234,8 @@ impl App {
             return;
         }
 
-        // 1. Lazily strip each window's frame once its HWND exists.
+        // 1. Lazily strip each window's frame once its HWND exists; keep the maximize/
+        //    restore icon in sync with the OS maximized state.
         for w in &windows {
             if w.hwnd.get() == 0 {
                 let raw = window::hwnd_of(w.app.window());
@@ -243,6 +244,7 @@ impl App {
                     w.hwnd.set(raw);
                 }
             }
+            w.app.set_maximized(window::is_maximized(w.hwnd.get()));
         }
 
         // 2. Drain the ONE shared event channel, routing each event to its window.
@@ -474,9 +476,9 @@ impl App {
             if self.drag_capture.replace(false) {
                 window::end_drag_cursor(0); // defensive: release a stray capture/cursor
             }
-            // Idle: show the open-hand cursor while hovering a drag handle (header / tab).
-            let hov = self.compute_hover(windows, drag::cursor_pos());
-            window::set_hover_cursor(hov.over_strip || hov.over_header);
+            // Idle: normal cursor. The hand only appears once you actually press a handle
+            // (no open hand on mere hover).
+            window::set_hover_cursor(false);
             return;
         }
 
@@ -521,6 +523,7 @@ impl App {
                 let raw = self.window_by_id(d.source_win).map(|w| w.hwnd.get()).unwrap_or(0);
                 window::end_drag_cursor(raw);
             }
+            window::set_hover_cursor(false); // back to the normal cursor on release
             *self.spring.borrow_mut() = None;
             if self.preview_on.replace(false) {
                 self.clear_previews(windows);
@@ -529,7 +532,10 @@ impl App {
         }
 
         if !active {
-            return; // still a pending click — not yet a drag
+            // Pressed a handle but not yet moved past the threshold (drag start): show the
+            // open hand. It becomes the closed grabbing hand the moment the drag engages.
+            window::set_hover_cursor(true);
+            return;
         }
 
         let hover = self.compute_hover(windows, cursor);
@@ -552,10 +558,11 @@ impl App {
             }
         }
 
-        // Engage the global "move" cursor + mouse capture once, for the whole drag.
+        // Engage the grabbing cursor + mouse capture once, for the whole drag.
         if !self.drag_capture.get() {
             if let Some(src) = self.window_by_id(source_id) {
                 window::begin_drag_cursor(src.hwnd.get());
+                window::set_hover_cursor(false); // drop the open hand → grabbing takes over
                 self.drag_capture.set(true);
             }
         }
