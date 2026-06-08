@@ -19,6 +19,7 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod ai;
 mod app;
 mod command;
 mod contextmenu;
