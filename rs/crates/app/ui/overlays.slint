@@ -101,6 +101,7 @@ export component OverlayLayer inherits Rectangle {
     // preferences
     in property <[PrefOption]> families;
     in property <[FramePaletteOption]> frame-palettes;
+    in property <[PrefOption]> shells;
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -356,6 +357,26 @@ export component OverlayLayer inherits Rectangle {
             //   once the widget gains `set_palette`/a theme table.
             // TODO(phase5): idle-glow settings (idleAlert / idleEffect / idleAlertSeconds) — the
             //   AI-pane glow effect isn't built in the native shell yet.
+
+            // ===================== Terminal =====================
+            SectionTitle { text: "Terminal"; }
+
+            // ---- default shell (applies to new panes & restarts) ----
+            Text { text: "Default shell"; color: Theme.faint; font-size: 11px; }
+            HorizontalLayout {
+                spacing: 6px;
+                for opt[i] in root.shells : Pill {
+                    label: opt.label;
+                    active: opt.active;
+                    clicked => { root.pref-action(5, opt.id); }
+                }
+            }
+
+            // TODO(phase5): scrollback (history lines) — needs a terminal-widget history buffer
+            //   (TermGrid keeps a fixed viewport buffer today). The setting is already persisted.
+            // TODO(phase5): Control API section (agents/MCP) — the loopback control server isn't
+            //   wired into the native shell yet.
+            // TODO(phase5): Ambient AI section (local Ollama) — not in the native shell yet.
 
             Rectangle { vertical-stretch: 1; }
         }

@@ -51,12 +51,14 @@ pub struct DetachedPane {
 
 /// A single preferences edit, carried by `Command::ApplySetting`. Keeps the `Command`
 /// enum flat (one variant) while still typing each field of [`Settings`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Setting {
     /// Select font family by index into `prefs::FONT_FAMILIES`.
     FontFamily(usize),
     /// Select the frame palette by index into `theme::FRAME_PALETTES` (remaps pane accents).
     FramePalette(usize),
+    /// Set the default shell token for new panes ("" = system default).
+    DefaultShell(String),
     /// Nudge the base font size by ±N points.
     FontDelta(i32),
     ShowFrame(bool),
@@ -254,6 +256,12 @@ impl State {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let palette = self.settings.frame_palette;
+        // Honour the default-shell preference ("" = let core pick the system default).
+        let shell = if self.settings.default_shell.is_empty() {
+            None
+        } else {
+            Some(self.settings.default_shell.clone())
+        };
         let (cols, rows) = (80u16, 24u16);
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
@@ -261,6 +269,7 @@ impl State {
             rows: Some(rows),
             pane_id: Some(uid.clone()),
             cwd,
+            shell,
             ..Default::default()
         }) {
             eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
@@ -840,6 +849,7 @@ impl State {
                     self.font_reload = true;
                 }
             }
+            Setting::DefaultShell(shell) => self.settings.default_shell = shell,
             Setting::ShowFrame(on) => self.settings.show_frame = on,
             Setting::ShowDot(on) => self.settings.show_dot = on,
         }

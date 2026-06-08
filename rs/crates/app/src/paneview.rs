@@ -46,6 +46,7 @@ pub struct Ui {
     pub projects: Rc<VecModel<ProjectItem>>,
     pub families: Rc<VecModel<PrefOption>>,
     pub palettes: Rc<VecModel<FramePaletteOption>>,
+    pub shells: Rc<VecModel<PrefOption>>,
 }
 
 impl Ui {
@@ -60,6 +61,7 @@ impl Ui {
             projects: Rc::new(VecModel::default()),
             families: Rc::new(VecModel::default()),
             palettes: Rc::new(VecModel::default()),
+            shells: Rc::new(VecModel::default()),
         })
     }
 
@@ -73,6 +75,7 @@ impl Ui {
         app.set_projects(ModelRc::from(self.projects.clone()));
         app.set_pref_families(ModelRc::from(self.families.clone()));
         app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
+        app.set_pref_shells(ModelRc::from(self.shells.clone()));
     }
 }
 
@@ -309,6 +312,18 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         })
         .collect();
     sync_model(&ui.palettes, palettes);
+
+    // default-shell options; active = the one whose token matches the saved setting.
+    let shells: Vec<PrefOption> = prefs::SHELL_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(id, (label, value))| PrefOption {
+            id: id as i32,
+            label: (*label).into(),
+            active: *value == state.settings.default_shell,
+        })
+        .collect();
+    sync_model(&ui.shells, shells);
 
     app.set_pref_fontpx(state.settings.font_px.round() as i32);
     app.set_show_frame(state.settings.show_frame);

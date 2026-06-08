@@ -1051,6 +1051,12 @@ impl App {
                     2 => crate::state::Setting::ShowFrame(arg != 0),
                     3 => crate::state::Setting::ShowDot(arg != 0),
                     4 => crate::state::Setting::FramePalette(arg as usize),
+                    5 => crate::state::Setting::DefaultShell(
+                        crate::prefs::SHELL_OPTIONS
+                            .get(arg as usize)
+                            .map(|(_, v)| v.to_string())
+                            .unwrap_or_default(),
+                    ),
                     _ => return,
                 };
                 app.run_command(&w, Command::ApplySetting(setting));

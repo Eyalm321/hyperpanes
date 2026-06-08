@@ -21,6 +21,17 @@ pub const FONT_FAMILIES: [(&str, &str); 3] = [
     ("Consolas", "C:/Windows/Fonts/consola.ttf"),
 ];
 
+/// The default-shell choices offered in the Terminal section: a label + the shell token
+/// passed to `SpawnOptions::shell` (empty = the system default resolved in core's spawn).
+/// The native port of the renderer's `ShellPicker` options (kept to the common Windows
+/// shells; an unlisted shell still works via the persisted string, this is just the picker).
+pub const SHELL_OPTIONS: [(&str, &str); 4] = [
+    ("System", ""),
+    ("pwsh", "pwsh"),
+    ("PowerShell", "powershell"),
+    ("cmd", "cmd"),
+];
+
 /// Base (un-scaled) terminal font size bounds, mirroring `useSettings`' clamps.
 pub const MIN_FONT_PX: f32 = 8.0;
 pub const MAX_FONT_PX: f32 = 32.0;
@@ -36,6 +47,9 @@ pub struct Settings {
     /// Index into [`crate::theme::FRAME_PALETTES`] for the active pane dot/frame palette.
     /// Switching it remaps panes by creation slot (the native port of `framePalette`).
     pub frame_palette: usize,
+    /// Default shell for new panes (the token from [`SHELL_OPTIONS`], e.g. "pwsh"). Empty
+    /// = the system default. Mirrors the renderer `Settings.defaultShell`.
+    pub default_shell: String,
     /// Base (logical px, pre-DPI-scale) terminal font size.
     pub font_px: f32,
     /// Whether each pane draws its colored frame border + header tint.
@@ -55,6 +69,7 @@ impl Default for Settings {
         Settings {
             font_family: 0,
             frame_palette: 0,
+            default_shell: String::new(),
             font_px: DEFAULT_FONT_PX,
             show_frame: true,
             show_dot: true,

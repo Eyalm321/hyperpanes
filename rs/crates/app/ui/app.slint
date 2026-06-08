@@ -53,6 +53,7 @@ export component AppWindow inherits Window {
     in property <int> palette-sel: 0;
     in property <[PrefOption]> pref-families;
     in property <[FramePaletteOption]> pref-palettes;
+    in property <[PrefOption]> pref-shells;
     in property <int> pref-fontpx: 14;
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
@@ -179,6 +180,7 @@ export component AppWindow inherits Window {
                 palette-sel: root.palette-sel;
                 pref-families: root.pref-families;
                 pref-palettes: root.pref-palettes;
+                pref-shells: root.pref-shells;
                 pref-fontpx: root.pref-fontpx;
                 pref-frame: root.show-frame;
                 pref-dot: root.show-dot;
