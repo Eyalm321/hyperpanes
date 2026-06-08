@@ -480,16 +480,7 @@ impl TerminalPane {
         let text = self.clipboard.paste()?;
         let n = text.chars().count();
         self.set_toast(format!("Pasted {} char{}", n, if n == 1 { "" } else { "s" }));
-        // When the app enabled bracketed-paste mode (PSReadLine does), wrap the payload in
-        // `ESC[200~ … ESC[201~`. The shell then inserts the whole thing as one literal paste —
-        // the caret lands at the end — instead of replaying each embedded newline as Enter, which
-        // is what fragmented a multi-line paste across `>>` continuation prompts and stranded the
-        // caret behind the text. The char-count toast stays on the *visible* text, not the markers.
-        if self.grid.bracketed_paste() {
-            Some(format!("\u{1b}[200~{text}\u{1b}[201~"))
-        } else {
-            Some(text)
-        }
+        Some(prepare_paste(&text, self.grid.bracketed_paste()))
     }
 
     /// Pin the viewport back to the live edge (display offset 0) so the cursor is visible at the
@@ -647,6 +638,26 @@ pub fn cells_for_px(width_px: f32, height_px: f32, cell_w: u32, cell_h: u32) -> 
     (cols, rows)
 }
 
+/// Turn raw clipboard text into the exact bytes to write to the pty for a paste.
+///
+/// Two transforms, both matching how Windows Terminal feeds a paste to conpty:
+/// 1. **Normalize line endings to CR (`\r`).** Windows console input treats CR as Enter; a bare
+///    LF (`\n`) is mishandled by conpty/PSReadLine, which strands the caret and fragments a
+///    multi-line paste across `>>` continuation prompts. Our selection text joins rows with `\n`,
+///    and external clipboards carry `\r\n`/`\n` — all collapse to `\r` here.
+/// 2. **Bracket** the payload in `ESC[200~ … ESC[201~` *only* when the app enabled bracketed-paste
+///    mode (DECSET 2004 — modern PSReadLine / PowerShell 7). Then the shell inserts it as one
+///    literal paste (caret at the end, no premature execution). Old shells (Windows PowerShell 5.1)
+///    don't set the mode, so the CR-normalized text is sent bare — still the correct Enter handling.
+fn prepare_paste(text: &str, bracketed: bool) -> String {
+    let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+    if bracketed {
+        format!("\u{1b}[200~{normalized}\u{1b}[201~")
+    } else {
+        normalized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +746,23 @@ mod tests {
             other => panic!("ctrl+click should copy, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_paste_normalizes_newlines_to_cr() {
+        // LF and CRLF both collapse to CR (the Enter the Windows console expects); a paste with
+        // no bracketed-paste mode is sent bare.
+        assert_eq!(prepare_paste("a\nb\r\nc", false), "a\rb\rc");
+        // Trailing blank lines (e.g. a multi-row selection over empty rows) become trailing CRs.
+        assert_eq!(prepare_paste("x\n\n", false), "x\r\r");
+        // No newlines → unchanged.
+        assert_eq!(prepare_paste("echo hello", false), "echo hello");
+    }
+
+    #[test]
+    fn prepare_paste_wraps_in_brackets_only_when_mode_on() {
+        assert_eq!(prepare_paste("a\nb", true), "\u{1b}[200~a\rb\u{1b}[201~");
+        assert!(!prepare_paste("a\nb", false).contains("200~"));
     }
 
     #[test]
