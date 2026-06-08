@@ -30,17 +30,18 @@ component Check inherits Path {
     commands: "M 1 5.5 L 4.5 9 L 11 1";
 }
 
-// A drawn down-chevron for the dropdown buttons.
+// A drawn chevron for the dropdown buttons; points up while the popup is open.
 component Chevron inherits Path {
-    in property <color> ink: Theme.faint;
-    width: 9px;
-    height: 6px;
-    viewbox-width: 9;
-    viewbox-height: 6;
+    in property <color> ink: Theme.subtext;
+    in property <bool> up: false;
+    width: 12px;
+    height: 8px;
+    viewbox-width: 12;
+    viewbox-height: 8;
     stroke: root.ink;
-    stroke-width: 1.4px;
+    stroke-width: 1.6px;
     fill: transparent;
-    commands: "M 1 1 L 4.5 4.5 L 8 1";
+    commands: root.up ? "M 1 6.5 L 6 1.5 L 11 6.5" : "M 1 1.5 L 6 6.5 L 11 1.5";
 }
 
 // A small labelled toggle switch (frame/dot prefs).
@@ -176,6 +177,8 @@ component FontDropdown inherits Rectangle {
     in property <[PrefOption]> options;
     in property <string> current-label;
     callback selected(int);
+    // whether the popup is open (drives the chevron direction)
+    property <bool> open: false;
     height: 32px;
     border-radius: 7px;
     border-width: 1px;
@@ -195,10 +198,10 @@ component FontDropdown inherits Rectangle {
         }
         VerticalLayout {
             alignment: center;
-            Chevron {}
+            Chevron { up: root.open; }
         }
     }
-    ta := TouchArea { clicked => { popup.show(); } }
+    ta := TouchArea { clicked => { root.open = true; popup.show(); } }
     popup := PopupWindow {
         x: 0;
         y: parent.height + 4px;
@@ -234,7 +237,7 @@ component FontDropdown inherits Rectangle {
                             if opt.active : Check {}
                         }
                     }
-                    ita := TouchArea { clicked => { root.selected(opt.id); popup.close(); } }
+                    ita := TouchArea { clicked => { root.selected(opt.id); root.open = false; popup.close(); } }
                 }
             }
         }
