@@ -9,6 +9,9 @@ export struct PaneItem {
     title: string,
     // optional secondary line under the label (user subtitle / ambient-AI line).
     subtitle: string,
+    // ambient-AI summary line, already truncated to the typewriter-revealed prefix by the
+    // controller. Shown only when there's no manual `subtitle` and the pane isn't muted.
+    ai-subtitle: string,
     accent: color,
     // resolved per-pane chrome (the per-pane override already folded over the global pref
     // by the controller): a clean new pane is frame/dot OFF; a git-project pane is ON.

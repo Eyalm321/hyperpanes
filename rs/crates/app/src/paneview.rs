@@ -26,6 +26,10 @@ use crate::prefs;
 /// Thickness (logical px) of the draggable divider hit-area.
 const DIVIDER_THICK: f32 = 10.0;
 
+/// Characters revealed per pump tick for the ambient-AI subtitle typewriter (~8 ms/tick, so
+/// ≈75 chars/sec — a brisk but legible reveal).
+const AI_REVEAL_PER_TICK: f32 = 0.6;
+
 /// Per-pane inset (logical px) within its tile — matches the Electron app's
 /// `.hp-pane { inset: 3px }`, giving 6px gaps between panes + a 3px edge margin.
 const PANE_GAP: f32 = 3.0;
@@ -158,10 +162,20 @@ fn pane_item(
     } else {
         format!("{cur} / {total}").into()
     };
+    // Ambient-AI line: the typewriter-revealed prefix of the engine's summary, shown only
+    // when there's no manual subtitle (which always wins) and the pane isn't muted.
+    let manual_subtitle = ps.subtitle.as_ref().is_some_and(|s| !s.is_empty());
+    let ai_subtitle: SharedString = if manual_subtitle || ps.ai_muted || ps.ai.full.is_empty() {
+        SharedString::new()
+    } else {
+        let shown = (ps.ai.reveal as usize).min(ps.ai.full.chars().count());
+        ps.ai.full.chars().take(shown).collect::<String>().into()
+    };
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
         subtitle: ps.subtitle.clone().unwrap_or_default(),
+        ai_subtitle,
         show_frame: ps.frame_on(show_frame),
         show_dot: ps.dot_on(show_dot),
         editing,
@@ -833,14 +847,29 @@ pub fn pump(
         if toast_changed {
             ps.last_toast = toast;
         }
+        // ---- ambient-AI subtitle typewriter reveal ----
+        // Advance the reveal cursor toward the full summary length, but only while the AI line
+        // is actually shown (no manual subtitle, not muted). A change re-pushes the row.
+        let manual_subtitle = ps.subtitle.as_ref().is_some_and(|s| !s.is_empty());
+        let ai_target = if manual_subtitle || ps.ai_muted {
+            0
+        } else {
+            ps.ai.full.chars().count()
+        };
+        let ai_changed = if ai_target > 0 && (ps.ai.reveal as usize) < ai_target {
+            ps.ai.reveal = (ps.ai.reveal + AI_REVEAL_PER_TICK).min(ai_target as f32);
+            true
+        } else {
+            false
+        };
         let focus_blink = i == focused && blink_changed;
         let pane_dirty = ps.pane.take_dirty();
-        // Repaint the surface only for terminal/cursor changes; a glow-only or toast-only
-        // change just re-pushes the (unchanged) surface with the new alpha / indicator.
+        // Repaint the surface only for terminal/cursor changes; a glow-only, toast-only or
+        // typewriter-only change just re-pushes the (unchanged) surface with the new line.
         if pane_dirty || focus_blink {
             ps.surface = ps.pane.render(&mut ps.font, &opts);
             rendered = true;
-        } else if !glow_changed && !toast_changed {
+        } else if !glow_changed && !toast_changed && !ai_changed {
             continue;
         }
         if i < ui.panes.row_count() {

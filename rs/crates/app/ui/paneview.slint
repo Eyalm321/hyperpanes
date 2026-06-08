@@ -388,6 +388,17 @@ export component PaneView inherits Rectangle {
                                     horizontal-alignment: left;
                                     overflow: elide;
                                 }
+                                // ambient-AI "what you're doing" line (typewriter-revealed by
+                                // the controller), shown only when no manual subtitle wins.
+                                if pane.subtitle == "" && pane.ai-subtitle != "" : Text {
+                                    text: pane.ai-subtitle;
+                                    color: Theme.accent;
+                                    font-size: 9px;
+                                    font-italic: true;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
                             }
                             // single-click focuses; double-click opens the inline editor.
                             lta := TouchArea {
