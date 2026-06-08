@@ -22,13 +22,49 @@
 
 use crate::font::Font;
 use crate::grid::TermGrid;
+use crate::links::extract_path_candidates;
 use crate::render::{PaneRenderer, RenderOpts};
+use hyperpanes_core::paths::{self, OpenResult, ResolveResult};
 use slint::Image;
+use std::collections::HashMap;
 
 /// Controller for a single terminal pane: grid model + a pluggable renderer.
 pub struct TerminalPane {
     grid: TermGrid,
     renderer: Box<dyn PaneRenderer>,
+    /// This pane's working directory, used to resolve relative path tokens (the renderer-side
+    /// half of `core::paths`). `None` falls back to the home dir, matching the pty start dir.
+    cwd: Option<String>,
+    /// Verified paths cached for this pane's lifetime, keyed by `cwd\x1ftoken`. Only *existing*
+    /// paths are cached (negatives aren't), so a file the shell creates becomes clickable on the
+    /// next hover — mirroring the Electron renderer's `verified` map.
+    verified: HashMap<String, ResolveResult>,
+}
+
+/// A resolved, on-disk-verified link under the cursor: where to draw the hover underline (in the
+/// pane's *logical* pixel space) plus the absolute target. Returned by [`TerminalPane::link_at`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkHit {
+    /// Underline rect in logical px within the pane surface.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    /// Absolute, verified path the link points at.
+    pub abs_path: String,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+    /// Tooltip label (`abs_path` with any `:line[:col]` suffix appended).
+    pub tip: String,
+}
+
+/// The outcome of activating (clicking) a link. Mirrors the Electron split: a plain click opens
+/// (editor / OS default), Ctrl/Cmd-click copies the absolute path.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkAction {
+    /// Ctrl/Cmd-click — the caller should copy this absolute path to the clipboard.
+    Copy(String),
+    /// Plain click — the file/dir was opened (the result carries blocked/err detail).
+    Opened(OpenResult),
 }
 
 impl TerminalPane {
@@ -39,6 +75,8 @@ impl TerminalPane {
         Self {
             grid: TermGrid::new(cols, rows),
             renderer,
+            cwd: None,
+            verified: HashMap::new(),
         }
     }
 
@@ -95,6 +133,144 @@ impl TerminalPane {
     pub fn set_renderer(&mut self, renderer: Box<dyn PaneRenderer>) {
         self.renderer = renderer;
     }
+
+    // ---- Clickable file paths --------------------------------------------------------------
+    //
+    // Plain click opens the file (editor / OS default); Ctrl/Cmd-click copies the resolved
+    // absolute path. Paths are verified on disk (against this pane's cwd) before they linkify,
+    // so prose tokens don't light up. The grid extraction lives in [`crate::links`]; resolve +
+    // open live in [`hyperpanes_core::paths`]. This is the renderer-side glue (Spike's
+    // `Terminal.tsx` link provider, ported to the cell grid).
+
+    /// Set this pane's working directory (the base for resolving relative path tokens). Clearing
+    /// or changing it drops the verify cache, since the same token can resolve elsewhere.
+    pub fn set_cwd(&mut self, cwd: Option<String>) {
+        if cwd != self.cwd {
+            self.cwd = cwd;
+            self.verified.clear();
+        }
+    }
+
+    /// The logical-px cell size for a surface of `surf_w`×`surf_h` (the terminal image is
+    /// stretched `image-fit: fill` over the pane body), or `None` for a degenerate pane.
+    fn cell_logical(&self, surf_w: f32, surf_h: f32) -> Option<(f32, f32, usize, usize)> {
+        let (cols, rows) = self.grid_size();
+        if cols == 0 || rows == 0 || surf_w <= 0.0 || surf_h <= 0.0 {
+            return None;
+        }
+        Some((surf_w / cols as f32, surf_h / rows as f32, cols, rows))
+    }
+
+    /// Reconstruct one viewport row's text (one char per column; blanks as spaces) so the
+    /// `links` extractor's column indices line up with cells. Exact for ASCII paths.
+    fn row_text(snap: &crate::grid::GridSnapshot, row: usize) -> String {
+        (0..snap.cols)
+            .map(|col| {
+                let ch = snap.cell(col, row).ch;
+                if ch == '\0' {
+                    ' '
+                } else {
+                    ch
+                }
+            })
+            .collect()
+    }
+
+    fn cache_key(&self, token: &str) -> String {
+        format!("{}\u{1f}{}", self.cwd.as_deref().unwrap_or(""), token)
+    }
+
+    /// Find a verified path token under the (logical-px) point, returning the resolved record,
+    /// the candidate's column span, and the cell metrics. Resolution is cached per (cwd, token);
+    /// only existing paths are cached, so freshly-created files linkify on a later hover.
+    fn locate(
+        &mut self,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Option<(ResolveResult, usize, usize, usize, f32, f32)> {
+        let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let col = (x / cell_w) as usize;
+        let row = (y / cell_h) as usize;
+        if col >= cols || row >= rows {
+            return None;
+        }
+
+        let snap = self.grid.snapshot();
+        let text = Self::row_text(&snap, row);
+        let cand = extract_path_candidates(&text)
+            .into_iter()
+            .find(|c| col >= c.start && col < c.end)?;
+
+        let key = self.cache_key(&cand.path);
+        let resolved = if let Some(hit) = self.verified.get(&key) {
+            hit.clone()
+        } else {
+            let r = paths::resolve_path(self.cwd.as_deref(), &cand.path);
+            if !r.exists {
+                return None; // negatives aren't cached (a later hover re-checks)
+            }
+            self.verified.insert(key, r.clone());
+            r
+        };
+        Some((resolved, cand.start, cand.end, row, cell_w, cell_h))
+    }
+
+    /// Hit-test a (logical-px) hover point against the rendered grid. Returns the underline rect +
+    /// target when the point is over a path that exists on disk, else `None`. The candidate's
+    /// `:line[:col]` is carried through (and shown in the tooltip), but only the resolved path is
+    /// verified — mirroring the Electron link provider.
+    pub fn link_at(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<LinkHit> {
+        let (r, start, end, row, cell_w, cell_h) = self.locate(x, y, surf_w, surf_h)?;
+        // Recover the candidate's line/col by re-extracting (cheap; same row). The resolved
+        // record only carries the path, so pull location off the candidate that covered the cell.
+        let snap = self.grid.snapshot();
+        let text = Self::row_text(&snap, row);
+        let cand = extract_path_candidates(&text)
+            .into_iter()
+            .find(|c| c.start == start && c.end == end);
+        let (line, col) = cand.as_ref().map(|c| (c.line, c.col)).unwrap_or((None, None));
+
+        let tip = match (line, col) {
+            (Some(l), Some(c)) => format!("{}:{}:{}", r.abs_path, l, c),
+            (Some(l), None) => format!("{}:{}", r.abs_path, l),
+            _ => r.abs_path.clone(),
+        };
+        Some(LinkHit {
+            x: start as f32 * cell_w,
+            y: (row as f32 + 1.0) * cell_h - 1.0, // a hairline along the cell's baseline
+            w: (end - start) as f32 * cell_w,
+            abs_path: r.abs_path,
+            line,
+            col,
+            tip,
+        })
+    }
+
+    /// Activate the link under a (logical-px) click. `ctrl` (Ctrl or Cmd held) copies the
+    /// absolute path; otherwise the file/dir is opened via [`hyperpanes_core::paths`] using
+    /// `editor_command` (empty → VS Code if present, else the guarded OS default). `None` when
+    /// the click wasn't over a verified path.
+    pub fn activate_link(
+        &mut self,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+        ctrl: bool,
+        editor_command: &str,
+    ) -> Option<LinkAction> {
+        let hit = self.link_at(x, y, surf_w, surf_h)?;
+        if ctrl {
+            return Some(LinkAction::Copy(hit.abs_path));
+        }
+        let res = paths::open_resolved_path(&hit.abs_path, hit.line, hit.col, editor_command);
+        Some(LinkAction::Opened(res))
+    }
 }
 
 /// Compute the cell grid that fits a pane of `width_px`×`height_px` *physical* pixels for
@@ -135,5 +311,82 @@ mod tests {
         assert_eq!(cells_for_px(800.0, 400.0, 8, 16), (100, 25));
         // Collapsed pane never yields a zero grid.
         assert_eq!(cells_for_px(0.0, 0.0, 8, 16), (2, 1));
+    }
+
+    // A pane whose surface is `cols`×`rows` logical px → exactly 1px per cell, so a hover at
+    // `(col + 0.5, row + 0.5)` lands squarely on cell `(col, row)`.
+    fn unit_pane(cols: usize, rows: usize) -> TerminalPane {
+        TerminalPane::new(cols, rows, Box::new(SoftwareRenderer::new()))
+    }
+
+    #[test]
+    fn link_at_hits_a_verified_path_and_misses_prose() {
+        let dir = std::env::temp_dir().join(format!("hp_pane_link_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.txt"), b"hi").unwrap();
+
+        let mut p = unit_pane(40, 3);
+        p.set_cwd(Some(dir.to_string_lossy().into_owned()));
+        p.feed("see note.txt"); // "see " = cols 0..4, "note.txt" = cols 4..12
+        let (w, h) = (40.0, 3.0); // 1px per cell
+
+        // Over the path token → a hit pointing at the absolute file.
+        let hit = p.link_at(6.5, 0.5, w, h).expect("hover over note.txt should hit");
+        assert!(hit.abs_path.replace('\\', "/").ends_with("note.txt"));
+        // Underline spans exactly the token's columns (4..12) at 1px/col.
+        assert_eq!(hit.x, 4.0);
+        assert_eq!(hit.w, 8.0);
+
+        // Over the bare word "see" (not path-shaped) → nothing.
+        assert!(p.link_at(1.5, 0.5, w, h).is_none());
+        // Over a blank cell past the text → nothing.
+        assert!(p.link_at(30.5, 0.5, w, h).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_at_ignores_a_nonexistent_path() {
+        let dir = std::env::temp_dir().join(format!("hp_pane_nolink_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = unit_pane(40, 2);
+        p.set_cwd(Some(dir.to_string_lossy().into_owned()));
+        p.feed("ghost.txt is gone"); // shape-passes but doesn't exist → no link
+        assert!(p.link_at(2.5, 0.5, 40.0, 2.0).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_click_copies_the_absolute_path() {
+        let dir = std::env::temp_dir().join(format!("hp_pane_copy_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = unit_pane(20, 2);
+        p.set_cwd(Some(dir.to_string_lossy().into_owned()));
+        p.feed("a.txt"); // cols 0..5
+        match p.activate_link(2.5, 0.5, 20.0, 2.0, true, "") {
+            Some(LinkAction::Copy(path)) => {
+                assert!(path.replace('\\', "/").ends_with("a.txt"));
+            }
+            other => panic!("ctrl+click should copy, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changing_cwd_clears_the_verify_cache() {
+        let mut p = unit_pane(20, 2);
+        p.set_cwd(Some("/a".to_string()));
+        // Prime the cache with a fake entry, then a cwd change must drop it.
+        p.verified.insert("x".to_string(), paths::ResolveResult {
+            token: "t".into(),
+            abs_path: "/a/t".into(),
+            exists: true,
+            is_dir: false,
+            is_exe: false,
+        });
+        assert!(!p.verified.is_empty());
+        p.set_cwd(Some("/b".to_string()));
+        assert!(p.verified.is_empty(), "a cwd change must clear stale resolutions");
     }
 }

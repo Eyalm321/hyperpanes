@@ -21,6 +21,7 @@
 pub mod font;
 pub mod grid;
 pub mod keys;
+pub mod links;
 pub mod pane;
 pub mod render;
 
@@ -38,5 +39,6 @@ pub mod ui {
 pub use font::Font;
 pub use grid::{GridSnapshot, RenderCell, TermGrid, TermSize};
 pub use keys::encode_key;
-pub use pane::{cells_for_px, TerminalPane};
+pub use links::{extract_path_candidates, PathCandidate};
+pub use pane::{cells_for_px, LinkAction, LinkHit, TerminalPane};
 pub use render::{GpuRenderer, PaneRenderer, RenderOpts, SoftwareRenderer};

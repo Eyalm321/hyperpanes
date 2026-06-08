@@ -17,8 +17,8 @@
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager, SpawnOptions};
 use hyperpanes_terminal_widget::ui::{DemoWindow, KeyMsg, PaneVisual};
 use hyperpanes_terminal_widget::{
-    cells_for_px, encode_key, Font, GpuRenderer, PaneRenderer, RenderOpts, SoftwareRenderer,
-    TerminalPane,
+    cells_for_px, encode_key, Font, GpuRenderer, LinkAction, PaneRenderer, RenderOpts,
+    SoftwareRenderer, TerminalPane,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::RefCell;
@@ -109,6 +109,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             surface: slint::Image::default(),
             title: titles[i].into(),
             accent: accents[i],
+            link_visible: false,
+            link_x: 0.0,
+            link_y: 0.0,
+            link_w: 0.0,
+            link_tip: Default::default(),
+            link_tip_x: 0.0,
+            link_tip_y: 0.0,
         });
     }
     app.set_panes(ModelRc::from(model.clone()));
@@ -155,6 +162,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
+
+    // ---- clickable file paths: hover hit-testing + click open/copy ----
+    // The widget reports pointer moves/clicks (logical px within the surface); we hit-test the
+    // pane's grid against its on-screen size (`geom`), then drive the per-pane hover overlay in
+    // the model. The surface Image fills the pane, so the reported coords ARE surface coords.
+    {
+        let state = state.clone();
+        let geom = geom.clone();
+        let model = model.clone();
+        app.on_link_moved(move |idx, x, y| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
+            let hit = st.panes[idx].pane.link_at(x, y, w, h);
+            if let Some(mut row) = model.row_data(idx) {
+                match hit {
+                    Some(lh) => {
+                        row.link_visible = true;
+                        row.link_x = lh.x;
+                        row.link_y = lh.y;
+                        row.link_w = lh.w;
+                        row.link_tip = lh.tip.into();
+                        row.link_tip_x = x + 12.0;
+                        row.link_tip_y = y + 16.0;
+                    }
+                    None => {
+                        row.link_visible = false;
+                        row.link_tip = Default::default();
+                    }
+                }
+                model.set_row_data(idx, row);
+            }
+        });
+    }
+    {
+        let model = model.clone();
+        app.on_link_exited(move |idx| {
+            let idx = idx as usize;
+            if let Some(mut row) = model.row_data(idx) {
+                row.link_visible = false;
+                row.link_tip = Default::default();
+                model.set_row_data(idx, row);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let geom = geom.clone();
+        app.on_link_activated(move |idx, x, y, ctrl| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            let st = match guard.as_mut() {
+                Some(s) => s,
+                None => return,
+            };
+            if idx >= st.panes.len() {
+                return;
+            }
+            let (w, h) = geom.borrow().get(idx).copied().unwrap_or((0.0, 0.0));
+            // Empty editor command → core picks VS Code (if on PATH) else the guarded OS default.
+            match st.panes[idx].pane.activate_link(x, y, w, h, ctrl, "") {
+                Some(LinkAction::Copy(p)) => eprintln!("[demo] Ctrl+click → copy: {p}"),
+                Some(LinkAction::Opened(res)) => {
+                    if res.ok {
+                        eprintln!("[demo] click → opened");
+                    } else if res.blocked {
+                        eprintln!("[demo] click → refused to auto-open ({:?})", res.error);
+                    } else {
+                        eprintln!("[demo] click → open failed ({:?})", res.error);
+                    }
+                }
+                None => {}
+            }
+        });
+    }
 
     // ---- the render/pump loop (Slint timer on the UI thread) ----
     let timer = slint::Timer::default();
@@ -278,6 +367,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         SessionEvent::Cwd { uid, cwd } => {
+                            // Resolve clickable paths relative to the shell's live directory.
+                            if let Some(i) = uids.iter().position(|u| *u == uid) {
+                                st.panes[i].pane.set_cwd(Some(cwd.clone()));
+                            }
                             eprintln!("[demo] {uid} cwd → {cwd}");
                         }
                         SessionEvent::Exit { uid, code } => {
@@ -327,14 +420,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let img = pc.pane.render(font, &opts);
-                model.set_row_data(
-                    i,
-                    PaneVisual {
-                        surface: img,
-                        title: titles[i].into(),
-                        accent: accents[i],
-                    },
-                );
+                // Read-modify-write so the live hover-overlay fields (link_*) set by the link
+                // callbacks survive a surface repaint.
+                if let Some(mut row) = model.row_data(i) {
+                    row.surface = img;
+                    model.set_row_data(i, row);
+                }
                 rendered = true;
             }
             if rendered {

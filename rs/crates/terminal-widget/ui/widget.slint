@@ -22,11 +22,29 @@ export component TerminalPane inherits Rectangle {
     in property <color> accent: #7aa2f7;
     in property <bool> chrome: true;
 
+    // --- clickable-paths link overlay (driven by the controller after it hit-tests the grid) ---
+    // The controller answers `link-moved` by hit-testing the cell under the cursor and, when it
+    // lands on a verified path, sets these to draw a hover underline + tooltip. Defaults are inert
+    // so a consumer that ignores the link layer (e.g. an older app shell) is unaffected.
+    in property <bool> link-visible: false;
+    in property <length> link-x;
+    in property <length> link-y;
+    in property <length> link-w;
+    in property <string> link-tip: "";
+    in property <length> link-tip-x;
+    in property <length> link-tip-y;
+
     // --- outputs (the controller subscribes to these) ---
     // A key was pressed while this pane had focus → encode to PTY bytes and write.
     callback key(KeyMsg);
     // The pane's on-screen size changed (logical px) → recompute cols/rows and resize.
     callback geometry-changed(length, length);
+    // Pointer moved over the surface (logical px) → hit-test for a path under the cursor.
+    callback link-moved(length, length);
+    // Pointer left the surface → clear any hover link.
+    callback link-exited();
+    // Surface clicked (logical px, ctrl/cmd held) → open (plain) or copy (ctrl) the path there.
+    callback link-activated(length, length, bool);
 
     forward-focus: fs;
 
@@ -49,9 +67,56 @@ export component TerminalPane inherits Rectangle {
         image-rendering: pixelated;
     }
 
-    // Click anywhere on the pane to focus it (so the keyboard routes here).
-    TouchArea {
-        clicked => { fs.focus(); }
+    // Click anywhere on the pane to focus it (so the keyboard routes here), and drive the
+    // clickable-path link layer: report pointer moves for hover hit-testing and clicks (with the
+    // ctrl/cmd modifier) for open/copy. A pointer cursor signals a live link.
+    link-ta := TouchArea {
+        mouse-cursor: root.link-visible ? pointer : default;
+        moved => { root.link-moved(self.mouse-x, self.mouse-y); }
+        changed has-hover => {
+            if (!self.has-hover) { root.link-exited(); }
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                fs.focus();
+                root.link-activated(self.mouse-x, self.mouse-y,
+                                    e.modifiers.control || e.modifiers.meta);
+            }
+        }
+    }
+
+    // Hover underline drawn over the terminal surface, spanning the path's columns.
+    if root.link-visible: Rectangle {
+        x: root.link-x;
+        y: root.link-y;
+        width: root.link-w;
+        height: 1px;
+        background: root.accent;
+    }
+
+    // Path tooltip near the cursor (absolute target + the open/copy hint).
+    if root.link-tip != "": Rectangle {
+        x: min(root.link-tip-x, root.width - self.width - 4px);
+        y: min(root.link-tip-y, root.height - self.height - 4px);
+        background: #000000d8;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: #ffffff1f;
+        VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            Text {
+                text: root.link-tip;
+                color: #cdd6f4;
+                font-size: 11px;
+                font-family: "Consolas";
+            }
+            Text {
+                text: "click to open · Ctrl+click to copy";
+                color: #7f849c;
+                font-size: 10px;
+            }
+        }
     }
 
     fs := FocusScope {
@@ -98,6 +163,14 @@ export struct PaneVisual {
     surface: image,
     title: string,
     accent: color,
+    // clickable-paths hover overlay state (set by the demo after hit-testing).
+    link-visible: bool,
+    link-x: length,
+    link-y: length,
+    link-w: length,
+    link-tip: string,
+    link-tip-x: length,
+    link-tip-y: length,
 }
 
 export component DemoWindow inherits Window {
@@ -108,6 +181,12 @@ export component DemoWindow inherits Window {
     callback key(int, KeyMsg);
     // (pane index, width, height) — geometry of a pane changed.
     callback geometry-changed(int, length, length);
+    // (pane index, x, y) — pointer moved over a pane → hit-test for a clickable path.
+    callback link-moved(int, length, length);
+    // (pane index) — pointer left a pane → clear its hover link.
+    callback link-exited(int);
+    // (pane index, x, y, ctrl) — pane clicked → open (plain) or copy (ctrl) the path there.
+    callback link-activated(int, length, length, bool);
 
     title: "hyperpanes — terminal-widget demo";
     preferred-width: 1280px;
@@ -126,8 +205,18 @@ export component DemoWindow inherits Window {
             surface: pane.surface;
             title: pane.title;
             accent: pane.accent;
+            link-visible: pane.link-visible;
+            link-x: pane.link-x;
+            link-y: pane.link-y;
+            link-w: pane.link-w;
+            link-tip: pane.link-tip;
+            link-tip-x: pane.link-tip-x;
+            link-tip-y: pane.link-tip-y;
             key(m) => { root.key(idx, m); }
             geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }
+            link-moved(x, y) => { root.link-moved(idx, x, y); }
+            link-exited => { root.link-exited(idx); }
+            link-activated(x, y, ctrl) => { root.link-activated(idx, x, y, ctrl); }
         }
     }
 
