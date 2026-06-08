@@ -208,6 +208,8 @@ pub struct State {
     preview_key: (String, f32, f32),
     /// Last terminal-theme index applied to the preview pane (-1 = none yet).
     preview_theme: i32,
+    /// Last cursor on/off state rendered into the preview (so the caret blinks).
+    preview_cursor: bool,
     /// The latest rendered preview image (shown in the Appearance preview).
     pub preview_surface: Image,
     /// Cached, newest-first git-project list for the sidebar rail.
@@ -271,6 +273,7 @@ impl State {
             preview_font: None,
             preview_key: (String::new(), 0.0, 0.0),
             preview_theme: -1,
+            preview_cursor: false,
             preview_surface: Image::default(),
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
@@ -302,7 +305,7 @@ impl State {
     /// Render the appearance preview (a real, locked terminal) with the drafted font + theme,
     /// returning the freshly-rendered image when anything changed (else `None`). Called by the
     /// pump while Preferences is open; `scale` is the window DPI scale.
-    pub fn render_preview(&mut self, scale: f32) -> Option<Image> {
+    pub fn render_preview(&mut self, scale: f32, cursor_on: bool) -> Option<Image> {
         let (font_path, px, theme_idx) = match &self.prefs_draft {
             Some(d) => (prefs::resolve_or_default(&d.font_family), d.font_px, d.terminal_theme),
             None => (self.settings.font_path(), self.settings.font_px, self.settings.terminal_theme),
@@ -319,10 +322,14 @@ impl State {
             self.preview_theme = theme_idx as i32;
             changed = true;
         }
+        // Locked (no pty), but the caret still blinks like a real terminal.
+        if self.preview_cursor != cursor_on {
+            self.preview_cursor = cursor_on;
+            changed = true;
+        }
         if changed || self.preview_pane.take_dirty() {
             let font = self.preview_font.as_mut().unwrap();
-            // Locked: no live cursor blink.
-            self.preview_surface = self.preview_pane.render(font, &RenderOpts { cursor_on: false });
+            self.preview_surface = self.preview_pane.render(font, &RenderOpts { cursor_on });
             Some(self.preview_surface.clone())
         } else {
             None

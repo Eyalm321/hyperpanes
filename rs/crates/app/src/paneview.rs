@@ -436,12 +436,6 @@ pub fn pump(
         state.dirty = false;
     }
 
-    // ---- render the appearance preview (a real, locked terminal) while Prefs is open ----
-    if state.overlay == Overlay::Prefs {
-        if let Some(img) = state.render_preview(scale) {
-            app.set_pref_preview_surface(img);
-        }
-    }
 
     // ---- cursor blink (~530 ms) ----
     let blink_changed = if state.last_blink.elapsed() >= Duration::from_millis(530) {
@@ -454,6 +448,15 @@ pub fn pump(
     let opts = RenderOpts {
         cursor_on: state.cursor_on,
     };
+
+    // ---- render the appearance preview (a real, locked terminal) while Prefs is open ----
+    // Caret blinks in sync with the panes' cursor.
+    if state.overlay == Overlay::Prefs {
+        let cursor_on = state.cursor_on;
+        if let Some(img) = state.render_preview(scale, cursor_on) {
+            app.set_pref_preview_surface(img);
+        }
+    }
 
     // ---- render dirty (visible) panes of the active tab → model ----
     let active = state.active;
