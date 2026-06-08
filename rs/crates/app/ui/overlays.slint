@@ -191,6 +191,8 @@ export component OverlayLayer inherits Rectangle {
     // preferences
     in property <[PrefOption]> families;
     in property <string> font-label;
+    in property <bool> font-custom: false;
+    in property <string> font-custom-value: "";
     in property <[FramePaletteOption]> frame-palettes;
     in property <[PrefOption]> shells;
     in property <int> font-px: 14;
@@ -424,6 +426,34 @@ export component OverlayLayer inherits Rectangle {
                 options: root.families;
                 current-label: root.font-label;
                 selected(id) => { root.pref-action(0, id); }
+            }
+            // Custom font path field — shown only in "Custom…" mode (mirrors the renderer).
+            if root.font-custom : Rectangle {
+                height: 32px;
+                border-radius: 7px;
+                background: Theme.bg;
+                border-width: 1px;
+                border-color: Theme.border;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    fci := TextInput {
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        init => { fci.text = root.font-custom-value; }
+                        edited => { root.pref-text(8, self.text); }
+                    }
+                }
+                Text {
+                    x: 10px;
+                    text: "font file path, e.g. C:/Fonts/MyFont.ttf";
+                    color: Theme.faint;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    visible: fci.text == "";
+                }
             }
 
             // ---- font size ----

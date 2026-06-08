@@ -295,24 +295,42 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
 
     // Appearance controls reflect the DRAFT while Preferences is open (so edits preview
     // without touching the live panes), else the committed settings.
-    let (view_font, view_palette, view_px, view_frame, view_dot) = state.appearance_view();
+    let (_view_font, view_palette, view_px, view_frame, view_dot) = state.appearance_view();
 
-    // installed font-family options (active = the resolved drafted/current font path).
-    let avail = prefs::available_families();
-    let mut font_label = String::from("Default");
-    let families: Vec<PrefOption> = avail
+    // Font family: the fixed option list (mirrors the renderer) + a trailing "Custom…"
+    // entry. Active = the option whose value matches the drafted raw value, or Custom when
+    // the picker is in custom mode (a user-typed font path).
+    let raw_font = match &state.prefs_draft {
+        Some(d) => d.font_family.clone(),
+        None => state.settings.font_family.clone(),
+    };
+    let custom = state.font_custom;
+    let mut font_label = String::new();
+    let mut families: Vec<PrefOption> = prefs::FONT_OPTIONS
         .iter()
         .enumerate()
-        .map(|(id, (label, path))| {
-            let active = *path == view_font;
+        .map(|(id, (label, value))| {
+            let active = !custom && *value == raw_font;
             if active {
-                font_label = label.clone();
+                font_label = (*label).to_string();
             }
-            PrefOption { id: id as i32, label: label.clone().into(), active }
+            PrefOption { id: id as i32, label: (*label).into(), active }
         })
         .collect();
+    families.push(PrefOption {
+        id: prefs::FONT_OPTIONS.len() as i32,
+        label: "Custom…".into(),
+        active: custom,
+    });
+    if custom {
+        font_label = "Custom…".to_string();
+    } else if font_label.is_empty() {
+        font_label = prefs::FONT_OPTIONS[0].0.to_string();
+    }
     sync_model(&ui.families, families);
     app.set_pref_font_label(font_label.into());
+    app.set_pref_font_custom(custom);
+    app.set_pref_font_custom_value(raw_font.into());
 
     // frame-palette options (label + 8 slot color chips), active = drafted/current
     let palettes: Vec<FramePaletteOption> = theme::FRAME_PALETTES

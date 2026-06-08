@@ -13,32 +13,31 @@
 use hyperpanes_core::persistence::paths;
 use serde::{Deserialize, Serialize};
 
-/// Candidate monospace fonts offered in the font picker: a label + the font-file name to
-/// look for. Each is resolved against the system **and** per-user font folders (see
-/// [`font_dirs`]); only the ones actually installed are offered (see [`available_families`]),
-/// so the picker grows with whatever monospace fonts the user has (Cascadia/Consolas ship
-/// with Windows; JetBrains/Fira/Hack/etc. appear if installed). The glyph cache loads the
-/// resolved `.ttf`/`.ttc` path. Selection is persisted by path, so adding/reordering this
-/// list never invalidates a saved choice.
-pub const FONT_CANDIDATES: [(&str, &str); 14] = [
-    ("Cascadia Mono", "CascadiaMono.ttf"),
+/// The fixed font-family choices offered in the picker — a 1:1 mirror of the renderer's
+/// `FONT_OPTIONS` (label + value): the empty value is the built-in default; every other
+/// value is the font-file name resolved against the system/per-user font folders (see
+/// [`font_dirs`]). Shown as a fixed list (not filtered by what's installed) so it matches
+/// the Electron dropdown exactly; a missing font simply falls back when loaded. A "Custom…"
+/// entry (handled in the UI) lets the user type any font-file path. Selection is persisted
+/// by value.
+pub const FONT_OPTIONS: [(&str, &str); 8] = [
+    ("System default (Consolas)", ""),
     ("Cascadia Code", "CascadiaCode.ttf"),
+    ("Cascadia Mono", "CascadiaMono.ttf"),
     ("Consolas", "consola.ttf"),
     ("Courier New", "cour.ttf"),
-    ("Lucida Console", "lucon.ttf"),
-    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
     ("Fira Code", "FiraCode-Regular.ttf"),
-    ("Hack", "Hack-Regular.ttf"),
-    ("Source Code Pro", "SourceCodePro-Regular.ttf"),
-    ("DejaVu Sans Mono", "DejaVuSansMono.ttf"),
-    ("Iosevka", "Iosevka-Regular.ttf"),
-    ("Roboto Mono", "RobotoMono-Regular.ttf"),
-    ("IBM Plex Mono", "IBMPlexMono-Regular.ttf"),
-    ("Cascadia Code NF", "CascadiaCodeNF.ttf"),
+    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
+    ("Menlo", "Menlo.ttc"), // macOS font; absent on Windows → falls back (parity entry)
 ];
 
 /// The fallback font path used when nothing else resolves (always present on Windows).
 const FALLBACK_FONT: &str = "C:/Windows/Fonts/consola.ttf";
+
+/// Whether `font` is a user-typed custom value (non-empty and not one of [`FONT_OPTIONS`]).
+pub fn is_custom_font(font: &str) -> bool {
+    !font.is_empty() && !FONT_OPTIONS.iter().any(|(_, v)| *v == font)
+}
 
 /// The directories scanned for the candidate font files: the system font folder plus the
 /// per-user font folder (where user-installed fonts land on modern Windows).
@@ -140,33 +139,23 @@ impl Settings {
     }
 }
 
-/// Resolve a saved font path to an actually-loadable one: the path itself if present, else
-/// the first available family, else the always-present fallback. Shared by the live settings
-/// and the in-dialog appearance draft so both highlight the same active font.
+/// Resolve a saved font value to an actually-loadable `.ttf`/`.ttc` path. Handles the three
+/// value shapes: empty (the default → Consolas/fallback), a bare font-file name from
+/// [`FONT_OPTIONS`] (looked up in the font folders), or a custom absolute path. Anything that
+/// can't be found falls back to the always-present Consolas, so loading never fails. Shared by
+/// the live settings and the in-dialog appearance draft so both highlight the same font.
 pub fn resolve_or_default(font: &str) -> String {
-    if !font.is_empty() && std::path::Path::new(font).exists() {
-        return font.to_string();
+    if font.is_empty() {
+        return resolve_font("consola.ttf").unwrap_or_else(|| FALLBACK_FONT.to_string());
     }
-    available_families()
-        .into_iter()
-        .next()
-        .map(|(_, path)| path)
+    // A custom absolute path (contains a separator) is used verbatim when it exists.
+    if (font.contains('/') || font.contains('\\')) && std::path::Path::new(font).exists() {
+        return font.replace('\\', "/");
+    }
+    // Otherwise treat it as a font-file name and look it up in the font folders.
+    resolve_font(font)
+        .or_else(|| resolve_font("consola.ttf"))
         .unwrap_or_else(|| FALLBACK_FONT.to_string())
-}
-
-/// The monospace fonts actually installed on this machine, as `(label, path)` pairs, in
-/// [`FONT_CANDIDATES`] order. Always non-empty (falls back to Consolas) so the picker is
-/// never blank.
-pub fn available_families() -> Vec<(String, String)> {
-    let present: Vec<(String, String)> = FONT_CANDIDATES
-        .iter()
-        .filter_map(|(label, file)| resolve_font(file).map(|p| (label.to_string(), p)))
-        .collect();
-    if present.is_empty() {
-        vec![("Consolas".to_string(), FALLBACK_FONT.to_string())]
-    } else {
-        present
-    }
 }
 
 /// Load the persisted settings (defaults on a missing/corrupt file).
@@ -213,8 +202,22 @@ mod tests {
     }
 
     #[test]
-    fn available_is_never_empty() {
-        assert!(!available_families().is_empty());
+    fn font_options_present_and_resolve() {
+        // The fixed list mirrors the renderer (System default first) and every value
+        // resolves to a loadable .ttf/.ttc (missing fonts fall back to Consolas).
+        assert_eq!(FONT_OPTIONS[0].1, "");
+        assert!(FONT_OPTIONS.len() >= 8);
+        for (_, value) in FONT_OPTIONS {
+            let p = resolve_or_default(value);
+            assert!(p.ends_with(".ttf") || p.ends_with(".ttc"), "unresolved: {value} -> {p}");
+        }
+    }
+
+    #[test]
+    fn custom_font_detection() {
+        assert!(!is_custom_font(""));
+        assert!(!is_custom_font("consola.ttf")); // a preset value
+        assert!(is_custom_font("C:/Fonts/MyFont.ttf"));
     }
 
     #[test]

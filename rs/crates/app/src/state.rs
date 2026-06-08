@@ -193,6 +193,8 @@ pub struct State {
     pub prefs_draft: Option<PrefsDraft>,
     /// Whether the "unsaved appearance changes" save/discard prompt is showing.
     pub prefs_confirm: bool,
+    /// Whether the font picker is in "Custom…" mode (showing the free-text font path field).
+    pub font_custom: bool,
     /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
@@ -249,6 +251,7 @@ impl State {
             font_reload: true,
             prefs_draft: None,
             prefs_confirm: false,
+            font_custom: false,
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
@@ -820,6 +823,7 @@ impl State {
             self.overlay = Overlay::None;
             self.prefs_draft = None;
             self.prefs_confirm = false;
+            self.font_custom = false;
             self.dirty = true;
         }
     }
@@ -890,7 +894,34 @@ impl State {
         // the live panes until Done.
         self.prefs_draft = Some(PrefsDraft::from_settings(&self.settings));
         self.prefs_confirm = false;
+        self.font_custom = prefs::is_custom_font(&self.settings.font_family);
         self.dirty = true;
+    }
+
+    /// Font picker: select option `idx` from `prefs::FONT_OPTIONS`, or enter "Custom…" mode
+    /// when `idx` is the trailing Custom entry (== `FONT_OPTIONS.len()`). Edits the draft.
+    pub fn font_select(&mut self, idx: usize) {
+        let Some(d) = self.prefs_draft.as_mut() else { return };
+        if let Some((_, value)) = prefs::FONT_OPTIONS.get(idx) {
+            d.font_family = value.to_string();
+            self.font_custom = false;
+        } else {
+            // Custom… — start from an empty field unless the current value is already custom.
+            if !prefs::is_custom_font(&d.font_family) {
+                d.font_family.clear();
+            }
+            self.font_custom = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Font picker: set the custom font path typed in the "Custom…" field (edits the draft).
+    pub fn font_custom_value(&mut self, value: String) {
+        if let Some(d) = self.prefs_draft.as_mut() {
+            d.font_family = value;
+            self.font_custom = true;
+            self.dirty = true;
+        }
     }
 
     /// The appearance values the dialog should display: the draft while Preferences is open,

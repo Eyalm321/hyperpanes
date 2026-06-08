@@ -65,6 +65,10 @@ pub enum Command {
     PrefsDone,
     /// Resolve the save/discard prompt: 0 keep · 1 discard · 2 save.
     PrefsConfirm(i32),
+    /// Font picker: select option `i` (== FONT_OPTIONS.len() → Custom… mode).
+    FontSelect(usize),
+    /// Font picker: set the custom font path typed in the Custom… field.
+    FontCustomValue(String),
     // sidebar / projects
     /// Show/hide the whole right-edge rail.
     ToggleSidebar,
@@ -178,6 +182,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::DraftSetting(s) => state.draft_setting(s),
         Command::PrefsDone => state.prefs_done(),
         Command::PrefsConfirm(a) => state.prefs_confirm_resolve(a),
+        Command::FontSelect(i) => state.font_select(i),
+        Command::FontCustomValue(v) => state.font_custom_value(v),
         Command::ToggleSidebar => state.toggle_sidebar(),
         Command::ToggleProjects => state.toggle_projects(),
         Command::OpenProject(i) => state.open_project(i, mgr),

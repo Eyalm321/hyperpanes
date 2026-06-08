@@ -53,6 +53,8 @@ export component AppWindow inherits Window {
     in property <int> palette-sel: 0;
     in property <[PrefOption]> pref-families;
     in property <string> pref-font-label;
+    in property <bool> pref-font-custom: false;
+    in property <string> pref-font-custom-value: "";
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
     in property <bool> pref-clickable: true;
@@ -195,6 +197,8 @@ export component AppWindow inherits Window {
                 palette-sel: root.palette-sel;
                 pref-families: root.pref-families;
                 pref-font-label: root.pref-font-label;
+                pref-font-custom: root.pref-font-custom;
+                pref-font-custom-value: root.pref-font-custom-value;
                 pref-palettes: root.pref-palettes;
                 pref-shells: root.pref-shells;
                 pref-fontpx: root.pref-fontpx;
