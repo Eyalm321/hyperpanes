@@ -213,6 +213,9 @@ component FontDropdown inherits Rectangle {
         }
     }
     popup := PopupWindow {
+        // We own open/close (so the button reliably toggles + the chevron tracks it);
+        // default auto-close would swallow the second button click before our handler runs.
+        close-policy: PopupClosePolicy.no-auto-close;
         x: 0;
         y: parent.height + 4px;
         width: root.width;
