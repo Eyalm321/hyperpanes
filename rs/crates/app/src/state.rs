@@ -1996,11 +1996,13 @@ impl State {
     /// Paste the clipboard into pane `idx`'s session (the widget owns the clipboard; the
     /// controller owns the transport, so we write the returned text via the manager).
     pub fn paste_pane(&mut self, idx: usize, mgr: &SessionManager) {
-        let payload = self
-            .active_tab_mut()
-            .panes
-            .get_mut(idx)
-            .and_then(|p| p.pane.paste_from_clipboard().map(|t| (p.uid.clone(), t)));
+        let payload = self.active_tab_mut().panes.get_mut(idx).and_then(|p| {
+            let text = p.pane.paste_from_clipboard()?;
+            // Snap the viewport to the live edge so the caret lands at the end of the pasted
+            // text (visible), regardless of where the pane was scrolled when pasting.
+            p.pane.scroll_to_bottom();
+            Some((p.uid.clone(), text))
+        });
         if let Some((uid, text)) = payload {
             mgr.write(&uid, &text);
             self.dirty = true;
