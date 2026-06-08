@@ -23,7 +23,7 @@ mod imp {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     #[derive(Clone, Copy)]
@@ -32,6 +32,12 @@ mod imp {
     /// The window proc we replaced (winit's), chained to for every message we
     /// don't handle ourselves.
     static OLD_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+    /// The cursor (HCURSOR as isize) to force globally while a tear-off drag is in flight;
+    /// `0` = none. Set by [`begin_drag_cursor`], honored by the subclass on `WM_SETCURSOR`
+    /// so the drag cursor holds even out over the desktop / other apps (we capture the mouse
+    /// so every `WM_SETCURSOR` routes to the source window's proc).
+    static DRAG_CURSOR: AtomicIsize = AtomicIsize::new(0);
 
     fn hwnd(raw: isize) -> HWND {
         HWND(raw as *mut c_void)
@@ -47,6 +53,16 @@ mod imp {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // While a drag is in flight (and the mouse is captured to this window), force the
+        // drag cursor for every WM_SETCURSOR — including those that arrive while the cursor
+        // is over the desktop or another app.
+        if msg == WM_SETCURSOR {
+            let c = DRAG_CURSOR.load(Ordering::Relaxed);
+            if c != 0 {
+                SetCursor(HCURSOR(c as *mut c_void));
+                return LRESULT(1); // TRUE → we handled it; stop default cursor processing.
+            }
+        }
         if msg == WM_NCCALCSIZE && wparam.0 != 0 {
             if IsZoomed(h).as_bool() {
                 let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
@@ -120,6 +136,30 @@ mod imp {
             let h = hwnd(raw);
             let _ = ReleaseCapture();
             SendMessageW(h, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as usize), LPARAM(0));
+        }
+    }
+
+    /// Begin forcing the tear-off drag cursor globally: load the 4-way "move" cursor, set
+    /// it now, and capture the mouse to `raw` so every `WM_SETCURSOR` (over any window or
+    /// the desktop) routes to our subclass and keeps the cursor consistent for the whole
+    /// drag. (Win32 has no closed-hand system cursor; the move cursor reads as "carrying".)
+    pub fn begin_drag_cursor(raw: isize) {
+        unsafe {
+            if let Ok(cur) = LoadCursorW(None, IDC_SIZEALL) {
+                DRAG_CURSOR.store(cur.0 as isize, Ordering::Relaxed);
+                SetCursor(cur);
+            }
+            if raw != 0 {
+                SetCapture(hwnd(raw));
+            }
+        }
+    }
+
+    /// Stop forcing the drag cursor and release the mouse capture (drop / cancel).
+    pub fn end_drag_cursor(_raw: isize) {
+        DRAG_CURSOR.store(0, Ordering::Relaxed);
+        unsafe {
+            let _ = ReleaseCapture();
         }
     }
 
@@ -212,6 +252,8 @@ mod imp {
     }
     pub fn make_frameless(_raw: isize) {}
     pub fn start_drag(_raw: isize) {}
+    pub fn begin_drag_cursor(_raw: isize) {}
+    pub fn end_drag_cursor(_raw: isize) {}
     pub fn minimize(_raw: isize) {}
     pub fn toggle_max(_raw: isize) {}
     pub fn close(_raw: isize) {}

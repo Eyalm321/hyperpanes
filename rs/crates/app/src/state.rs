@@ -440,18 +440,25 @@ impl State {
         self.adopt_pane(mgr, det);
     }
 
-    /// Detach a **specific** pane (by `uid`) from the active tab for re-hosting elsewhere
-    /// — like [`Self::detach_focused`] but targets the dragged pane rather than the focused
-    /// one. Returns the rebind info + whether this window still has panes; `None` if the
-    /// uid isn't in the active tab.
+    /// Detach a **specific** pane (by `uid`) from wherever it lives (any tab) for re-hosting
+    /// elsewhere — like [`Self::detach_focused`] but targets the dragged pane. Searching all
+    /// tabs (not just the active one) keeps a drop correct even after the active tab changed
+    /// mid-drag (e.g. a spring-load switched tabs). Returns the rebind info + whether this
+    /// window still has panes; `None` if the uid isn't here. `take_pane_in` keeps the active
+    /// tab pointing at the same tab across the removal.
     pub fn detach_uid(&mut self, uid: &str) -> Option<(DetachedPane, bool)> {
-        let ti = self.active;
-        let idx = self.tabs.get(ti)?.panes.iter().position(|p| p.uid == uid)?;
+        let (ti, idx) = self.find_pane(uid)?;
         let (ps, alive) = self.take_pane_in(ti, idx)?;
         Some((
             DetachedPane { uid: ps.uid, title: ps.title, pinned_accent: ps.pinned_accent },
             alive,
         ))
+    }
+
+    /// Whether the active tab currently hosts pane `uid` (used to choose reorder-in-place
+    /// vs cross-tab move when a pane is dropped in the pane area).
+    pub fn active_has_uid(&self, uid: &str) -> bool {
+        self.active_tab().panes.iter().any(|p| p.uid == uid)
     }
 
     /// Move pane `from` to insertion index `to` within the active tab (in-window reorder),

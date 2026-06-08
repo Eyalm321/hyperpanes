@@ -80,6 +80,7 @@ component TabChip inherits Rectangle {
     in property <string> title;
     in property <bool> active;
     in property <bool> editing;
+    in property <bool> spring-hover: false;   // a dragged pane is hovering this tab
     callback select();
     callback close();
     callback begin-rename();
@@ -100,14 +101,19 @@ component TabChip inherits Rectangle {
     min-width: 96px;
     max-width: 200px;
     horizontal-stretch: 0;
-    // active tab adopts the pane-area bg (reads connected); hover lifts to surface.
-    background: root.active ? Theme.bg : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
+    // active tab adopts the pane-area bg (reads connected); hover lifts to surface; a
+    // spring-hover (dragged pane resting over it) glows in the brand accent.
+    background: root.spring-hover ? Theme.brand.with-alpha(0.14)
+              : root.active ? Theme.bg
+              : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
     border-top-left-radius: 9px;
     border-top-right-radius: 9px;
-    border-width: root.active ? 1px : 0px;
-    border-color: Theme.border;
+    border-width: root.spring-hover ? 2px : (root.active ? 1px : 0px);
+    border-color: root.spring-hover ? Theme.brand : Theme.border;
 
     ta := TouchArea {
+        // open hand on hover, closed hand while dragging — the tab is a drag handle.
+        mouse-cursor: self.pressed ? MouseCursor.grabbing : MouseCursor.grab;
         clicked => { root.select(); }
         double-clicked => { root.begin-rename(); }
         pointer-event(e) => {
@@ -224,6 +230,7 @@ export component TopBar inherits Rectangle {
     in property <bool> drop-strip-active: false;
     in property <length> drop-tab-x: 0px;
     in property <bool> drop-tab-active: false;
+    in property <int> drop-tab-idx: -1;
 
     callback select-tab(int);
     callback close-tab(int);
@@ -303,6 +310,7 @@ export component TopBar inherits Rectangle {
                     title: tab.title;
                     active: tab.active;
                     editing: root.editing-tab == idx;
+                    spring-hover: root.drop-tab-idx == idx;
                     select => { root.select-tab(idx); }
                     close => { root.close-tab(idx); }
                     begin-rename => { root.begin-rename(idx); }

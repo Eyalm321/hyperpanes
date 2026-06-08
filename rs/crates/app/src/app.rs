@@ -91,7 +91,17 @@ pub struct App {
     ghost: RefCell<Option<drag::Ghost>>,
     /// Set while previews are painted, so they're cleared exactly once when a drag ends.
     preview_on: Cell<bool>,
+    /// True while the global tear-off drag cursor + mouse capture are engaged (so we
+    /// begin/end them exactly once per drag).
+    drag_capture: Cell<bool>,
+    /// Spring-load tracker: `(window id, hovered tab index, since)`. When a pane drag rests
+    /// over the same tab past [`SPRING_DELAY`], that window switches to the tab so the pane
+    /// can be dropped into its layout.
+    spring: RefCell<Option<(usize, usize, std::time::Instant)>>,
 }
+
+/// How long a pane drag must rest over a tab before it springs open (Chrome/Finder).
+const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 
 impl App {
     pub fn new(mgr: Rc<SessionManager>, erx: UnboundedReceiver<SessionEvent>) -> Rc<Self> {
@@ -106,6 +116,8 @@ impl App {
             drag: RefCell::new(None),
             ghost: RefCell::new(None),
             preview_on: Cell::new(false),
+            drag_capture: Cell::new(false),
+            spring: RefCell::new(None),
         })
     }
 
@@ -455,6 +467,9 @@ impl App {
             if self.preview_on.replace(false) {
                 self.clear_previews(windows);
             }
+            if self.drag_capture.replace(false) {
+                window::end_drag_cursor(0); // defensive: release a stray capture/cursor
+            }
             return;
         }
 
@@ -495,6 +510,11 @@ impl App {
             if let Some(g) = self.ghost.borrow().as_ref() {
                 g.hide();
             }
+            if self.drag_capture.replace(false) {
+                let raw = self.window_by_id(d.source_win).map(|w| w.hwnd.get()).unwrap_or(0);
+                window::end_drag_cursor(raw);
+            }
+            *self.spring.borrow_mut() = None;
             if self.preview_on.replace(false) {
                 self.clear_previews(windows);
             }
@@ -522,6 +542,36 @@ impl App {
                         *index = dest;
                     }
                 }
+            }
+        }
+
+        // Engage the global "move" cursor + mouse capture once, for the whole drag.
+        if !self.drag_capture.get() {
+            if let Some(src) = self.window_by_id(source_id) {
+                window::begin_drag_cursor(src.hwnd.get());
+                self.drag_capture.set(true);
+            }
+        }
+
+        // Spring-load: a pane resting over a tab switches that window to the tab after a
+        // short hold, so the pane can be dropped into that tab's layout at a precise slot.
+        if is_pane {
+            let mut sp = self.spring.borrow_mut();
+            match (hover.win, hover.over_strip, hover.tab_over) {
+                (Some(win), true, Some(ti)) => match *sp {
+                    Some((w, t, since)) if w == win && t == ti => {
+                        if since.elapsed() >= SPRING_DELAY {
+                            if let Some(tw) = self.window_by_id(win) {
+                                if tw.state.borrow().active != ti {
+                                    tw.state.borrow_mut().switch_tab(ti);
+                                }
+                            }
+                            *sp = Some((win, ti, std::time::Instant::now())); // re-arm
+                        }
+                    }
+                    _ => *sp = Some((win, ti, std::time::Instant::now())),
+                },
+                _ => *sp = None,
             }
         }
 
@@ -568,7 +618,9 @@ impl App {
             // Over the top bar → a tab-strip target.
             if !fullscreen && ly < TOPBAR_H {
                 h.over_strip = true;
-                h.tab_slot = self.tab_slot_at(w, lx);
+                let (slot, over) = self.tab_hit(w, lx);
+                h.tab_slot = slot;
+                h.tab_over = over;
                 return h;
             }
 
@@ -597,19 +649,25 @@ impl App {
         Hover::default() // empty space
     }
 
-    /// The tab insertion index for a window-logical x (count of tabs whose centre the
-    /// cursor has passed). Uses the UI-reported [`Window::tab_geom`].
-    fn tab_slot_at(&self, w: &Rc<Window>, lx: f32) -> usize {
+    /// Hit-test a window-logical x against the tab strip: returns `(insertion slot, the tab
+    /// chip directly under the cursor)`. The slot counts tabs whose centre the cursor has
+    /// passed (for the reorder/dock caret); the chip is the tab whose extent contains the
+    /// cursor (for spring-load / dock-into-tab). Uses the UI-reported [`Window::tab_geom`].
+    fn tab_hit(&self, w: &Rc<Window>, lx: f32) -> (usize, Option<usize>) {
         let g = w.tab_geom.borrow();
         let n = w.state.borrow().tabs.len().min(g.len());
         let mut slot = 0;
+        let mut over = None;
         for i in 0..n {
             let (x, wd) = g[i];
             if lx >= x + wd / 2.0 {
                 slot = i + 1;
             }
+            if lx >= x && lx < x + wd {
+                over = Some(i);
+            }
         }
-        slot
+        (slot, over)
     }
 
     /// Resolve a completed drop: reorder in-window, stitch / dock cross-window, or spawn a
@@ -632,21 +690,45 @@ impl App {
                     // ---- in-window ----
                     Some(target_id) if target_id == d.source_win => {
                         if hover.over_strip {
-                            // dock the pane as a fresh tab in the same window
-                            let det = src.state.borrow_mut().detach_uid(uid);
-                            if let Some((det, _alive)) = det {
-                                src.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det);
+                            match hover.tab_over {
+                                // dropped on an existing tab chip → dock into that tab.
+                                Some(ti) => {
+                                    src.state.borrow_mut().switch_tab(ti);
+                                    let det = src.state.borrow_mut().detach_uid(uid);
+                                    if let Some((det, _alive)) = det {
+                                        src.state.borrow_mut().adopt_pane(&self.mgr, det);
+                                    }
+                                }
+                                // dropped on the empty strip / `+` → a fresh tab.
+                                None => {
+                                    let det = src.state.borrow_mut().detach_uid(uid);
+                                    if let Some((det, _alive)) = det {
+                                        src.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det);
+                                    }
+                                }
                             }
                         } else if hover.pane_idx.is_some() {
-                            let from = src
-                                .state
-                                .borrow()
-                                .active_tab()
-                                .panes
-                                .iter()
-                                .position(|p| p.uid == *uid);
-                            if let Some(from) = from {
-                                src.state.borrow_mut().reorder_pane(from, hover.slot_index);
+                            // Pane area: reorder within the active tab, or — if a spring-load
+                            // moved us to a different tab — move the pane across tabs to the
+                            // hovered slot.
+                            if src.state.borrow().active_has_uid(uid) {
+                                let from = src
+                                    .state
+                                    .borrow()
+                                    .active_tab()
+                                    .panes
+                                    .iter()
+                                    .position(|p| p.uid == *uid);
+                                if let Some(from) = from {
+                                    src.state.borrow_mut().reorder_pane(from, hover.slot_index);
+                                }
+                            } else {
+                                let det = src.state.borrow_mut().detach_uid(uid);
+                                if let Some((det, _alive)) = det {
+                                    src.state
+                                        .borrow_mut()
+                                        .adopt_pane_at(&self.mgr, det, hover.slot_index);
+                                }
                             }
                         }
                     }
@@ -656,7 +738,16 @@ impl App {
                         if let Some((det, alive)) = det {
                             if let Some(tgt) = self.window_by_id(target_id) {
                                 if hover.over_strip {
-                                    tgt.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det);
+                                    match hover.tab_over {
+                                        // onto an existing tab → switch to it + dock in.
+                                        Some(ti) => {
+                                            tgt.state.borrow_mut().switch_tab(ti);
+                                            tgt.state.borrow_mut().adopt_pane(&self.mgr, det);
+                                        }
+                                        None => {
+                                            tgt.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det)
+                                        }
+                                    }
                                 } else {
                                     tgt.state
                                         .borrow_mut()
@@ -724,6 +815,14 @@ impl App {
                 w.app.set_drop_tab_active(false);
             }
 
+            // Spring-target highlight: the existing tab chip a dragged pane is hovering.
+            let spring_tab = if is_pane && is_target && hover.over_strip {
+                hover.tab_over.map(|i| i as i32).unwrap_or(-1)
+            } else {
+                -1
+            };
+            w.app.set_drop_tab_idx(spring_tab);
+
             // Pane tile slot highlight (stitch / reorder target).
             let pane_active =
                 is_pane && is_target && !hover.over_strip && hover.pane_idx.is_some();
@@ -747,6 +846,7 @@ impl App {
             w.app.set_drop_win_active(false);
             w.app.set_drop_strip_active(false);
             w.app.set_drop_tab_active(false);
+            w.app.set_drop_tab_idx(-1);
             w.app.set_drop_rect_active(false);
         }
     }

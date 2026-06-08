@@ -57,6 +57,7 @@ export component AppWindow inherits Window {
     in property <bool> drop-strip-active: false;  // the tab strip is a drop target
     in property <length> drop-tab-x: 0px;         // tab insertion caret x (window coords)
     in property <bool> drop-tab-active: false;
+    in property <int> drop-tab-idx: -1;           // existing tab a dragged pane hovers (spring)
     in property <length> drop-rect-x: 0px;        // hovered pane slot (area-relative)
     in property <length> drop-rect-y: 0px;
     in property <length> drop-rect-w: 0px;
@@ -122,6 +123,7 @@ export component AppWindow inherits Window {
             drop-strip-active: root.drop-strip-active;
             drop-tab-x: root.drop-tab-x;
             drop-tab-active: root.drop-tab-active;
+            drop-tab-idx: root.drop-tab-idx;
 
             tab-grab(i) => { root.tab-grab(i); }
             tab-geom(i, x, w) => { root.tab-geom(i, x, w); }

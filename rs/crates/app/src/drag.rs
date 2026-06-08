@@ -77,6 +77,9 @@ pub struct Hover {
     pub over_strip: bool,
     /// Insertion index in the strip (for a tab reorder / dock caret).
     pub tab_slot: usize,
+    /// The existing tab chip directly under the cursor (vs the empty strip / `+`), if any.
+    /// Drives spring-load (hover-to-switch) and dock-into-that-tab on drop.
+    pub tab_over: Option<usize>,
     /// Pane tile under the cursor (active-tab pane index), if any.
     pub pane_idx: Option<usize>,
     /// Insertion index among that tab's panes for a stitch (edge-band aware).
