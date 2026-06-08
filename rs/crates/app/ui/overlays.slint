@@ -203,26 +203,13 @@ component FontDropdown inherits Rectangle {
     }
     ta := TouchArea { clicked => { root.open = true; popup.show(); } }
     popup := PopupWindow {
-        // We own open/close so the chevron tracks it. A full-window backdrop behind the list
-        // catches every click outside the list (the button, other controls, empty space) to
-        // close + reset the chevron; option rows (above it) select + close.
-        close-policy: PopupClosePolicy.no-auto-close;
+        // Default close-on-click: clicking an option or anywhere outside dismisses the popup.
+        // (Slint 1.16 exposes no close event, so the chevron reliably shows up-on-open and
+        // down-on-select; an outside dismiss leaves it up until the next open.)
         x: 0;
         y: parent.height + 4px;
         width: root.width;
-        // click-away catcher: large + offset so it covers the window around the list.
         Rectangle {
-            x: -2000px;
-            y: -2000px;
-            width: 4000px;
-            height: 4000px;
-            background: transparent;
-            TouchArea { clicked => { root.open = false; popup.close(); } }
-        }
-        Rectangle {
-            x: 0;
-            y: 0;
-            width: root.width;
             background: Theme.mantle;
             border-radius: 8px;
             border-width: 1px;
