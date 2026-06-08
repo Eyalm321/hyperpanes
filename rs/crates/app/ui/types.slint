@@ -37,6 +37,10 @@ export struct PaneItem {
     search-count: string,
     // transient bottom-right indicator: copy/paste confirmations + the Ctrl-zoom font "%".
     toast: string,
+    // Whether the pane's shell has exited (drives the single-layout taskbar's "exited"
+    // badge). The native app removes a pane the moment its session exits, so this is
+    // structurally always false today — kept for Electron parity / a future status model.
+    exited: bool,
 }
 
 // One tab (workspace group) chip in the strip.
@@ -63,6 +67,9 @@ export struct LayoutOption {
     label: string,
     glyph: string,
     active: bool,
+    // optional dim hint shown to the right (e.g. the "— grid" the Automatic row resolves
+    // to right now in the application menu's Layout submenu); "" = none.
+    hint: string,
 }
 
 // ===== Wave-2 overlay rows =====

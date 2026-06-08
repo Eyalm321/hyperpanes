@@ -378,19 +378,32 @@ impl App {
                             crate::demo_seed(&mut st, &self.mgr);
                         }
                         if let Some(which) = std::env::var_os("HYPERPANES_OPEN") {
-                            let cmd = match which.to_string_lossy().as_ref() {
-                                "palette" => Some(Command::PaletteOpen),
-                                "prefs" => Some(Command::PrefsOpen),
+                            match which.to_string_lossy().as_ref() {
+                                "palette" => { dispatch(&mut st, Command::PaletteOpen, &self.mgr); }
+                                "prefs" => { dispatch(&mut st, Command::PrefsOpen, &self.mgr); }
                                 // The rail is persistent; open its projects flyout so a
                                 // screenshot exercises the full surface.
-                                "sidebar" => Some(Command::ToggleProjects),
+                                "sidebar" => { dispatch(&mut st, Command::ToggleProjects, &self.mgr); }
                                 // Open a context menu at a fixed anchor (screenshot scaffold).
-                                "panemenu" => Some(Command::OpenPaneContext(0, 380.0, 150.0)),
-                                "tabmenu" => Some(Command::OpenTabContext(0, 90.0, 44.0)),
-                                _ => None,
-                            };
-                            if let Some(cmd) = cmd {
-                                dispatch(&mut st, cmd, &self.mgr);
+                                "panemenu" => { dispatch(&mut st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr); }
+                                "tabmenu" => { dispatch(&mut st, Command::OpenTabContext(0, 90.0, 44.0), &self.mgr); }
+                                // Phase-5 chrome-parity scaffolds:
+                                // the hamburger (application) menu, anchored under the button.
+                                "appmenu" => { dispatch(&mut st, Command::OpenAppContext(10.0, 32.0), &self.mgr); }
+                                // three panes in the single preset → the bottom pane taskbar shows.
+                                "taskbar" => {
+                                    dispatch(&mut st, Command::NewPane, &self.mgr);
+                                    dispatch(&mut st, Command::NewPane, &self.mgr);
+                                    dispatch(&mut st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
+                                }
+                                // taskbar + its right-click pane menu (inTaskbar variant: Show + no Maximize).
+                                "taskbarmenu" => {
+                                    dispatch(&mut st, Command::NewPane, &self.mgr);
+                                    dispatch(&mut st, Command::NewPane, &self.mgr);
+                                    dispatch(&mut st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
+                                    dispatch(&mut st, Command::OpenTaskbarContext(0, 40.0, 805.0), &self.mgr);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1115,6 +1128,24 @@ impl App {
             win.app.on_tab_context(move |i, x, y| {
                 if let Some(w) = app.window_by_id(id) {
                     app.run_command(&w, Command::OpenTabContext(i as usize, x, y));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_taskbar_context(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenTaskbarContext(i as usize, x, y));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_open_app_menu(move |x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenAppContext(x, y));
                 }
             });
         }

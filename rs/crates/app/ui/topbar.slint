@@ -197,38 +197,6 @@ component TabChip inherits Rectangle {
     }
 }
 
-// ---- a row in the application menu ----
-
-component MenuItem inherits Rectangle {
-    in property <string> label;
-    in property <bool> checked: false;
-    in property <bool> show-check: false;
-    in property <bool> indent: false;
-    callback clicked;
-    height: 30px;
-    border-radius: 6px;
-    background: ta.has-hover ? Theme.surface2 : transparent;
-    HorizontalLayout {
-        padding-left: root.indent ? 26px : 11px;
-        padding-right: 11px;
-        spacing: 9px;
-        Text {
-            text: root.label;
-            color: Theme.text;
-            font-size: 12px;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-        Text {
-            text: (root.show-check && root.checked) ? "✓" : "";
-            color: Theme.accent;
-            font-size: 12px;
-            vertical-alignment: center;
-        }
-    }
-    ta := TouchArea { clicked => { root.clicked(); } }
-}
-
 export component TopBar inherits Rectangle {
     in property <[TabItem]> tabs;
     in property <int> editing-tab: -1;
@@ -254,6 +222,9 @@ export component TopBar inherits Rectangle {
     callback move-pane-new-window();
     callback set-layout(int);
     callback new-pane();
+    // Open the application (hamburger) menu at the given window-logical anchor (just below
+    // the hamburger). The contents are rendered by the shared ContextMenu at the app root.
+    callback open-app-menu(length, length);
     callback open-palette();
     callback open-prefs();
     callback toggle-sidebar();
@@ -304,7 +275,12 @@ export component TopBar inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     ink: mta.has-hover ? Theme.text : Theme.subtext;
                 }
-                mta := TouchArea { clicked => { menu-popup.show(); } }
+                mta := TouchArea {
+                    clicked => {
+                        root.open-app-menu(menu-btn.absolute-position.x,
+                                           menu-btn.absolute-position.y + menu-btn.height);
+                    }
+                }
             }
         }
 
@@ -405,87 +381,9 @@ export component TopBar inherits Rectangle {
         }
     }
 
-    // ===== application (hamburger) menu =====
-    menu-popup := PopupWindow {
-        x: 8px;
-        y: 36px;
-        width: 250px;
-        height: 536px;
-
-        Rectangle {
-            background: Theme.mantle;
-            border-radius: 9px;
-            border-width: 1px;
-            border-color: Theme.border;
-            drop-shadow-blur: 40px;
-            drop-shadow-color: Theme.scrim;
-            drop-shadow-offset-y: 14px;
-
-            VerticalLayout {
-                padding: 5px;
-                spacing: 1px;
-
-                MenuItem {
-                    label: "Command palette…";
-                    clicked => { root.open-palette(); menu-popup.close(); }
-                }
-                MenuItem {
-                    label: "New pane";
-                    clicked => { root.new-pane(); menu-popup.close(); }
-                }
-                MenuItem {
-                    label: "New tab";
-                    clicked => { root.new-tab(); menu-popup.close(); }
-                }
-                MenuItem {
-                    label: "New window";
-                    clicked => { root.new-window(); menu-popup.close(); }
-                }
-                MenuItem {
-                    label: "Move pane to new window";
-                    clicked => { root.move-pane-new-window(); menu-popup.close(); }
-                }
-                Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
-
-                // Layout section
-                Text {
-                    text: "Layout";
-                    color: Theme.subtext;
-                    font-size: 10px;
-                    font-weight: 700;
-                    horizontal-alignment: left;
-                    height: 18px;
-                    vertical-alignment: center;
-                    x: 11px;
-                }
-                for opt[i] in root.layouts : MenuItem {
-                    label: opt.label;
-                    checked: opt.active;
-                    show-check: true;
-                    indent: true;
-                    clicked => { root.set-layout(opt.id); menu-popup.close(); }
-                }
-                Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
-
-                MenuItem {
-                    label: "Zoom pane";
-                    checked: root.zoomed;
-                    show-check: true;
-                    clicked => { root.toggle-zoom(); menu-popup.close(); }
-                }
-                MenuItem {
-                    label: "Fullscreen";
-                    checked: root.fullscreen;
-                    show-check: true;
-                    clicked => { root.toggle-fullscreen(); menu-popup.close(); }
-                }
-                Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
-                MenuItem {
-                    label: "Preferences…";
-                    clicked => { root.open-prefs(); menu-popup.close(); }
-                }
-                Rectangle { vertical-stretch: 1; }
-            }
-        }
-    }
+    // The application (hamburger) menu contents are rendered by the shared ContextMenu at the
+    // app root (CtxKind::App), opened via `open-app-menu` — so it shares the items/submenu/
+    // separator/shortcut/checkmark/glyph styling and gets Esc / outside-click / select-close
+    // for free, and its cascading Layout submenu can fly out past the bar (a PopupWindow would
+    // clip it).
 }

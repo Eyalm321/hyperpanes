@@ -38,6 +38,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # Wave-2 preferences persistence (a small native-settings.json blob).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Native Open/Save file dialogs for the application menu's workspace items. On Windows this
+# uses the COM IFileDialog via `windows-sys` (separate from the `windows` crate below, so it
+# doesn't perturb the pinned 0.62 graph); no GTK/xdg on this Windows-first target.
+rfd = { version = "0.15", default-features = false }
 # Frameless window / custom titlebar (strip WS_CAPTION + the HTCAPTION drag trick + min/max/close)
 # — lifted from spike-tearoff. Bumped 0.58 -> 0.62 to unify with wgpu-hal 29 / gpu-allocator and
 # avoid two `windows` crate versions in the graph (which breaks wgpu-hal's d3d12 backend).

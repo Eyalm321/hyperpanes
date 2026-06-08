@@ -99,10 +99,20 @@ pub enum Command {
     // ---- context-menu lifecycle ----
     /// Open the pane context menu for pane `0` at window-logical `(1, 2)`.
     OpenPaneContext(usize, f32, f32),
+    /// Open the single-layout taskbar's pane menu for pane `0` at `(1, 2)` (the `inTaskbar`
+    /// variant: a leading Show row, no Maximize).
+    OpenTaskbarContext(usize, f32, f32),
     /// Open the tab context menu for tab `0` at window-logical `(1, 2)`.
     OpenTabContext(usize, f32, f32),
+    /// Open the application (hamburger) menu at window-logical `(0, 1)`.
+    OpenAppContext(f32, f32),
     /// Dismiss the open context menu.
     CloseContext,
+    // ---- workspace file (application menu) ----
+    /// Pick a `workspace.json` and load it (the application menu's "Open workspace…").
+    OpenWorkspace,
+    /// Serialize the active tab and save it to a chosen file (the menu's "Save workspace…").
+    SaveWorkspace,
     // ---- multi-window (Phase 4) ----
     /// Open a fresh OS window with an empty tab.
     NewWindow,
@@ -276,8 +286,13 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         // ---- context-menu lifecycle ----
         Command::OpenPaneContext(i, x, y) => state.open_pane_context(i, x, y),
+        Command::OpenTaskbarContext(i, x, y) => state.open_taskbar_context(i, x, y),
         Command::OpenTabContext(i, x, y) => state.open_tab_context(i, x, y),
+        Command::OpenAppContext(x, y) => state.open_app_context(x, y),
         Command::CloseContext => state.close_context(),
+        // ---- workspace file (application menu) ----
+        Command::OpenWorkspace => state.open_workspace(mgr),
+        Command::SaveWorkspace => state.save_workspace(),
         // ---- multi-window ----
         Command::NewWindow => return Effect::NewWindow,
         Command::MovePaneToNewWindow => {

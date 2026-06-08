@@ -20,6 +20,8 @@ use hyperpanes_core::layout::sizes::{
 };
 use hyperpanes_core::persistence::projects;
 use hyperpanes_core::session_manager::{SessionManager, SpawnOptions};
+use hyperpanes_core::workspace::io::{read_workspace, windows_of, write_workspace};
+use hyperpanes_core::workspace::model::{GroupSpec, PaneSpec, WorkspaceFile};
 use hyperpanes_terminal_widget::{Font, RenderOpts, SoftwareRenderer, TerminalPane};
 
 use slint::{Color, Image, SharedString};
@@ -1793,9 +1795,24 @@ impl State {
     /// the focused pane or active tab.
     pub fn open_pane_context(&mut self, idx: usize, x: f32, y: f32) {
         if idx < self.active_tab().panes.len() {
-            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y));
+            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, false));
             self.dirty = true;
         }
+    }
+
+    /// Open the single-layout taskbar's pane menu for pane `idx` (the `inTaskbar` variant:
+    /// a leading Show row, no Maximize), anchored at window-logical `(x, y)`.
+    pub fn open_taskbar_context(&mut self, idx: usize, x: f32, y: f32) {
+        if idx < self.active_tab().panes.len() {
+            self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, true));
+            self.dirty = true;
+        }
+    }
+
+    /// Open the application (hamburger) menu, anchored at window-logical `(x, y)`.
+    pub fn open_app_context(&mut self, x: f32, y: f32) {
+        self.ctx = Some(crate::contextmenu::app_menu(self, x, y));
+        self.dirty = true;
     }
 
     /// Open the tab-strip menu for tab `idx`, anchored at window-logical `(x, y)`.
@@ -2282,6 +2299,231 @@ impl State {
                 self.dirty = true;
             }
         }
+    }
+
+    // ---- workspace file (application menu: Open / Save) ----
+
+    /// Whether the single-layout pane taskbar should show: the active tab uses the explicit
+    /// `single` preset, has more than one pane, and we're not in fullscreen. (The single
+    /// preset renders only the focused pane, so the strip is how the hidden panes stay
+    /// reachable — the native port of Electron's `PaneTaskbar` gate.)
+    pub fn taskbar_visible(&self) -> bool {
+        let t = self.active_tab();
+        t.layout == Layout::Single && t.panes.len() > 1 && !self.fullscreen
+    }
+
+    /// Snapshot the **active tab** into the persistable file shape — the native port of
+    /// `serializeWorkspace()` (`{ name, layout, panes }`; runtime-only fields dropped). Pane
+    /// identity is the label + color; the cwd/command aren't tracked per-pane in the native
+    /// state, so a reloaded pane re-spawns a plain shell at its saved label/color.
+    pub fn to_workspace_file(&self) -> WorkspaceFile {
+        let t = self.active_tab();
+        let panes: Vec<PaneSpec> = t
+            .panes
+            .iter()
+            .map(|p| PaneSpec {
+                label: Some(p.title.to_string()),
+                color: Some(color_hex(p.accent)),
+                ..Default::default()
+            })
+            .collect();
+        WorkspaceFile {
+            name: Some(t.title.to_string()),
+            layout: Some(theme::layout_name(t.layout).to_string()),
+            panes: Some(panes),
+            ..Default::default()
+        }
+    }
+
+    /// "Save workspace…": pick a destination via the native save dialog and write the active
+    /// tab's serialized workspace there. No-op if the dialog is cancelled.
+    pub fn save_workspace(&mut self) {
+        let file = self.to_workspace_file();
+        let default_name = match &file.name {
+            Some(n) if !n.is_empty() => format!("{n}.json"),
+            _ => "workspace.json".to_string(),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Workspace", &["json"])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        if !write_workspace(&path, &file) {
+            eprintln!("[hyperpanes] failed to write workspace {}", path.display());
+        }
+    }
+
+    /// "Open workspace…": pick a `workspace.json` via the native open dialog, read + validate
+    /// it, and load its groups as new tabs (switching to the first). Non-destructive: existing
+    /// tabs/sessions are left intact. No-op if cancelled or the file has no panes.
+    pub fn open_workspace(&mut self, mgr: &SessionManager) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Workspace", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(file) = read_workspace(&path) else {
+            eprintln!("[hyperpanes] {} is not a valid workspace", path.display());
+            return;
+        };
+        self.load_workspace(file, mgr);
+    }
+
+    /// Load a parsed workspace file: append a tab per group of its first window and switch to
+    /// the first appended tab. Each pane re-spawns from its spec (label/color/cwd/command/
+    /// shell). Shared by [`Self::open_workspace`].
+    pub fn load_workspace(&mut self, file: WorkspaceFile, mgr: &SessionManager) {
+        let windows = windows_of(Some(&file));
+        let Some(win) = windows.into_iter().next() else {
+            return;
+        };
+        let first_new = self.tabs.len();
+        for g in win.groups {
+            self.append_tab_from_group(mgr, g);
+        }
+        if self.tabs.len() > first_new {
+            self.active = first_new;
+            self.editing_tab = -1;
+            self.dirty = true;
+        }
+    }
+
+    /// Build a tab from a `GroupSpec` (spawning a pane per spec) and append it.
+    fn append_tab_from_group(&mut self, mgr: &SessionManager, g: GroupSpec) {
+        let palette = self.settings.frame_palette;
+        let title: SharedString = match g.title {
+            Some(t) if !t.is_empty() => t.into(),
+            _ => {
+                self.tab_seq += 1;
+                format!("term {}", self.tab_seq).into()
+            }
+        };
+        let layout = g.layout.as_deref().map(layout_from_name).unwrap_or(Layout::Auto);
+        let mut tab = Tab::empty(title);
+        tab.layout = layout;
+        for (i, spec) in g.panes.iter().enumerate() {
+            if let Some(ps) = self.make_pane_from_spec(mgr, i, spec) {
+                tab.panes.push(ps);
+            }
+        }
+        let n = tab.panes.len();
+        if n == 0 {
+            return; // a contentless group — skip it
+        }
+        tab.sizes = match &g.sizes {
+            Some(s) if s.len() == n => s.clone(),
+            _ => equal_sizes(n),
+        };
+        if let Some(mf) = g.main_fraction {
+            tab.main_fraction = clamp_fraction(mf);
+        }
+        tab.focused = g.focused.map(|f| (f as usize).min(n - 1)).unwrap_or(0);
+        tab.zoomed = g.zoomed.map(|z| (z as usize).min(n - 1));
+        tab.relabel(palette);
+        self.tabs.push(tab);
+    }
+
+    /// Spawn a pane from a `PaneSpec` (its command/args/cwd/shell), returning the `PaneState`.
+    /// A spec with a `color` is treated like a project pane (tinted: frame + dot on, accent
+    /// pinned); a colorless spec is a clean pane coloured by slot.
+    fn make_pane_from_spec(
+        &mut self,
+        mgr: &SessionManager,
+        idx: usize,
+        spec: &PaneSpec,
+    ) -> Option<PaneState> {
+        let uid = format!("pane-{}", self.next_uid);
+        self.next_uid += 1;
+        let palette = self.settings.frame_palette;
+        let shell = spec.shell.clone().or_else(|| {
+            if self.settings.default_shell.is_empty() {
+                None
+            } else {
+                Some(self.settings.default_shell.clone())
+            }
+        });
+        let shell_path = shell
+            .clone()
+            .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
+        let integration = hyperpanes_core::shell_integration::integration_for(
+            &shell_path,
+            &hyperpanes_core::shell_integration::shell_integration_dir(),
+        )
+        .map(|si| hyperpanes_core::session_manager::Integration {
+            args: si.args,
+            env: si.env.into_iter().collect(),
+        });
+        let (cols, rows) = (80u16, 24u16);
+        if let Err(e) = mgr.create(SpawnOptions {
+            uid: uid.clone(),
+            cols: Some(cols),
+            rows: Some(rows),
+            pane_id: Some(uid.clone()),
+            cwd: spec.cwd.clone(),
+            shell,
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            integration,
+            ..Default::default()
+        }) {
+            eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
+            return None;
+        }
+        let mut pane =
+            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        let glow = Glow::new(crate::glow::seed_from(&uid));
+        let pinned = spec.color.as_deref().map(parse_hex);
+        let project = pinned.is_some();
+        let label = match &spec.label {
+            Some(l) if !l.is_empty() => l.clone(),
+            _ if idx == 0 => "shell".to_string(),
+            _ => format!("pane {}", idx + 1),
+        };
+        Some(PaneState {
+            uid,
+            title: label.into(),
+            subtitle: None,
+            show_frame: Some(project),
+            show_dot: Some(project),
+            accent: pinned.unwrap_or_else(|| theme::accent_for(idx, palette)),
+            pane,
+            applied: (cols as usize, rows as usize),
+            surface: Image::default(),
+            rect: (0.0, 0.0, 0.0, 0.0),
+            visible: true,
+            started: false,
+            startup: None,
+            pinned_accent: pinned,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
+            glow,
+            shell_title: String::new(),
+            ai_muted: false,
+            last_toast: String::new(),
+        })
+    }
+}
+
+/// Format a Slint [`Color`] as `#rrggbb` (the workspace-file pane color format).
+fn color_hex(c: Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
+}
+
+/// Parse a workspace-file layout token (`"single"`/`"columns"`/… / `"main-stack"`) back to a
+/// [`Layout`], defaulting to `Auto` for an unknown/absent token.
+fn layout_from_name(name: &str) -> Layout {
+    match name {
+        "single" => Layout::Single,
+        "columns" => Layout::Columns,
+        "rows" => Layout::Rows,
+        "grid" => Layout::Grid,
+        "main-stack" => Layout::MainStack,
+        _ => Layout::Auto,
     }
 }
 
