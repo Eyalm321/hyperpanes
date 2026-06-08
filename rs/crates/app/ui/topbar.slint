@@ -89,6 +89,7 @@ component TabChip inherits Rectangle {
     callback begin-rename();
     callback commit-rename(string);
     callback grab();                         // a press on the tab — arm a reorder drag
+    callback context(length, length);        // right-click → open the tab menu at (x, y)
     callback report-geom(length, length);    // window-x + width, for hit-testing
 
     // Report this tab's window geometry to the controller so the drag pump can hit-test
@@ -126,6 +127,10 @@ component TabChip inherits Rectangle {
             }
             if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
                 root.grab();
+            }
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                root.context(self.absolute-position.x + self.mouse-x,
+                             self.absolute-position.y + self.mouse-y);
             }
         }
     }
@@ -239,6 +244,7 @@ export component TopBar inherits Rectangle {
 
     callback select-tab(int);
     callback close-tab(int);
+    callback tab-context(int, length, length);   // right-click tab `i` at (x, y)
     callback new-tab();
     callback begin-rename(int);
     callback rename-tab(int, string);
@@ -321,6 +327,7 @@ export component TopBar inherits Rectangle {
                     begin-rename => { root.begin-rename(idx); }
                     commit-rename(t) => { root.rename-tab(idx, t); }
                     grab => { root.tab-grab(idx); }
+                    context(x, y) => { root.tab-context(idx, x, y); }
                     report-geom(x, w) => { root.tab-geom(idx, x, w); }
                 }
 

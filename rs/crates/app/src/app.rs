@@ -422,6 +422,11 @@ impl App {
             self.run_command(win, cmd);
             return;
         }
+        // Escape closes an open context menu first (it sits above everything else).
+        if crate::is_key(&msg.text, Key::Escape) && win.state.borrow().ctx_open() {
+            self.run_command(win, Command::CloseContext);
+            return;
+        }
         // Escape while an overlay is open closes it; Preferences routes through the
         // appearance save/discard guard (so unsaved edits prompt) rather than reaching the shell.
         if crate::is_key(&msg.text, Key::Escape) && win.state.borrow().overlay_open() {
@@ -1049,6 +1054,112 @@ impl App {
         // multi-window
         cb0!(on_new_window, Command::NewWindow);
         cb0!(on_move_pane_new_window, Command::MovePaneToNewWindow);
+
+        // ---- context menus (pane header / tab strip) ----
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_context(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenPaneContext(i as usize, x, y));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_tab_context(move |i, x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenTabContext(i as usize, x, y));
+                }
+            });
+        }
+        // A top-level row: run its command, then dismiss the menu.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_pick(move |row| {
+                if let Some(w) = app.window_by_id(id) {
+                    let cmd = w.state.borrow().ctx_command(row as usize);
+                    if let Some(cmd) = cmd {
+                        app.run_command(&w, cmd);
+                    }
+                    app.run_command(&w, Command::CloseContext);
+                }
+            });
+        }
+        // Change-Color submenu — these keep the menu open (live preview), like the renderer.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_swatch(move |sw| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::RecolorPane(t, sw as usize));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_swatch_none(move || {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetPaneFrame(t, false));
+                        app.run_command(&w, Command::SetPaneDot(t, false));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_frame_set(move |on| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetPaneFrame(t, on));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_dot_set(move |on| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetPaneDot(t, on));
+                    }
+                }
+            });
+        }
+        // Move-to-Tab + Layout submenus — perform, then dismiss.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_move_tab(move |tab| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
+                    }
+                    app.run_command(&w, Command::CloseContext);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_ctx_layout(move |lid| {
+                if let Some(w) = app.window_by_id(id) {
+                    if let Some(t) = w.state.borrow().ctx_target() {
+                        app.run_command(&w, Command::SetTabLayout(t, theme::layout_from_id(lid)));
+                    }
+                    app.run_command(&w, Command::CloseContext);
+                }
+            });
+        }
+        cb0!(on_ctx_dismiss, Command::CloseContext);
 
         // ---- drag / tear-off (Wave 2) ----
         // A pane header / tab was pressed: arm a drag from the *global* cursor (the pump

@@ -136,6 +136,7 @@ export component PaneView inherits Rectangle {
     in property <bool> drop-rect-active: false;
 
     callback pane-grab(int);
+    callback pane-context(int, length, length);   // right-click the header → open the pane menu
     callback key(int, KeyMsg);
     callback focus-pane(int);
     callback area-resized(length, length);
@@ -212,6 +213,10 @@ export component PaneView inherits Rectangle {
                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                 root.pane-grab(idx);
                             }
+                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                root.pane-context(idx, self.absolute-position.x + self.mouse-x,
+                                                       self.absolute-position.y + self.mouse-y);
+                            }
                         }
                     }
 
@@ -266,6 +271,12 @@ export component PaneView inherits Rectangle {
                                 enabled: !pane.editing;
                                 clicked => { root.focus-pane(idx); tp.focus(); }
                                 double-clicked => { root.begin-rename-pane(idx); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                        root.pane-context(idx, self.absolute-position.x + self.mouse-x,
+                                                               self.absolute-position.y + self.mouse-y);
+                                    }
+                                }
                             }
                             // inline rename editor (absolute overlay → never reflows chrome)
                             if pane.editing : Rectangle {

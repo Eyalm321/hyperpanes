@@ -1,0 +1,280 @@
+// The cursor-anchored context menu (pane header + tab strip) — the native port of
+// src/renderer/components/{ContextMenu,contextMenus,ColorSwatches}.tsx.
+//
+// Lifts the hamburger PopupWindow look from topbar.slint (Catppuccin card, hover rows,
+// ✓ checkmarks, ▸ submenu arrows) and adds: cursor anchoring with viewport clamping, danger
+// styling (Close Pane), disabled rows, keyboard-shortcut hints, and three side-flyout submenus
+// (Change Color swatches + Show-Frame/Dot toggles · Move to Tab · Layout). Submenus open on
+// click (one at a time) and the flyout sits flush to the card's edge (flipping left near the
+// right edge). The whole component fills the window: clicks outside the card dismiss it.
+
+import { Theme } from "theme.slint";
+import { MenuEntry, CtxTab, LayoutOption } from "types.slint";
+
+// One menu row: glyph · label · shortcut · trailing (✓ / ▸). Honors disabled + danger.
+component CtxRow inherits Rectangle {
+    in property <MenuEntry> e;
+    in property <bool> has-sub;
+    in property <bool> sub-open;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked();
+    height: 30px;
+    border-radius: 6px;
+    background: e.disabled ? transparent
+              : (ta.has-hover || root.sub-open)
+                  ? (e.danger ? #f38ba822 : Theme.surface2)
+                  : transparent;
+
+    HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        spacing: 8px;
+
+        // optional leading glyph (layout submenu header)
+        Text {
+            text: e.glyph;
+            visible: e.glyph != "";
+            color: e.disabled ? Theme.faint : Theme.subtext;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: e.label;
+            color: e.disabled ? Theme.faint : (e.danger ? Theme.danger : Theme.text);
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        // keyboard shortcut hint
+        Text {
+            text: e.shortcut;
+            visible: e.shortcut != "";
+            color: Theme.faint;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        // trailing: a ✓ for a checked toggle, a ▸ for a submenu
+        Text {
+            text: root.has-sub ? "▸" : ((e.show-check && e.checked) ? "✓" : "");
+            color: root.has-sub ? Theme.subtext : Theme.accent;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: !e.disabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A labelled checkbox row used inside the Change-Color flyout (Show Frame / Show Dot).
+component CtxToggle inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    callback toggled(bool);
+    height: 26px;
+    border-radius: 6px;
+    background: ta.has-hover ? Theme.surface2 : transparent;
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 8px;
+        Rectangle {
+            width: 15px;
+            height: 15px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.on ? Theme.accent : Theme.border;
+            background: root.on ? Theme.accent : transparent;
+            Text {
+                text: root.on ? "✓" : "";
+                color: #11111b;
+                font-size: 11px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.toggled(!root.on); } }
+}
+
+// A floating submenu card (the flyout container).
+component Flyout inherits Rectangle {
+    background: Theme.mantle;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: 30px;
+    drop-shadow-color: Theme.scrim;
+    drop-shadow-offset-y: 10px;
+}
+
+export component ContextMenu inherits Rectangle {
+    // window-logical anchor (the right-click point)
+    in property <length> menu-x;
+    in property <length> menu-y;
+    in property <[MenuEntry]> entries;
+    // submenu data (only the relevant ones are populated per menu kind)
+    in property <[color]> swatches;
+    in property <int> cur-swatch: -1;     // index of the pane's color in `swatches`, or -1
+    in property <bool> frame-on;
+    in property <bool> dot-on;
+    in property <[CtxTab]> tabs;           // Move-to-Tab destinations
+    in property <[LayoutOption]> layouts;  // Layout submenu (checkmark on current)
+
+    callback pick(int);          // a plain top-level row
+    callback swatch(int);        // a color swatch
+    callback swatch-none();      // the "no color" swatch
+    callback set-frame(bool);
+    callback set-dot(bool);
+    callback move-tab(int);      // a Move-to-Tab destination (real tab index)
+    callback set-layout(int);    // a Layout option id
+    callback dismiss();
+
+    // which submenu row is currently expanded (-1 = none). Reset every open (the `if` in
+    // app.slint re-instantiates this component when the menu opens).
+    property <int> open-sub: -1;
+    property <length> menu-w: 250px;
+    property <length> est-h: root.entries.length * 30px + 12px;
+    // flip flyouts to the left when the card sits in the right of the window.
+    property <bool> open-left: root.menu-x > root.width * 0.6;
+
+    // ---- full-window click-away catcher ----
+    away := TouchArea {
+        clicked => { root.dismiss(); }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                root.dismiss();
+            }
+        }
+    }
+
+    // ---- the menu card ----
+    card := Rectangle {
+        x: min(max(root.menu-x, 4px), root.width - root.menu-w - 4px);
+        y: min(max(root.menu-y, 4px), max(4px, root.height - root.est-h - 4px));
+        width: root.menu-w;
+        background: Theme.mantle;
+        border-radius: 9px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 40px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 14px;
+
+        VerticalLayout {
+            padding: 5px;
+            spacing: 1px;
+
+            for entry[i] in root.entries : Rectangle {
+                height: entry.kind == -1 ? 9px : 30px;
+
+                // separator
+                if entry.kind == -1 : Rectangle {
+                    y: 4px;
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                // a real row (item or submenu header)
+                if entry.kind != -1 : row := CtxRow {
+                    e: entry;
+                    has-sub: entry.kind >= 2;
+                    sub-open: root.open-sub == i;
+                    clicked => {
+                        if (entry.kind >= 2) {
+                            root.open-sub = (root.open-sub == i) ? -1 : i;
+                        } else {
+                            root.pick(i);
+                        }
+                    }
+                }
+
+                // ---- Change Color flyout ----
+                if entry.kind == 2 && root.open-sub == i : Flyout {
+                    x: root.open-left ? -self.width + 2px : parent.width - 2px;
+                    y: -4px;
+                    width: 232px;
+                    height: vbox-color.preferred-height;
+                    vbox-color := VerticalLayout {
+                        padding: 8px;
+                        spacing: 6px;
+                        // swatch row: a "no color" chip + the palette slots
+                        HorizontalLayout {
+                            spacing: 5px;
+                            alignment: start;
+                            Rectangle {
+                                width: 20px;
+                                height: 20px;
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: (!root.frame-on && !root.dot-on) ? Theme.text : Theme.border;
+                                Text {
+                                    text: "∅";
+                                    color: Theme.subtext;
+                                    font-size: 12px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                TouchArea { clicked => { root.swatch-none(); } }
+                            }
+                            for c[ci] in root.swatches : Rectangle {
+                                width: 20px;
+                                height: 20px;
+                                border-radius: 5px;
+                                background: c;
+                                border-width: (ci == root.cur-swatch && root.frame-on) ? 2px : 0px;
+                                border-color: Theme.text;
+                                TouchArea { clicked => { root.swatch(ci); } }
+                            }
+                        }
+                        CtxToggle { label: "Show Frame"; on: root.frame-on; toggled(v) => { root.set-frame(v); } }
+                        CtxToggle { label: "Show Dot"; on: root.dot-on; toggled(v) => { root.set-dot(v); } }
+                    }
+                }
+
+                // ---- Move to Tab flyout ----
+                if entry.kind == 3 && root.open-sub == i : Flyout {
+                    x: root.open-left ? -self.width + 2px : parent.width - 2px;
+                    y: -4px;
+                    width: 200px;
+                    height: vbox-tab.preferred-height;
+                    vbox-tab := VerticalLayout {
+                        padding: 5px;
+                        spacing: 1px;
+                        for tb in root.tabs : CtxRow {
+                            e: { label: tb.label, shortcut: "", glyph: "", kind: 0, checked: false, show-check: false, disabled: false, danger: false };
+                            clicked => { root.move-tab(tb.idx); }
+                        }
+                    }
+                }
+
+                // ---- Layout flyout (checkmark on current) ----
+                if entry.kind == 4 && root.open-sub == i : Flyout {
+                    x: root.open-left ? -self.width + 2px : parent.width - 2px;
+                    y: -4px;
+                    width: 200px;
+                    height: vbox-layout.preferred-height;
+                    vbox-layout := VerticalLayout {
+                        padding: 5px;
+                        spacing: 1px;
+                        for lo in root.layouts : CtxRow {
+                            e: { label: lo.label, shortcut: "", glyph: lo.glyph, kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
+                            clicked => { root.set-layout(lo.id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
