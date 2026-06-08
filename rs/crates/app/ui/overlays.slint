@@ -201,25 +201,28 @@ component FontDropdown inherits Rectangle {
             Chevron { up: root.open; }
         }
     }
-    ta := TouchArea {
-        clicked => {
-            // Toggle: clicking the button while open closes it (and flips the chevron back).
-            root.open = !root.open;
-            if (root.open) {
-                popup.show();
-            } else {
-                popup.close();
-            }
-        }
-    }
+    ta := TouchArea { clicked => { root.open = true; popup.show(); } }
     popup := PopupWindow {
-        // We own open/close (so the button reliably toggles + the chevron tracks it);
-        // default auto-close would swallow the second button click before our handler runs.
+        // We own open/close so the chevron tracks it. A full-window backdrop behind the list
+        // catches every click outside the list (the button, other controls, empty space) to
+        // close + reset the chevron; option rows (above it) select + close.
         close-policy: PopupClosePolicy.no-auto-close;
         x: 0;
         y: parent.height + 4px;
         width: root.width;
+        // click-away catcher: large + offset so it covers the window around the list.
         Rectangle {
+            x: -2000px;
+            y: -2000px;
+            width: 4000px;
+            height: 4000px;
+            background: transparent;
+            TouchArea { clicked => { root.open = false; popup.close(); } }
+        }
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: root.width;
             background: Theme.mantle;
             border-radius: 8px;
             border-width: 1px;
