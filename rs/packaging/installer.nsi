@@ -53,6 +53,7 @@ VIAddVersionKey  "FileDescription" "${PRODUCT_NAME} installer"
 VIAddVersionKey  "FileVersion"   "${VERSION}.0"
 VIAddVersionKey  "ProductVersion" "${VERSION}"
 VIAddVersionKey  "CompanyName"   "${PUBLISHER}"
+VIAddVersionKey  "LegalCopyright" "Copyright (C) 2026"
 
 ; ----- UI --------------------------------------------------------------------
 !define MUI_ICON   "${ICON}"
