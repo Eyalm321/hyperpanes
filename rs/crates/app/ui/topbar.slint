@@ -472,10 +472,6 @@ export component TopBar inherits Rectangle {
                 }
                 Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
                 MenuItem {
-                    label: "Projects sidebar";
-                    clicked => { root.toggle-sidebar(); menu-popup.close(); }
-                }
-                MenuItem {
                     label: "Preferences…";
                     clicked => { root.open-prefs(); menu-popup.close(); }
                 }
