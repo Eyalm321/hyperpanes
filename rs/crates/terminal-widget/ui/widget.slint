@@ -117,6 +117,9 @@ export component TerminalPane inherits Rectangle {
 
     // --- in-pane search (Ctrl+F): the box anchored top-right + the match highlights ---
     in property <bool> search-open: false;
+    // Bumped by the controller each time Ctrl+F (re)invokes search — even while the box is
+    // already open — so the query input gets (re)focused on a reliable change signal.
+    in property <int> search-focus-tick;
     in property <string> search-count: "";   // e.g. "2 / 5" / "No results"
     in property <[HiRect]> search-rects;      // inactive matches in the viewport
     in property <bool> search-active-on: false;
@@ -171,9 +174,14 @@ export component TerminalPane inherits Rectangle {
 
     changed width => { root.geometry-changed(root.width, root.height); }
     changed height => { root.geometry-changed(root.width, root.height); }
-    // When search closes, hand keyboard focus back to the terminal (the box grabs it on open
-    // via the input's `init`).
-    changed search-open => { if (!root.search-open) { fs.focus(); } }
+    // Drive query-input focus from reliable change signals (NOT a one-shot `init` on a freshly
+    // created element, which doesn't reliably land in Slint): opening focuses the query, closing
+    // hands focus back to the terminal, and a re-invoke (`search-focus-tick`) re-focuses it even
+    // when the box was already open.
+    changed search-open => {
+        if (root.search-open) { query.focus(); } else { fs.focus(); }
+    }
+    changed search-focus-tick => { if (root.search-open) { query.focus(); } }
 
     // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
     Image {
@@ -342,7 +350,11 @@ export component TerminalPane inherits Rectangle {
     }
 
     // In-pane search box (Ctrl+F), anchored top-right — ports `SearchBox.tsx` / `.hp-search`.
-    if root.search-open: Rectangle {
+    // Always instantiated (visibility-toggled) rather than `if`-created, so `query` stays in
+    // scope for the focus handlers above and focusing it is reliable (an `if`-created input
+    // can't be focused from `init`).
+    Rectangle {
+        visible: root.search-open;
         // Hug the content (input + counter + buttons) at the top-right. Without an explicit
         // width the Rectangle filled the whole pane, pushing `x` negative / off-screen.
         width: boxrow.preferred-width;
@@ -377,8 +389,6 @@ export component TerminalPane inherits Rectangle {
                     font-size: 12px * root.ind-scale;
                     font-family: "Consolas";
                     single-line: true;
-                    // Grab focus the moment the box appears (Ctrl+F → type immediately).
-                    init => { self.focus(); }
                     edited => { root.search-edited(self.text); }
                     key-pressed(e) => {
                         if (e.text == Key.Escape) {

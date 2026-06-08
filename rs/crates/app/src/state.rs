@@ -179,6 +179,10 @@ pub struct PaneState {
     /// copy/paste confirmations + the Ctrl-zoom font %), cached so the pump can detect a
     /// change and update/clear the row even when the surface itself isn't dirty.
     pub last_toast: String,
+    /// Bumped each time Ctrl+F (re)invokes the in-pane search box on this pane, even while it's
+    /// already open. Projected into `PaneItem::search_focus_seq` so the widget can (re)focus the
+    /// query input on a reliable change signal rather than a one-shot `init`.
+    pub search_focus_seq: i32,
     /// The pane's OWN terminal font size (logical px) — per-pane zoom. Ctrl+= / − / 0 adjust
     /// the FOCUSED pane only (Electron parity); a new pane starts at the configured base
     /// (`Settings::font_px`). Drives both the rendered glyphs and the indicator scaling.
@@ -637,6 +641,7 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            search_focus_seq: 0,
             font_px,
             font,
             font_dirty: false,
@@ -808,6 +813,7 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            search_focus_seq: 0,
             font_px: det.font_px,
             font,
             font_dirty: false,
@@ -1953,10 +1959,12 @@ impl State {
         self.dirty = true;
     }
 
-    /// Open the in-pane search box on pane `idx`.
+    /// Open the in-pane search box on pane `idx` (or, if already open, re-focus it). Bumps the
+    /// focus sequence so the widget (re)focuses the query input even when the box was already up.
     pub fn open_search(&mut self, idx: usize) {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             p.pane.search_open();
+            p.search_focus_seq = p.search_focus_seq.wrapping_add(1);
             self.dirty = true;
         }
     }
@@ -2183,6 +2191,7 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            search_focus_seq: 0,
             font_px: det.font_px,
             font,
             font_dirty: false,
@@ -2608,6 +2617,7 @@ impl State {
             shell_title: String::new(),
             ai_muted: false,
             last_toast: String::new(),
+            search_focus_seq: 0,
             font_px,
             font,
             font_dirty: false,

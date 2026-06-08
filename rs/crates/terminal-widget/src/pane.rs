@@ -626,6 +626,15 @@ impl TerminalPane {
             self.grid.scroll_to_visible(m.line);
         }
     }
+
+    /// Recompute matches against the (possibly reflowed) grid — call after a [`resize`](Self::resize)
+    /// so the highlight rects keep tracking the rewrapped text while the search box stays open. A
+    /// no-op when search is closed; doesn't force-scroll (the viewport stays where the user left it).
+    pub fn search_reflow(&mut self) {
+        if self.search_shown {
+            self.search_recompute();
+        }
+    }
 }
 
 /// Compute the cell grid that fits a pane of `width_px`×`height_px` *physical* pixels for
