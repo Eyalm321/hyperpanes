@@ -789,15 +789,16 @@ impl State {
         }
     }
 
-    /// Move focus in `dir`. When soloed (zoom or single), cycle the pane order.
+    /// Move focus in `dir`. When soloed (zoom, fullscreen, or single), cycle the pane order.
     pub fn focus_dir(&mut self, dir: Direction) {
+        let fullscreen = self.fullscreen;
         let t = self.active_tab_mut();
         let n = t.panes.len();
         if n < 2 {
             return;
         }
         let eff = t.effective();
-        let next = if t.zoomed.is_some() || eff == Layout::Single {
+        let next = if t.zoomed.is_some() || fullscreen || eff == Layout::Single {
             let delta = matches!(dir, Direction::Right | Direction::Down);
             Some(if delta {
                 (t.focused + 1) % n
@@ -880,10 +881,11 @@ impl State {
         self.active_tab().effective() == Layout::Rows
     }
 
-    /// The current active tab's draggable dividers (empty when zoomed).
+    /// The current active tab's draggable dividers (empty when zoomed or fullscreen — both
+    /// solo a single pane, so there are no seams to drag).
     pub fn dividers(&self) -> Vec<hyperpanes_core::layout::presets::DividerDesc> {
         let t = self.active_tab();
-        if t.zoomed.is_some() {
+        if t.zoomed.is_some() || self.fullscreen {
             return Vec::new();
         }
         compute_dividers(t.effective(), t.panes.len(), &t.sizes, t.main_fraction)

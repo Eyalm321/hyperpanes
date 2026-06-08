@@ -136,6 +136,9 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
     let cw = state.font.cell_w;
     let ch = state.font.cell_h;
     let active = state.active;
+    // Fullscreen solos the focused pane (OS fullscreen + bars hidden in app.slint), like
+    // Electron's `fullscreenPaneId`: one pane fills the screen, the rest go invisible.
+    let fullscreen = state.fullscreen;
     let tab = &mut state.tabs[active];
     let n = tab.panes.len();
     if n == 0 {
@@ -164,6 +167,13 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
             p.applied = (cols, rows);
         }
     };
+
+    // Fullscreen wins over zoom: solo the focused pane, full-area.
+    if fullscreen {
+        let f = tab.focused.min(n - 1);
+        place(&mut tab.panes[f], 0.0, 0.0, aw, ah);
+        return;
+    }
 
     if let Some(z) = tab.zoomed {
         if z < n {
