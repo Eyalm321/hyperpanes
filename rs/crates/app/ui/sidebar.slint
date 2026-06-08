@@ -1,0 +1,316 @@
+// The right-edge sidebar rail — the native port of `components/Sidebar.tsx`.
+//
+//   ┌──┐  a slim (44px), PERSISTENT, icon-only rail living to the RIGHT of the pane
+//   │＋│  area (a sibling, not an overlay — no scrim, never dims the panes). Gated by
+//   │📁│  `show-sidebar` (and hidden in fullscreen) up in app.slint.
+//   └──┘
+//   ＋  quick-pane: opens a default pane.
+//   📁  projects: a count badge + a flyout (opens LEFTWARD, over the panes) listing the
+//       remembered git projects. Click a row → open it in a pane (cd'd into the repo);
+//       right-click → recolor / rename / remove.
+//
+// All state is owned by the Rust controller; this is projection + callbacks that each map
+// to a `Command`.
+
+import { Theme } from "theme.slint";
+import { ProjectItem } from "types.slint";
+
+// "+" quick-pane glyph (two crossed bars — font-independent).
+component PlusGlyph inherits Rectangle {
+    in property <color> ink;
+    width: 16px;
+    height: 16px;
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.7px; height: 13px; border-radius: 1px; background: ink; }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.7px; width: 13px; border-radius: 1px; background: ink; }
+}
+
+// A folder silhouette (stroked).
+component FolderGlyph inherits Path {
+    in property <color> ink;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 18;
+    viewbox-height: 18;
+    stroke: ink;
+    stroke-width: 1.5px;
+    fill: transparent;
+    commands: "M 2.5 14 L 2.5 5 L 7 5 L 8.6 6.8 L 15.5 6.8 L 15.5 14 Z";
+}
+
+// One recolor swatch in the project context menu.
+component Swatch inherits Rectangle {
+    in property <color> hue;
+    callback picked();
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: hue;
+    border-width: sa.has-hover ? 2px : 0px;
+    border-color: Theme.text;
+    sa := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+// The project row right-click menu: recolor swatches + an inline rename field + remove.
+component ProjectMenu inherits PopupWindow {
+    in property <string> pname;
+    callback recolor(int);       // palette swatch index 0..7
+    callback rename(string);
+    callback remove();
+    // anchored just below-left of the row's left edge.
+    x: 10px;
+    y: 26px;
+    width: 220px;
+    height: 158px;
+
+    Rectangle {
+        background: Theme.mantle;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 10px;
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 7px;
+
+            Text { text: "Change Color"; color: Theme.subtext; font-size: 10px; font-weight: 700; }
+            HorizontalLayout {
+                spacing: 5px;
+                Swatch { hue: #e5484d; picked => { root.recolor(0); root.close(); } }
+                Swatch { hue: #f5a623; picked => { root.recolor(1); root.close(); } }
+                Swatch { hue: #30a46c; picked => { root.recolor(2); root.close(); } }
+                Swatch { hue: #3b82f6; picked => { root.recolor(3); root.close(); } }
+                Swatch { hue: #a855f7; picked => { root.recolor(4); root.close(); } }
+                Swatch { hue: #ec4899; picked => { root.recolor(5); root.close(); } }
+                Swatch { hue: #14b8a6; picked => { root.recolor(6); root.close(); } }
+                Swatch { hue: #eab308; picked => { root.recolor(7); root.close(); } }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // inline rename (Enter commits)
+            Rectangle {
+                height: 28px;
+                border-radius: 5px;
+                background: Theme.surface;
+                border-width: 1px;
+                border-color: Theme.accent;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    ri := TextInput {
+                        text: root.pname;
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        init => { ri.select-all(); ri.focus(); }
+                        accepted => { root.rename(self.text); root.close(); }
+                    }
+                }
+            }
+
+            // remove (danger)
+            Rectangle {
+                height: 28px;
+                border-radius: 5px;
+                background: rta.has-hover ? Theme.danger : transparent;
+                HorizontalLayout {
+                    padding-left: 9px;
+                    Text {
+                        text: "Remove";
+                        color: rta.has-hover ? #ffffff : Theme.danger;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+                rta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.remove(); root.close(); }
+                }
+            }
+        }
+    }
+}
+
+// One project row in the flyout: a colored dot + name; left-click opens, right-click
+// pops the recolor/rename/remove menu.
+component ProjectRow inherits Rectangle {
+    in property <ProjectItem> proj;
+    callback open();
+    callback recolor(int);
+    callback rename(string);
+    callback remove();
+
+    height: 30px;
+    border-radius: 5px;
+    background: ta.has-hover ? Theme.surface2 : transparent;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.proj.color;
+            }
+        }
+        Text {
+            text: root.proj.name;
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                menu.show();
+            }
+        }
+    }
+
+    menu := ProjectMenu {
+        pname: root.proj.name;
+        recolor(s) => { root.recolor(s); }
+        rename(t) => { root.rename(t); }
+        remove => { root.remove(); }
+    }
+}
+
+export component SidebarRail inherits Rectangle {
+    in property <[ProjectItem]> projects;
+    in property <bool> projects-open: false;
+    callback new-pane();
+    callback toggle-projects();
+    callback open-project(int);
+    callback recolor-project(int, int);   // row, swatch
+    callback rename-project(int, string);
+    callback remove-project(int);
+
+    width: 44px;
+    background: Theme.mantle;
+
+    // left hairline against the pane area
+    Rectangle { x: 0; width: 1px; height: 100%; background: Theme.border; }
+
+    // ＋ quick-pane
+    plus-btn := Rectangle {
+        x: 6px;
+        y: 6px;
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
+        background: pa.has-hover ? Theme.surface2 : transparent;
+        PlusGlyph {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            ink: pa.has-hover ? Theme.text : Theme.subtext;
+        }
+        pa := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.new-pane(); }
+        }
+    }
+
+    // 📁 projects + count badge
+    folder-btn := Rectangle {
+        x: 6px;
+        y: 42px;
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
+        background: (root.projects-open || fa.has-hover) ? Theme.surface2 : transparent;
+        FolderGlyph {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            ink: root.projects-open ? Theme.accent : (fa.has-hover ? Theme.text : Theme.subtext);
+        }
+        if root.projects.length > 0 : Rectangle {
+            x: parent.width - self.width - 1px;
+            y: 1px;
+            width: 15px;
+            height: 14px;
+            border-radius: 7px;
+            background: Theme.accent;
+            Text {
+                text: root.projects.length;
+                color: #11111b;
+                font-size: 9px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        fa := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggle-projects(); }
+        }
+    }
+
+    // ===== projects flyout (opens LEFTWARD, over the pane area) =====
+    if root.projects-open : Rectangle {
+        x: -236px;                  // 224 wide + a 12px gap, to the left of the 44px rail
+        y: 6px;
+        width: 224px;
+        height: min(root.height - 12px, 56px + root.projects.length * 32px);
+        background: Theme.surface;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-x: -6px;
+        drop-shadow-offset-y: 8px;
+        clip: true;
+        // eat stray clicks so they don't fall through to a pane behind the flyout
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 2px;
+
+            Text {
+                text: "PROJECTS";
+                color: Theme.subtext;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+                height: 18px;
+                vertical-alignment: center;
+            }
+
+            if root.projects.length == 0 : Text {
+                text: "Projects you cd into show up here, each with its own color.";
+                color: Theme.subtext;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            for p[i] in root.projects : ProjectRow {
+                proj: p;
+                open => { root.open-project(i); }
+                recolor(s) => { root.recolor-project(i, s); }
+                rename(t) => { root.rename-project(i, t); }
+                remove => { root.remove-project(i); }
+            }
+        }
+    }
+}

@@ -3,7 +3,7 @@
 // dividers over them, and reserves an overlay slot for Wave-2 panels.
 
 import { Theme } from "theme.slint";
-import { PaneItem, DividerItem, PaletteItem, ProjectItem, PrefOption } from "types.slint";
+import { PaneItem, DividerItem, PaletteItem, PrefOption } from "types.slint";
 import { OverlayLayer } from "overlays.slint";
 import { TerminalPane, KeyMsg } from "@widgets";
 
@@ -111,7 +111,6 @@ export component PaneView inherits Rectangle {
     in property <int> pref-fontpx: 14;
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
-    in property <[ProjectItem]> projects;
     // ---- drag / tear-off slot preview (area-relative logical px) ----
     in property <length> drop-rect-x: 0px;
     in property <length> drop-rect-y: 0px;
@@ -134,7 +133,6 @@ export component PaneView inherits Rectangle {
     callback palette-activate();
     callback palette-pick(int);
     callback pref-action(int, int);
-    callback open-project(int);
     callback overlay-dismiss();
 
     background: Theme.bg;
@@ -317,13 +315,11 @@ export component PaneView inherits Rectangle {
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;
-            projects: root.projects;
             palette-query(q) => { root.palette-query(q); }
             palette-nav(d) => { root.palette-nav(d); }
             palette-activate => { root.palette-activate(); }
             palette-pick(i) => { root.palette-pick(i); }
             pref-action(k, a) => { root.pref-action(k, a); }
-            open-project(i) => { root.open-project(i); }
             dismiss => { root.overlay-dismiss(); }
         }
     }

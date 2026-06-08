@@ -60,8 +60,17 @@ pub enum Command {
     PrefsOpen,
     ApplySetting(Setting),
     // sidebar / projects
+    /// Show/hide the whole right-edge rail.
     ToggleSidebar,
+    /// Expand/collapse the projects flyout behind the 📁 icon.
+    ToggleProjects,
     OpenProject(usize),
+    /// Recolor flyout row `0` to palette swatch `1`.
+    SetProjectColor(usize, usize),
+    /// Rename flyout row `0` to `1`.
+    RenameProject(usize, String),
+    /// Forget flyout row `0`.
+    RemoveProject(usize),
 }
 
 /// A side effect the controller must apply outside the state (UI/window layer). The
@@ -161,7 +170,11 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::PrefsOpen => state.open_prefs(),
         Command::ApplySetting(s) => state.apply_setting(s),
         Command::ToggleSidebar => state.toggle_sidebar(),
+        Command::ToggleProjects => state.toggle_projects(),
         Command::OpenProject(i) => state.open_project(i, mgr),
+        Command::SetProjectColor(i, swatch) => state.set_project_color(i, swatch),
+        Command::RenameProject(i, name) => state.rename_project(i, &name),
+        Command::RemoveProject(i) => state.remove_project(i),
     }
     Effect::None
 }

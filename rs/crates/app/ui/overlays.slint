@@ -1,17 +1,19 @@
-// Wave-2 overlay panels (Seam #3): the command palette, preferences dialog, and
-// sidebar/projects panel that mount into PaneView's overlay slot. One `OverlayLayer`
-// fills the scrim area and shows exactly one panel based on `kind`:
+// Wave-2 overlay panels (Seam #3): the command palette and preferences dialog that
+// mount into PaneView's overlay slot. One `OverlayLayer` fills the scrim area and shows
+// exactly one panel based on `kind`:
 //
 //   kind 1 = command palette  (centred search card)
 //   kind 2 = preferences      (centred settings card)
-//   kind 3 = sidebar/projects (left-anchored rail panel)
+//
+// (The projects sidebar is no longer an overlay — it's a persistent right-edge rail; see
+//  sidebar.slint.)
 //
 // All state is owned by the Rust controller; this is pure projection + callbacks that
 // each map to a `Command`. Keyboard focus is grabbed by the palette query input so the
 // chords/text route here (not the panes) while open.
 
 import { Theme } from "theme.slint";
-import { PaletteItem, ProjectItem, PrefOption } from "types.slint";
+import { PaletteItem, PrefOption } from "types.slint";
 
 // A small labelled toggle switch (frame/dot prefs).
 component PrefToggle inherits Rectangle {
@@ -78,7 +80,7 @@ component Pill inherits Rectangle {
 }
 
 export component OverlayLayer inherits Rectangle {
-    // 0 none · 1 palette · 2 prefs · 3 sidebar
+    // 0 none · 1 palette · 2 prefs
     in property <int> kind: 0;
 
     // palette
@@ -95,10 +97,6 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
     callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
-
-    // sidebar / projects
-    in property <[ProjectItem]> projects;
-    callback open-project(int);
 
     callback dismiss();
 
@@ -293,79 +291,6 @@ export component OverlayLayer inherits Rectangle {
             }
 
             Rectangle { vertical-stretch: 1; }
-        }
-    }
-
-    // ===== sidebar / projects (left-anchored rail panel) =====
-    if root.kind == 3 : Rectangle {
-        width: 260px;
-        height: parent.height - 16px;
-        x: 8px;
-        y: 8px;
-        background: Theme.mantle;
-        border-radius: 12px;
-        border-width: 1px;
-        border-color: Theme.border;
-        drop-shadow-blur: 40px;
-        drop-shadow-color: Theme.scrim;
-        drop-shadow-offset-x: 10px;
-        clip: true;
-        TouchArea {}
-
-        VerticalLayout {
-            padding: 14px;
-            spacing: 8px;
-
-            Text {
-                text: "Projects";
-                color: Theme.text;
-                font-size: 14px;
-                font-weight: 700;
-            }
-            Text {
-                text: "Repos you cd into show up here.";
-                color: Theme.faint;
-                font-size: 11px;
-                visible: root.projects.length == 0;
-                wrap: word-wrap;
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
-                clip: true;
-                VerticalLayout {
-                    alignment: start;
-                    spacing: 2px;
-                    for p[i] in root.projects : Rectangle {
-                        height: 34px;
-                        border-radius: 7px;
-                        background: pa.has-hover ? Theme.surface2 : transparent;
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 9px;
-                            VerticalLayout {
-                                alignment: center;
-                                Rectangle {
-                                    width: 10px;
-                                    height: 10px;
-                                    border-radius: 5px;
-                                    background: p.color;
-                                }
-                            }
-                            Text {
-                                text: p.name;
-                                color: Theme.text;
-                                font-size: 13px;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                overflow: elide;
-                            }
-                        }
-                        pa := TouchArea { clicked => { root.open-project(i); } }
-                    }
-                }
-            }
         }
     }
 }

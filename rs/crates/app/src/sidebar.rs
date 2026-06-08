@@ -13,9 +13,21 @@ use std::path::{Path, PathBuf};
 pub use hyperpanes_core::persistence::projects::Project;
 use hyperpanes_core::persistence::projects;
 
-/// The remembered projects, newest-first (the order the panel renders).
+/// The remembered projects, newest-first (the order the panel renders), self-healed:
+/// any project whose repo folder no longer exists on disk is forgotten (removed from
+/// `projects.json`) and dropped from the result. Done app-side via the existing core
+/// `remove_project`, so a deleted/moved repo silently disappears from the rail.
 pub fn list() -> Vec<Project> {
-    projects::list_projects()
+    let all = projects::list_projects();
+    let mut kept = Vec::with_capacity(all.len());
+    for p in all {
+        if Path::new(&p.path).is_dir() {
+            kept.push(p);
+        } else {
+            projects::remove_project(&p.id);
+        }
+    }
+    kept
 }
 
 /// Walk up from `cwd` looking for the nearest ancestor that contains a `.git` entry,

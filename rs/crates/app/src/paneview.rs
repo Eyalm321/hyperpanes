@@ -264,7 +264,6 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         Overlay::None => 0,
         Overlay::Palette => 1,
         Overlay::Prefs => 2,
-        Overlay::Sidebar => 3,
     };
     app.set_overlay_kind(kind);
 
@@ -291,7 +290,9 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_show_frame(state.settings.show_frame);
     app.set_show_dot(state.settings.show_dot);
 
-    // sidebar / projects rows
+    // sidebar / projects: the rail gating + flyout state + rows
+    app.set_show_sidebar(state.settings.show_sidebar);
+    app.set_sidebar_open(state.sidebar_open);
     let projects: Vec<ProjectItem> = state
         .project_rows()
         .into_iter()

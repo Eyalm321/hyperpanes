@@ -361,7 +361,9 @@ impl App {
                             let cmd = match which.to_string_lossy().as_ref() {
                                 "palette" => Some(Command::PaletteOpen),
                                 "prefs" => Some(Command::PrefsOpen),
-                                "sidebar" => Some(Command::ToggleSidebar),
+                                // The rail is persistent; open its projects flyout so a
+                                // screenshot exercises the full surface.
+                                "sidebar" => Some(Command::ToggleProjects),
                                 _ => None,
                             };
                             if let Some(cmd) = cmd {
@@ -1004,11 +1006,31 @@ impl App {
         cb0!(on_open_palette, Command::PaletteOpen);
         cb0!(on_open_prefs, Command::PrefsOpen);
         cb0!(on_toggle_sidebar, Command::ToggleSidebar);
+        cb0!(on_toggle_projects, Command::ToggleProjects);
         cb0!(on_palette_activate, Command::PaletteActivate);
         cb0!(on_overlay_dismiss, Command::CloseOverlay);
         cb_i32!(on_palette_nav, Command::PaletteNav);
         cb_usize!(on_palette_pick, Command::PaletteSelect);
         cb_usize!(on_open_project, Command::OpenProject);
+        cb_usize!(on_remove_project, Command::RemoveProject);
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_recolor_project(move |row, swatch| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::SetProjectColor(row as usize, swatch as usize));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_rename_project(move |row, name| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::RenameProject(row as usize, name.to_string()));
+                }
+            });
+        }
         {
             let app = app.clone();
             let id = win.id;

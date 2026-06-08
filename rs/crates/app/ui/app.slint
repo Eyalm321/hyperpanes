@@ -13,6 +13,7 @@ import { Theme } from "theme.slint";
 import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
+import { SidebarRail } from "sidebar.slint";
 import { KeyMsg } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
@@ -52,7 +53,10 @@ export component AppWindow inherits Window {
     in property <int> palette-sel: 0;
     in property <[PrefOption]> pref-families;
     in property <int> pref-fontpx: 14;
+    // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
+    in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
+    in property <bool> sidebar-open: false;  // projects flyout expanded
     // ---- Wave-2 drag / tear-off previews (driven by the drag pump) ----
     in property <bool> drop-win-active: false;    // this window is a cross-window tear target
     in property <bool> drop-strip-active: false;  // the tab strip is a drop target
@@ -104,8 +108,13 @@ export component AppWindow inherits Window {
     callback palette-activate();
     callback palette-pick(int);
     callback pref-action(int, int);
-    callback open-project(int);
     callback overlay-dismiss();
+    // ---- sidebar rail ----
+    callback open-project(int);
+    callback toggle-projects();
+    callback recolor-project(int, int);   // row, swatch
+    callback rename-project(int, string);
+    callback remove-project(int);
     // top-bar menu → overlays
     callback open-palette();
     callback open-prefs();
@@ -149,44 +158,63 @@ export component AppWindow inherits Window {
             close-window => { root.close-window(); }
         }
 
-        PaneView {
+        // The pane area + the persistent right-edge sidebar rail sit side by side. The
+        // rail is a real sibling of the panes (not an overlay): it never dims them, and
+        // its projects flyout opens leftward over the pane area.
+        HorizontalLayout {
             vertical-stretch: 1;
-            panes: root.panes;
-            dividers: root.dividers;
-            zoomed: root.zoomed;
-            fullscreen: root.fullscreen;
-            show-frame: root.show-frame;
-            show-dot: root.show-dot;
-            overlay-kind: root.overlay-kind;
-            palette: root.palette;
-            palette-sel: root.palette-sel;
-            pref-families: root.pref-families;
-            pref-fontpx: root.pref-fontpx;
-            pref-frame: root.show-frame;
-            pref-dot: root.show-dot;
-            projects: root.projects;
-            drop-rect-x: root.drop-rect-x;
-            drop-rect-y: root.drop-rect-y;
-            drop-rect-w: root.drop-rect-w;
-            drop-rect-h: root.drop-rect-h;
-            drop-rect-edge: root.drop-rect-edge;
-            drop-rect-active: root.drop-rect-active;
+            spacing: 0px;
 
-            pane-grab(i) => { root.pane-grab(i); }
-            key(i, m) => { root.key(i, m); }
-            focus-pane(i) => { root.focus-pane(i); }
-            area-resized(w, h) => { root.area-resized(w, h); }
-            divider-drag(i, main, vert, dx, dy) => { root.divider-drag(i, main, vert, dx, dy); }
-            pane-zoom(i) => { root.pane-zoom(i); }
-            pane-fullscreen(i) => { root.pane-fullscreen(i); }
-            pane-close(i) => { root.pane-close(i); }
-            palette-query(q) => { root.palette-query(q); }
-            palette-nav(d) => { root.palette-nav(d); }
-            palette-activate => { root.palette-activate(); }
-            palette-pick(i) => { root.palette-pick(i); }
-            pref-action(k, a) => { root.pref-action(k, a); }
-            open-project(i) => { root.open-project(i); }
-            overlay-dismiss => { root.overlay-dismiss(); }
+            PaneView {
+                horizontal-stretch: 1;
+                panes: root.panes;
+                dividers: root.dividers;
+                zoomed: root.zoomed;
+                fullscreen: root.fullscreen;
+                show-frame: root.show-frame;
+                show-dot: root.show-dot;
+                overlay-kind: root.overlay-kind;
+                palette: root.palette;
+                palette-sel: root.palette-sel;
+                pref-families: root.pref-families;
+                pref-fontpx: root.pref-fontpx;
+                pref-frame: root.show-frame;
+                pref-dot: root.show-dot;
+                drop-rect-x: root.drop-rect-x;
+                drop-rect-y: root.drop-rect-y;
+                drop-rect-w: root.drop-rect-w;
+                drop-rect-h: root.drop-rect-h;
+                drop-rect-edge: root.drop-rect-edge;
+                drop-rect-active: root.drop-rect-active;
+
+                pane-grab(i) => { root.pane-grab(i); }
+                key(i, m) => { root.key(i, m); }
+                focus-pane(i) => { root.focus-pane(i); }
+                area-resized(w, h) => { root.area-resized(w, h); }
+                divider-drag(i, main, vert, dx, dy) => { root.divider-drag(i, main, vert, dx, dy); }
+                pane-zoom(i) => { root.pane-zoom(i); }
+                pane-fullscreen(i) => { root.pane-fullscreen(i); }
+                pane-close(i) => { root.pane-close(i); }
+                palette-query(q) => { root.palette-query(q); }
+                palette-nav(d) => { root.palette-nav(d); }
+                palette-activate => { root.palette-activate(); }
+                palette-pick(i) => { root.palette-pick(i); }
+                pref-action(k, a) => { root.pref-action(k, a); }
+                overlay-dismiss => { root.overlay-dismiss(); }
+            }
+
+            // Shown whenever the setting is on AND not fullscreen (mirrors
+            // `!fullscreenPaneId && showSidebar && <Sidebar/>`).
+            if root.show-sidebar && !root.fullscreen : SidebarRail {
+                projects: root.projects;
+                projects-open: root.sidebar-open;
+                new-pane => { root.new-pane(); }
+                toggle-projects => { root.toggle-projects(); }
+                open-project(i) => { root.open-project(i); }
+                recolor-project(i, s) => { root.recolor-project(i, s); }
+                rename-project(i, t) => { root.rename-project(i, t); }
+                remove-project(i) => { root.remove-project(i); }
+            }
         }
     }
 
