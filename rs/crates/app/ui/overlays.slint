@@ -396,6 +396,11 @@ export component OverlayLayer inherits Rectangle {
     in property <[PrefOption]> idle-effects;
     in property <string> idle-effect-label;
     in property <int> idle-seconds: 10;
+    // ambient-AI (local Ollama) — engine status mirror + field seeds.
+    in property <bool> ai-enabled: false;
+    in property <string> ai-host: "";
+    in property <string> ai-model: "";
+    in property <string> ai-status: "";
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> keybindings;
     in property <bool> keybinds-overridden: false;  // any binding overridden → show "Reset all"
@@ -780,13 +785,93 @@ export component OverlayLayer inherits Rectangle {
             //   (TermGrid keeps a fixed viewport buffer today). The setting is already persisted.
             // TODO(phase5): Control API section (agents/MCP) — the loopback control server isn't
             //   wired into the native shell yet.
-            // TODO(phase5): Ambient AI section (local Ollama) — not in the native shell yet.
+            // Ambient AI (local Ollama) now lives in the AI features tab.
 
                         } // end Terminal panel
 
                         // ===================== AI features =====================
                         if prefs.sel == 2 : VerticalLayout {
                             spacing: 12px;
+
+            // ---- Ambient AI (local Ollama "what you're doing" subtitles) ----
+            Text { text: "Ambient AI"; color: Theme.faint; font-size: 11px; }
+            PrefToggle {
+                label: "Ambient AI subtitles";
+                on: root.ai-enabled;
+                toggled(v) => { root.pref-action(13, v ? 1 : 0); }
+            }
+            Text {
+                text: "a local model labels what each pane is doing (default off, private)";
+                color: Theme.faint;
+                font-size: 11px;
+            }
+            // Host / model / status only matter once it's enabled.
+            if root.ai-enabled : VerticalLayout {
+                spacing: 8px;
+                Text { text: "Ollama base URL"; color: Theme.faint; font-size: 11px; }
+                Rectangle {
+                    height: 32px;
+                    border-radius: 7px;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        ahost := TextInput {
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            init => { ahost.text = root.ai-host; }
+                            edited => { root.pref-text(13, self.text); }
+                        }
+                    }
+                    Text {
+                        x: 10px;
+                        text: "http://192.168.0.11:11434";
+                        color: Theme.faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        visible: ahost.text == "";
+                    }
+                }
+                Text { text: "Model"; color: Theme.faint; font-size: 11px; }
+                Rectangle {
+                    height: 32px;
+                    border-radius: 7px;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        amodel := TextInput {
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            init => { amodel.text = root.ai-model; }
+                            edited => { root.pref-text(14, self.text); }
+                        }
+                    }
+                    Text {
+                        x: 10px;
+                        text: "gemma3:4b";
+                        color: Theme.faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        visible: amodel.text == "";
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Status:"; color: Theme.faint; font-size: 11px; vertical-alignment: center; }
+                    Text { text: root.ai-status; color: Theme.subtext; font-size: 11px; vertical-alignment: center; }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
 
             Text { text: "Idle glow"; color: Theme.faint; font-size: 11px; }
             // Mirrors Electron's "Idle glow for AI panes" — only an agent pane (one whose
