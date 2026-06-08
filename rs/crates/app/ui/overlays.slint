@@ -435,7 +435,11 @@ export component OverlayLayer inherits Rectangle {
             VerticalLayout {
                 // The Appearance preview is pinned (sticky) above the scroll area, so a
                 // change stays visible while the controls below scroll (mirrors Electron).
+                // `vertical-stretch: 0` keeps it snug (it must not share the extra height
+                // with the scrolling body, or the box would float with a gap under the title).
                 if prefs.sel == 0 : VerticalLayout {
+                    vertical-stretch: 0;
+                    alignment: start;
                     padding-left: 16px;
                     padding-right: 16px;
                     padding-top: 16px;
