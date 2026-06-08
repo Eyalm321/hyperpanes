@@ -39,6 +39,10 @@ pub enum Command {
     SwitchTab(usize),
     BeginRename(i32),
     RenameTab(i32, String),
+    /// Begin editing pane `0`'s label inline (double-click on its header).
+    BeginRenamePane(i32),
+    /// Commit pane `0`'s label to `1` (blank keeps the prior label).
+    RenamePane(i32, String),
     // ---- multi-window (Phase 4) ----
     /// Open a fresh OS window with an empty tab.
     NewWindow,
@@ -119,6 +123,14 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         state.editing_tab = -1;
         state.dirty = true;
     }
+    // Likewise, any action other than a pane rename cancels an in-progress pane-label edit
+    // (so the inline box never lingers when you interact elsewhere).
+    if state.editing_pane != -1
+        && !matches!(cmd, Command::BeginRenamePane(_) | Command::RenamePane(..))
+    {
+        state.editing_pane = -1;
+        state.dirty = true;
+    }
     match cmd {
         Command::NewPane => state.add_pane(mgr),
         Command::CloseFocused => {
@@ -156,6 +168,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SwitchTab(i) => state.switch_tab(i),
         Command::BeginRename(i) => state.begin_rename(i),
         Command::RenameTab(i, t) => state.rename_tab(i, &t),
+        Command::BeginRenamePane(i) => state.begin_rename_pane(i),
+        Command::RenamePane(i, t) => state.rename_pane(i, &t),
         // ---- multi-window ----
         Command::NewWindow => return Effect::NewWindow,
         Command::MovePaneToNewWindow => {

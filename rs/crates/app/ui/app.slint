@@ -107,6 +107,9 @@ export component AppWindow inherits Window {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // pane-header inline rename (double-click the header label)
+    callback begin-rename-pane(int);
+    callback rename-pane(int, string);
     // clickable paths (terminal links)
     callback pane-geometry(int, length, length);
     callback pane-link-moved(int, length, length);
@@ -230,6 +233,8 @@ export component AppWindow inherits Window {
                 pane-zoom(i) => { root.pane-zoom(i); }
                 pane-fullscreen(i) => { root.pane-fullscreen(i); }
                 pane-close(i) => { root.pane-close(i); }
+                begin-rename-pane(i) => { root.begin-rename-pane(i); }
+                rename-pane(i, t) => { root.rename-pane(i, t); }
                 pane-geometry(i, w, h) => { root.pane-geometry(i, w, h); }
                 pane-link-moved(i, x, y) => { root.pane-link-moved(i, x, y); }
                 pane-link-exited(i) => { root.pane-link-exited(i); }

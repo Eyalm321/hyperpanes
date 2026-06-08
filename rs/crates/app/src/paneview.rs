@@ -102,8 +102,16 @@ fn sync_model<T: Clone + 'static>(model: &VecModel<T>, items: Vec<T>) {
     }
 }
 
-/// Build a model row for pane `i`.
-fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
+/// Build a model row for pane `i`. `editing` flags the pane whose label is being renamed
+/// inline; `show_frame`/`show_dot` are the GLOBAL Appearance prefs, folded here over each
+/// pane's per-pane override (a clean new pane resolves OFF, a git-project pane ON).
+fn pane_item(
+    ps: &PaneState,
+    focused: bool,
+    editing: bool,
+    show_frame: bool,
+    show_dot: bool,
+) -> PaneItem {
     let (x, y, w, h) = ps.rect;
     // Project the clickable-path hover overlay (if any) into the model row.
     let (lx, ly) = ps.link_cursor;
@@ -111,6 +119,11 @@ fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
+        subtitle: ps.subtitle.clone().unwrap_or_default(),
+        shell_title: ps.shell_title.as_str().into(),
+        show_frame: ps.frame_on(show_frame),
+        show_dot: ps.dot_on(show_dot),
+        editing,
         accent: ps.accent,
         x,
         y,
@@ -265,13 +278,16 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.layouts, layouts);
 
     // panes
+    let show_frame = state.settings.show_frame;
+    let show_dot = state.settings.show_dot;
+    let editing_pane = state.editing_pane;
     let t = state.active_tab();
     let focused = t.focused;
     let items: Vec<PaneItem> = t
         .panes
         .iter()
         .enumerate()
-        .map(|(i, p)| pane_item(p, i == focused))
+        .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot))
         .collect();
     sync_model(&ui.panes, items);
 
@@ -540,6 +556,11 @@ pub fn pump(
     let glow_now_ms = crate::glow::now_epoch_ms();
 
     // ---- render dirty (visible) panes of the active tab → model ----
+    // Per-pane chrome inputs (read before the tab borrow): the global frame/dot prefs each
+    // pane's override folds over, and which pane (if any) is being renamed inline.
+    let show_frame = state.settings.show_frame;
+    let show_dot = state.settings.show_dot;
+    let editing_pane = state.editing_pane;
     let active = state.active;
     let focused = state.tabs[active].focused;
     let font = &mut state.font;
@@ -579,7 +600,10 @@ pub fn pump(
             continue;
         }
         if i < ui.panes.row_count() {
-            ui.panes.set_row_data(i, pane_item(ps, i == focused));
+            ui.panes.set_row_data(
+                i,
+                pane_item(ps, i == focused, i as i32 == editing_pane, show_frame, show_dot),
+            );
         }
     }
     if rendered {

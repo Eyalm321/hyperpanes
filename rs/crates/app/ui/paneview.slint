@@ -143,6 +143,9 @@ export component PaneView inherits Rectangle {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // pane-header inline rename (double-click the header label).
+    callback begin-rename-pane(int);
+    callback rename-pane(int, string);
     // clickable-paths: surface geometry (for hit-testing) + hover/click reports.
     callback pane-geometry(int, length, length);
     callback pane-link-moved(int, length, length);
@@ -177,10 +180,11 @@ export component PaneView inherits Rectangle {
             visible: pane.visible;
             background: Theme.bg;
             border-radius: 7px;
-            // Frame border: accent when focused; hidden entirely when the frame pref
-            // is off (a hairline border still separates focused panes).
-            border-width: root.show-frame ? 1px : (pane.focused ? 1px : 0px);
-            border-color: root.show-frame
+            // Frame border: a project/coloured pane (pane.show-frame on) draws its accent
+            // border; a clean pane shows none, except an accent focus ring so the focused
+            // pane is still visible (mirrors PaneFrame's `frameOn ? color : accent-ring`).
+            border-width: pane.show-frame ? 1px : (pane.focused ? 1px : 0px);
+            border-color: pane.show-frame
                 ? (pane.focused ? pane.accent : Theme.border)
                 : (pane.focused ? Theme.accent : transparent);
             clip: true;
@@ -189,6 +193,12 @@ export component PaneView inherits Rectangle {
                 // ---- header (.hp-pane-header) ----
                 Rectangle {
                     height: 26px;
+                    // Header tint: a faint wash of the pane's accent when its frame is on
+                    // (a git-project / manually-coloured pane). A clean pane shows no tint —
+                    // matching the Electron `background: frameOn ? ${color}1a` header.
+                    Rectangle {
+                        background: pane.show-frame ? pane.accent.with-alpha(0.10) : transparent;
+                    }
                     // bottom hairline
                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
                     // header click focuses the pane (sits under the buttons); a press also
@@ -209,7 +219,7 @@ export component PaneView inherits Rectangle {
                         padding-left: 8px;
                         padding-right: 8px;
                         spacing: 6px;
-                        // accent color dot (toggleable via Preferences)
+                        // accent color dot (per-pane toggle; on for project panes)
                         VerticalLayout {
                             alignment: center;
                             Rectangle {
@@ -217,17 +227,65 @@ export component PaneView inherits Rectangle {
                                 height: 8px;
                                 border-radius: 4px;
                                 background: pane.accent;
-                                visible: root.show-dot;
+                                visible: pane.show-dot;
                             }
                         }
-                        Text {
-                            text: pane.title;
-                            color: pane.focused ? Theme.text : Theme.subtext;
-                            font-size: 11px;
-                            font-weight: 600;
-                            vertical-alignment: center;
+                        // ---- editable label + secondary line (subtitle / shell title) ----
+                        // Double-click to rename (mirrors the Electron EditableLabel); the
+                        // label press does NOT start a drag (you drag from the empty header).
+                        Rectangle {
                             horizontal-stretch: 1;
-                            overflow: elide;
+                            clip: true;
+                            VerticalLayout {
+                                alignment: center;
+                                visible: !pane.editing;
+                                Text {
+                                    text: pane.title;
+                                    color: pane.focused ? Theme.text : Theme.subtext;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
+                                // subtitle wins; else the shell's OSC window title (dimmed).
+                                if (pane.subtitle != "" || pane.shell-title != "") : Text {
+                                    text: pane.subtitle != "" ? pane.subtitle : pane.shell-title;
+                                    color: Theme.subtext;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
+                            }
+                            // single-click focuses; double-click opens the inline editor.
+                            lta := TouchArea {
+                                enabled: !pane.editing;
+                                clicked => { root.focus-pane(idx); tp.focus(); }
+                                double-clicked => { root.begin-rename-pane(idx); }
+                            }
+                            // inline rename editor (absolute overlay → never reflows chrome)
+                            if pane.editing : Rectangle {
+                                background: Theme.bg;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: Theme.accent;
+                                height: 20px;
+                                y: (parent.height - self.height) / 2;
+                                lti := TextInput {
+                                    x: 5px;
+                                    width: parent.width - 10px;
+                                    height: parent.height;
+                                    text: pane.title;
+                                    color: Theme.text;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    single-line: true;
+                                    init => { lti.select-all(); lti.focus(); }
+                                    accepted => { root.rename-pane(idx, self.text); }
+                                }
+                            }
                         }
                         // each wrapped so it centres vertically against the title
                         VerticalLayout {

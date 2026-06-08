@@ -345,7 +345,9 @@ impl App {
                     if let Some((ti, pi)) = st.find_pane(&uid) {
                         st.tabs[ti].panes[pi].pane.set_cwd(Some(cwd.clone()));
                     }
-                    st.note_cwd(&cwd);
+                    // Refresh the remembered-projects list AND tint THIS pane if its cwd is
+                    // inside a git repo (project color + frame/dot on + project-name label).
+                    st.note_pane_cwd(&uid, &cwd);
                 }
             }
         }
@@ -959,6 +961,18 @@ impl App {
                 if let Some(w) = app.window_by_id(id) {
                     app.run_command(&w, Command::FocusPane(i as usize));
                     app.run_command(&w, Command::ToggleFullscreen);
+                }
+            });
+        }
+
+        // pane-header inline rename (double-click the header label).
+        cb_i32!(on_begin_rename_pane, Command::BeginRenamePane);
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_rename_pane(move |i, t| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::RenamePane(i, t.to_string()));
                 }
             });
         }

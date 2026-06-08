@@ -47,7 +47,12 @@ pub enum Overlay {
 pub struct DetachedPane {
     pub uid: String,
     pub title: SharedString,
+    pub subtitle: Option<SharedString>,
     pub pinned_accent: Option<Color>,
+    /// Per-pane frame/dot overrides (carried across a re-host so a tinted project pane
+    /// stays tinted, and a clean pane stays clean). `None` = inherit the global pref.
+    pub show_frame: Option<bool>,
+    pub show_dot: Option<bool>,
 }
 
 /// A single preferences edit, carried by `Command::ApplySetting`. Keeps the `Command`
@@ -109,7 +114,19 @@ impl PrefsDraft {
 /// One pane's controller-side state (terminal grid + placement + chrome).
 pub struct PaneState {
     pub uid: String,
+    /// The pane's editable label (the header title): "shell"/"pane N" by default, the
+    /// first word of a launched command, or — once tinted to a git project — the repo
+    /// name. Double-click the header to rename (see [`State::begin_rename_pane`]).
     pub title: SharedString,
+    /// An optional secondary line under the label (user-set subtitle). `None` = none.
+    pub subtitle: Option<SharedString>,
+    /// Per-pane override of the global `show_frame`/`show_dot` Appearance prefs (mirrors
+    /// the renderer's `pane.showFrame ?? globalShowFrame`). NEW panes default both to
+    /// `Some(false)` (clean: no colored border/tint/dot); a git-project tint flips them to
+    /// `Some(true)`; `None` would inherit the global pref. The pane still carries a `color`
+    /// VALUE (its `accent`) even while clean.
+    pub show_frame: Option<bool>,
+    pub show_dot: Option<bool>,
     pub accent: Color,
     pub pane: TerminalPane,
     /// Cell dims currently applied to the bound session (to detect a real reflow).
@@ -140,6 +157,31 @@ pub struct PaneState {
     pub shell_title: String,
 }
 
+impl PaneState {
+    /// Effective frame visibility: the per-pane override if set, else the global pref.
+    pub fn frame_on(&self, global: bool) -> bool {
+        self.show_frame.unwrap_or(global)
+    }
+    /// Effective dot visibility: the per-pane override if set, else the global pref.
+    pub fn dot_on(&self, global: bool) -> bool {
+        self.show_dot.unwrap_or(global)
+    }
+}
+
+/// Whether `label` is still a default auto-name ("shell" / "pane N" / a bare slot number),
+/// so a git-project tint may overwrite it — never a name the user chose. Mirrors the
+/// renderer's `/^(shell|pane \d+)$/i` test (plus the legacy bare-number default).
+fn is_default_label(label: &str) -> bool {
+    let l = label.trim();
+    if l.eq_ignore_ascii_case("shell") {
+        return true;
+    }
+    if let Some(rest) = l.strip_prefix("pane ").or_else(|| l.strip_prefix("Pane ")) {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    !l.is_empty() && l.chars().all(|c| c.is_ascii_digit())
+}
+
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
 /// `Group`). Background tabs keep their `PaneState`s — and thus their live
 /// sessions — alive; only the active tab is mounted in the UI models.
@@ -167,11 +209,13 @@ impl Tab {
         }
     }
 
-    /// Re-label + recolor panes so titles/accents stay 1..N in order. A pinned accent
-    /// (a project color) is preserved.
+    /// Recolor panes so each unpinned pane's accent tracks its creation slot in the
+    /// current palette. A pinned accent (a manual recolor or a git-project color) is
+    /// preserved. Pane LABELS are stable and user-owned, so they're left untouched —
+    /// unlike the old build, panes are no longer renumbered 1..N (that was the bare-number
+    /// "title" bug). The color VALUE stays assigned even on a clean (frame-off) pane.
     fn relabel(&mut self, palette: usize) {
         for (i, p) in self.panes.iter_mut().enumerate() {
-            p.title = format!("{}", i + 1).into();
             p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i, palette));
         }
     }
@@ -192,6 +236,9 @@ pub struct State {
     pub fullscreen: bool,
     /// Index of the tab whose title is being edited inline (-1 = none).
     pub editing_tab: i32,
+    /// Index (within the active tab) of the pane whose label is being edited inline
+    /// (-1 = none). Double-clicking a pane header sets this; it drives the inline editor.
+    pub editing_pane: i32,
     pub last_blink: Instant,
     pub cursor_on: bool,
     pub frames: u32,
@@ -284,6 +331,7 @@ impl State {
             tab_seq: 0,
             fullscreen: false,
             editing_tab: -1,
+            editing_pane: -1,
             last_blink: Instant::now(),
             cursor_on: true,
             frames: 0,
@@ -484,9 +532,21 @@ impl State {
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         let glow = Glow::new(crate::glow::seed_from(&uid));
+        // A pane spawned WITH an accent is a project pane (opened from the sidebar cd'd into
+        // a repo): tint it on. A plain new pane is clean — it still gets a palette color
+        // VALUE by slot, but its frame/dot overrides default OFF (mirrors `addPane`).
+        let project = accent.is_some();
+        let label = if idx == 0 {
+            "shell".to_string()
+        } else {
+            format!("pane {}", idx + 1)
+        };
         Some(PaneState {
             uid,
-            title: format!("{}", idx + 1).into(),
+            title: label.into(),
+            subtitle: None,
+            show_frame: Some(project),
+            show_dot: Some(project),
             accent: accent.unwrap_or_else(|| theme::accent_for(idx, palette)),
             pane,
             applied: (cols as usize, rows as usize),
@@ -612,7 +672,14 @@ impl State {
         let idx = self.tabs.get(ti)?.focused;
         let (ps, alive) = self.take_pane_in(ti, idx)?;
         Some((
-            DetachedPane { uid: ps.uid, title: ps.title, pinned_accent: ps.pinned_accent },
+            DetachedPane {
+                uid: ps.uid,
+                title: ps.title,
+                subtitle: ps.subtitle,
+                pinned_accent: ps.pinned_accent,
+                show_frame: ps.show_frame,
+                show_dot: ps.show_dot,
+            },
             alive,
         ))
     }
@@ -641,6 +708,9 @@ impl State {
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
+            subtitle: det.subtitle,
+            show_frame: det.show_frame,
+            show_dot: det.show_dot,
             accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at, palette)),
             pane,
             applied: (cols as usize, rows as usize),
@@ -691,7 +761,14 @@ impl State {
         let (ti, idx) = self.find_pane(uid)?;
         let (ps, alive) = self.take_pane_in(ti, idx)?;
         Some((
-            DetachedPane { uid: ps.uid, title: ps.title, pinned_accent: ps.pinned_accent },
+            DetachedPane {
+                uid: ps.uid,
+                title: ps.title,
+                subtitle: ps.subtitle,
+                pinned_accent: ps.pinned_accent,
+                show_frame: ps.show_frame,
+                show_dot: ps.show_dot,
+            },
             alive,
         ))
     }
@@ -960,6 +1037,58 @@ impl State {
             }
         }
         self.editing_tab = -1;
+        self.dirty = true;
+    }
+
+    /// Begin editing pane `idx`'s label inline (double-click on its header). Cancels any
+    /// in-progress tab rename first.
+    pub fn begin_rename_pane(&mut self, idx: i32) {
+        self.editing_tab = -1;
+        if idx >= 0 && (idx as usize) < self.active_tab().panes.len() {
+            self.editing_pane = idx;
+            self.dirty = true;
+        }
+    }
+
+    /// Commit a pane label rename (blank keeps the prior label, mirroring the renderer).
+    pub fn rename_pane(&mut self, idx: i32, title: &str) {
+        if idx >= 0 && (idx as usize) < self.active_tab().panes.len() {
+            let title = title.trim();
+            if !title.is_empty() {
+                self.active_tab_mut().panes[idx as usize].title = title.into();
+            }
+        }
+        self.editing_pane = -1;
+        self.dirty = true;
+    }
+
+    /// A pane reported a cwd: refresh the remembered-projects list (the sidebar), AND — if
+    /// that cwd sits inside a git repo — TINT this specific pane to the project (the native
+    /// port of `applyProjectToPane`): adopt the project color, turn the per-pane frame + dot
+    /// ON, and rename the pane to the repo name **only if its label is still a default**.
+    /// A clean pane outside any repo is left untouched (stays frame/dot OFF).
+    pub fn note_pane_cwd(&mut self, uid: &str, cwd: &str) {
+        let Some(root) = sidebar::git_root_of(cwd) else {
+            return;
+        };
+        let project = projects::upsert_project_by_root(&root.to_string_lossy());
+        let color = parse_hex(&project.color);
+        if let Some((ti, pi)) = self.find_pane(uid) {
+            let p = &mut self.tabs[ti].panes[pi];
+            p.accent = color;
+            p.pinned_accent = Some(color);
+            p.show_frame = Some(true);
+            p.show_dot = Some(true);
+            if is_default_label(&p.title) {
+                p.title = project.name.clone().into();
+            }
+            // Drop a subtitle that merely duplicated the repo name (it's now the label).
+            if p.subtitle.as_deref() == Some(project.name.as_str()) {
+                p.subtitle = None;
+            }
+        }
+        // Refresh the cached, newest-first project list (rail badge + flyout).
+        self.projects = sidebar::list();
         self.dirty = true;
     }
 
@@ -1416,17 +1545,6 @@ impl State {
             self.projects = sidebar::list();
         }
         self.dirty = true;
-    }
-
-    /// A pane reported a cwd — if it's inside a repo, remember it and refresh the cache
-    /// (so the rail's count badge + an open flyout update live).
-    pub fn note_cwd(&mut self, cwd: &str) {
-        if let Some(list) = sidebar::note_cwd(cwd) {
-            self.projects = list;
-            if self.settings.show_sidebar {
-                self.dirty = true;
-            }
-        }
     }
 
     /// The cached project rows as `(name, color)` for the flyout.
