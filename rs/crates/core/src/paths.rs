@@ -266,13 +266,31 @@ pub fn quote(arg: &str) -> String {
     }
 }
 
+/// Spawn a child process without flashing a console window. On Windows a GUI app spawning
+/// `cmd`/`where` briefly pops a console; `CREATE_NO_WINDOW` suppresses it. A no-op elsewhere.
+trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+impl NoWindow for Command {
+    #[cfg(windows)]
+    fn no_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+    #[cfg(not(windows))]
+    fn no_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
 /// Cached one-shot detection of VS Code on PATH (the zero-config default editor).
 fn detect_vscode() -> Option<String> {
     static VSCODE: OnceLock<Option<String>> = OnceLock::new();
     VSCODE
         .get_or_init(|| {
             let finder = if cfg!(windows) { "where" } else { "which" };
-            let out = Command::new(finder).arg("code").output().ok()?;
+            let out = Command::new(finder).arg("code").no_window().output().ok()?;
             if !out.status.success() {
                 return None;
             }
@@ -295,6 +313,7 @@ fn launch(command_line: &str) {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .no_window()
             .spawn()
     } else {
         Command::new("sh")
@@ -315,7 +334,7 @@ fn os_open(path: &str) -> Result<(), String> {
     let spawn = if cfg!(windows) {
         // `start` is a cmd builtin; the empty "" is the window title arg so a quoted path
         // isn't consumed as the title.
-        Command::new("cmd").args(["/C", "start", "", path]).spawn()
+        Command::new("cmd").args(["/C", "start", "", path]).no_window().spawn()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(path).spawn()
     } else {

@@ -40,6 +40,16 @@ export struct PaneItem {
     // match counter text (e.g. "2 / 5").
     search-open: bool,
     search-count: string,
+    // A monotonically increasing counter bumped every time the search box is (re)invoked
+    // (Ctrl+F), even while already open. The widget watches it to (re)focus the query input —
+    // a reliable signal that survives the box already being open (unlike a one-shot `init`).
+    search-focus-seq: int,
+    // Search match highlights projected into the viewport (logical px, hit-tested by the
+    // controller from the pane surface): every visible match dimmed, plus the active match drawn
+    // distinctly. Without these the box found matches + showed the counter but painted nothing.
+    search-rects: [HiRect],
+    search-active-on: bool,
+    search-active-rect: HiRect,
     // transient bottom-right indicator: copy/paste confirmations + the Ctrl-zoom font "%".
     toast: string,
     // the terminal font size in effect (logical px) — the live zoom / focused-pane font-size

@@ -36,6 +36,14 @@ use std::time::Instant;
 /// 1.6s auto-dismiss in `Terminal.tsx`.
 const TOAST_MS: u128 = 1600;
 
+/// Minimum pointer travel from the press point (logical px) before a left-press is treated as a
+/// drag-select rather than a click. A click frequently twitches a pixel or two; if that twitch
+/// straddles a cell boundary the selection would otherwise flip to `dragged` and copy-on-select,
+/// clobbering the clipboard right before a paste (the `$c.Dispose()`-rides-along bug). Below this
+/// slop the head never tracks, so a click can never copy — matching the few-px dead zone xterm /
+/// the Electron pane allow before a drag begins.
+const DRAG_THRESHOLD_PX: f32 = 4.0;
+
 /// Controller for a single terminal pane: grid model + a pluggable renderer.
 pub struct TerminalPane {
     grid: TermGrid,
@@ -51,6 +59,10 @@ pub struct TerminalPane {
     /// `None` until a press starts one; a non-dragged selection (a plain click) is held but
     /// renders nothing, so the same press can still resolve to a link click.
     selection: Option<Selection>,
+    /// The (logical-px) point of the active selection press, used to gate a real drag from a click
+    /// twitch: the head only starts tracking once the pointer moves past [`DRAG_THRESHOLD_PX`] from
+    /// here. `None` when no press is in flight.
+    select_origin: Option<(f32, f32)>,
     /// System clipboard handle for copy-on-select / right-click paste (kept open for the pane's
     /// life — see [`crate::clipboard`]).
     clipboard: Clipboard,
@@ -104,6 +116,7 @@ impl TerminalPane {
             cwd: None,
             verified: HashMap::new(),
             selection: None,
+            select_origin: None,
             clipboard: Clipboard::new(),
             toast: None,
             search_shown: false,
@@ -332,10 +345,21 @@ impl TerminalPane {
     /// a click that doesn't move still falls through to a link activation.
     pub fn selection_begin(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
         self.selection = self.cell_at_clamped(x, y, surf_w, surf_h).map(Selection::new);
+        self.select_origin = Some((x, y));
     }
 
     /// Extend the active selection's head to the (logical-px) cursor point during a drag.
+    ///
+    /// Gated on [`DRAG_THRESHOLD_PX`]: until the pointer has moved that far from the press point
+    /// the head stays pinned to the anchor (so the selection never becomes `dragged` and a click
+    /// can't copy-on-select). This dead zone is what stops a stray click twitch — especially one
+    /// that straddles a cell boundary — from clobbering the clipboard ahead of a paste.
     pub fn selection_update(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
+        if let Some((ox, oy)) = self.select_origin {
+            if (x - ox).hypot(y - oy) < DRAG_THRESHOLD_PX {
+                return;
+            }
+        }
         let c = match self.cell_at_clamped(x, y, surf_w, surf_h) {
             Some(c) => c,
             None => return,
@@ -348,6 +372,7 @@ impl TerminalPane {
     /// Drop the current selection (and its highlight).
     pub fn selection_clear(&mut self) {
         self.selection = None;
+        self.select_origin = None;
     }
 
     /// Select the entire viewport (every visible cell), marked `dragged` so it renders and is
@@ -455,7 +480,7 @@ impl TerminalPane {
         let text = self.clipboard.paste()?;
         let n = text.chars().count();
         self.set_toast(format!("Pasted {} char{}", n, if n == 1 { "" } else { "s" }));
-        Some(text)
+        Some(prepare_paste(&text, self.grid.bracketed_paste()))
     }
 
     /// Pin the viewport back to the live edge (display offset 0) so the cursor is visible at the
@@ -601,6 +626,15 @@ impl TerminalPane {
             self.grid.scroll_to_visible(m.line);
         }
     }
+
+    /// Recompute matches against the (possibly reflowed) grid — call after a [`resize`](Self::resize)
+    /// so the highlight rects keep tracking the rewrapped text while the search box stays open. A
+    /// no-op when search is closed; doesn't force-scroll (the viewport stays where the user left it).
+    pub fn search_reflow(&mut self) {
+        if self.search_shown {
+            self.search_recompute();
+        }
+    }
 }
 
 /// Compute the cell grid that fits a pane of `width_px`×`height_px` *physical* pixels for
@@ -611,6 +645,26 @@ pub fn cells_for_px(width_px: f32, height_px: f32, cell_w: u32, cell_h: u32) -> 
     let cols = ((width_px as u32) / cell_w.max(1)).max(2) as usize;
     let rows = ((height_px as u32) / cell_h.max(1)).max(1) as usize;
     (cols, rows)
+}
+
+/// Turn raw clipboard text into the exact bytes to write to the pty for a paste.
+///
+/// Two transforms, both matching how Windows Terminal feeds a paste to conpty:
+/// 1. **Normalize line endings to CR (`\r`).** Windows console input treats CR as Enter; a bare
+///    LF (`\n`) is mishandled by conpty/PSReadLine, which strands the caret and fragments a
+///    multi-line paste across `>>` continuation prompts. Our selection text joins rows with `\n`,
+///    and external clipboards carry `\r\n`/`\n` — all collapse to `\r` here.
+/// 2. **Bracket** the payload in `ESC[200~ … ESC[201~` *only* when the app enabled bracketed-paste
+///    mode (DECSET 2004 — modern PSReadLine / PowerShell 7). Then the shell inserts it as one
+///    literal paste (caret at the end, no premature execution). Old shells (Windows PowerShell 5.1)
+///    don't set the mode, so the CR-normalized text is sent bare — still the correct Enter handling.
+fn prepare_paste(text: &str, bracketed: bool) -> String {
+    let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+    if bracketed {
+        format!("\u{1b}[200~{normalized}\u{1b}[201~")
+    } else {
+        normalized
+    }
 }
 
 #[cfg(test)]
@@ -701,6 +755,47 @@ mod tests {
             other => panic!("ctrl+click should copy, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_paste_normalizes_newlines_to_cr() {
+        // LF and CRLF both collapse to CR (the Enter the Windows console expects); a paste with
+        // no bracketed-paste mode is sent bare.
+        assert_eq!(prepare_paste("a\nb\r\nc", false), "a\rb\rc");
+        // Trailing blank lines (e.g. a multi-row selection over empty rows) become trailing CRs.
+        assert_eq!(prepare_paste("x\n\n", false), "x\r\r");
+        // No newlines → unchanged.
+        assert_eq!(prepare_paste("echo hello", false), "echo hello");
+    }
+
+    #[test]
+    fn prepare_paste_wraps_in_brackets_only_when_mode_on() {
+        assert_eq!(prepare_paste("a\nb", true), "\u{1b}[200~a\rb\u{1b}[201~");
+        assert!(!prepare_paste("a\nb", false).contains("200~"));
+    }
+
+    #[test]
+    fn a_click_twitch_within_threshold_is_not_a_drag() {
+        // A press with a sub-threshold wobble (even one that crosses a cell boundary) must NOT
+        // promote to a drag — otherwise it copies-on-select and clobbers the clipboard before a
+        // paste. A 10×10 pane driven by a 100px surface → each cell is 10px wide: a 2px move from
+        // x=19 (cell 1) to x=21 (cell 2) straddles a boundary but stays inside the 4px dead zone.
+        let mut p = unit_pane(10, 10);
+        p.selection_begin(19.0, 5.0, 100.0, 100.0);
+        p.selection_update(21.0, 5.0, 100.0, 100.0); // 2px move, crosses cell 1→2
+        assert!(!p.selection_is_drag(), "a sub-threshold twitch must not be a drag");
+        assert!(p.selection_text().is_none(), "a click must not yield copyable text");
+        assert!(p.selection_rects(100.0, 100.0).is_empty(), "a click leaves no highlight");
+    }
+
+    #[test]
+    fn a_real_drag_past_threshold_selects_and_copies() {
+        let mut p = unit_pane(10, 10);
+        p.feed("abcdefghij"); // row 0 cells 0..10
+        p.selection_begin(5.0, 5.0, 100.0, 100.0); // cell 0
+        p.selection_update(55.0, 5.0, 100.0, 100.0); // 50px move → well past threshold, cell 5
+        assert!(p.selection_is_drag(), "a real drag past the threshold selects");
+        assert_eq!(p.selection_text().as_deref(), Some("abcdef"));
     }
 
     #[test]

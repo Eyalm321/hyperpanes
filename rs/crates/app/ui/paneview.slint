@@ -490,6 +490,12 @@ export component PaneView inherits Rectangle {
                         // in-pane search box (controller-driven; opened from the pane menu)
                         search-open: pane.search-open;
                         search-count: pane.search-count;
+                        // bump → (re)focus the query input (reliable across an already-open box)
+                        search-focus-tick: pane.search-focus-seq;
+                        // match highlights painted over the terminal (controller-driven, per tick)
+                        search-rects: pane.search-rects;
+                        search-active-on: pane.search-active-on;
+                        search-active-rect: pane.search-active-rect;
                         // drag-to-select highlight rects (controller-driven, per tick)
                         selection-rects: pane.selection-rects;
                         // transient bottom-right indicator (copy/paste + Ctrl-zoom font %)

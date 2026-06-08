@@ -139,6 +139,17 @@ fn pane_item(
         .into_iter()
         .map(|(x, y, w, h)| HiRect { x, y, w, h })
         .collect();
+    // Search-match highlights for the viewport: every visible match dimmed, the active one drawn
+    // distinctly. Hit-tested against the same on-screen surface as the selection rects.
+    let (search_rect_v, search_active) = ps.pane.search_view_rects(sw, sh);
+    let search_rects: Vec<HiRect> = search_rect_v
+        .into_iter()
+        .map(|(x, y, w, h)| HiRect { x, y, w, h })
+        .collect();
+    let (search_active_on, search_active_rect) = match search_active {
+        Some((x, y, w, h)) => (true, HiRect { x, y, w, h }),
+        None => (false, HiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
+    };
     // In-pane search box state (opened from the pane menu's "Search…").
     let search_open = ps.pane.search_is_open();
     let (cur, total) = ps.pane.search_count();
@@ -172,6 +183,10 @@ fn pane_item(
         selection_rects: ModelRc::from(Rc::new(VecModel::from(selection_rects))),
         search_open,
         search_count,
+        search_focus_seq: ps.search_focus_seq,
+        search_rects: ModelRc::from(Rc::new(VecModel::from(search_rects))),
+        search_active_on,
+        search_active_rect,
         toast: ps.last_toast.clone().into(),
         // The live terminal font px (logical) — drives the widget's indicator scaling.
         font_px,
@@ -206,6 +221,15 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
         let gh = (h - 2.0 * PANE_GAP).max(1.0);
         p.rect = (gx, gy, gw, gh);
         p.visible = true;
+        // The selection / link / search-highlight hit-test surface, set authoritatively here
+        // every tick. Slint's `geometry-changed` is unreliable: it doesn't fire for a pane
+        // created already at its final size (a freshly *launched* pane stays at surf (0,0), which
+        // breaks hit-testing), and when adding a pane reflows its neighbours their surf can go
+        // stale (highlights then drift against the old size). The pump always knows the exact
+        // size, so we own it here. The widget's surface = the frame minus its insets: a 4px
+        // x-inset and 30px vertically (26px header + 2px top + 2px bottom) — see paneview.slint
+        // `tp` (matches the size `geometry-changed` reports, so this never fights it).
+        p.surf = ((gw - 4.0).max(1.0), (gh - 30.0).max(1.0));
         // size the grid to the terminal body (frame chrome removed) so cells match. Each pane
         // uses its OWN font cell metrics (per-pane zoom), so panes can differ in cols/rows.
         let tw = (gw - PANE_CHROME_W).max(1.0);
@@ -216,6 +240,9 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
                 mgr.resize(&p.uid, cols as u16, rows as u16);
             }
             p.applied = (cols, rows);
+            // The grid rewrapped — recompute any open search so its highlights track the
+            // reflowed text instead of drifting against stale match coordinates.
+            p.pane.search_reflow();
         }
     };
 
