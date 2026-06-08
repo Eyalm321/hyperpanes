@@ -63,6 +63,7 @@ export component AppWindow inherits Window {
     in property <string> pref-theme-label;
     in property <[FramePaletteOption]> pref-palettes;
     in property <[PrefOption]> pref-shells;
+    in property <string> pref-shell-label;
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
@@ -275,6 +276,7 @@ export component AppWindow inherits Window {
             theme-label: root.pref-theme-label;
             frame-palettes: root.pref-palettes;
             shells: root.pref-shells;
+            shell-label: root.pref-shell-label;
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;

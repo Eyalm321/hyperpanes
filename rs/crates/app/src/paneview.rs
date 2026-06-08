@@ -377,16 +377,20 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_pref_preview_bg(theme::theme_color(view_theme, 0));
 
     // default-shell options; active = the one whose token matches the saved setting.
+    let mut shell_label = prefs::SHELL_OPTIONS[0].0.to_string();
     let shells: Vec<PrefOption> = prefs::SHELL_OPTIONS
         .iter()
         .enumerate()
-        .map(|(id, (label, value))| PrefOption {
-            id: id as i32,
-            label: (*label).into(),
-            active: *value == state.settings.default_shell,
+        .map(|(id, (label, value))| {
+            let active = *value == state.settings.default_shell;
+            if active {
+                shell_label = (*label).to_string();
+            }
+            PrefOption { id: id as i32, label: (*label).into(), active }
         })
         .collect();
     sync_model(&ui.shells, shells);
+    app.set_pref_shell_label(shell_label.into());
 
     // Dialog appearance scalars come from the draft view; the actual panes keep the
     // committed show_frame/show_dot until Done.

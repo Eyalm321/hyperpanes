@@ -266,6 +266,7 @@ export component OverlayLayer inherits Rectangle {
     in property <string> theme-label;
     in property <[FramePaletteOption]> frame-palettes;
     in property <[PrefOption]> shells;
+    in property <string> shell-label;
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
@@ -597,13 +598,10 @@ export component OverlayLayer inherits Rectangle {
 
             // ---- default shell (applies to new panes & restarts) ----
             Text { text: "Default shell"; color: Theme.faint; font-size: 11px; }
-            HorizontalLayout {
-                spacing: 6px;
-                for opt[i] in root.shells : Pill {
-                    label: opt.label;
-                    active: opt.active;
-                    clicked => { root.pref-action(5, opt.id); }
-                }
+            FontDropdown {
+                options: root.shells;
+                current-label: root.shell-label;
+                selected(id) => { root.pref-action(5, id); }
             }
 
             // ---- clickable file paths (click opens · Ctrl+click copies) ----
@@ -640,7 +638,7 @@ export component OverlayLayer inherits Rectangle {
                     }
                     Text {
                         x: 10px;
-                        text: "blank = auto-detect VS Code, else OS default";
+                        text: "blank = OS default";
                         color: Theme.faint;
                         font-size: 12px;
                         vertical-alignment: center;
