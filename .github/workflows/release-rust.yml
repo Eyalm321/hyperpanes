@@ -1,23 +1,22 @@
 name: Release (Rust native)
 
 # Build the per-user Windows NSIS installer for the NATIVE Rust app and publish
-# it to a GitHub Release. Mirrors release.yml (the Electron release) but for the
-# `rs/crates/app` binary `hyperpanes`.
+# it to a GitHub Release. This is the release for `rs/crates/app` (binary
+# `hyperpanes`), which supersedes the Electron app.
 #
-# Trigger: `rust-v*` tags (e.g. rust-v0.1.0) — deliberately distinct from the
-# Electron release's `v*` tags so the two installers never collide / double-publish
-# while both apps coexist. Once the native app supersedes Electron, switch this to
-# `v*` and retire release.yml.
+# Trigger: `v*` tags (e.g. v0.1.0). NOTE: the legacy Electron release.yml also
+# fires on `v*` and emits an identically-named Hyperpanes-<ver>-setup.exe — retire
+# release.yml (archive the Electron main) before tagging, or the two collide.
 on:
   push:
     tags:
-      - 'rust-v*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: 'Version to stamp (semver x.y.z), e.g. 0.1.0'
         required: true
-        default: '0.0.0'
+        default: '0.1.0'
 
 permissions:
   contents: write # create the release and upload the installer
@@ -42,9 +41,9 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          if ($tag -like 'rust-v*') { $v = $tag -replace '^rust-v', '' }
+          if ($tag -like 'v*') { $v = $tag -replace '^v', '' }
           elseif ('${{ github.event.inputs.version }}') { $v = '${{ github.event.inputs.version }}' }
-          else { $v = '0.0.0' }
+          else { $v = '0.1.0' }
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "version = $v"
 

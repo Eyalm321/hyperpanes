@@ -52,17 +52,20 @@ the current user; already-open shells won't see it until restarted).
 
 ## Releasing via CI
 
-Push a `rust-v*` tag (distinct from the Electron `v*` tags so the two don't
-collide while both apps coexist):
+Push a `v*` tag:
 
 ```bash
-git tag rust-v0.1.0
-git push origin rust-v0.1.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 The workflow builds the installer on `windows-latest` and attaches
 `Hyperpanes-0.1.0-setup.exe` to the GitHub Release. It can also be run manually
 via **workflow_dispatch** with an explicit version.
+
+> **Note:** the legacy Electron `release.yml` also triggers on `v*` and produces
+> an identically-named `Hyperpanes-<ver>-setup.exe`. Retire it (archive the
+> Electron `main`) before tagging, otherwise the two releases collide.
 
 ## Known follow-up (needs an app-crate change — out of packaging scope)
 
