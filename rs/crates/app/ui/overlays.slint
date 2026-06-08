@@ -201,7 +201,17 @@ component FontDropdown inherits Rectangle {
             Chevron { up: root.open; }
         }
     }
-    ta := TouchArea { clicked => { root.open = true; popup.show(); } }
+    ta := TouchArea {
+        clicked => {
+            // Toggle: clicking the button while open closes it (and flips the chevron back).
+            root.open = !root.open;
+            if (root.open) {
+                popup.show();
+            } else {
+                popup.close();
+            }
+        }
+    }
     popup := PopupWindow {
         x: 0;
         y: parent.height + 4px;
