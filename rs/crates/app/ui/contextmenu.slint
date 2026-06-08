@@ -262,17 +262,17 @@ export component ContextMenu inherits Rectangle {
                     }
                 }
 
-                // ---- Layout flyout (checkmark on current) ----
+                // ---- Layout flyout (glyph · label · "— resolved" hint · radio ✓) ----
                 if entry.kind == 4 && root.open-sub == i : Flyout {
                     x: root.open-left ? -self.width + 2px : parent.width - 2px;
                     y: -4px;
-                    width: 200px;
+                    width: 232px;
                     height: vbox-layout.preferred-height;
                     vbox-layout := VerticalLayout {
                         padding: 5px;
                         spacing: 1px;
                         for lo in root.layouts : CtxRow {
-                            e: { label: lo.label, shortcut: "", glyph: "", kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
+                            e: { label: lo.label, shortcut: lo.hint, glyph: lo.glyph, kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
                             clicked => { root.set-layout(lo.id); }
                         }
                     }

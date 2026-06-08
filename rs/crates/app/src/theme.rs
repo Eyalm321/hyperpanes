@@ -239,6 +239,35 @@ pub fn layout_glyph(l: Layout) -> &'static str {
     }
 }
 
+/// The geometric Unicode icon for each layout — the exact glyphs the Electron app uses
+/// (`presets.ts` `LAYOUTS[].icon` + `AUTO_LAYOUT.icon`). Unlike [`layout_glyph`] (Segoe
+/// MDL2 private-use codepoints, which need the icon font) these render in any UI font, so
+/// the menus show them reliably. Used by the application + tab Layout submenus.
+pub fn layout_icon(l: Layout) -> &'static str {
+    match l {
+        Layout::Auto => "⊞",
+        Layout::Single => "□",
+        Layout::Columns => "▥",
+        Layout::Rows => "▤",
+        Layout::Grid => "▦",
+        Layout::MainStack => "▧",
+    }
+}
+
+/// The human display label for each layout, matching Electron's `LAYOUTS[].label` /
+/// `AUTO_LAYOUT.label` (Title Case). Used in the menus; the HUD/serialization keep the
+/// lowercase token from [`layout_name`].
+pub fn layout_label(l: Layout) -> &'static str {
+    match l {
+        Layout::Auto => "Automatic",
+        Layout::Single => "Single",
+        Layout::Columns => "Columns",
+        Layout::Rows => "Rows",
+        Layout::Grid => "Grid",
+        Layout::MainStack => "Main + Stack",
+    }
+}
+
 /// Load a monospace font at the given UI scale (best-available Cascadia/Consolas).
 pub fn load_font(scale: f32) -> Font {
     let candidates = [

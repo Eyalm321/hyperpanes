@@ -191,6 +191,7 @@ export component AppWindow inherits Window {
     callback pane-context(int, length, length);   // right-click pane `i` at (x, y)
     callback taskbar-context(int, length, length); // right-click taskbar button `i` at (x, y)
     callback tab-context(int, length, length);    // right-click tab `i` at (x, y)
+    callback open-app-menu(length, length);        // open the hamburger (application) menu
     callback ctx-pick(int);        // a plain top-level menu row
     callback ctx-swatch(int);      // Change-Color swatch
     callback ctx-swatch-none();    // Change-Color "no color"
@@ -228,6 +229,7 @@ export component AppWindow inherits Window {
             move-pane-new-window => { root.move-pane-new-window(); }
             set-layout(l) => { root.set-layout(l); }
             new-pane => { root.new-pane(); }
+            open-app-menu(x, y) => { root.open-app-menu(x, y); }
             open-palette => { root.open-palette(); }
             open-prefs => { root.open-prefs(); }
             toggle-sidebar => { root.toggle-sidebar(); }

@@ -387,6 +387,9 @@ impl App {
                                 // Open a context menu at a fixed anchor (screenshot scaffold).
                                 "panemenu" => { dispatch(&mut st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr); }
                                 "tabmenu" => { dispatch(&mut st, Command::OpenTabContext(0, 90.0, 44.0), &self.mgr); }
+                                // Phase-5 chrome-parity scaffolds:
+                                // the hamburger (application) menu, anchored under the button.
+                                "appmenu" => { dispatch(&mut st, Command::OpenAppContext(10.0, 32.0), &self.mgr); }
                                 // three panes in the single preset → the bottom pane taskbar shows.
                                 "taskbar" => {
                                     dispatch(&mut st, Command::NewPane, &self.mgr);
@@ -1134,6 +1137,15 @@ impl App {
             win.app.on_taskbar_context(move |i, x, y| {
                 if let Some(w) = app.window_by_id(id) {
                     app.run_command(&w, Command::OpenTaskbarContext(i as usize, x, y));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_open_app_menu(move |x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::OpenAppContext(x, y));
                 }
             });
         }

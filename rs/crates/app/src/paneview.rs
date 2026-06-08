@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use hyperpanes_core::layout::presets::{
-    compute_tiles, effective_layout, DividerKind, Orientation,
+    compute_tiles, effective_layout, DividerKind, Layout, Orientation,
 };
 use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
@@ -297,9 +297,10 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .iter()
         .map(|l| LayoutOption {
             id: theme::layout_id(*l),
-            label: theme::layout_name(*l).into(),
-            glyph: theme::layout_glyph(*l).into(),
+            label: theme::layout_label(*l).into(),
+            glyph: theme::layout_icon(*l).into(),
             active: *l == cur,
+            hint: SharedString::new(),
         })
         .collect();
     sync_model(&ui.layouts, layouts);
@@ -548,6 +549,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         Some(c) => match c.kind {
             CtxKind::Pane => 1,
             CtxKind::Tab => 2,
+            CtxKind::App => 3,
         },
     };
     app.set_ctx_kind(ctx_kind);
@@ -628,9 +630,35 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                     .iter()
                     .map(|l| LayoutOption {
                         id: theme::layout_id(*l),
-                        label: theme::layout_name(*l).into(),
-                        glyph: theme::layout_glyph(*l).into(),
+                        label: theme::layout_label(*l).into(),
+                        glyph: theme::layout_icon(*l).into(),
                         active: *l == cur,
+                        hint: SharedString::new(),
+                    })
+                    .collect();
+                sync_model(&ui.ctx_layouts, layouts);
+                sync_model(&ui.ctx_swatches, Vec::new());
+                sync_model(&ui.ctx_tabs, Vec::new());
+            }
+            CtxKind::App => {
+                // The application menu's Layout submenu: Automatic + the 5 presets, radio ✓ on
+                // the active tab's current layout, with the Automatic row carrying a live
+                // "— <resolved>" hint of what auto tiles as right now (by pane count).
+                let cur = state.active_tab().layout;
+                let n = state.active_tab().panes.len();
+                let auto_resolved = effective_layout(Layout::Auto, n);
+                let layouts: Vec<LayoutOption> = theme::LAYOUT_MENU
+                    .iter()
+                    .map(|l| LayoutOption {
+                        id: theme::layout_id(*l),
+                        label: theme::layout_label(*l).into(),
+                        glyph: theme::layout_icon(*l).into(),
+                        active: *l == cur,
+                        hint: if *l == Layout::Auto {
+                            format!("— {}", theme::layout_name(auto_resolved)).into()
+                        } else {
+                            SharedString::new()
+                        },
                     })
                     .collect();
                 sync_model(&ui.ctx_layouts, layouts);

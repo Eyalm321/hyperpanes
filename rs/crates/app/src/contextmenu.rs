@@ -19,6 +19,10 @@ use crate::state::State;
 pub enum CtxKind {
     Pane,
     Tab,
+    /// The application (hamburger) menu. Reuses the cursor-anchored menu component anchored
+    /// just below the top-bar hamburger, so it shares the items/submenu/separator/shortcut/
+    /// checkmark/glyph styling rather than duplicating a popup. See [`app_menu`].
+    App,
 }
 
 /// A submenu kind a row can open (`0` = none, a plain item/separator).
@@ -214,4 +218,43 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
     b.row("Layout", "", "", false, false, false, false, sub::LAYOUT, None);
 
     b.finish(CtxKind::Tab, idx, x, y)
+}
+
+/// Build the application (hamburger) menu, anchored at window-logical `(x, y)`. The native
+/// port of the Electron `TopBar` menu: New pane · Command palette (+shortcut) · — · Layout ▸
+/// (cascading submenu, radio ✓) · — · Open/Save workspace · — · Sidebar (checkbox) ·
+/// Preferences. The Layout submenu rows come from the [`crate::theme::LAYOUT_MENU`] model the
+/// resync pushes into `ctx_layouts` (with the live checkmark + the Automatic "— <resolved>"
+/// hint), exactly like the tab menu's Layout submenu.
+pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
+    let mut b = Build::new();
+    let cur = state.active_tab().layout;
+    let palette_sc = state.keymap.label_for("palette.toggle").unwrap_or_default();
+    let sidebar_on = state.settings.show_sidebar;
+
+    b.row("New pane…", "", "＋", false, false, false, false, sub::NONE, Some(Command::NewPane));
+    b.row(
+        "Command palette", &palette_sc, "⌘", false, false, false, false, sub::NONE,
+        Some(Command::PaletteOpen),
+    );
+    b.sep();
+    // Layout submenu header: glyph + label of the CURRENT layout (the submenu lists Automatic
+    // + the 5 presets with the radio ✓ on the current). The current label sits in the shortcut
+    // slot (mirrors Electron's "{current.label} ▸").
+    b.row(
+        "Layout",
+        crate::theme::layout_label(cur),
+        crate::theme::layout_icon(cur),
+        false, false, false, false, sub::LAYOUT, None,
+    );
+    b.sep();
+    b.row("Open workspace…", "", "📂", false, false, false, false, sub::NONE, Some(Command::OpenWorkspace));
+    b.row("Save workspace…", "", "💾", false, false, false, false, sub::NONE, Some(Command::SaveWorkspace));
+    b.sep();
+    b.row("Sidebar", "", "▥", sidebar_on, true, false, false, sub::NONE, Some(Command::ToggleSidebar));
+    b.row("Preferences…", "", "⚙", false, false, false, false, sub::NONE, Some(Command::PrefsOpen));
+
+    // Target = the active tab, so the Layout submenu (which routes through `ctx_target` →
+    // `SetTabLayout`) retargets the *current* tab's layout (mirrors Electron's `setLayout`).
+    b.finish(CtxKind::App, state.active, x, y)
 }

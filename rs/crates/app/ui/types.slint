@@ -67,6 +67,9 @@ export struct LayoutOption {
     label: string,
     glyph: string,
     active: bool,
+    // optional dim hint shown to the right (e.g. the "— grid" the Automatic row resolves
+    // to right now in the application menu's Layout submenu); "" = none.
+    hint: string,
 }
 
 // ===== Wave-2 overlay rows =====
