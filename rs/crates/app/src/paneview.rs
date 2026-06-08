@@ -428,24 +428,32 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_pref_idle_effect_label(idle_label.into());
     app.set_pref_idle_seconds(state.settings.idle_alert_seconds as i32);
 
-    // keybindings list (read-only mirror of the default keymap), grouped by category and
-    // rendered as <kbd> chips — styled like the Electron Preferences → Keybindings tab.
+    // keybindings list (the EFFECTIVE keymap — overrides over defaults), grouped by category
+    // and rendered as <kbd> chips. Each row is editable: click to capture a new chord, with a
+    // per-row reset when overridden. `capturing` marks the row currently capturing input.
+    let capturing = state.capturing_binding.clone();
     let mut prev_cat = "";
-    let keybindings: Vec<KeybindingItem> = crate::keybindings::binding_rows()
+    let keybindings: Vec<KeybindingItem> = state
+        .keymap
+        .rows()
         .into_iter()
         .map(|r| {
             let group_first = r.category != prev_cat;
             prev_cat = r.category;
             let parts: Vec<SharedString> = r.parts.into_iter().map(Into::into).collect();
             KeybindingItem {
+                id: r.id.into(),
                 label: r.label.into(),
                 parts: ModelRc::from(Rc::new(VecModel::from(parts))),
                 category: r.category.into(),
                 group_first,
+                overridden: r.overridden,
+                capturing: capturing.as_deref() == Some(r.id),
             }
         })
         .collect();
     sync_model(&ui.keybindings, keybindings);
+    app.set_pref_keybinds_overridden(state.keymap.any_overridden());
 
     // Dialog appearance scalars come from the draft view; the actual panes keep the
     // committed show_frame/show_dot until Done.

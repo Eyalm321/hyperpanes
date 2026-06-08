@@ -203,6 +203,12 @@ pub struct State {
     pub overlay: Overlay,
     /// Persisted appearance preferences (font, frame/dot).
     pub settings: Settings,
+    /// The user's keybinding overrides — consulted (override-first) by the key router. Edited
+    /// live from the Preferences → Keybindings panel.
+    pub keymap: crate::keybindings::Keymap,
+    /// The binding id currently capturing a new chord in the editor (`None` = not capturing).
+    /// While set, that editor row grabs focus and the next key combo rebinds it.
+    pub capturing_binding: Option<String>,
     /// Set when the font family/size changed — the pump reloads the font (it owns the
     /// DPI scale) then clears this.
     pub font_reload: bool,
@@ -285,6 +291,8 @@ impl State {
             dirty: true,
             overlay: Overlay::None,
             settings: prefs::load(),
+            keymap: crate::keybindings::Keymap::load(),
+            capturing_binding: None,
             // Apply the saved font family/size on the first pump (it owns the scale).
             font_reload: true,
             prefs_draft: None,
@@ -986,6 +994,7 @@ impl State {
             self.prefs_draft = None;
             self.prefs_confirm = false;
             self.font_custom = false;
+            self.capturing_binding = None;
             self.dirty = true;
         }
     }
@@ -1254,6 +1263,58 @@ impl State {
             }
         }
         prefs::save(&self.settings);
+        self.dirty = true;
+    }
+
+    // ---- keybindings editor (Preferences → Keybindings) ----
+
+    /// Begin capturing a new chord for binding `id`: the editor row grabs focus and shows
+    /// "Press a chord…"; the next captured combo rebinds it (or Esc cancels).
+    pub fn begin_rebind(&mut self, id: &str) {
+        self.capturing_binding = Some(id.to_string());
+        self.dirty = true;
+    }
+
+    /// Cancel an in-progress chord capture (Esc, or clicking elsewhere).
+    pub fn cancel_rebind(&mut self) {
+        if self.capturing_binding.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Handle a key captured while rebinding: Escape cancels, a bare modifier is ignored (keep
+    /// waiting for a real key), and any other combo becomes the binding's override (persisted)
+    /// and ends the capture. No-op when not capturing.
+    pub fn capture_chord(&mut self, ctrl: bool, alt: bool, shift: bool, text: &str) {
+        let Some(id) = self.capturing_binding.clone() else {
+            return;
+        };
+        if crate::is_key(text, slint::platform::Key::Escape) {
+            self.cancel_rebind();
+            return;
+        }
+        // A bare modifier press has no key token yet — keep the capture open.
+        let Some(key) = crate::key_tok_from_text(text, ctrl) else {
+            return;
+        };
+        self.keymap.set(&id, crate::keybindings::Chord { ctrl, alt, shift, key });
+        self.capturing_binding = None;
+        self.dirty = true;
+    }
+
+    /// Reset binding `id` to its default chord (drop the override).
+    pub fn reset_binding(&mut self, id: &str) {
+        self.keymap.reset(id);
+        if self.capturing_binding.as_deref() == Some(id) {
+            self.capturing_binding = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Reset every binding to its default (clear all overrides).
+    pub fn reset_all_bindings(&mut self) {
+        self.keymap.reset_all();
+        self.capturing_binding = None;
         self.dirty = true;
     }
 

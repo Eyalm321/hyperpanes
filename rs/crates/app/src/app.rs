@@ -399,13 +399,15 @@ impl App {
     fn on_key(self: &Rc<Self>, win: &Rc<Window>, idx: usize, msg: KeyMsg) {
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
-            if let Some(cmd) = crate::route_chord(&msg) {
+            let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
+            if let Some(cmd) = cmd {
                 self.run_command(win, cmd);
             }
             return;
         }
         // Other modifier chords (Alt+… focus, bare F11) — run + swallow.
-        if let Some(cmd) = crate::route_chord(&msg) {
+        let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
+        if let Some(cmd) = cmd {
             self.run_command(win, cmd);
             return;
         }
@@ -1071,6 +1073,44 @@ impl App {
         cb0!(on_overlay_dismiss, Command::CloseOverlay);
         cb0!(on_pref_done, Command::PrefsDone);
         cb_i32!(on_pref_confirm, Command::PrefsConfirm);
+
+        // ---- keybindings editor: rebind capture + reset (act on state directly) ----
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_rebind(move |bid| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().begin_rebind(&bid);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_capture(move |ctrl, alt, shift, text| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().capture_chord(ctrl, alt, shift, &text);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_reset_binding(move |bid| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().reset_binding(&bid);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_reset_all_bindings(move || {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().reset_all_bindings();
+                }
+            });
+        }
         cb_i32!(on_palette_nav, Command::PaletteNav);
         cb_usize!(on_palette_pick, Command::PaletteSelect);
         cb_usize!(on_open_project, Command::OpenProject);
