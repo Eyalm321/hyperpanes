@@ -162,6 +162,7 @@ fn pane_item(
         link_tip_y: ly + 16.0,
         search_open,
         search_count,
+        toast: ps.last_toast.clone().into(),
     }
 }
 
@@ -488,6 +489,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                 group_first,
                 overridden: r.overridden,
                 capturing: capturing.as_deref() == Some(r.id),
+                unbound: r.unbound,
                 static_row: false,
             }
         })
@@ -505,6 +507,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                 group_first: false,
                 overridden: false,
                 capturing: false,
+                unbound: false,
                 static_row: true,
             },
         );
@@ -729,14 +732,21 @@ pub fn pump(
             let _ = ps.pane.take_dirty();
             continue;
         }
+        // Poll the transient bottom-right indicator each tick so it appears + auto-expires
+        // (copy/paste confirmations + the Ctrl-zoom font %). A change alone refreshes the row.
+        let toast = ps.pane.toast_text().unwrap_or_default();
+        let toast_changed = ps.last_toast != toast;
+        if toast_changed {
+            ps.last_toast = toast;
+        }
         let focus_blink = i == focused && blink_changed;
         let pane_dirty = ps.pane.take_dirty();
-        // Repaint the surface only for terminal/cursor changes; a glow-only change just
-        // re-pushes the (unchanged) surface with the new alpha.
+        // Repaint the surface only for terminal/cursor changes; a glow-only or toast-only
+        // change just re-pushes the (unchanged) surface with the new alpha / indicator.
         if pane_dirty || focus_blink {
             ps.surface = ps.pane.render(font, &opts);
             rendered = true;
-        } else if !glow_changed {
+        } else if !glow_changed && !toast_changed {
             continue;
         }
         if i < ui.panes.row_count() {

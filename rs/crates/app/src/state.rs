@@ -170,6 +170,10 @@ pub struct PaneState {
     /// Whether the pane's ambient-AI summary line is muted (the pane menu's "Mute AI Summary"
     /// toggle; mirrors the renderer's `ui.aiMuted` set). New panes default unmuted.
     pub ai_muted: bool,
+    /// The last polled value of the widget's transient bottom-right indicator ("toast" —
+    /// copy/paste confirmations + the Ctrl-zoom font %), cached so the pump can detect a
+    /// change and update/clear the row even when the surface itself isn't dirty.
+    pub last_toast: String,
 }
 
 impl PaneState {
@@ -607,6 +611,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            last_toast: String::new(),
         })
     }
 
@@ -772,6 +777,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            last_toast: String::new(),
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -1088,15 +1094,15 @@ impl State {
     }
 
     /// Nudge the global terminal font size by `delta` px (clamped), re-gridding every pane on
-    /// the next pump — the Ctrl+= / Ctrl+- font-zoom keybindings.
+    /// the next pump — the Ctrl+= / Ctrl+- font-zoom keybindings (and Ctrl+wheel).
     pub fn font_zoom(&mut self, delta: i32) {
         let next = Settings::clamp_font(self.settings.font_px + delta as f32);
         if next != self.settings.font_px {
             self.settings.font_px = next;
             prefs::save(&self.settings);
             self.font_reload = true;
-            self.dirty = true;
         }
+        self.show_zoom_toast();
     }
 
     /// Reset the global terminal font size to its default — the Ctrl+0 keybinding.
@@ -1105,8 +1111,19 @@ impl State {
             self.settings.font_px = prefs::DEFAULT_FONT_PX;
             prefs::save(&self.settings);
             self.font_reload = true;
-            self.dirty = true;
         }
+        self.show_zoom_toast();
+    }
+
+    /// Flash the current font scale as a `%` indicator in the focused pane's bottom-right —
+    /// the same transient "toast" the widget uses for copy/paste confirmations.
+    fn show_zoom_toast(&mut self) {
+        let pct = (self.settings.font_px / prefs::DEFAULT_FONT_PX * 100.0).round() as i32;
+        let f = self.active_tab().focused;
+        if let Some(p) = self.active_tab_mut().panes.get_mut(f) {
+            p.pane.set_toast(format!("{pct}%"));
+        }
+        self.dirty = true;
     }
 
     pub fn begin_rename(&mut self, idx: i32) {
@@ -1502,9 +1519,9 @@ impl State {
     }
 
     /// Handle a key captured while rebinding: Escape cancels, a bare modifier is ignored (keep
-    /// waiting for a real key), a chord already taken by another binding surfaces a "Used by …"
-    /// clash (and keeps the capture open), and any free combo becomes the binding's override
-    /// (persisted) and ends the capture. No-op when not capturing.
+    /// waiting for a real key), and any other combo becomes the binding's override (persisted)
+    /// and ends the capture. If the combo is already held by another binding it is **stolen** —
+    /// that binding becomes unbound (its row then shows "Unbound"). No-op when not capturing.
     pub fn capture_chord(&mut self, ctrl: bool, alt: bool, shift: bool, text: &str) {
         let Some(id) = self.capturing_binding.clone() else {
             return;
@@ -1518,11 +1535,9 @@ impl State {
             return;
         };
         let chord = crate::keybindings::Chord { ctrl, alt, shift, key };
-        // Clash with another binding → show "Used by <label>" and keep recording.
-        if let Some(label) = self.keymap.conflict(&id, chord) {
-            self.capture_conflict = Some(label.to_string());
-            self.dirty = true;
-            return;
+        // Steal the chord from its current owner (if any) — that binding becomes unbound.
+        if let Some(other) = self.keymap.owner_of(chord, &id) {
+            self.keymap.unbind(other);
         }
         self.keymap.set(&id, chord);
         self.capturing_binding = None;
@@ -1530,7 +1545,18 @@ impl State {
         self.dirty = true;
     }
 
-    /// Reset binding `id` to its default chord (drop the override).
+    /// Unbind binding `id` (clear its chord — nothing fires it) and end any capture on it. The
+    /// row then shows "Unbound" until rebound or reset to default.
+    pub fn unbind_binding(&mut self, id: &str) {
+        self.keymap.unbind(id);
+        if self.capturing_binding.as_deref() == Some(id) {
+            self.capturing_binding = None;
+            self.capture_conflict = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Reset binding `id` to its default chord (drop the override/unbind).
     pub fn reset_binding(&mut self, id: &str) {
         self.keymap.reset(id);
         if self.capturing_binding.as_deref() == Some(id) {
@@ -2042,6 +2068,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            last_toast: String::new(),
         };
         let auto = self.tabs[ti].layout == Layout::Auto;
         let t = &mut self.tabs[ti];

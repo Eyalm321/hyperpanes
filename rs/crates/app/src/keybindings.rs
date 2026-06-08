@@ -230,37 +230,52 @@ pub fn default_bindings() -> Vec<Binding> {
 }
 
 /// One row of the Preferences → Keybindings list: its binding id, category, label, the
-/// **effective** chord pieces (override or default), and whether it's been overridden (so the
-/// editor can show a "reset" affordance).
+/// **effective** chord pieces (override or default), whether it's been overridden (so the
+/// editor can show a "reset" affordance), and whether it's currently **unbound** (the user
+/// cleared its chord, or it lost its chord to another binding — the row shows "Unbound").
 pub struct BindingRow {
     pub id: &'static str,
     pub category: &'static str,
     pub label: &'static str,
     pub parts: Vec<String>,
     pub overridden: bool,
+    pub unbound: bool,
 }
 
 /// The user's per-binding chord overrides (the native port of `useKeybindings`'s persisted
 /// `combos`, stored as a sparse override map rather than the full table so bindings added in
-/// a later version still get their fresh default).
+/// a later version still get their fresh default). A value of `Some(chord)` rebinds the
+/// shortcut; `None` means the user explicitly **unbound** it (no chord fires it); an *absent*
+/// id falls back to the compiled-in default.
 pub struct Keymap {
-    overrides: BTreeMap<String, Chord>,
+    overrides: BTreeMap<String, Option<Chord>>,
 }
 
 impl Keymap {
-    /// Load the persisted overrides (an empty map on a missing/corrupt file). Unknown ids and
-    /// un-parseable chords are dropped, so an older blob never breaks the editor.
+    /// Load the persisted overrides (an empty map on a missing/corrupt file). Unknown ids are
+    /// dropped and un-parseable chords fall back to the default, so an older blob never breaks
+    /// the editor. A `null` value is an explicit unbind.
     pub fn load() -> Self {
         let mut overrides = BTreeMap::new();
         let path = paths::user_data_dir().join("native-keybindings.json");
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(map) = serde_json::from_str::<BTreeMap<String, ChordRepr>>(&raw) {
+            if let Ok(map) = serde_json::from_str::<BTreeMap<String, Option<ChordRepr>>>(&raw) {
                 let valid: std::collections::HashSet<&str> =
                     default_bindings().iter().map(|b| b.id).collect();
                 for (id, repr) in map {
-                    if valid.contains(id.as_str()) {
-                        if let Some(chord) = repr.to_chord() {
-                            overrides.insert(id, chord);
+                    if !valid.contains(id.as_str()) {
+                        continue;
+                    }
+                    match repr {
+                        // a parseable chord rebinds; an un-parseable one falls back to default
+                        Some(r) => {
+                            if let Some(chord) = r.to_chord() {
+                                overrides.insert(id, Some(chord));
+                            }
+                        }
+                        // explicit unbind
+                        None => {
+                            overrides.insert(id, None);
                         }
                     }
                 }
@@ -270,10 +285,11 @@ impl Keymap {
     }
 
     /// Persist the overrides atomically (best-effort; a write failure is logged, never fatal).
+    /// An unbound binding serializes as `null`.
     fn save(&self) {
         let path = paths::user_data_dir().join("native-keybindings.json");
-        let map: BTreeMap<&String, ChordRepr> =
-            self.overrides.iter().map(|(id, c)| (id, ChordRepr::from(*c))).collect();
+        let map: BTreeMap<&String, Option<ChordRepr>> =
+            self.overrides.iter().map(|(id, c)| (id, c.map(ChordRepr::from))).collect();
         match serde_json::to_string_pretty(&map) {
             Ok(json) => {
                 if let Err(e) = paths::write_atomic(&path, json.as_bytes()) {
@@ -284,60 +300,76 @@ impl Keymap {
         }
     }
 
-    /// The effective chord for `id`: the user override if set, else `default`.
-    fn effective(&self, id: &str, default: Chord) -> Chord {
-        self.overrides.get(id).copied().unwrap_or(default)
+    /// The effective chord for `id`: the user override if set (which may be `None` = unbound),
+    /// else `default`. `None` means nothing fires this binding.
+    fn effective(&self, id: &str, default: Chord) -> Option<Chord> {
+        match self.overrides.get(id) {
+            Some(opt) => *opt,
+            None => Some(default),
+        }
     }
 
-    /// Whether `id` currently has a user override.
+    /// Whether `id` currently has a user override (a rebind *or* an explicit unbind).
     pub fn is_overridden(&self, id: &str) -> bool {
         self.overrides.contains_key(id)
     }
 
     /// The effective chord label (e.g. `Ctrl+Shift+Z`) for binding `id` — the native port of the
     /// renderer's `comboLabel(combos[id])`, used to annotate context-menu rows. `None` for an
-    /// unknown id.
+    /// unknown *or* unbound binding (so the menu shows no shortcut).
     pub fn label_for(&self, id: &str) -> Option<String> {
         default_bindings()
             .iter()
             .find(|b| b.id == id)
-            .map(|b| self.effective(id, b.chord).label())
+            .and_then(|b| self.effective(id, b.chord))
+            .map(|c| c.label())
     }
 
     /// Find the command bound to a live modifier+key combo, consulting each binding's
-    /// **effective** chord (override wins over default), first match in table order.
+    /// **effective** chord (override wins over default; an unbound binding never matches),
+    /// first match in table order.
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
         default_bindings()
             .into_iter()
-            .find(|b| self.effective(b.id, b.chord).matches(ctrl, alt, shift, key))
+            .find(|b| {
+                self.effective(b.id, b.chord)
+                    .is_some_and(|c| c.matches(ctrl, alt, shift, key))
+            })
             .map(|b| b.command)
     }
 
-    /// The label of a *different* binding whose **effective** chord already equals `chord`
-    /// (the native port of the renderer's `comboEquals` clash check). `None` when `chord` is
-    /// free. Drives the editor's "Used by <label>" message so a rebind never silently
-    /// shadows another shortcut.
-    pub fn conflict(&self, id: &str, chord: Chord) -> Option<&'static str> {
+    /// The id of a *different* binding whose **effective** chord already equals `chord` (the
+    /// current owner of that combo), or `None` when the combo is free. Used to "steal" a chord:
+    /// rebinding to an in-use combo unbinds its previous owner.
+    pub fn owner_of(&self, chord: Chord, except: &str) -> Option<&'static str> {
         default_bindings()
             .into_iter()
             .find(|b| {
-                b.id != id
+                b.id != except
                     && self
                         .effective(b.id, b.chord)
-                        .matches(chord.ctrl, chord.alt, chord.shift, chord.key)
+                        .is_some_and(|c| c.matches(chord.ctrl, chord.alt, chord.shift, chord.key))
             })
-            .map(|b| b.label)
+            .map(|b| b.id)
     }
 
     /// Override binding `id` with `chord`, persisting. Unknown ids are ignored.
     pub fn set(&mut self, id: &str, chord: Chord) {
         if default_bindings().iter().any(|b| b.id == id) {
-            self.overrides.insert(id.to_string(), chord);
+            self.overrides.insert(id.to_string(), Some(chord));
             self.save();
         }
     }
 
-    /// Reset binding `id` to its default chord (drop any override), persisting.
+    /// Explicitly unbind `id` (no chord fires it), persisting. Unknown ids are ignored.
+    pub fn unbind(&mut self, id: &str) {
+        if default_bindings().iter().any(|b| b.id == id) {
+            self.overrides.insert(id.to_string(), None);
+            self.save();
+        }
+    }
+
+    /// Reset binding `id` to its default chord (drop any override/unbind), persisting.
     pub fn reset(&mut self, id: &str) {
         if self.overrides.remove(id).is_some() {
             self.save();
@@ -358,20 +390,21 @@ impl Keymap {
     }
 
     /// The bindings grouped by [`CATEGORY_ORDER`] (category order, then table order) — the
-    /// editor's row model, with each row's **effective** chord chips + overridden flag. Each
-    /// category's rows are contiguous so the view can draw a heading per group.
+    /// editor's row model, with each row's **effective** chord chips, overridden flag, and
+    /// unbound flag. Each category's rows are contiguous so the view can draw a heading per group.
     pub fn rows(&self) -> Vec<BindingRow> {
         let bindings = default_bindings();
         let mut rows = Vec::with_capacity(bindings.len());
         for category in CATEGORY_ORDER {
             for b in bindings.iter().filter(|b| b.category == category) {
-                let chord = self.effective(b.id, b.chord);
+                let effective = self.effective(b.id, b.chord);
                 rows.push(BindingRow {
                     id: b.id,
                     category,
                     label: b.label,
-                    parts: chord.parts(),
+                    parts: effective.map(|c| c.parts()).unwrap_or_default(),
                     overridden: self.is_overridden(b.id),
+                    unbound: effective.is_none(),
                 });
             }
         }
@@ -435,7 +468,7 @@ mod tests {
         // Rebind the palette to Ctrl+J. The old Ctrl+Shift+P no longer fires; Ctrl+J does.
         km.overrides.insert(
             "palette.toggle".into(),
-            Chord::new(true, false, false, KeyTok::Char('j')),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
         assert!(km.match_chord(true, false, true, KeyTok::Char('p')).is_none());
         assert!(matches!(
@@ -445,19 +478,31 @@ mod tests {
     }
 
     #[test]
-    fn conflict_detects_clash() {
+    fn owner_of_finds_current_holder() {
         let km = empty_keymap();
-        // Trying to bind something else to Ctrl+Shift+P clashes with the palette.
+        // Ctrl+Shift+P is held by the palette; rebinding another binding to it would steal it.
         assert_eq!(
-            km.conflict("tab.new", Chord::new(true, false, true, KeyTok::Char('p'))),
-            Some("Command palette")
+            km.owner_of(Chord::new(true, false, true, KeyTok::Char('p')), "tab.new"),
+            Some("palette.toggle")
         );
-        // A free chord has no conflict; rebinding a chord to itself is not a clash.
-        assert_eq!(km.conflict("tab.new", Chord::new(true, false, false, KeyTok::Char('j'))), None);
+        // A free chord has no owner; the holder doesn't count itself.
+        assert_eq!(km.owner_of(Chord::new(true, false, false, KeyTok::Char('j')), "tab.new"), None);
         assert_eq!(
-            km.conflict("palette.toggle", Chord::new(true, false, true, KeyTok::Char('p'))),
+            km.owner_of(Chord::new(true, false, true, KeyTok::Char('p')), "palette.toggle"),
             None
         );
+    }
+
+    #[test]
+    fn unbound_binding_never_fires() {
+        let mut km = empty_keymap();
+        km.overrides.insert("palette.toggle".into(), None);
+        // The default chord no longer fires, and the row reports unbound.
+        assert!(km.match_chord(true, false, true, KeyTok::Char('p')).is_none());
+        let row = km.rows().into_iter().find(|r| r.id == "palette.toggle").unwrap();
+        assert!(row.unbound);
+        assert!(row.parts.is_empty());
+        assert!(km.label_for("palette.toggle").is_none());
     }
 
     #[test]
@@ -465,7 +510,7 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert(
             "palette.toggle".into(),
-            Chord::new(true, false, false, KeyTok::Char('j')),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
         // reset() persists; in the test we just drop the in-memory override.
         km.overrides.remove("palette.toggle");
@@ -538,7 +583,7 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert(
             "palette.toggle".into(),
-            Chord::new(true, false, false, KeyTok::Char('j')),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
         let rows = km.rows();
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();

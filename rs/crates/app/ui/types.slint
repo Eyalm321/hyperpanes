@@ -35,6 +35,8 @@ export struct PaneItem {
     // match counter text (e.g. "2 / 5").
     search-open: bool,
     search-count: string,
+    // transient bottom-right indicator: copy/paste confirmations + the Ctrl-zoom font "%".
+    toast: string,
 }
 
 // One tab (workspace group) chip in the strip.
@@ -97,6 +99,8 @@ export struct KeybindingItem {
     group-first: bool,
     overridden: bool,
     capturing: bool,
+    // The user cleared this binding's chord (or it was stolen by another): show "Unbound".
+    unbound: bool,
     // A non-rebindable documentation row (the "Focus pane by number → Alt 1…9" line): rendered
     // as static <kbd> pills with no rebind/reset affordances.
     static-row: bool,

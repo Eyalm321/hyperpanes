@@ -1038,6 +1038,9 @@ impl App {
             });
         }
 
+        // Ctrl+wheel over a pane → zoom the terminal font (same command as Ctrl+= / Ctrl+-).
+        cb_i32!(on_pane_font_zoom, Command::FontZoom);
+
         // in-pane search box (opened from the pane context menu)
         {
             let app = app.clone();
@@ -1274,6 +1277,15 @@ impl App {
             win.app.on_pref_cancel_rebind(move || {
                 if let Some(w) = app.window_by_id(id) {
                     w.state.borrow_mut().cancel_rebind();
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_unbind(move |bid| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.state.borrow_mut().unbind_binding(&bid);
                 }
             });
         }

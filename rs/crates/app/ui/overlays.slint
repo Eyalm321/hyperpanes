@@ -316,6 +316,55 @@ component Kbd inherits Rectangle {
     }
 }
 
+// The keybindings-editor action glyphs, drawn as vector Paths (like Check/Chevron) so they
+// render regardless of the UI font's glyph coverage (it lacks ✎/↺/×, same as ✓/▾).
+component IconEdit inherits Path {        // pencil — "rebind"
+    in property <color> ink: Theme.subtext;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    stroke: root.ink;
+    stroke-width: 1.4px;
+    fill: transparent;
+    // centered in the 16 viewbox so it vertically aligns with the reset icon beside it.
+    commands: "M 4 10 L 11 3 L 13 5 L 6 12 Z M 4 10 L 3 13 L 6 12 Z";
+}
+component IconReset inherits Path {       // stroked circular arrow (Feather rotate-cw) — "reset to default"
+    in property <color> ink: Theme.subtext;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: root.ink;
+    stroke-width: 2px;       // ≈1.2px at 14px — matches the pencil's stroke weight
+    fill: transparent;
+    // a single thin circular arrow with one arrowhead (centerline stroke, not a filled glyph).
+    commands: "M 23 4 v 6 h -6 M 20.49 15 a 9 9 0 1 1 -2.12 -9.36 L 23 10";
+}
+component IconCancel inherits Path {      // X — "cancel recording"
+    in property <color> ink: Theme.subtext;
+    width: 12px;
+    height: 12px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: "M 4 4 L 12 12 M 12 4 L 4 12";
+}
+component IconUnbind inherits Path {      // ⊘ circle-slash — "unbind (no shortcut)"
+    in property <color> ink: Theme.subtext;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: root.ink;
+    stroke-width: 2px;
+    fill: transparent;
+    commands: "M 5 12 a 7 7 0 1 0 14 0 a 7 7 0 1 0 -14 0 M 7.05 7.05 L 16.95 16.95";
+}
+
 export component OverlayLayer inherits Rectangle {
     // 0 none · 1 palette · 2 prefs
     in property <int> kind: 0;
@@ -365,6 +414,7 @@ export component OverlayLayer inherits Rectangle {
     callback pref-rebind(string);                    // start capturing binding `id`
     callback pref-capture(bool, bool, bool, string); // (ctrl, alt, shift, key-text)
     callback pref-cancel-rebind();                   // stop capturing without binding (✎→× / Esc)
+    callback pref-unbind(string);                    // clear binding `id`'s chord (→ Unbound)
     callback pref-reset-binding(string);             // reset binding `id` to default
     callback pref-reset-all-bindings();
 
@@ -877,8 +927,15 @@ export component OverlayLayer inherits Rectangle {
                                                         vertical-alignment: center;
                                                     }
                                                     if kb.static-row : Kbd { text: "9"; }
-                                                    // editable rows: the effective chord as chips
-                                                    if !kb.static-row : HorizontalLayout {
+                                                    // editable rows: "Unbound" or the chord chips
+                                                    if !kb.static-row && kb.unbound : Text {
+                                                        text: "Unbound";
+                                                        color: Theme.faint;
+                                                        font-size: 11px;
+                                                        font-italic: true;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    if !kb.static-row && !kb.unbound : HorizontalLayout {
                                                         spacing: 4px;
                                                         alignment: end;
                                                         for part in kb.parts : Kbd {
@@ -895,6 +952,20 @@ export component OverlayLayer inherits Rectangle {
                                             }
                                         }
 
+                                        // ---- ⊘ unbind (while recording only) ----
+                                        if kb.capturing : VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 22px;
+                                                height: 22px;
+                                                border-radius: 5px;
+                                                background: uta.has-hover ? Theme.surface2 : transparent;
+                                                IconUnbind {
+                                                    ink: uta.has-hover ? Theme.danger : Theme.subtext;
+                                                }
+                                                uta := TouchArea { clicked => { root.pref-unbind(kb.id); } }
+                                            }
+                                        }
                                         // ---- ✎ rebind / × cancel (editable rows only) ----
                                         if !kb.static-row : VerticalLayout {
                                             alignment: center;
@@ -903,12 +974,11 @@ export component OverlayLayer inherits Rectangle {
                                                 height: 22px;
                                                 border-radius: 5px;
                                                 background: eta.has-hover ? Theme.surface2 : transparent;
-                                                Text {
-                                                    text: kb.capturing ? "×" : "✎";
-                                                    color: eta.has-hover ? Theme.text : Theme.subtext;
-                                                    font-size: 14px;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
+                                                if kb.capturing : IconCancel {
+                                                    ink: eta.has-hover ? Theme.text : Theme.subtext;
+                                                }
+                                                if !kb.capturing : IconEdit {
+                                                    ink: eta.has-hover ? Theme.text : Theme.subtext;
                                                 }
                                                 eta := TouchArea {
                                                     clicked => {
@@ -929,12 +999,8 @@ export component OverlayLayer inherits Rectangle {
                                                 height: 22px;
                                                 border-radius: 5px;
                                                 background: rta.has-hover ? Theme.surface2 : transparent;
-                                                Text {
-                                                    text: "↺";
-                                                    color: rta.has-hover ? Theme.text : Theme.subtext;
-                                                    font-size: 14px;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
+                                                IconReset {
+                                                    ink: rta.has-hover ? Theme.text : Theme.subtext;
                                                 }
                                                 rta := TouchArea { clicked => { root.pref-reset-binding(kb.id); } }
                                             }
