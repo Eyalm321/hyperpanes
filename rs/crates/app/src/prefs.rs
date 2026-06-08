@@ -13,13 +13,51 @@
 use hyperpanes_core::persistence::paths;
 use serde::{Deserialize, Serialize};
 
-/// The selectable terminal fonts: a label + the on-disk path the glyph cache loads.
-/// Only the ones actually installed are offered (see [`available_families`]).
-pub const FONT_FAMILIES: [(&str, &str); 3] = [
-    ("Cascadia Mono", "C:/Windows/Fonts/CascadiaMono.ttf"),
-    ("Cascadia Code", "C:/Windows/Fonts/CascadiaCode.ttf"),
-    ("Consolas", "C:/Windows/Fonts/consola.ttf"),
+/// Candidate monospace fonts offered in the font picker: a label + the font-file name to
+/// look for. Each is resolved against the system **and** per-user font folders (see
+/// [`font_dirs`]); only the ones actually installed are offered (see [`available_families`]),
+/// so the picker grows with whatever monospace fonts the user has (Cascadia/Consolas ship
+/// with Windows; JetBrains/Fira/Hack/etc. appear if installed). The glyph cache loads the
+/// resolved `.ttf`/`.ttc` path. Selection is persisted by path, so adding/reordering this
+/// list never invalidates a saved choice.
+pub const FONT_CANDIDATES: [(&str, &str); 14] = [
+    ("Cascadia Mono", "CascadiaMono.ttf"),
+    ("Cascadia Code", "CascadiaCode.ttf"),
+    ("Consolas", "consola.ttf"),
+    ("Courier New", "cour.ttf"),
+    ("Lucida Console", "lucon.ttf"),
+    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
+    ("Fira Code", "FiraCode-Regular.ttf"),
+    ("Hack", "Hack-Regular.ttf"),
+    ("Source Code Pro", "SourceCodePro-Regular.ttf"),
+    ("DejaVu Sans Mono", "DejaVuSansMono.ttf"),
+    ("Iosevka", "Iosevka-Regular.ttf"),
+    ("Roboto Mono", "RobotoMono-Regular.ttf"),
+    ("IBM Plex Mono", "IBMPlexMono-Regular.ttf"),
+    ("Cascadia Code NF", "CascadiaCodeNF.ttf"),
 ];
+
+/// The fallback font path used when nothing else resolves (always present on Windows).
+const FALLBACK_FONT: &str = "C:/Windows/Fonts/consola.ttf";
+
+/// The directories scanned for the candidate font files: the system font folder plus the
+/// per-user font folder (where user-installed fonts land on modern Windows).
+fn font_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![std::path::PathBuf::from("C:/Windows/Fonts")];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(std::path::Path::new(&local).join("Microsoft").join("Windows").join("Fonts"));
+    }
+    dirs
+}
+
+/// Resolve a candidate font-file name to an installed absolute path (forward-slashed), or
+/// `None` if it isn't present in any font directory.
+fn resolve_font(file: &str) -> Option<String> {
+    font_dirs().into_iter().find_map(|d| {
+        let p = d.join(file);
+        p.exists().then(|| p.to_string_lossy().replace('\\', "/"))
+    })
+}
 
 /// The default-shell choices offered in the Terminal section: a label + the shell token
 /// passed to `SpawnOptions::shell` (empty = the system default resolved in core's spawn).
@@ -42,8 +80,9 @@ pub const DEFAULT_FONT_PX: f32 = 14.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    /// Index into [`FONT_FAMILIES`] for the active terminal font.
-    pub font_family: usize,
+    /// Absolute path of the active terminal font file ("" = the first available default).
+    /// Persisted by path so the picker list can grow/reorder without invalidating it.
+    pub font_family: String,
     /// Index into [`crate::theme::FRAME_PALETTES`] for the active pane dot/frame palette.
     /// Switching it remaps panes by creation slot (the native port of `framePalette`).
     pub frame_palette: usize,
@@ -73,7 +112,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            font_family: 0,
+            font_family: String::new(),
             frame_palette: 0,
             default_shell: String::new(),
             font_px: DEFAULT_FONT_PX,
@@ -88,16 +127,18 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The resolved font path for the active family, clamped to an installed font so a
-    /// stale index never loads nothing.
-    pub fn font_path(&self) -> &'static str {
-        let avail = available_families();
-        let idx = if avail.iter().any(|(i, _)| *i == self.font_family) {
-            self.font_family
-        } else {
-            avail.first().map(|(i, _)| *i).unwrap_or(0)
-        };
-        FONT_FAMILIES[idx.min(FONT_FAMILIES.len() - 1)].1
+    /// The resolved font path to load: the saved `font_family` path if it's still present,
+    /// else the first available family, else the always-present fallback. So a font that was
+    /// uninstalled (or a blank default) never loads nothing.
+    pub fn font_path(&self) -> String {
+        if !self.font_family.is_empty() && std::path::Path::new(&self.font_family).exists() {
+            return self.font_family.clone();
+        }
+        available_families()
+            .into_iter()
+            .next()
+            .map(|(_, path)| path)
+            .unwrap_or_else(|| FALLBACK_FONT.to_string())
     }
 
     /// Clamp the base font size into the supported range.
@@ -106,18 +147,16 @@ impl Settings {
     }
 }
 
-/// The font families that actually exist on this machine, as `(index, label)` pairs.
-/// Always non-empty (Consolas ships with Windows); falls back to all entries if none
-/// resolve (e.g. a non-standard install) so the picker is never blank.
-pub fn available_families() -> Vec<(usize, &'static str)> {
-    let present: Vec<(usize, &'static str)> = FONT_FAMILIES
+/// The monospace fonts actually installed on this machine, as `(label, path)` pairs, in
+/// [`FONT_CANDIDATES`] order. Always non-empty (falls back to Consolas) so the picker is
+/// never blank.
+pub fn available_families() -> Vec<(String, String)> {
+    let present: Vec<(String, String)> = FONT_CANDIDATES
         .iter()
-        .enumerate()
-        .filter(|(_, (_, path))| std::path::Path::new(path).exists())
-        .map(|(i, (label, _))| (i, *label))
+        .filter_map(|(label, file)| resolve_font(file).map(|p| (label.to_string(), p)))
         .collect();
     if present.is_empty() {
-        FONT_FAMILIES.iter().enumerate().map(|(i, (l, _))| (i, *l)).collect()
+        vec![("Consolas".to_string(), FALLBACK_FONT.to_string())]
     } else {
         present
     }

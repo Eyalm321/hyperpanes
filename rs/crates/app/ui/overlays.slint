@@ -76,6 +76,80 @@ component NavItem inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// A dropdown (select) for the terminal font family — a button showing the current font that
+// opens a popup list of all installed monospace fonts. Mirrors Electron's `<select>`.
+component FontDropdown inherits Rectangle {
+    in property <[PrefOption]> options;
+    in property <string> current-label;
+    callback selected(int);
+    height: 32px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: ta.has-hover ? Theme.surface : Theme.bg;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: root.current-label;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: "▾";
+            color: Theme.faint;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { popup.show(); } }
+    popup := PopupWindow {
+        x: 0;
+        y: parent.height + 4px;
+        width: root.width;
+        Rectangle {
+            background: Theme.mantle;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.scrim;
+            drop-shadow-offset-y: 8px;
+            VerticalLayout {
+                padding: 4px;
+                for opt[i] in root.options : Rectangle {
+                    height: 28px;
+                    border-radius: 5px;
+                    background: opt.active ? Theme.surface2 : (ita.has-hover ? Theme.surface : transparent);
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: opt.label;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: opt.active ? "✓" : "";
+                            color: Theme.accent;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    ita := TouchArea { clicked => { root.selected(opt.id); popup.close(); } }
+                }
+            }
+        }
+    }
+}
+
 // A small pill button (font ± and family chips).
 component Pill inherits Rectangle {
     in property <string> label;
@@ -116,6 +190,7 @@ export component OverlayLayer inherits Rectangle {
 
     // preferences
     in property <[PrefOption]> families;
+    in property <string> font-label;
     in property <[FramePaletteOption]> frame-palettes;
     in property <[PrefOption]> shells;
     in property <int> font-px: 14;
@@ -342,13 +417,10 @@ export component OverlayLayer inherits Rectangle {
 
             // ---- terminal font family ----
             Text { text: "Terminal font"; color: Theme.faint; font-size: 11px; }
-            HorizontalLayout {
-                spacing: 6px;
-                for opt[i] in root.families : Pill {
-                    label: opt.label;
-                    active: opt.active;
-                    clicked => { root.pref-action(0, opt.id); }
-                }
+            FontDropdown {
+                options: root.families;
+                current-label: root.font-label;
+                selected(id) => { root.pref-action(0, id); }
             }
 
             // ---- font size ----

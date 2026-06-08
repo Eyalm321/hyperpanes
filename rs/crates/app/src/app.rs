@@ -1095,7 +1095,12 @@ impl App {
             win.app.on_pref_action(move |kind, arg| {
                 let Some(w) = app.window_by_id(id) else { return };
                 let setting = match kind {
-                    0 => crate::state::Setting::FontFamily(arg as usize),
+                    0 => crate::state::Setting::FontFamily(
+                        crate::prefs::available_families()
+                            .get(arg as usize)
+                            .map(|(_, path)| path.clone())
+                            .unwrap_or_default(),
+                    ),
                     1 => crate::state::Setting::FontDelta(arg),
                     2 => crate::state::Setting::ShowFrame(arg != 0),
                     3 => crate::state::Setting::ShowDot(arg != 0),

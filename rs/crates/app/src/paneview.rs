@@ -293,16 +293,25 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.palette, palette);
     app.set_palette_sel(state.palette_sel as i32);
 
-    // preferences scalars + the installed font-family options
-    let families: Vec<PrefOption> = prefs::available_families()
-        .into_iter()
-        .map(|(id, label)| PrefOption {
-            id: id as i32,
-            label: label.into(),
-            active: id == state.settings.font_family,
+    // preferences scalars + the installed font-family options (active = the resolved
+    // current font path). The picker offers each font by index; selection maps back to its
+    // path in the controller.
+    let current_font = state.settings.font_path();
+    let avail = prefs::available_families();
+    let mut font_label = String::from("Default");
+    let families: Vec<PrefOption> = avail
+        .iter()
+        .enumerate()
+        .map(|(id, (label, path))| {
+            let active = *path == current_font;
+            if active {
+                font_label = label.clone();
+            }
+            PrefOption { id: id as i32, label: label.clone().into(), active }
         })
         .collect();
     sync_model(&ui.families, families);
+    app.set_pref_font_label(font_label.into());
 
     // frame-palette options (label + 8 slot color chips), active = current
     let palettes: Vec<FramePaletteOption> = theme::FRAME_PALETTES

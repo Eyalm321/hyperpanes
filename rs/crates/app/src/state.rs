@@ -53,8 +53,8 @@ pub struct DetachedPane {
 /// enum flat (one variant) while still typing each field of [`Settings`].
 #[derive(Debug, Clone)]
 pub enum Setting {
-    /// Select font family by index into `prefs::FONT_FAMILIES`.
-    FontFamily(usize),
+    /// Select the terminal font by its file path (see `prefs::available_families`).
+    FontFamily(String),
     /// Select the frame palette by index into `theme::FRAME_PALETTES` (remaps pane accents).
     FramePalette(usize),
     /// Set the default shell token for new panes ("" = system default).
@@ -843,9 +843,9 @@ impl State {
     /// a resync (font edits additionally request a font reload on the next pump).
     pub fn apply_setting(&mut self, s: Setting) {
         match s {
-            Setting::FontFamily(idx) => {
-                if self.settings.font_family != idx {
-                    self.settings.font_family = idx;
+            Setting::FontFamily(path) => {
+                if self.settings.font_family != path {
+                    self.settings.font_family = path;
                     self.font_reload = true;
                 }
             }
@@ -880,7 +880,7 @@ impl State {
     /// pane to re-grid at the new cell metrics (resets each pane's `applied`). Called by
     /// the pump (which owns the scale) when `font_reload` is set.
     pub fn reload_font(&mut self, scale: f32) {
-        self.font = theme::load_font_at(self.settings.font_path(), self.settings.font_px, scale);
+        self.font = theme::load_font_at(&self.settings.font_path(), self.settings.font_px, scale);
         for t in &mut self.tabs {
             for p in &mut t.panes {
                 p.applied = (0, 0); // force a reflow at the new cell size
