@@ -118,6 +118,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             link_tip_y: 0.0,
             selection_rects: ModelRc::new(VecModel::default()),
             toast: Default::default(),
+            search_open: false,
+            search_count: Default::default(),
+            search_rects: ModelRc::new(VecModel::default()),
+            search_active_on: false,
+            search_active_rect: HiRect::default(),
         });
     }
     app.set_panes(ModelRc::from(model.clone()));
@@ -179,6 +184,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         app.on_key(move |idx, msg: KeyMsg| {
             let idx = idx as usize;
+            // Search: Ctrl+F opens the in-pane search box (the render loop reflects it + the box
+            // grabs focus). Never forwarded to the shell.
+            let is_search =
+                msg.control && (msg.text.eq_ignore_ascii_case("f") || msg.text == "\u{6}");
+            if is_search {
+                let mut guard = state.borrow_mut();
+                if let Some(st) = guard.as_mut() {
+                    if idx < st.panes.len() {
+                        st.panes[idx].pane.search_open();
+                    }
+                }
+                return;
+            }
             let is_copy =
                 msg.control && (msg.text.eq_ignore_ascii_case("c") || msg.text == "\u{3}");
             if is_copy {
@@ -400,6 +418,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // ---- in-pane search: query/step/close drive the controller; the render loop reflects the
+    //      box state, match counter and highlight rects back into the model each frame ----
+    {
+        let state = state.clone();
+        app.on_search_edited(move |idx, query| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_set_query(query.as_str());
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        app.on_search_next(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_step(true);
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        app.on_search_prev(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_step(false);
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        app.on_search_closed(move |idx| {
+            let idx = idx as usize;
+            let mut guard = state.borrow_mut();
+            if let Some(st) = guard.as_mut() {
+                if idx < st.panes.len() {
+                    st.panes[idx].pane.search_close();
+                }
+            }
+        });
+    }
+
     // ---- the render/pump loop (Slint timer on the UI thread) ----
     let timer = slint::Timer::default();
     let app_weak = app.as_weak();
@@ -594,6 +663,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(mut row) = model.row_data(i) {
                     if row.toast != t {
                         row.toast = t;
+                        model.set_row_data(i, row);
+                    }
+                }
+            }
+
+            // ---------- in-pane search: reflect box state + highlights into the model ----------
+            for i in 0..st.panes.len() {
+                let open = st.panes[i].pane.search_is_open();
+                if let Some(mut row) = model.row_data(i) {
+                    if open {
+                        let (w, h) = geom.borrow().get(i).copied().unwrap_or((0.0, 0.0));
+                        let (rects, active) = st.panes[i].pane.search_view_rects(w, h);
+                        let (cur, total) = st.panes[i].pane.search_count();
+                        let count = if total > 0 {
+                            format!("{cur} / {total}")
+                        } else if st.panes[i].pane.search_query().is_empty() {
+                            String::new()
+                        } else {
+                            "No results".to_string()
+                        };
+                        row.search_open = true;
+                        row.search_rects = to_hirects(rects);
+                        row.search_active_on = active.is_some();
+                        if let Some((x, y, w, h)) = active {
+                            row.search_active_rect = HiRect { x, y, w, h };
+                        }
+                        row.search_count = count.into();
+                        model.set_row_data(i, row);
+                    } else if row.search_open {
+                        // Just closed → clear the overlay state once.
+                        row.search_open = false;
+                        row.search_active_on = false;
+                        row.search_rects = to_hirects(Vec::new());
+                        row.search_count = Default::default();
                         model.set_row_data(i, row);
                     }
                 }

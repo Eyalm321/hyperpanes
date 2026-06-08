@@ -25,6 +25,7 @@ pub mod keys;
 pub mod links;
 pub mod pane;
 pub mod render;
+pub mod search;
 pub mod selection;
 
 /// The compiled Slint components. Wave-2's `app-shell` imports the **`TerminalPane`**

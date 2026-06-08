@@ -55,6 +55,26 @@ component HaloText inherits Rectangle {
     }
 }
 
+// A small icon button for the search box (↑ / ↓ / ×), matching the Electron `.hp-search-btn`.
+component SearchBtn inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    background: btn-ta.has-hover ? #2a2e42 : transparent;
+    btn-ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.label;
+        color: btn-ta.has-hover ? #c0caf5 : #9aa5ce;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component TerminalPane inherits Rectangle {
     // --- inputs (the controller / parent layout drive these) ---
     in property <image> surface;
@@ -81,6 +101,13 @@ export component TerminalPane inherits Rectangle {
     in property <string> toast: "";
     in property <color> toast-fg: #c0caf5;
     in property <color> toast-halo: #16161e;
+
+    // --- in-pane search (Ctrl+F): the box anchored top-right + the match highlights ---
+    in property <bool> search-open: false;
+    in property <string> search-count: "";   // e.g. "2 / 5" / "No results"
+    in property <[HiRect]> search-rects;      // inactive matches in the viewport
+    in property <bool> search-active-on: false;
+    in property <HiRect> search-active-rect;  // the current match
 
     // --- outputs (the controller subscribes to these) ---
     // Any mouse-down inside the pane → the app should focus this pane. FROZEN CONTRACT:
@@ -111,6 +138,15 @@ export component TerminalPane inherits Rectangle {
     // Right button pressed (or Ctrl+V) → paste the clipboard into this pane's session.
     callback paste-requested();
 
+    // --- in-pane search ---
+    // The query text changed (find-as-you-type).
+    callback search-edited(string);
+    // Step to the next / previous match (Enter / Shift+Enter or the ↑/↓ buttons).
+    callback search-next();
+    callback search-prev();
+    // The search box was dismissed (Esc or ×).
+    callback search-closed();
+
     forward-focus: fs;
 
     border-radius: root.chrome ? 12px : 0px;
@@ -122,6 +158,9 @@ export component TerminalPane inherits Rectangle {
 
     changed width => { root.geometry-changed(root.width, root.height); }
     changed height => { root.geometry-changed(root.width, root.height); }
+    // When search closes, hand keyboard focus back to the terminal (the box grabs it on open
+    // via the input's `init`).
+    changed search-open => { if (!root.search-open) { fs.focus(); } }
 
     // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
     Image {
@@ -180,6 +219,26 @@ export component TerminalPane inherits Rectangle {
         width: r.w;
         height: r.h;
         background: root.accent.with-alpha(0.30);
+    }
+
+    // Search-match highlights: every visible match dimmed, the active one accented + outlined.
+    for r in root.search-rects: Rectangle {
+        x: r.x;
+        y: r.y;
+        width: r.w;
+        height: r.h;
+        border-radius: 2px;
+        background: #e0af68.with-alpha(0.30);
+    }
+    if root.search-active-on: Rectangle {
+        x: root.search-active-rect.x;
+        y: root.search-active-rect.y;
+        width: root.search-active-rect.w;
+        height: root.search-active-rect.h;
+        border-radius: 2px;
+        background: #ff9e64.with-alpha(0.45);
+        border-width: 1px;
+        border-color: #ff9e64;
     }
 
     // Hover underline drawn over the terminal surface, spanning the path's columns.
@@ -264,6 +323,82 @@ export component TerminalPane inherits Rectangle {
         halo: root.toast-halo;
         size: 13px;
     }
+
+    // In-pane search box (Ctrl+F), anchored top-right — ports `SearchBox.tsx` / `.hp-search`.
+    if root.search-open: Rectangle {
+        x: parent.width - self.width - 14px;
+        y: 6px;
+        height: 30px;
+        border-radius: 7px;
+        background: #1a1b26;
+        border-width: 1px;
+        border-color: #2a2e42;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: #00000073;
+        // Swallow presses so a click in the box doesn't begin a selection on the surface.
+        TouchArea {}
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 3px;
+            // Query input.
+            Rectangle {
+                width: 150px;
+                border-radius: 5px;
+                background: #16161e;
+                border-width: 1px;
+                border-color: query.has-focus ? root.accent : #2a2e42;
+                query := TextInput {
+                    x: 7px;
+                    width: parent.width - 14px;
+                    vertical-alignment: center;
+                    color: #c0caf5;
+                    font-size: 12px;
+                    font-family: "Consolas";
+                    single-line: true;
+                    // Grab focus the moment the box appears (Ctrl+F → type immediately).
+                    init => { self.focus(); }
+                    edited => { root.search-edited(self.text); }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) {
+                            root.search-closed();
+                            accept
+                        } else if (e.text == Key.Return) {
+                            if (e.modifiers.shift) {
+                                root.search-prev();
+                            } else {
+                                root.search-next();
+                            }
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                }
+            }
+            // Match counter.
+            Text {
+                vertical-alignment: center;
+                width: self.preferred-width + 4px;
+                text: root.search-count;
+                color: #565f89;
+                font-size: 11px;
+                horizontal-alignment: center;
+            }
+            // Prev / next / close.
+            SearchBtn {
+                label: "↑";
+                clicked => { root.search-prev(); }
+            }
+            SearchBtn {
+                label: "↓";
+                clicked => { root.search-next(); }
+            }
+            SearchBtn {
+                label: "✕";
+                clicked => { root.search-closed(); }
+            }
+        }
+    }
 }
 
 export struct PaneVisual {
@@ -282,6 +417,12 @@ export struct PaneVisual {
     selection-rects: [HiRect],
     // copy/paste indicator text (set by the demo; empty = hidden).
     toast: string,
+    // in-pane search state (set by the demo from the controller).
+    search-open: bool,
+    search-count: string,
+    search-rects: [HiRect],
+    search-active-on: bool,
+    search-active-rect: HiRect,
 }
 
 export component DemoWindow inherits Window {
@@ -308,6 +449,11 @@ export component DemoWindow inherits Window {
     callback selection-end(int);
     // (pane index) — right-click / Ctrl+V paste requested in a pane.
     callback paste-requested(int);
+    // (pane index, query) / (pane index) — in-pane search interactions.
+    callback search-edited(int, string);
+    callback search-next(int);
+    callback search-prev(int);
+    callback search-closed(int);
 
     title: "hyperpanes — terminal-widget demo";
     preferred-width: 1280px;
@@ -335,6 +481,11 @@ export component DemoWindow inherits Window {
             link-tip-y: pane.link-tip-y;
             selection-rects: pane.selection-rects;
             toast: pane.toast;
+            search-open: pane.search-open;
+            search-count: pane.search-count;
+            search-rects: pane.search-rects;
+            search-active-on: pane.search-active-on;
+            search-active-rect: pane.search-active-rect;
             focus-requested => { root.focus-requested(idx); }
             key(m) => { root.key(idx, m); }
             geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }
@@ -345,6 +496,10 @@ export component DemoWindow inherits Window {
             selection-update(x, y) => { root.selection-update(idx, x, y); }
             selection-end => { root.selection-end(idx); }
             paste-requested => { root.paste-requested(idx); }
+            search-edited(t) => { root.search-edited(idx, t); }
+            search-next => { root.search-next(idx); }
+            search-prev => { root.search-prev(idx); }
+            search-closed => { root.search-closed(idx); }
         }
     }
 

@@ -25,6 +25,7 @@ use crate::font::Font;
 use crate::grid::TermGrid;
 use crate::links::extract_path_candidates;
 use crate::render::{PaneRenderer, RenderOpts};
+use crate::search::{self, Match};
 use crate::selection::{self, Selection};
 use hyperpanes_core::paths::{self, OpenResult, ResolveResult};
 use slint::Image;
@@ -56,6 +57,14 @@ pub struct TerminalPane {
     /// The transient copy/paste indicator ("toast") + when it was raised; auto-expires after
     /// [`TOAST_MS`]. Drained by [`toast_text`](Self::toast_text).
     toast: Option<(String, Instant)>,
+    /// Whether the in-pane search box (Ctrl+F) is open.
+    search_shown: bool,
+    /// The current search query (the search box text).
+    search_query: String,
+    /// All matches for `search_query` across the grid + scrollback, top to bottom.
+    search_matches: Vec<Match>,
+    /// Index into `search_matches` of the active (highlighted/revealed) match, if any.
+    search_index: Option<usize>,
 }
 
 /// A resolved, on-disk-verified link under the cursor: where to draw the hover underline (in the
@@ -97,6 +106,10 @@ impl TerminalPane {
             selection: None,
             clipboard: Clipboard::new(),
             toast: None,
+            search_shown: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_index: None,
         }
     }
 
@@ -440,6 +453,122 @@ impl TerminalPane {
             return None;
         }
         self.toast.as_ref().map(|(m, _)| m.clone())
+    }
+
+    // ---- In-pane search (Ctrl+F) ------------------------------------------------------------
+    //
+    // Open a search box, type to find/highlight matches across the grid + scrollback, and step
+    // through them (Enter / Shift+Enter), revealing each by scrolling it into view. Mirrors the
+    // xterm `@xterm/addon-search` wiring in the Electron `Terminal.tsx` / `SearchBox.tsx`.
+
+    /// Open the search box (Ctrl+F). The query starts empty; type to search.
+    pub fn search_open(&mut self) {
+        self.search_shown = true;
+    }
+
+    /// Close the search box, dropping the query/matches and pinning the viewport back to the
+    /// bottom (the live prompt).
+    pub fn search_close(&mut self) {
+        self.search_shown = false;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_index = None;
+        self.grid.scroll_to_bottom();
+    }
+
+    /// Whether the search box is open.
+    pub fn search_is_open(&self) -> bool {
+        self.search_shown
+    }
+
+    /// The current query text.
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Set the query (find-as-you-type): recompute matches across the grid + scrollback, pick the
+    /// match nearest the current viewport, and scroll it into view.
+    pub fn search_set_query(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        self.search_recompute();
+        self.search_reveal_active();
+    }
+
+    /// Step to the next (`forward`) / previous match, wrapping around, and reveal it.
+    pub fn search_step(&mut self, forward: bool) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let i = self.search_index.unwrap_or(0);
+        self.search_index = Some(search::step(i, self.search_matches.len(), forward));
+        self.search_reveal_active();
+    }
+
+    /// `(current_1_based, total)` for the match counter — `(0, 0)` when there are no matches.
+    pub fn search_count(&self) -> (usize, usize) {
+        let total = self.search_matches.len();
+        let cur = self.search_index.map(|i| i + 1).unwrap_or(0);
+        (cur, total)
+    }
+
+    /// Highlight rectangles (logical px) for every match currently in the viewport, plus the
+    /// active match's rect on its own (so the pane can draw it distinctly). Matches scrolled out
+    /// of view are omitted.
+    pub fn search_view_rects(
+        &self,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> (Vec<(f32, f32, f32, f32)>, Option<(f32, f32, f32, f32)>) {
+        let (cell_w, cell_h, _cols, rows) = match self.cell_logical(surf_w, surf_h) {
+            Some(t) => t,
+            None => return (Vec::new(), None),
+        };
+        let off = self.grid.display_offset() as i32;
+        let mut rects = Vec::new();
+        let mut active = None;
+        for (i, m) in self.search_matches.iter().enumerate() {
+            let row = m.line + off;
+            if row < 0 || row >= rows as i32 {
+                continue;
+            }
+            let rect = (
+                m.start as f32 * cell_w,
+                row as f32 * cell_h,
+                (m.end.saturating_sub(m.start)) as f32 * cell_w,
+                cell_h,
+            );
+            if Some(i) == self.search_index {
+                active = Some(rect);
+            } else {
+                rects.push(rect);
+            }
+        }
+        (rects, active)
+    }
+
+    /// Recompute `search_matches` for the current query, choosing an initial active match nearest
+    /// the viewport top. Clears everything for an empty query.
+    fn search_recompute(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_matches.clear();
+            self.search_index = None;
+            return;
+        }
+        let lines = self.grid.history_lines();
+        self.search_matches = search::find_matches(&lines, &self.search_query);
+        self.search_index = if self.search_matches.is_empty() {
+            None
+        } else {
+            let prefer_line = -(self.grid.display_offset() as i32);
+            search::initial_index(&self.search_matches, prefer_line)
+        };
+    }
+
+    /// Scroll the active match into view (no-op if already visible or there's none).
+    fn search_reveal_active(&mut self) {
+        if let Some(m) = self.search_index.and_then(|i| self.search_matches.get(i).copied()) {
+            self.grid.scroll_to_visible(m.line);
+        }
     }
 }
 
