@@ -510,7 +510,7 @@ pub fn pump(
         // Animate the idle-glow demo for the AI-features preview: always "idle" so the
         // selected effect plays continuously (the .slint only shows it on the AI tab).
         let eff = crate::glow::IdleEffect::from_token(&state.settings.idle_effect);
-        let a = state.preview_glow.update(eff, true, Instant::now(), crate::glow::now_epoch_ms());
+        let a = state.preview_glow.update(eff, true, Instant::now());
         app.set_pref_preview_glow(a);
     }
 
@@ -543,7 +543,7 @@ pub fn pump(
                 Some(ms) => glow_now_ms.saturating_sub(ms) >= idle_threshold_ms,
                 None => false,
             };
-        ps.glow.update(idle_effect, idle, glow_now, glow_now_ms);
+        ps.glow.update(idle_effect, idle, glow_now);
         let glow_changed = (ps.glow.alpha - prev_glow).abs() > 0.004;
 
         if !ps.visible {
