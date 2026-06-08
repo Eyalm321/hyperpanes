@@ -152,6 +152,8 @@ export component PaneView inherits Rectangle {
     callback pane-link-moved(int, length, length);
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
+    // Ctrl+wheel over a pane body → zoom the terminal font (±1 px per notch).
+    callback pane-font-zoom(int);
     // in-pane search box (opened from the pane menu's "Search…")
     callback pane-search-edited(int, string);
     callback pane-search-next(int);
@@ -337,6 +339,22 @@ export component PaneView inherits Rectangle {
                 // ---- body (.hp-pane-body, padding 2 0 2 4) ----
                 Rectangle {
                     vertical-stretch: 1;
+                    // Ctrl+wheel zooms the terminal font (parity with editors/terminals). The
+                    // TerminalPane's own pointer area doesn't handle scroll, so the event bubbles
+                    // up to this ancestor TouchArea; plain (no-Ctrl) scrolls are rejected so they
+                    // fall through unchanged. Wheel up → zoom in, down → zoom out.
+                    TouchArea {
+                        scroll-event(e) => {
+                            if (e.modifiers.control || e.modifiers.meta) {
+                                if (e.delta-y > 0) {
+                                    root.pane-font-zoom(1);
+                                } else if (e.delta-y < 0) {
+                                    root.pane-font-zoom(-1);
+                                }
+                                return accept;
+                            }
+                            return reject;
+                        }
                     tp := TerminalPane {
                         x: 4px;
                         y: 2px;
@@ -356,6 +374,8 @@ export component PaneView inherits Rectangle {
                         // in-pane search box (controller-driven; opened from the pane menu)
                         search-open: pane.search-open;
                         search-count: pane.search-count;
+                        // transient bottom-right indicator (copy/paste + Ctrl-zoom font %)
+                        toast: pane.toast;
                         search-edited(q) => { root.pane-search-edited(idx, q); }
                         search-next => { root.pane-search-next(idx); }
                         search-prev => { root.pane-search-prev(idx); }
@@ -379,6 +399,7 @@ export component PaneView inherits Rectangle {
                             root.focus-pane(idx);
                             root.pane-link-activated(idx, x, y, ctrl);
                         }
+                    }
                     }
                 }
             }

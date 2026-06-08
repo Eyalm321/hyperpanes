@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-keybinds-overridden: false;
+    in property <string> pref-kb-conflict: "";
     in property <bool> pref-clickable: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
@@ -127,6 +128,7 @@ export component AppWindow inherits Window {
     callback pane-link-moved(int, length, length);
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
+    callback pane-font-zoom(int);   // Ctrl+wheel over a pane → zoom the terminal font
     // in-pane search (opened from the pane context menu)
     callback pane-search-edited(int, string);
     callback pane-search-next(int);
@@ -168,6 +170,8 @@ export component AppWindow inherits Window {
     // keybindings editor: start capturing a rebind, deliver a captured chord, reset one / all.
     callback pref-rebind(string);                  // start capturing binding `id`
     callback pref-capture(bool, bool, bool, string); // (ctrl, alt, shift, key-text)
+    callback pref-cancel-rebind();                  // stop capturing without binding
+    callback pref-unbind(string);                  // clear binding `id`'s chord
     callback pref-reset-binding(string);           // reset binding `id` to default
     callback pref-reset-all-bindings();
     callback overlay-dismiss();
@@ -269,6 +273,7 @@ export component AppWindow inherits Window {
                 pane-link-moved(i, x, y) => { root.pane-link-moved(i, x, y); }
                 pane-link-exited(i) => { root.pane-link-exited(i); }
                 pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
+                pane-font-zoom(d) => { root.pane-font-zoom(d); }
                 pane-search-edited(i, q) => { root.pane-search-edited(i, q); }
                 pane-search-next(i) => { root.pane-search-next(i); }
                 pane-search-prev(i) => { root.pane-search-prev(i); }
@@ -339,6 +344,7 @@ export component AppWindow inherits Window {
             idle-seconds: root.pref-idle-seconds;
             keybindings: root.pref-keybindings;
             keybinds-overridden: root.pref-keybinds-overridden;
+            kb-conflict: root.pref-kb-conflict;
             font-px: root.pref-fontpx;
             show-frame: root.pref-frame;
             show-dot: root.pref-dot;
@@ -355,6 +361,8 @@ export component AppWindow inherits Window {
             pref-confirm(a) => { root.pref-confirm(a); }
             pref-rebind(id) => { root.pref-rebind(id); }
             pref-capture(c, a, s, t) => { root.pref-capture(c, a, s, t); }
+            pref-cancel-rebind => { root.pref-cancel-rebind(); }
+            pref-unbind(id) => { root.pref-unbind(id); }
             pref-reset-binding(id) => { root.pref-reset-binding(id); }
             pref-reset-all-bindings => { root.pref-reset-all-bindings(); }
             dismiss => { root.overlay-dismiss(); }

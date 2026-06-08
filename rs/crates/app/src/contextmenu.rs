@@ -141,8 +141,8 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
     let n = t.panes.len();
     let others = state.tabs.len() > 1;
 
-    let zoom_sc = state.keymap.label_for("pane.zoom").unwrap_or_default();
-    let full_sc = state.keymap.label_for("pane.fullscreen").unwrap_or_default();
+    let zoom_sc = state.keymap.label_for("pane.toggleZoom").unwrap_or_default();
+    let full_sc = state.keymap.label_for("pane.toggleFullscreen").unwrap_or_default();
 
     b.item("New Pane…", Command::NewPane);
     b.item("Rename…", Command::BeginRenamePane(idx as i32));

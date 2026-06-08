@@ -20,28 +20,39 @@ use serde::{Deserialize, Serialize};
 use crate::command::Command;
 
 /// The non-text key tokens a chord can target (mirrors the renderer's normalized
-/// `e.key`). Printable chords carry their lowercase letter instead.
+/// `e.key`). Printable chords carry their lowercase character ([`KeyTok::Char`] —
+/// letters, digits, and symbols like `=`/`-`/`0`); the named keys are the ones the
+/// renderer spells out (`arrowleft`, `tab`, `f11`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyTok {
-    Letter(char),
+    Char(char),
     Left,
     Right,
     Up,
     Down,
     F11,
+    Tab,
+    Enter,
+    Space,
+    Escape,
 }
 
 impl KeyTok {
     /// The persisted/normalized token string (mirrors the renderer's `e.key`): a single
-    /// lowercase letter, or `left`/`right`/`up`/`down`/`f11`.
+    /// lowercase character, or `arrowleft`/`arrowright`/`arrowup`/`arrowdown`/`f11`/`tab`/
+    /// `enter`/`space`/`escape`.
     pub fn token(self) -> String {
         match self {
-            KeyTok::Letter(c) => c.to_ascii_lowercase().to_string(),
-            KeyTok::Left => "left".into(),
-            KeyTok::Right => "right".into(),
-            KeyTok::Up => "up".into(),
-            KeyTok::Down => "down".into(),
+            KeyTok::Char(c) => c.to_ascii_lowercase().to_string(),
+            KeyTok::Left => "arrowleft".into(),
+            KeyTok::Right => "arrowright".into(),
+            KeyTok::Up => "arrowup".into(),
+            KeyTok::Down => "arrowdown".into(),
             KeyTok::F11 => "f11".into(),
+            KeyTok::Tab => "tab".into(),
+            KeyTok::Enter => "enter".into(),
+            KeyTok::Space => "space".into(),
+            KeyTok::Escape => "escape".into(),
         }
     }
 
@@ -49,32 +60,48 @@ impl KeyTok {
     /// Unknown multi-char tokens return `None`.
     pub fn from_token(s: &str) -> Option<KeyTok> {
         match s {
-            "left" => Some(KeyTok::Left),
-            "right" => Some(KeyTok::Right),
-            "up" => Some(KeyTok::Up),
-            "down" => Some(KeyTok::Down),
+            "arrowleft" => Some(KeyTok::Left),
+            "arrowright" => Some(KeyTok::Right),
+            "arrowup" => Some(KeyTok::Up),
+            "arrowdown" => Some(KeyTok::Down),
             "f11" => Some(KeyTok::F11),
+            "tab" => Some(KeyTok::Tab),
+            "enter" => Some(KeyTok::Enter),
+            "space" => Some(KeyTok::Space),
+            "escape" => Some(KeyTok::Escape),
             _ => {
                 let mut chars = s.chars();
                 match (chars.next(), chars.next()) {
-                    (Some(c), None) if c.is_ascii_alphabetic() => Some(KeyTok::Letter(c.to_ascii_lowercase())),
+                    (Some(c), None) if is_printable(c) => Some(KeyTok::Char(c.to_ascii_lowercase())),
                     _ => None,
                 }
             }
         }
     }
 
-    /// The display chip for this key (`P`, `←`, `F11`).
+    /// The display chip for this key (`P`, `←`, `F11`, `Tab`) — the native port of the
+    /// renderer's `keyLabel`: arrows show glyphs, named keys are spelled out, a single
+    /// character is upper-cased.
     fn label(self) -> String {
         match self {
-            KeyTok::Letter(c) => c.to_ascii_uppercase().to_string(),
+            KeyTok::Char(c) => c.to_ascii_uppercase().to_string(),
             KeyTok::Left => "←".into(),
             KeyTok::Right => "→".into(),
             KeyTok::Up => "↑".into(),
             KeyTok::Down => "↓".into(),
             KeyTok::F11 => "F11".into(),
+            KeyTok::Tab => "Tab".into(),
+            KeyTok::Enter => "Enter".into(),
+            KeyTok::Space => "Space".into(),
+            KeyTok::Escape => "Esc".into(),
         }
     }
+}
+
+/// Whether `c` is a single printable (non-control) character a chord can target.
+fn is_printable(c: char) -> bool {
+    let u = c as u32;
+    u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
 }
 
 /// A modifier+key combo. `ctrl`/`alt`/`shift` must match exactly.
@@ -162,14 +189,14 @@ pub struct Binding {
     pub command: Command,
 }
 
-/// Category headings, in the order the Preferences keybindings list shows them (mirrors the
-/// renderer's `CATEGORY_ORDER`, adapted to the native keymap which adds a Windows group).
-pub const CATEGORY_ORDER: [&str; 4] = ["General", "Windows", "Tabs", "Panes"];
+/// Category headings, in the order the Preferences keybindings list shows them (an exact
+/// mirror of the renderer's `CATEGORY_ORDER` in `src/renderer/keybindings.ts`).
+pub const CATEGORY_ORDER: [&str; 4] = ["General", "Tabs", "Panes", "Zoom"];
 
-/// The default keymap, reusing existing Wave-1 commands. Order is the display order. The
-/// secondary directional/zoom/fullscreen bindings (the native build supports both
-/// `Ctrl+Shift` and `Alt`/`F11`) carry a distinguishing label so each editor row is
-/// unambiguous.
+/// The default keymap — an exact port of the renderer's `BINDING_DEFS`
+/// (`src/renderer/keybindings.ts`): same ids, labels, categories and default chords. Order
+/// is the display order within each category. (The non-rebindable "Focus pane by number →
+/// Alt 1…9" documentation row is rendered by the editor, not a binding here.)
 pub fn default_bindings() -> Vec<Binding> {
     use KeyTok::*;
     let b = |id, ctrl, alt, shift, key, category, label, command| Binding {
@@ -181,65 +208,74 @@ pub fn default_bindings() -> Vec<Binding> {
     };
     vec![
         // General
-        b("palette.toggle", true, false, true, Letter('p'), "General", "Command palette", Command::PaletteOpen),
-        b("sidebar.toggle", true, false, true, Letter('b'), "General", "Toggle sidebar", Command::ToggleSidebar),
-        // Windows
-        b("window.new", true, false, true, Letter('o'), "Windows", "New window", Command::NewWindow),
-        b("window.movePane", true, false, true, Letter('m'), "Windows", "Move pane to new window", Command::MovePaneToNewWindow),
+        b("palette.toggle", true, false, true, Char('p'), "General", "Command palette", Command::PaletteOpen),
         // Tabs
-        b("tab.new", true, false, true, Letter('t'), "Tabs", "New tab", Command::NewTab),
+        b("tab.new", true, false, false, Char('t'), "Tabs", "New tab", Command::NewTab),
+        b("tab.next", true, false, false, Tab, "Tabs", "Next tab", Command::NextTab),
+        b("tab.prev", true, false, true, Tab, "Tabs", "Previous tab", Command::PrevTab),
+        b("tab.reopen", true, false, true, Char('t'), "Tabs", "Reopen closed tab", Command::ReopenClosedTab),
         // Panes
-        b("pane.new", true, false, true, Letter('n'), "Panes", "New pane", Command::NewPane),
-        b("pane.close", true, false, true, Letter('w'), "Panes", "Close pane", Command::CloseFocused),
-        b("pane.cycleLayout", true, false, true, Letter('l'), "Panes", "Cycle layout", Command::CycleLayout),
-        b("pane.zoom", true, false, true, Letter('z'), "Panes", "Zoom pane", Command::ToggleZoom),
-        b("pane.zoom.alt", false, true, false, Letter('z'), "Panes", "Zoom pane (alt)", Command::ToggleZoom),
-        b("pane.fullscreen", true, false, true, Letter('f'), "Panes", "Fullscreen", Command::ToggleFullscreen),
-        b("pane.fullscreen.f11", false, false, false, F11, "Panes", "Fullscreen (F11)", Command::ToggleFullscreen),
-        // Directional focus — both the Wave-1 Ctrl+Shift+arrows and Alt+arrows.
-        b("pane.focusLeft", true, false, true, Left, "Panes", "Focus left", Command::FocusDir(Direction::Left)),
-        b("pane.focusRight", true, false, true, Right, "Panes", "Focus right", Command::FocusDir(Direction::Right)),
-        b("pane.focusUp", true, false, true, Up, "Panes", "Focus up", Command::FocusDir(Direction::Up)),
-        b("pane.focusDown", true, false, true, Down, "Panes", "Focus down", Command::FocusDir(Direction::Down)),
-        b("pane.focusLeft.alt", false, true, false, Left, "Panes", "Focus left (alt)", Command::FocusDir(Direction::Left)),
-        b("pane.focusRight.alt", false, true, false, Right, "Panes", "Focus right (alt)", Command::FocusDir(Direction::Right)),
-        b("pane.focusUp.alt", false, true, false, Up, "Panes", "Focus up (alt)", Command::FocusDir(Direction::Up)),
-        b("pane.focusDown.alt", false, true, false, Down, "Panes", "Focus down (alt)", Command::FocusDir(Direction::Down)),
+        b("pane.focusLeft", false, true, false, Left, "Panes", "Focus pane left", Command::FocusDir(Direction::Left)),
+        b("pane.focusRight", false, true, false, Right, "Panes", "Focus pane right", Command::FocusDir(Direction::Right)),
+        b("pane.focusUp", false, true, false, Up, "Panes", "Focus pane up", Command::FocusDir(Direction::Up)),
+        b("pane.focusDown", false, true, false, Down, "Panes", "Focus pane down", Command::FocusDir(Direction::Down)),
+        b("pane.toggleZoom", false, true, false, Char('z'), "Panes", "Zoom / unzoom pane", Command::ToggleZoom),
+        b("pane.toggleFullscreen", false, false, false, F11, "Panes", "Fullscreen pane", Command::ToggleFullscreen),
+        b("pane.search", true, false, false, Char('f'), "Panes", "Search in pane", Command::SearchFocused),
+        // Zoom (font)
+        b("zoom.in", true, false, false, Char('='), "Zoom", "Zoom in (font)", Command::FontZoom(1)),
+        b("zoom.out", true, false, false, Char('-'), "Zoom", "Zoom out (font)", Command::FontZoom(-1)),
+        b("zoom.reset", true, false, false, Char('0'), "Zoom", "Reset zoom (font)", Command::FontReset),
     ]
 }
 
 /// One row of the Preferences → Keybindings list: its binding id, category, label, the
-/// **effective** chord pieces (override or default), and whether it's been overridden (so the
-/// editor can show a "reset" affordance).
+/// **effective** chord pieces (override or default), whether it's been overridden (so the
+/// editor can show a "reset" affordance), and whether it's currently **unbound** (the user
+/// cleared its chord, or it lost its chord to another binding — the row shows "Unbound").
 pub struct BindingRow {
     pub id: &'static str,
     pub category: &'static str,
     pub label: &'static str,
     pub parts: Vec<String>,
     pub overridden: bool,
+    pub unbound: bool,
 }
 
 /// The user's per-binding chord overrides (the native port of `useKeybindings`'s persisted
 /// `combos`, stored as a sparse override map rather than the full table so bindings added in
-/// a later version still get their fresh default).
+/// a later version still get their fresh default). A value of `Some(chord)` rebinds the
+/// shortcut; `None` means the user explicitly **unbound** it (no chord fires it); an *absent*
+/// id falls back to the compiled-in default.
 pub struct Keymap {
-    overrides: BTreeMap<String, Chord>,
+    overrides: BTreeMap<String, Option<Chord>>,
 }
 
 impl Keymap {
-    /// Load the persisted overrides (an empty map on a missing/corrupt file). Unknown ids and
-    /// un-parseable chords are dropped, so an older blob never breaks the editor.
+    /// Load the persisted overrides (an empty map on a missing/corrupt file). Unknown ids are
+    /// dropped and un-parseable chords fall back to the default, so an older blob never breaks
+    /// the editor. A `null` value is an explicit unbind.
     pub fn load() -> Self {
         let mut overrides = BTreeMap::new();
         let path = paths::user_data_dir().join("native-keybindings.json");
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(map) = serde_json::from_str::<BTreeMap<String, ChordRepr>>(&raw) {
+            if let Ok(map) = serde_json::from_str::<BTreeMap<String, Option<ChordRepr>>>(&raw) {
                 let valid: std::collections::HashSet<&str> =
                     default_bindings().iter().map(|b| b.id).collect();
                 for (id, repr) in map {
-                    if valid.contains(id.as_str()) {
-                        if let Some(chord) = repr.to_chord() {
-                            overrides.insert(id, chord);
+                    if !valid.contains(id.as_str()) {
+                        continue;
+                    }
+                    match repr {
+                        // a parseable chord rebinds; an un-parseable one falls back to default
+                        Some(r) => {
+                            if let Some(chord) = r.to_chord() {
+                                overrides.insert(id, Some(chord));
+                            }
+                        }
+                        // explicit unbind
+                        None => {
+                            overrides.insert(id, None);
                         }
                     }
                 }
@@ -249,10 +285,11 @@ impl Keymap {
     }
 
     /// Persist the overrides atomically (best-effort; a write failure is logged, never fatal).
+    /// An unbound binding serializes as `null`.
     fn save(&self) {
         let path = paths::user_data_dir().join("native-keybindings.json");
-        let map: BTreeMap<&String, ChordRepr> =
-            self.overrides.iter().map(|(id, c)| (id, ChordRepr::from(*c))).collect();
+        let map: BTreeMap<&String, Option<ChordRepr>> =
+            self.overrides.iter().map(|(id, c)| (id, c.map(ChordRepr::from))).collect();
         match serde_json::to_string_pretty(&map) {
             Ok(json) => {
                 if let Err(e) = paths::write_atomic(&path, json.as_bytes()) {
@@ -263,44 +300,76 @@ impl Keymap {
         }
     }
 
-    /// The effective chord for `id`: the user override if set, else `default`.
-    fn effective(&self, id: &str, default: Chord) -> Chord {
-        self.overrides.get(id).copied().unwrap_or(default)
+    /// The effective chord for `id`: the user override if set (which may be `None` = unbound),
+    /// else `default`. `None` means nothing fires this binding.
+    fn effective(&self, id: &str, default: Chord) -> Option<Chord> {
+        match self.overrides.get(id) {
+            Some(opt) => *opt,
+            None => Some(default),
+        }
     }
 
-    /// Whether `id` currently has a user override.
+    /// Whether `id` currently has a user override (a rebind *or* an explicit unbind).
     pub fn is_overridden(&self, id: &str) -> bool {
         self.overrides.contains_key(id)
     }
 
     /// The effective chord label (e.g. `Ctrl+Shift+Z`) for binding `id` — the native port of the
     /// renderer's `comboLabel(combos[id])`, used to annotate context-menu rows. `None` for an
-    /// unknown id.
+    /// unknown *or* unbound binding (so the menu shows no shortcut).
     pub fn label_for(&self, id: &str) -> Option<String> {
         default_bindings()
             .iter()
             .find(|b| b.id == id)
-            .map(|b| self.effective(id, b.chord).label())
+            .and_then(|b| self.effective(id, b.chord))
+            .map(|c| c.label())
     }
 
     /// Find the command bound to a live modifier+key combo, consulting each binding's
-    /// **effective** chord (override wins over default), first match in table order.
+    /// **effective** chord (override wins over default; an unbound binding never matches),
+    /// first match in table order.
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
         default_bindings()
             .into_iter()
-            .find(|b| self.effective(b.id, b.chord).matches(ctrl, alt, shift, key))
+            .find(|b| {
+                self.effective(b.id, b.chord)
+                    .is_some_and(|c| c.matches(ctrl, alt, shift, key))
+            })
             .map(|b| b.command)
+    }
+
+    /// The id of a *different* binding whose **effective** chord already equals `chord` (the
+    /// current owner of that combo), or `None` when the combo is free. Used to "steal" a chord:
+    /// rebinding to an in-use combo unbinds its previous owner.
+    pub fn owner_of(&self, chord: Chord, except: &str) -> Option<&'static str> {
+        default_bindings()
+            .into_iter()
+            .find(|b| {
+                b.id != except
+                    && self
+                        .effective(b.id, b.chord)
+                        .is_some_and(|c| c.matches(chord.ctrl, chord.alt, chord.shift, chord.key))
+            })
+            .map(|b| b.id)
     }
 
     /// Override binding `id` with `chord`, persisting. Unknown ids are ignored.
     pub fn set(&mut self, id: &str, chord: Chord) {
         if default_bindings().iter().any(|b| b.id == id) {
-            self.overrides.insert(id.to_string(), chord);
+            self.overrides.insert(id.to_string(), Some(chord));
             self.save();
         }
     }
 
-    /// Reset binding `id` to its default chord (drop any override), persisting.
+    /// Explicitly unbind `id` (no chord fires it), persisting. Unknown ids are ignored.
+    pub fn unbind(&mut self, id: &str) {
+        if default_bindings().iter().any(|b| b.id == id) {
+            self.overrides.insert(id.to_string(), None);
+            self.save();
+        }
+    }
+
+    /// Reset binding `id` to its default chord (drop any override/unbind), persisting.
     pub fn reset(&mut self, id: &str) {
         if self.overrides.remove(id).is_some() {
             self.save();
@@ -321,20 +390,21 @@ impl Keymap {
     }
 
     /// The bindings grouped by [`CATEGORY_ORDER`] (category order, then table order) — the
-    /// editor's row model, with each row's **effective** chord chips + overridden flag. Each
-    /// category's rows are contiguous so the view can draw a heading per group.
+    /// editor's row model, with each row's **effective** chord chips, overridden flag, and
+    /// unbound flag. Each category's rows are contiguous so the view can draw a heading per group.
     pub fn rows(&self) -> Vec<BindingRow> {
         let bindings = default_bindings();
         let mut rows = Vec::with_capacity(bindings.len());
         for category in CATEGORY_ORDER {
             for b in bindings.iter().filter(|b| b.category == category) {
-                let chord = self.effective(b.id, b.chord);
+                let effective = self.effective(b.id, b.chord);
                 rows.push(BindingRow {
                     id: b.id,
                     category,
                     label: b.label,
-                    parts: chord.parts(),
+                    parts: effective.map(|c| c.parts()).unwrap_or_default(),
                     overridden: self.is_overridden(b.id),
+                    unbound: effective.is_none(),
                 });
             }
         }
@@ -354,7 +424,7 @@ mod tests {
     fn palette_chord_resolves() {
         let km = empty_keymap();
         assert!(matches!(
-            km.match_chord(true, false, true, KeyTok::Letter('p')),
+            km.match_chord(true, false, true, KeyTok::Char('p')),
             Some(Command::PaletteOpen)
         ));
     }
@@ -369,9 +439,27 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycle_and_reopen_resolve() {
+        let km = empty_keymap();
+        // Ctrl+T = new tab, Ctrl+Tab = next, Ctrl+Shift+Tab = prev, Ctrl+Shift+T = reopen.
+        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('t')), Some(Command::NewTab)));
+        assert!(matches!(km.match_chord(true, false, false, KeyTok::Tab), Some(Command::NextTab)));
+        assert!(matches!(km.match_chord(true, false, true, KeyTok::Tab), Some(Command::PrevTab)));
+        assert!(matches!(km.match_chord(true, false, true, KeyTok::Char('t')), Some(Command::ReopenClosedTab)));
+    }
+
+    #[test]
+    fn font_zoom_chords_resolve() {
+        let km = empty_keymap();
+        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('=')), Some(Command::FontZoom(1))));
+        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('-')), Some(Command::FontZoom(-1))));
+        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('0')), Some(Command::FontReset)));
+    }
+
+    #[test]
     fn unbound_combo_is_none() {
         let km = empty_keymap();
-        assert!(km.match_chord(false, false, false, KeyTok::Letter('q')).is_none());
+        assert!(km.match_chord(false, false, false, KeyTok::Char('q')).is_none());
     }
 
     #[test]
@@ -380,13 +468,41 @@ mod tests {
         // Rebind the palette to Ctrl+J. The old Ctrl+Shift+P no longer fires; Ctrl+J does.
         km.overrides.insert(
             "palette.toggle".into(),
-            Chord::new(true, false, false, KeyTok::Letter('j')),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
-        assert!(km.match_chord(true, false, true, KeyTok::Letter('p')).is_none());
+        assert!(km.match_chord(true, false, true, KeyTok::Char('p')).is_none());
         assert!(matches!(
-            km.match_chord(true, false, false, KeyTok::Letter('j')),
+            km.match_chord(true, false, false, KeyTok::Char('j')),
             Some(Command::PaletteOpen)
         ));
+    }
+
+    #[test]
+    fn owner_of_finds_current_holder() {
+        let km = empty_keymap();
+        // Ctrl+Shift+P is held by the palette; rebinding another binding to it would steal it.
+        assert_eq!(
+            km.owner_of(Chord::new(true, false, true, KeyTok::Char('p')), "tab.new"),
+            Some("palette.toggle")
+        );
+        // A free chord has no owner; the holder doesn't count itself.
+        assert_eq!(km.owner_of(Chord::new(true, false, false, KeyTok::Char('j')), "tab.new"), None);
+        assert_eq!(
+            km.owner_of(Chord::new(true, false, true, KeyTok::Char('p')), "palette.toggle"),
+            None
+        );
+    }
+
+    #[test]
+    fn unbound_binding_never_fires() {
+        let mut km = empty_keymap();
+        km.overrides.insert("palette.toggle".into(), None);
+        // The default chord no longer fires, and the row reports unbound.
+        assert!(km.match_chord(true, false, true, KeyTok::Char('p')).is_none());
+        let row = km.rows().into_iter().find(|r| r.id == "palette.toggle").unwrap();
+        assert!(row.unbound);
+        assert!(row.parts.is_empty());
+        assert!(km.label_for("palette.toggle").is_none());
     }
 
     #[test]
@@ -394,12 +510,12 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert(
             "palette.toggle".into(),
-            Chord::new(true, false, false, KeyTok::Letter('j')),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
         // reset() persists; in the test we just drop the in-memory override.
         km.overrides.remove("palette.toggle");
         assert!(matches!(
-            km.match_chord(true, false, true, KeyTok::Letter('p')),
+            km.match_chord(true, false, true, KeyTok::Char('p')),
             Some(Command::PaletteOpen)
         ));
     }
@@ -407,23 +523,32 @@ mod tests {
     #[test]
     fn chord_labels_format() {
         assert_eq!(
-            Chord::new(true, false, true, KeyTok::Letter('p')).label(),
+            Chord::new(true, false, true, KeyTok::Char('p')).label(),
             "Ctrl+Shift+P"
         );
         assert_eq!(Chord::new(false, true, false, KeyTok::Left).label(), "Alt+←");
         assert_eq!(Chord::new(false, false, false, KeyTok::F11).label(), "F11");
+        assert_eq!(Chord::new(true, false, true, KeyTok::Tab).label(), "Ctrl+Shift+Tab");
+        assert_eq!(Chord::new(true, false, false, KeyTok::Char('=')).label(), "Ctrl+=");
     }
 
     #[test]
     fn keytok_token_roundtrip() {
         for tok in [
-            KeyTok::Letter('p'),
-            KeyTok::Letter('z'),
+            KeyTok::Char('p'),
+            KeyTok::Char('z'),
+            KeyTok::Char('='),
+            KeyTok::Char('-'),
+            KeyTok::Char('0'),
             KeyTok::Left,
             KeyTok::Right,
             KeyTok::Up,
             KeyTok::Down,
             KeyTok::F11,
+            KeyTok::Tab,
+            KeyTok::Enter,
+            KeyTok::Space,
+            KeyTok::Escape,
         ] {
             assert_eq!(KeyTok::from_token(&tok.token()), Some(tok));
         }
@@ -458,7 +583,7 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert(
             "palette.toggle".into(),
-            Chord::new(true, false, false, KeyTok::Letter('j')),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
         let rows = km.rows();
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
@@ -469,8 +594,8 @@ mod tests {
     #[test]
     fn exact_modifier_match_required() {
         let km = empty_keymap();
-        // Ctrl+Shift+T is New tab; plain T is not bound.
-        assert!(km.match_chord(true, false, true, KeyTok::Letter('t')).is_some());
-        assert!(km.match_chord(false, false, false, KeyTok::Letter('t')).is_none());
+        // Ctrl+Shift+T reopens a closed tab; plain T is not bound.
+        assert!(km.match_chord(true, false, true, KeyTok::Char('t')).is_some());
+        assert!(km.match_chord(false, false, false, KeyTok::Char('t')).is_none());
     }
 }
