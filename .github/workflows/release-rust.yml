@@ -1,0 +1,60 @@
+name: Release (Rust native)
+
+# Build the per-user Windows NSIS installer for the NATIVE Rust app and publish
+# it to a GitHub Release. Mirrors release.yml (the Electron release) but for the
+# `rs/crates/app` binary `hyperpanes`.
+#
+# Trigger: `rust-v*` tags (e.g. rust-v0.1.0) — deliberately distinct from the
+# Electron release's `v*` tags so the two installers never collide / double-publish
+# while both apps coexist. Once the native app supersedes Electron, switch this to
+# `v*` and retire release.yml.
+on:
+  push:
+    tags:
+      - 'rust-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp (semver x.y.z), e.g. 0.1.0'
+        required: true
+        default: '0.0.0'
+
+permissions:
+  contents: write # create the release and upload the installer
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs/crates/app
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Derive version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -like 'rust-v*') { $v = $tag -replace '^rust-v', '' }
+          elseif ('${{ github.event.inputs.version }}') { $v = '${{ github.event.inputs.version }}' }
+          else { $v = '0.0.0' }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $v"
+
+      - name: Build installer
+        shell: pwsh
+        run: ./rs/packaging/build-installer.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rs/packaging/dist/*-setup.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
