@@ -42,6 +42,9 @@ pub struct Settings {
     /// Per-pane scrollback (history lines). Persisted for forward-compat with the
     /// renderer blob; the native terminal grid currently keeps a fixed buffer.
     pub scrollback: u32,
+    /// Whether the right-edge sidebar rail (quick-pane + git-projects history) is
+    /// shown. Hidden in fullscreen regardless of this. Mirrors `useSettings.showSidebar`.
+    pub show_sidebar: bool,
 }
 
 impl Default for Settings {
@@ -52,6 +55,7 @@ impl Default for Settings {
             show_frame: true,
             show_dot: true,
             scrollback: 5000,
+            show_sidebar: true,
         }
     }
 }

@@ -18,6 +18,7 @@ use hyperpanes_core::layout::presets::{
 use hyperpanes_core::layout::sizes::{
     clamp_fraction, equal_sizes, insert_size, remove_size, resize_at,
 };
+use hyperpanes_core::persistence::projects;
 use hyperpanes_core::session_manager::{SessionManager, SpawnOptions};
 use hyperpanes_terminal_widget::{SoftwareRenderer, TerminalPane};
 
@@ -36,7 +37,6 @@ pub enum Overlay {
     None,
     Palette,
     Prefs,
-    Sidebar,
 }
 
 /// A session detached from its window for re-hosting in another (Wave-1 multi-window
@@ -147,8 +147,11 @@ pub struct State {
     /// Set when the font family/size changed — the pump reloads the font (it owns the
     /// DPI scale) then clears this.
     pub font_reload: bool,
-    /// Cached, newest-first git-project list for the sidebar panel.
+    /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
+    /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
+    /// itself is gated by `settings.show_sidebar`; this is just the flyout panel state.
+    pub sidebar_open: bool,
     // ---- command palette working state ----
     /// The registry snapshot built when the palette opened.
     palette_entries: Vec<Entry>,
@@ -198,7 +201,10 @@ impl State {
             settings: prefs::load(),
             // Apply the saved font family/size on the first pump (it owns the scale).
             font_reload: true,
-            projects: Vec::new(),
+            // Seed the rail's badge with the remembered projects up front (so the count
+            // is right before any pane reports a cwd).
+            projects: sidebar::list(),
+            sidebar_open: false,
             palette_entries: Vec::new(),
             palette_view: Vec::new(),
             palette_sel: 0,
@@ -841,29 +847,38 @@ impl State {
 
     // ---- sidebar / projects ----
 
-    /// Toggle the sidebar panel; refresh the project list when opening it.
+    /// Show/hide the whole right-edge rail (`Ctrl+Shift+B`, the ☰ menu, the palette).
+    /// Persisted like the other appearance prefs; hiding it also collapses the flyout.
     pub fn toggle_sidebar(&mut self) {
-        if self.overlay == Overlay::Sidebar {
-            self.overlay = Overlay::None;
-        } else {
+        self.settings.show_sidebar = !self.settings.show_sidebar;
+        if !self.settings.show_sidebar {
+            self.sidebar_open = false;
+        }
+        prefs::save(&self.settings);
+        self.dirty = true;
+    }
+
+    /// Toggle the projects flyout behind the 📁 icon; refresh the list when opening it.
+    pub fn toggle_projects(&mut self) {
+        self.sidebar_open = !self.sidebar_open;
+        if self.sidebar_open {
             self.projects = sidebar::list();
-            self.overlay = Overlay::Sidebar;
         }
         self.dirty = true;
     }
 
     /// A pane reported a cwd — if it's inside a repo, remember it and refresh the cache
-    /// (so an open sidebar updates live).
+    /// (so the rail's count badge + an open flyout update live).
     pub fn note_cwd(&mut self, cwd: &str) {
         if let Some(list) = sidebar::note_cwd(cwd) {
             self.projects = list;
-            if self.overlay == Overlay::Sidebar {
+            if self.settings.show_sidebar {
                 self.dirty = true;
             }
         }
     }
 
-    /// The cached project rows as `(name, color)` for the panel.
+    /// The cached project rows as `(name, color)` for the flyout.
     pub fn project_rows(&self) -> Vec<(SharedString, Color)> {
         self.projects
             .iter()
@@ -871,13 +886,45 @@ impl State {
             .collect()
     }
 
-    /// Open project `idx` (from the panel) in a new pane cd'd into its repo, focused.
+    /// Open project `idx` (from the flyout) in a new pane cd'd into its repo, focused.
+    /// Collapses the flyout afterwards (mirrors the Electron click behaviour).
     pub fn open_project(&mut self, idx: usize, mgr: &SessionManager) {
         let Some(p) = self.projects.get(idx).cloned() else {
             return;
         };
-        self.overlay = Overlay::None;
+        self.sidebar_open = false;
         self.add_pane_cwd(mgr, Some(p.path.clone()), Some(parse_hex(&p.color)));
+    }
+
+    /// Recolor project at flyout row `idx` to palette swatch `swatch`, persist via core,
+    /// and refresh the cache so the dot updates immediately.
+    pub fn set_project_color(&mut self, idx: usize, swatch: usize) {
+        let Some(p) = self.projects.get(idx) else { return };
+        let Some(color) = projects::PROJECT_COLORS.get(swatch) else { return };
+        projects::set_project_color(&p.id, color);
+        self.projects = sidebar::list();
+        self.dirty = true;
+    }
+
+    /// Rename project at flyout row `idx` (no-op on an empty/unchanged name).
+    pub fn rename_project(&mut self, idx: usize, name: &str) {
+        let name = name.trim();
+        let Some(p) = self.projects.get(idx) else { return };
+        if name.is_empty() || name == p.name {
+            return;
+        }
+        let id = p.id.clone();
+        projects::rename_project(&id, name);
+        self.projects = sidebar::list();
+        self.dirty = true;
+    }
+
+    /// Forget project at flyout row `idx`.
+    pub fn remove_project(&mut self, idx: usize) {
+        let Some(p) = self.projects.get(idx) else { return };
+        projects::remove_project(&p.id);
+        self.projects = sidebar::list();
+        self.dirty = true;
     }
 
     /// Record an Escape key event and decide what to do with it. A lone tap
