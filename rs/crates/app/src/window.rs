@@ -123,6 +123,30 @@ mod imp {
                 return r;
             }
         }
+        // Constrain a maximized borderless window to the monitor **work area** (not the
+        // full monitor). Without this, Windows maximizes a frame-stripped window to the
+        // whole monitor with an off-screen overhang on every edge — which covers the
+        // taskbar (making it unclickable) and leaves an unpainted "chrome" strip in the
+        // overhang. Pinning ptMaxPosition/ptMaxSize to the work area fixes both.
+        if msg == WM_GETMINMAXINFO {
+            let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                let mmi = lparam.0 as *mut MINMAXINFO;
+                let work = mi.rcWork;
+                let monr = mi.rcMonitor;
+                (*mmi).ptMaxPosition.x = work.left - monr.left;
+                (*mmi).ptMaxPosition.y = work.top - monr.top;
+                (*mmi).ptMaxSize.x = work.right - work.left;
+                (*mmi).ptMaxSize.y = work.bottom - work.top;
+                (*mmi).ptMaxTrackSize.x = work.right - work.left;
+                (*mmi).ptMaxTrackSize.y = work.bottom - work.top;
+            }
+            return LRESULT(0);
+        }
         if msg == WM_NCCALCSIZE && wparam.0 != 0 {
             if IsZoomed(h).as_bool() {
                 let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
