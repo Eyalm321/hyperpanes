@@ -248,9 +248,12 @@ export component PaneView inherits Rectangle {
                                     horizontal-alignment: left;
                                     overflow: elide;
                                 }
-                                // subtitle wins; else the shell's OSC window title (dimmed).
-                                if (pane.subtitle != "" || pane.shell-title != "") : Text {
-                                    text: pane.subtitle != "" ? pane.subtitle : pane.shell-title;
+                                // secondary line: the user/ambient subtitle only. The shell's
+                                // OSC title (e.g. pwsh's exe path) is noise — like Electron, it
+                                // is NOT shown inline (it stays a hover tooltip / drives the AI
+                                // gate); only a real subtitle gets a second line here.
+                                if pane.subtitle != "" : Text {
+                                    text: pane.subtitle;
                                     color: Theme.subtext;
                                     font-size: 9px;
                                     vertical-alignment: center;

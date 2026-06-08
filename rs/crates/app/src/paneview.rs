@@ -120,7 +120,6 @@ fn pane_item(
         surface: ps.surface.clone(),
         title: ps.title.clone(),
         subtitle: ps.subtitle.clone().unwrap_or_default(),
-        shell_title: ps.shell_title.as_str().into(),
         show_frame: ps.frame_on(show_frame),
         show_dot: ps.dot_on(show_dot),
         editing,
