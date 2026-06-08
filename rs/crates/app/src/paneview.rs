@@ -17,7 +17,8 @@ use std::rc::Rc;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
-    AppWindow, DividerItem, LayoutOption, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
+    AppWindow, DividerItem, FramePaletteOption, LayoutOption, PaletteItem, PaneItem, PrefOption,
+    ProjectItem, TabItem,
 };
 use crate::prefs;
 
@@ -44,6 +45,9 @@ pub struct Ui {
     pub palette: Rc<VecModel<PaletteItem>>,
     pub projects: Rc<VecModel<ProjectItem>>,
     pub families: Rc<VecModel<PrefOption>>,
+    pub palettes: Rc<VecModel<FramePaletteOption>>,
+    pub shells: Rc<VecModel<PrefOption>>,
+    pub themes: Rc<VecModel<PrefOption>>,
 }
 
 impl Ui {
@@ -57,6 +61,9 @@ impl Ui {
             palette: Rc::new(VecModel::default()),
             projects: Rc::new(VecModel::default()),
             families: Rc::new(VecModel::default()),
+            palettes: Rc::new(VecModel::default()),
+            shells: Rc::new(VecModel::default()),
+            themes: Rc::new(VecModel::default()),
         })
     }
 
@@ -69,6 +76,9 @@ impl Ui {
         app.set_palette(ModelRc::from(self.palette.clone()));
         app.set_projects(ModelRc::from(self.projects.clone()));
         app.set_pref_families(ModelRc::from(self.families.clone()));
+        app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
+        app.set_pref_shells(ModelRc::from(self.shells.clone()));
+        app.set_pref_themes(ModelRc::from(self.themes.clone()));
     }
 }
 
@@ -89,6 +99,9 @@ fn sync_model<T: Clone + 'static>(model: &VecModel<T>, items: Vec<T>) {
 /// Build a model row for pane `i`.
 fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
     let (x, y, w, h) = ps.rect;
+    // Project the clickable-path hover overlay (if any) into the model row.
+    let (lx, ly) = ps.link_cursor;
+    let link = ps.link.as_ref();
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
@@ -99,6 +112,13 @@ fn pane_item(ps: &PaneState, focused: bool) -> PaneItem {
         h,
         visible: ps.visible,
         focused,
+        link_visible: link.is_some(),
+        link_x: link.map(|l| l.x).unwrap_or(0.0),
+        link_y: link.map(|l| l.y).unwrap_or(0.0),
+        link_w: link.map(|l| l.w).unwrap_or(0.0),
+        link_tip: link.map(|l| l.tip.clone()).unwrap_or_default().into(),
+        link_tip_x: lx + 12.0,
+        link_tip_y: ly + 16.0,
     }
 }
 
@@ -276,19 +296,112 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.palette, palette);
     app.set_palette_sel(state.palette_sel as i32);
 
-    // preferences scalars + the installed font-family options
-    let families: Vec<PrefOption> = prefs::available_families()
-        .into_iter()
-        .map(|(id, label)| PrefOption {
-            id: id as i32,
-            label: label.into(),
-            active: id == state.settings.font_family,
+    // Appearance controls reflect the DRAFT while Preferences is open (so edits preview
+    // without touching the live panes), else the committed settings.
+    let (_view_font, view_palette, view_theme, view_px, view_frame, view_dot) =
+        state.appearance_view();
+
+    // Font family: the fixed option list (mirrors the renderer) + a trailing "Custom…"
+    // entry. Active = the option whose value matches the drafted raw value, or Custom when
+    // the picker is in custom mode (a user-typed font path).
+    let raw_font = match &state.prefs_draft {
+        Some(d) => d.font_family.clone(),
+        None => state.settings.font_family.clone(),
+    };
+    let custom = state.font_custom;
+    let mut font_label = String::new();
+    let mut families: Vec<PrefOption> = prefs::FONT_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(id, (label, value))| {
+            let active = !custom && *value == raw_font;
+            if active {
+                font_label = (*label).to_string();
+            }
+            PrefOption { id: id as i32, label: (*label).into(), active }
         })
         .collect();
+    families.push(PrefOption {
+        id: prefs::FONT_OPTIONS.len() as i32,
+        label: "Custom…".into(),
+        active: custom,
+    });
+    if custom {
+        font_label = "Custom…".to_string();
+    } else if font_label.is_empty() {
+        font_label = prefs::FONT_OPTIONS[0].0.to_string();
+    }
     sync_model(&ui.families, families);
-    app.set_pref_fontpx(state.settings.font_px.round() as i32);
+    app.set_pref_font_label(font_label.into());
+    app.set_pref_font_custom(custom);
+    app.set_pref_font_custom_value(raw_font.into());
+    // Preview header accent = the drafted palette's first slot (the surface itself is
+    // rendered by the controller's locked preview terminal; see State::render_preview).
+    app.set_pref_preview_accent(theme::accent_for(0, view_palette));
+
+    // frame-palette options (label + 8 slot color chips), active = drafted/current
+    let palettes: Vec<FramePaletteOption> = theme::FRAME_PALETTES
+        .iter()
+        .enumerate()
+        .map(|(id, (label, slots))| {
+            let colors: Vec<slint::Color> = slots
+                .iter()
+                .map(|(r, g, b)| slint::Color::from_rgb_u8(*r, *g, *b))
+                .collect();
+            FramePaletteOption {
+                id: id as i32,
+                label: (*label).into(),
+                active: id == view_palette,
+                colors: ModelRc::from(Rc::new(VecModel::from(colors))),
+            }
+        })
+        .collect();
+    sync_model(&ui.palettes, palettes);
+
+    // terminal colour-theme options (active = drafted/current); preview colors come from it.
+    let mut theme_label = String::new();
+    let themes: Vec<PrefOption> = theme::TERMINAL_THEMES
+        .iter()
+        .enumerate()
+        .map(|(id, (label, _))| {
+            let active = id == view_theme;
+            if active {
+                theme_label = (*label).to_string();
+            }
+            PrefOption { id: id as i32, label: (*label).into(), active }
+        })
+        .collect();
+    sync_model(&ui.themes, themes);
+    app.set_pref_theme_label(theme_label.into());
+    // preview letterbox background = the drafted theme's background colour.
+    app.set_pref_preview_bg(theme::theme_color(view_theme, 0));
+
+    // default-shell options; active = the one whose token matches the saved setting.
+    let mut shell_label = prefs::SHELL_OPTIONS[0].0.to_string();
+    let shells: Vec<PrefOption> = prefs::SHELL_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(id, (label, value))| {
+            let active = *value == state.settings.default_shell;
+            if active {
+                shell_label = (*label).to_string();
+            }
+            PrefOption { id: id as i32, label: (*label).into(), active }
+        })
+        .collect();
+    sync_model(&ui.shells, shells);
+    app.set_pref_shell_label(shell_label.into());
+
+    // Dialog appearance scalars come from the draft view; the actual panes keep the
+    // committed show_frame/show_dot until Done.
+    app.set_pref_fontpx(view_px.round() as i32);
+    app.set_pref_frame(view_frame);
+    app.set_pref_dot(view_dot);
     app.set_show_frame(state.settings.show_frame);
     app.set_show_dot(state.settings.show_dot);
+    app.set_prefs_confirm(state.prefs_confirm);
+    app.set_pref_clickable(state.settings.clickable_paths);
+    app.set_pref_editor(state.settings.editor_command.clone().into());
 
     // sidebar / projects: the rail gating + flyout state + rows
     app.set_show_sidebar(state.settings.show_sidebar);
@@ -327,6 +440,7 @@ pub fn pump(
         state.dirty = false;
     }
 
+
     // ---- cursor blink (~530 ms) ----
     let blink_changed = if state.last_blink.elapsed() >= Duration::from_millis(530) {
         state.cursor_on = !state.cursor_on;
@@ -338,6 +452,15 @@ pub fn pump(
     let opts = RenderOpts {
         cursor_on: state.cursor_on,
     };
+
+    // ---- render the appearance preview (a real, locked terminal) while Prefs is open ----
+    // Caret blinks in sync with the panes' cursor.
+    if state.overlay == Overlay::Prefs {
+        let cursor_on = state.cursor_on;
+        if let Some(img) = state.render_preview(scale, cursor_on) {
+            app.set_pref_preview_surface(img);
+        }
+    }
 
     // ---- render dirty (visible) panes of the active tab → model ----
     let active = state.active;

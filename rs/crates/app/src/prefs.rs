@@ -13,12 +13,91 @@
 use hyperpanes_core::persistence::paths;
 use serde::{Deserialize, Serialize};
 
-/// The selectable terminal fonts: a label + the on-disk path the glyph cache loads.
-/// Only the ones actually installed are offered (see [`available_families`]).
-pub const FONT_FAMILIES: [(&str, &str); 3] = [
-    ("Cascadia Mono", "C:/Windows/Fonts/CascadiaMono.ttf"),
-    ("Cascadia Code", "C:/Windows/Fonts/CascadiaCode.ttf"),
-    ("Consolas", "C:/Windows/Fonts/consola.ttf"),
+/// The fixed font-family choices offered in the picker — a 1:1 mirror of the renderer's
+/// `FONT_OPTIONS` (label + value): the empty value is the built-in default; every other
+/// value is the font-file name resolved against the system/per-user font folders (see
+/// [`font_dirs`]). Shown as a fixed list (not filtered by what's installed) so it matches
+/// the Electron dropdown exactly; a missing font simply falls back when loaded. A "Custom…"
+/// entry (handled in the UI) lets the user type any font-file path. Selection is persisted
+/// by value.
+pub const FONT_OPTIONS: [(&str, &str); 7] = [
+    ("System default (Consolas)", ""),
+    ("Cascadia Code", "CascadiaCode.ttf"),
+    ("Cascadia Mono", "CascadiaMono.ttf"),
+    ("Consolas", "consola.ttf"),
+    ("Courier New", "cour.ttf"),
+    // Fira Code + JetBrains Mono are baked in (see BUNDLED_FONTS), so they always render.
+    ("Fira Code", "FiraCode-Regular.ttf"),
+    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
+];
+
+/// The fallback font path used when nothing else resolves (always present on Windows).
+const FALLBACK_FONT: &str = "C:/Windows/Fonts/consola.ttf";
+
+/// Whether `font` is a user-typed custom value (non-empty and not one of [`FONT_OPTIONS`]).
+pub fn is_custom_font(font: &str) -> bool {
+    !font.is_empty() && !FONT_OPTIONS.iter().any(|(_, v)| *v == font)
+}
+
+/// Fonts shipped with hyperpanes (OFL 1.1, baked into the binary) so they're always
+/// available regardless of what the user has installed. Extracted to [`bundled_font_dir`]
+/// on startup (see [`init_bundled_fonts`]); their file names match the [`FONT_OPTIONS`]
+/// values so the picker resolves them. Licenses live in `assets/fonts/*-OFL.txt`.
+pub const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
+    ("FiraCode-Regular.ttf", include_bytes!("../assets/fonts/FiraCode-Regular.ttf")),
+    ("JetBrainsMono-Regular.ttf", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
+];
+
+/// Where the baked-in fonts are extracted: `%APPDATA%\hyperpanes\fonts`.
+pub fn bundled_font_dir() -> std::path::PathBuf {
+    paths::user_data_dir().join("fonts")
+}
+
+/// Extract the baked-in fonts to [`bundled_font_dir`] (writing each only when missing or a
+/// different size, so an app update refreshes them). Best-effort; call once at startup before
+/// any font is resolved. A failure just means those fonts fall back like an uninstalled one.
+pub fn init_bundled_fonts() {
+    let dir = bundled_font_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    for (name, bytes) in BUNDLED_FONTS {
+        let p = dir.join(name);
+        let stale = std::fs::metadata(&p).map(|m| m.len() as usize != bytes.len()).unwrap_or(true);
+        if stale {
+            let _ = std::fs::write(&p, bytes);
+        }
+    }
+}
+
+/// The directories scanned for the candidate font files: the system font folder, the per-user
+/// font folder (where user-installed fonts land on modern Windows), and the baked-in font dir
+/// (so the shipped OFL fonts always resolve even when not installed).
+fn font_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![std::path::PathBuf::from("C:/Windows/Fonts")];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(std::path::Path::new(&local).join("Microsoft").join("Windows").join("Fonts"));
+    }
+    dirs.push(bundled_font_dir());
+    dirs
+}
+
+/// Resolve a candidate font-file name to an installed absolute path (forward-slashed), or
+/// `None` if it isn't present in any font directory.
+fn resolve_font(file: &str) -> Option<String> {
+    font_dirs().into_iter().find_map(|d| {
+        let p = d.join(file);
+        p.exists().then(|| p.to_string_lossy().replace('\\', "/"))
+    })
+}
+
+/// The default-shell choices offered in the Terminal section: a label + the shell token
+/// passed to `SpawnOptions::shell` (empty = the system default resolved in core's spawn).
+/// The native port of the renderer's `ShellPicker` options (kept to the common Windows
+/// shells; an unlisted shell still works via the persisted string, this is just the picker).
+pub const SHELL_OPTIONS: [(&str, &str); 4] = [
+    ("System", ""),
+    ("pwsh", "pwsh"),
+    ("PowerShell", "powershell"),
+    ("cmd", "cmd"),
 ];
 
 /// Base (un-scaled) terminal font size bounds, mirroring `useSettings`' clamps.
@@ -31,14 +110,30 @@ pub const DEFAULT_FONT_PX: f32 = 14.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    /// Index into [`FONT_FAMILIES`] for the active terminal font.
-    pub font_family: usize,
+    /// Absolute path of the active terminal font file ("" = the first available default).
+    /// Persisted by path so the picker list can grow/reorder without invalidating it.
+    pub font_family: String,
+    /// Index into [`crate::theme::FRAME_PALETTES`] for the active pane dot/frame palette.
+    /// Switching it remaps panes by creation slot (the native port of `framePalette`).
+    pub frame_palette: usize,
+    /// Index into [`crate::theme::TERMINAL_THEMES`] for the active terminal colour theme
+    /// (the terminal's own bg/fg + 16 ANSI colours). Mirrors `terminalTheme`.
+    pub terminal_theme: usize,
+    /// Default shell for new panes (the token from [`SHELL_OPTIONS`], e.g. "pwsh"). Empty
+    /// = the system default. Mirrors the renderer `Settings.defaultShell`.
+    pub default_shell: String,
     /// Base (logical px, pre-DPI-scale) terminal font size.
     pub font_px: f32,
     /// Whether each pane draws its colored frame border + header tint.
     pub show_frame: bool,
     /// Whether each pane shows its accent color dot in the header.
     pub show_dot: bool,
+    /// Whether file paths in terminal output are clickable (plain click opens, Ctrl+click
+    /// copies the resolved absolute path). Mirrors `Settings.clickablePaths`.
+    pub clickable_paths: bool,
+    /// Command template used to open a clicked path ("" = auto-detect VS Code, else the OS
+    /// default handler). Placeholders: `{path}` `{line}` `{col}`. Mirrors `editorCommand`.
+    pub editor_command: String,
     /// Per-pane scrollback (history lines). Persisted for forward-compat with the
     /// renderer blob; the native terminal grid currently keeps a fixed buffer.
     pub scrollback: u32,
@@ -50,10 +145,15 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            font_family: 0,
+            font_family: String::new(),
+            frame_palette: 0,
+            terminal_theme: 0,
+            default_shell: String::new(),
             font_px: DEFAULT_FONT_PX,
             show_frame: true,
             show_dot: true,
+            clickable_paths: true,
+            editor_command: String::new(),
             scrollback: 5000,
             show_sidebar: true,
         }
@@ -61,16 +161,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The resolved font path for the active family, clamped to an installed font so a
-    /// stale index never loads nothing.
-    pub fn font_path(&self) -> &'static str {
-        let avail = available_families();
-        let idx = if avail.iter().any(|(i, _)| *i == self.font_family) {
-            self.font_family
-        } else {
-            avail.first().map(|(i, _)| *i).unwrap_or(0)
-        };
-        FONT_FAMILIES[idx.min(FONT_FAMILIES.len() - 1)].1
+    /// The resolved font path to load: the saved `font_family` path if it's still present,
+    /// else the first available family, else the always-present fallback. So a font that was
+    /// uninstalled (or a blank default) never loads nothing.
+    pub fn font_path(&self) -> String {
+        resolve_or_default(&self.font_family)
     }
 
     /// Clamp the base font size into the supported range.
@@ -79,21 +174,23 @@ impl Settings {
     }
 }
 
-/// The font families that actually exist on this machine, as `(index, label)` pairs.
-/// Always non-empty (Consolas ships with Windows); falls back to all entries if none
-/// resolve (e.g. a non-standard install) so the picker is never blank.
-pub fn available_families() -> Vec<(usize, &'static str)> {
-    let present: Vec<(usize, &'static str)> = FONT_FAMILIES
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, path))| std::path::Path::new(path).exists())
-        .map(|(i, (label, _))| (i, *label))
-        .collect();
-    if present.is_empty() {
-        FONT_FAMILIES.iter().enumerate().map(|(i, (l, _))| (i, *l)).collect()
-    } else {
-        present
+/// Resolve a saved font value to an actually-loadable `.ttf`/`.ttc` path. Handles the three
+/// value shapes: empty (the default → Consolas/fallback), a bare font-file name from
+/// [`FONT_OPTIONS`] (looked up in the font folders), or a custom absolute path. Anything that
+/// can't be found falls back to the always-present Consolas, so loading never fails. Shared by
+/// the live settings and the in-dialog appearance draft so both highlight the same font.
+pub fn resolve_or_default(font: &str) -> String {
+    if font.is_empty() {
+        return resolve_font("consola.ttf").unwrap_or_else(|| FALLBACK_FONT.to_string());
     }
+    // A custom absolute path (contains a separator) is used verbatim when it exists.
+    if (font.contains('/') || font.contains('\\')) && std::path::Path::new(font).exists() {
+        return font.replace('\\', "/");
+    }
+    // Otherwise treat it as a font-file name and look it up in the font folders.
+    resolve_font(font)
+        .or_else(|| resolve_font("consola.ttf"))
+        .unwrap_or_else(|| FALLBACK_FONT.to_string())
 }
 
 /// Load the persisted settings (defaults on a missing/corrupt file).
@@ -140,8 +237,22 @@ mod tests {
     }
 
     #[test]
-    fn available_is_never_empty() {
-        assert!(!available_families().is_empty());
+    fn font_options_present_and_resolve() {
+        // The fixed list mirrors the renderer (System default first) and every value
+        // resolves to a loadable .ttf/.ttc (missing fonts fall back to Consolas).
+        assert_eq!(FONT_OPTIONS[0].1, "");
+        assert!(FONT_OPTIONS.len() >= 7);
+        for (_, value) in FONT_OPTIONS {
+            let p = resolve_or_default(value);
+            assert!(p.ends_with(".ttf") || p.ends_with(".ttc"), "unresolved: {value} -> {p}");
+        }
+    }
+
+    #[test]
+    fn custom_font_detection() {
+        assert!(!is_custom_font(""));
+        assert!(!is_custom_font("consola.ttf")); // a preset value
+        assert!(is_custom_font("C:/Fonts/MyFont.ttf"));
     }
 
     #[test]

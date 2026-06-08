@@ -71,6 +71,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }));
 
+    // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.
+    crate::prefs::init_bundled_fonts();
+
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 

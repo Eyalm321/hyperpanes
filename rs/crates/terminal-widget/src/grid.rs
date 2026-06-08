@@ -132,6 +132,16 @@ impl TermGrid {
         }
     }
 
+    /// Apply a colour theme by overriding the 16 base ANSI colours (indices 0–15; index 0 is
+    /// the default background, index 7 the default foreground). The 6×6×6 colour cube and the
+    /// grayscale ramp (indices 16–255) are kept. Marks the grid dirty so it repaints.
+    pub fn set_base16(&mut self, base: [[u8; 3]; 16]) {
+        for (i, c) in base.iter().enumerate() {
+            self.palette[i] = Rgb { r: c[0], g: c[1], b: c[2] };
+        }
+        self.dirty = true;
+    }
+
     /// Advance the VTE parser with a chunk of raw session output. Marks the grid dirty.
     pub fn feed(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {

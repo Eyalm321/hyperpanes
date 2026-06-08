@@ -128,6 +128,12 @@ impl TerminalPane {
         self.renderer.name()
     }
 
+    /// Apply a colour theme: override the 16 base ANSI colours (index 0 = default background,
+    /// 7 = default foreground). See [`crate::grid::TermGrid::set_base16`].
+    pub fn set_palette(&mut self, base: [[u8; 3]; 16]) {
+        self.grid.set_base16(base);
+    }
+
     /// Swap the renderer at runtime (e.g. GPU↔software on a device-lost / RDP transition).
     /// The next [`render`](Self::render) rebuilds from the live grid, so the swap is seamless.
     pub fn set_renderer(&mut self, renderer: Box<dyn PaneRenderer>) {

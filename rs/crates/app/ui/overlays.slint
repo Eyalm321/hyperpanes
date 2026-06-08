@@ -13,7 +13,36 @@
 // chords/text route here (not the panes) while open.
 
 import { Theme } from "theme.slint";
-import { PaletteItem, PrefOption } from "types.slint";
+import { PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
+
+// A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
+// used to mark the active option in the pickers. Same Path-with-commands pattern the window
+// controls use (the default UI font lacks the ✓/▾ glyphs).
+component Check inherits Path {
+    in property <color> ink: Theme.accent;
+    width: 12px;
+    height: 10px;
+    viewbox-width: 12;
+    viewbox-height: 10;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: "M 1 5.5 L 4.5 9 L 11 1";
+}
+
+// A drawn chevron for the dropdown buttons; points up while the popup is open.
+component Chevron inherits Path {
+    in property <color> ink: Theme.subtext;
+    in property <bool> up: false;
+    width: 12px;
+    height: 8px;
+    viewbox-width: 12;
+    viewbox-height: 8;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: root.up ? "M 1 6.5 L 6 1.5 L 11 6.5" : "M 1 1.5 L 6 6.5 L 11 1.5";
+}
 
 // A small labelled toggle switch (frame/dot prefs).
 component PrefToggle inherits Rectangle {
@@ -48,6 +77,171 @@ component PrefToggle inherits Rectangle {
                     animate x { duration: 120ms; easing: ease-out; }
                 }
                 TouchArea { clicked => { root.toggled(!root.on); } }
+            }
+        }
+    }
+}
+
+// A category row in the preferences left-nav rail (mirrors Electron's `.hp-prefs-tab`).
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+    height: 32px;
+    border-radius: 6px;
+    background: root.active ? Theme.surface2 : (ta.has-hover ? Theme.surface : transparent);
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.label;
+            color: root.active ? Theme.text : Theme.subtext;
+            font-size: 12px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// A live mini-terminal preview for the Appearance section (mirrors Electron's
+// `TerminalPreview`). It's a styled sample — not a live pty — that reflects the drafted
+// font family/size, frame-palette accent, frame border, and color dot, so the options are
+// visible before Done. (Terminal color theme + idle-glow aren't wired in the native widget
+// yet, so the preview doesn't reflect those — TODO(phase5).)
+component AppearancePreview inherits Rectangle {
+    in property <image> surface;   // the rendered locked-terminal image
+    in property <color> accent;
+    in property <bool> show-frame;
+    in property <bool> show-dot;
+    in property <color> bg;
+    height: 134px;
+    border-radius: 8px;
+    background: root.bg;
+    border-width: root.show-frame ? 1px : 0px;
+    border-color: root.accent.with-alpha(0.55);
+    clip: true;
+    VerticalLayout {
+        // header chip
+        Rectangle {
+            height: 26px;
+            background: root.bg.darker(0.2);
+            Rectangle { y: parent.height - 1px; height: 1px; background: #ffffff14; }
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 6px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.accent;
+                        visible: root.show-dot;
+                    }
+                }
+                Text {
+                    text: "preview";
+                    color: root.accent;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+        // the real, locked terminal surface (rendered by the controller in the drafted
+        // font + theme), letterboxed on the theme background.
+        Rectangle {
+            background: root.bg;
+            clip: true;
+            Image {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                source: root.surface;
+                image-fit: contain;
+                image-rendering: pixelated;
+                horizontal-alignment: left;
+            }
+        }
+    }
+}
+
+// A dropdown (select) for the terminal font family — a button showing the current font that
+// opens a popup list of all installed monospace fonts. Mirrors Electron's `<select>`.
+component FontDropdown inherits Rectangle {
+    in property <[PrefOption]> options;
+    in property <string> current-label;
+    callback selected(int);
+    height: 32px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: ta.has-hover ? Theme.surface : Theme.bg;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: root.current-label;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            // Static (always down): Slint has no PopupWindow is-open/close event to flip it
+            // back reliably, so the built-in ComboBox keeps it static too (slint-ui #456).
+            Chevron {}
+        }
+    }
+    ta := TouchArea { clicked => { popup.show(); } }
+    popup := PopupWindow {
+        // Default close-on-click: clicking an option or anywhere outside dismisses the popup.
+        // (Slint 1.16 exposes no close event, so the chevron reliably shows up-on-open and
+        // down-on-select; an outside dismiss leaves it up until the next open.)
+        x: 0;
+        y: parent.height + 4px;
+        width: root.width;
+        Rectangle {
+            background: Theme.mantle;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.scrim;
+            drop-shadow-offset-y: 8px;
+            VerticalLayout {
+                padding: 4px;
+                for opt[i] in root.options : Rectangle {
+                    height: 28px;
+                    border-radius: 5px;
+                    background: opt.active ? Theme.surface2 : (ita.has-hover ? Theme.surface : transparent);
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: opt.label;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            width: 14px;
+                            if opt.active : Check {}
+                        }
+                    }
+                    ita := TouchArea { clicked => { root.selected(opt.id); popup.close(); } }
+                }
             }
         }
     }
@@ -93,10 +287,27 @@ export component OverlayLayer inherits Rectangle {
 
     // preferences
     in property <[PrefOption]> families;
+    in property <string> font-label;
+    in property <bool> font-custom: false;
+    in property <string> font-custom-value: "";
+    in property <image> preview-surface;
+    in property <color> preview-accent;
+    in property <color> preview-bg;
+    in property <[PrefOption]> themes;
+    in property <string> theme-label;
+    in property <[FramePaletteOption]> frame-palettes;
+    in property <[PrefOption]> shells;
+    in property <string> shell-label;
     in property <int> font-px: 14;
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
+    in property <bool> clickable-paths: true;
+    in property <string> editor-command: "";
+    in property <bool> prefs-confirm: false;  // showing the unsaved-changes prompt
     callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
+    callback pref-text(int, string); // (kind, value) — string-valued settings
+    callback pref-done();            // commit the appearance draft + close (Done / Save)
+    callback pref-confirm(int);      // 0 keep · 1 discard · 2 save
 
     callback dismiss();
 
@@ -208,48 +419,176 @@ export component OverlayLayer inherits Rectangle {
     }
 
     // ===== preferences =====
-    if root.kind == 2 : Rectangle {
-        width: 460px;
-        height: 360px;
+    // Structured to mirror Electron's `PreferencesDialog` section grouping (Appearance,
+    // then Terminal). Only settings whose underlying feature exists in the native build
+    // are rendered; deferred ones are marked `TODO(phase5)` (no dead controls). The card
+    // auto-sizes to its content (no scroll machinery needed at this size).
+    if root.kind == 2 : prefs := Rectangle {
+        width: min(780px, parent.width - 40px);
+        height: min(600px, parent.height - 60px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         background: Theme.mantle;
         border-radius: 12px;
         border-width: 1px;
         border-color: Theme.border;
-        drop-shadow-blur: 48px;
+        drop-shadow-blur: 64px;
         drop-shadow-color: Theme.scrim;
-        drop-shadow-offset-y: 18px;
+        drop-shadow-offset-y: 24px;
+        clip: true;
+        // selected category: 0 = Appearance · 1 = Terminal
+        property <int> sel: 0;
         TouchArea {}
 
-        VerticalLayout {
-            padding: 18px;
-            spacing: 14px;
-
-            HorizontalLayout {
-                Text {
-                    text: "Preferences";
-                    color: Theme.text;
-                    font-size: 16px;
-                    font-weight: 700;
-                    horizontal-stretch: 1;
-                    vertical-alignment: center;
+        HorizontalLayout {
+            // ---- left category rail (mirrors Electron `.hp-prefs-tabs`) ----
+            Rectangle {
+                width: 168px;
+                background: Theme.bg;
+                Rectangle { x: parent.width - 1px; width: 1px; background: Theme.border; }
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 2px;
+                    Text {
+                        text: "Preferences";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        height: 34px;
+                        vertical-alignment: center;
+                    }
+                    NavItem { label: "Appearance"; active: prefs.sel == 0; clicked => { prefs.sel = 0; } }
+                    NavItem { label: "Terminal"; active: prefs.sel == 1; clicked => { prefs.sel = 1; } }
+                    Rectangle { vertical-stretch: 1; }
                 }
-                Pill {
-                    label: "Done";
-                    clicked => { root.dismiss(); }
+            }
+            // ---- main column: pinned preview + scrolling body + pinned footer ----
+            VerticalLayout {
+                // The Appearance preview is pinned (sticky) above the scroll area, so a
+                // change stays visible while the controls below scroll (mirrors Electron).
+                // `vertical-stretch: 0` keeps it snug (it must not share the extra height
+                // with the scrolling body, or the box would float with a gap under the title).
+                if prefs.sel == 0 : VerticalLayout {
+                    vertical-stretch: 0;
+                    alignment: start;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 16px;
+                    spacing: 8px;
+                    Text { text: "Preview"; color: Theme.faint; font-size: 11px; }
+                    AppearancePreview {
+                        surface: root.preview-surface;
+                        accent: root.preview-accent;
+                        show-frame: root.show-frame;
+                        show-dot: root.show-dot;
+                        bg: root.preview-bg;
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: pbody.preferred-height;
+                        pbody := VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        // ===================== Appearance =====================
+                        if prefs.sel == 0 : VerticalLayout {
+                            spacing: 12px;
+
+            // ---- frame color palette (pane dot + border) ----
+            Text { text: "Frame color palette"; color: Theme.faint; font-size: 11px; }
+            VerticalLayout {
+                spacing: 4px;
+                for opt[i] in root.frame-palettes : Rectangle {
+                    height: 30px;
+                    border-radius: 7px;
+                    border-width: 1px;
+                    border-color: opt.active ? Theme.accent : Theme.border;
+                    background: opt.active ? Theme.surface2 : (pta.has-hover ? Theme.surface : transparent);
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            text: opt.label;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            width: 86px;
+                        }
+                        // 8 color chips
+                        HorizontalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            alignment: start;
+                            for c in opt.colors : VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 14px;
+                                    height: 14px;
+                                    border-radius: 3px;
+                                    background: c;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            width: 14px;
+                            if opt.active : Check {}
+                        }
+                    }
+                    pta := TouchArea { clicked => { root.pref-action(4, opt.id); } }
                 }
             }
 
-            // ---- font family ----
-            Text { text: "Terminal font"; color: Theme.subtext; font-size: 11px; font-weight: 700; }
-            HorizontalLayout {
-                spacing: 6px;
-                for opt[i] in root.families : Pill {
-                    label: opt.label;
-                    active: opt.active;
-                    clicked => { root.pref-action(0, opt.id); }
+            // ---- terminal font family ----
+            Text { text: "Terminal font"; color: Theme.faint; font-size: 11px; }
+            FontDropdown {
+                options: root.families;
+                current-label: root.font-label;
+                selected(id) => { root.pref-action(0, id); }
+            }
+            // Custom font path field — shown only in "Custom…" mode (mirrors the renderer).
+            if root.font-custom : Rectangle {
+                height: 32px;
+                border-radius: 7px;
+                background: Theme.bg;
+                border-width: 1px;
+                border-color: Theme.border;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    fci := TextInput {
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        init => { fci.text = root.font-custom-value; }
+                        edited => { root.pref-text(8, self.text); }
+                    }
                 }
+                Text {
+                    x: 10px;
+                    text: "font file path, e.g. C:/Fonts/MyFont.ttf";
+                    color: Theme.faint;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    visible: fci.text == "";
+                }
+            }
+
+            // ---- terminal color theme ----
+            Text { text: "Color theme"; color: Theme.faint; font-size: 11px; }
+            FontDropdown {
+                options: root.themes;
+                current-label: root.theme-label;
+                selected(id) => { root.pref-action(9, id); }
             }
 
             // ---- font size ----
@@ -276,8 +615,6 @@ export component OverlayLayer inherits Rectangle {
                 Pill { label: "+"; clicked => { root.pref-action(1, 1); } }
             }
 
-            Rectangle { height: 1px; background: Theme.border; }
-
             // ---- frame / dot toggles ----
             PrefToggle {
                 label: "Pane frame border";
@@ -290,7 +627,134 @@ export component OverlayLayer inherits Rectangle {
                 toggled(v) => { root.pref-action(3, v ? 1 : 0); }
             }
 
-            Rectangle { vertical-stretch: 1; }
+            // TODO(phase5): idle-glow settings (idleAlert / idleEffect / idleAlertSeconds) — the
+            //   AI-pane glow effect isn't built in the native shell yet.
+
+                        } // end Appearance panel
+
+                        // ===================== Terminal =====================
+                        if prefs.sel == 1 : VerticalLayout {
+                            spacing: 12px;
+
+            // ---- default shell (applies to new panes & restarts) ----
+            Text { text: "Default shell"; color: Theme.faint; font-size: 11px; }
+            FontDropdown {
+                options: root.shells;
+                current-label: root.shell-label;
+                selected(id) => { root.pref-action(5, id); }
+            }
+
+            // ---- clickable file paths (click opens · Ctrl+click copies) ----
+            PrefToggle {
+                label: "Clickable file paths";
+                on: root.clickable-paths;
+                toggled(v) => { root.pref-action(6, v ? 1 : 0); }
+            }
+            // Editor command — only shown when clickable paths are on (mirrors the renderer).
+            if root.clickable-paths : VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: "Editor command";
+                    color: Theme.faint;
+                    font-size: 11px;
+                }
+                Rectangle {
+                    height: 32px;
+                    border-radius: 7px;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        eci := TextInput {
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            init => { eci.text = root.editor-command; }
+                            edited => { root.pref-text(7, self.text); }
+                        }
+                    }
+                    Text {
+                        x: 10px;
+                        text: "blank = OS default";
+                        color: Theme.faint;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        visible: eci.text == "";
+                    }
+                }
+            }
+
+            // TODO(phase5): scrollback (history lines) — needs a terminal-widget history buffer
+            //   (TermGrid keeps a fixed viewport buffer today). The setting is already persisted.
+            // TODO(phase5): Control API section (agents/MCP) — the loopback control server isn't
+            //   wired into the native shell yet.
+            // TODO(phase5): Ambient AI section (local Ollama) — not in the native shell yet.
+
+                        } // end Terminal panel
+                        } // close scrolling body layout (pbody)
+                    } // close Flickable
+                }
+                // ---- footer (Done) ----
+                Rectangle {
+                    height: 56px;
+                    Rectangle { width: 100%; height: 1px; background: Theme.border; }
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Pill {
+                            label: "Done";
+                            active: true;
+                            clicked => { root.pref-done(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- unsaved appearance changes prompt (Esc / scrim click with edits) ----
+        if root.prefs-confirm : Rectangle {
+            background: #00000099;
+            TouchArea {} // eat clicks behind the modal
+            Rectangle {
+                width: 380px;
+                height: confirm-body.preferred-height;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Theme.mantle;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 48px;
+                drop-shadow-color: Theme.scrim;
+                drop-shadow-offset-y: 18px;
+                confirm-body := VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+                    Text {
+                        text: "Unsaved appearance changes";
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "You changed appearance settings but haven't applied them. Save the changes or discard them?";
+                        color: Theme.subtext;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Pill { label: "Keep editing"; clicked => { root.pref-confirm(0); } }
+                        Pill { label: "Discard"; clicked => { root.pref-confirm(1); } }
+                        Pill { label: "Save"; active: true; clicked => { root.pref-confirm(2); } }
+                    }
+                }
+            }
         }
     }
 }

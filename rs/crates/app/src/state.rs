@@ -20,7 +20,7 @@ use hyperpanes_core::layout::sizes::{
 };
 use hyperpanes_core::persistence::projects;
 use hyperpanes_core::session_manager::{SessionManager, SpawnOptions};
-use hyperpanes_terminal_widget::{SoftwareRenderer, TerminalPane};
+use hyperpanes_terminal_widget::{Font, RenderOpts, SoftwareRenderer, TerminalPane};
 
 use slint::{Color, Image, SharedString};
 
@@ -51,14 +51,52 @@ pub struct DetachedPane {
 
 /// A single preferences edit, carried by `Command::ApplySetting`. Keeps the `Command`
 /// enum flat (one variant) while still typing each field of [`Settings`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Setting {
-    /// Select font family by index into `prefs::FONT_FAMILIES`.
-    FontFamily(usize),
+    /// Select the terminal font by its file path (see `prefs::available_families`).
+    FontFamily(String),
+    /// Select the frame palette by index into `theme::FRAME_PALETTES` (remaps pane accents).
+    FramePalette(usize),
+    /// Select the terminal colour theme by index into `theme::TERMINAL_THEMES`.
+    TerminalTheme(usize),
+    /// Set the default shell token for new panes ("" = system default).
+    DefaultShell(String),
     /// Nudge the base font size by ±N points.
     FontDelta(i32),
     ShowFrame(bool),
     ShowDot(bool),
+    /// Toggle whether terminal paths are clickable.
+    ClickablePaths(bool),
+    /// Set the editor-command template used to open clicked paths ("" = auto).
+    EditorCommand(String),
+}
+
+/// The in-dialog draft of the **appearance** settings. While Preferences is open these edit
+/// the draft only — the live panes don't change until Done (mirrors the renderer's
+/// `AppearanceDraft`). General/Terminal settings (shell, clickable paths, editor) are not
+/// drafted; they apply immediately, exactly like the Electron dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrefsDraft {
+    pub font_family: String,
+    pub frame_palette: usize,
+    pub terminal_theme: usize,
+    pub font_px: f32,
+    pub show_frame: bool,
+    pub show_dot: bool,
+}
+
+impl PrefsDraft {
+    /// Snapshot the appearance subset of `s`.
+    fn from_settings(s: &Settings) -> Self {
+        PrefsDraft {
+            font_family: s.font_family.clone(),
+            frame_palette: s.frame_palette,
+            terminal_theme: s.terminal_theme,
+            font_px: s.font_px,
+            show_frame: s.show_frame,
+            show_dot: s.show_dot,
+        }
+    }
 }
 
 /// One pane's controller-side state (terminal grid + placement + chrome).
@@ -79,6 +117,13 @@ pub struct PaneState {
     pub startup: Option<String>,
     /// A fixed accent (e.g. a project color) that survives relabel; `None` = by-index.
     pub pinned_accent: Option<Color>,
+    /// The terminal surface's on-screen logical size (from the widget's `geometry-changed`),
+    /// used to hit-test clickable-path hover/click coordinates. `(0,0)` until first laid out.
+    pub surf: (f32, f32),
+    /// The current clickable-path hover hit (drives the link overlay), plus the cursor
+    /// position (logical px within the surface) for tooltip placement. `None` = no link.
+    pub link: Option<hyperpanes_terminal_widget::LinkHit>,
+    pub link_cursor: (f32, f32),
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -110,10 +155,10 @@ impl Tab {
 
     /// Re-label + recolor panes so titles/accents stay 1..N in order. A pinned accent
     /// (a project color) is preserved.
-    fn relabel(&mut self) {
+    fn relabel(&mut self, palette: usize) {
         for (i, p) in self.panes.iter_mut().enumerate() {
             p.title = format!("{}", i + 1).into();
-            p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i));
+            p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i, palette));
         }
     }
 
@@ -147,6 +192,26 @@ pub struct State {
     /// Set when the font family/size changed — the pump reloads the font (it owns the
     /// DPI scale) then clears this.
     pub font_reload: bool,
+    /// The in-dialog appearance draft (Some while Preferences is open). Appearance edits go
+    /// here and only commit to `settings` (and the panes) on Done.
+    pub prefs_draft: Option<PrefsDraft>,
+    /// Whether the "unsaved appearance changes" save/discard prompt is showing.
+    pub prefs_confirm: bool,
+    /// Whether the font picker is in "Custom…" mode (showing the free-text font path field).
+    pub font_custom: bool,
+    // ---- appearance preview: a real, locked (no-pty) terminal showing sample output ----
+    /// The preview pane (fed canned sample output once; never bound to a session).
+    preview_pane: TerminalPane,
+    /// The font the preview renders with, reloaded when the drafted family/size/scale change.
+    preview_font: Option<Font>,
+    /// Cache key for `preview_font`: `(font_path, px, scale)`.
+    preview_key: (String, f32, f32),
+    /// Last terminal-theme index applied to the preview pane (-1 = none yet).
+    preview_theme: i32,
+    /// Last cursor on/off state rendered into the preview (so the caret blinks).
+    preview_cursor: bool,
+    /// The latest rendered preview image (shown in the Appearance preview).
+    pub preview_surface: Image,
     /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
@@ -201,6 +266,15 @@ impl State {
             settings: prefs::load(),
             // Apply the saved font family/size on the first pump (it owns the scale).
             font_reload: true,
+            prefs_draft: None,
+            prefs_confirm: false,
+            font_custom: false,
+            preview_pane: TerminalPane::new(64, 7, Box::new(SoftwareRenderer::new())),
+            preview_font: None,
+            preview_key: (String::new(), 0.0, 0.0),
+            preview_theme: -1,
+            preview_cursor: false,
+            preview_surface: Image::default(),
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
@@ -216,7 +290,50 @@ impl State {
         };
         let tab = s.fresh_tab();
         s.tabs.push(tab);
+        // Canned sample output for the appearance preview (a real, locked terminal). ANSI SGR
+        // so the terminal theme's colours show: green prompt, dim build line, blue "Finished".
+        s.preview_pane.feed(
+            "\x1b[32m$\x1b[0m cargo run\r\n\
+             \x1b[90m   Compiling hyperpanes v0.1.0\x1b[0m\r\n\
+             \x1b[34m    Finished\x1b[0m dev in 1.24s\r\n\
+             \x1b[35mthe quick brown fox\x1b[0m \x1b[36mjumps 0123\x1b[0m\r\n\
+             $ ",
+        );
         s
+    }
+
+    /// Render the appearance preview (a real, locked terminal) with the drafted font + theme,
+    /// returning the freshly-rendered image when anything changed (else `None`). Called by the
+    /// pump while Preferences is open; `scale` is the window DPI scale.
+    pub fn render_preview(&mut self, scale: f32, cursor_on: bool) -> Option<Image> {
+        let (font_path, px, theme_idx) = match &self.prefs_draft {
+            Some(d) => (prefs::resolve_or_default(&d.font_family), d.font_px, d.terminal_theme),
+            None => (self.settings.font_path(), self.settings.font_px, self.settings.terminal_theme),
+        };
+        let key = (font_path.clone(), px, scale);
+        let mut changed = false;
+        if self.preview_font.is_none() || self.preview_key != key {
+            self.preview_font = Some(theme::load_font_at(&font_path, px, scale));
+            self.preview_key = key;
+            changed = true;
+        }
+        if self.preview_theme != theme_idx as i32 {
+            self.preview_pane.set_palette(theme::terminal_theme(theme_idx));
+            self.preview_theme = theme_idx as i32;
+            changed = true;
+        }
+        // Locked (no pty), but the caret still blinks like a real terminal.
+        if self.preview_cursor != cursor_on {
+            self.preview_cursor = cursor_on;
+            changed = true;
+        }
+        if changed || self.preview_pane.take_dirty() {
+            let font = self.preview_font.as_mut().unwrap();
+            self.preview_surface = self.preview_pane.render(font, &RenderOpts { cursor_on });
+            Some(self.preview_surface.clone())
+        } else {
+            None
+        }
     }
 
     fn fresh_tab(&mut self) -> Tab {
@@ -251,6 +368,13 @@ impl State {
     ) -> Option<PaneState> {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
+        let palette = self.settings.frame_palette;
+        // Honour the default-shell preference ("" = let core pick the system default).
+        let shell = if self.settings.default_shell.is_empty() {
+            None
+        } else {
+            Some(self.settings.default_shell.clone())
+        };
         let (cols, rows) = (80u16, 24u16);
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
@@ -258,16 +382,20 @@ impl State {
             rows: Some(rows),
             pane_id: Some(uid.clone()),
             cwd,
+            shell,
             ..Default::default()
         }) {
             eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
             return None;
         }
+        let mut pane =
+            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         Some(PaneState {
             uid,
             title: format!("{}", idx + 1).into(),
-            accent: accent.unwrap_or_else(|| theme::accent_for(idx)),
-            pane: TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new())),
+            accent: accent.unwrap_or_else(|| theme::accent_for(idx, palette)),
+            pane,
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
@@ -275,6 +403,9 @@ impl State {
             started: false,
             startup: None,
             pinned_accent: accent,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
         })
     }
 
@@ -319,6 +450,7 @@ impl State {
         if ti >= self.tabs.len() {
             return None;
         }
+        let palette = self.settings.frame_palette;
         let t = &mut self.tabs[ti];
         if idx >= t.panes.len() {
             return None;
@@ -358,7 +490,7 @@ impl State {
             Some(z) if z > idx => Some(z - 1),
             other => other,
         };
-        t.relabel();
+        t.relabel(palette);
         Some((ps, true))
     }
 
@@ -401,9 +533,11 @@ impl State {
     /// no blank pane and no PTY restart), rebind it to the existing `uid`, and focus it.
     /// `at` is clamped to `0..=len`, so a stitch can insert the pane at a hovered slot.
     pub fn adopt_pane_at(&mut self, mgr: &SessionManager, det: DetachedPane, at: usize) {
+        let palette = self.settings.frame_palette;
         let (cols, rows) = (80u16, 24u16);
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         // Replay the rolling buffer so the re-hosted pane shows recent output instantly.
         if let Some(replay) = mgr.replay(&det.uid) {
             pane.feed(&replay);
@@ -411,7 +545,7 @@ impl State {
         let ps = PaneState {
             uid: det.uid,
             title: det.title,
-            accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at)),
+            accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at, palette)),
             pane,
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
@@ -420,6 +554,9 @@ impl State {
             started: true, // the session is already running — don't re-send any startup.
             startup: None,
             pinned_accent: det.pinned_accent,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -432,7 +569,7 @@ impl State {
         t.panes.insert(at, ps);
         t.focused = at;
         t.zoomed = None;
-        t.relabel();
+        t.relabel(palette);
         self.dirty = true;
     }
 
@@ -471,6 +608,7 @@ impl State {
     /// carrying its split size with it so the layout stays stable. Focus follows the moved
     /// pane. No-op when the move is a no-op or the indices are out of range.
     pub fn reorder_pane(&mut self, from: usize, to: usize) {
+        let palette = self.settings.frame_palette;
         let t = self.active_tab_mut();
         let n = t.panes.len();
         if from >= n || to > n {
@@ -492,7 +630,7 @@ impl State {
             Some(z) if z == from => Some(dest),
             _ => t.zoomed,
         };
-        t.relabel();
+        t.relabel(palette);
         self.dirty = true;
     }
 
@@ -734,10 +872,28 @@ impl State {
 
     // ---- Wave-2: overlay panels (Seam #3) ----
 
-    /// Close whatever overlay is open (a no-op when none is).
+    /// Whether any overlay panel is currently mounted.
+    pub fn overlay_open(&self) -> bool {
+        self.overlay != Overlay::None
+    }
+
+    /// Close whatever overlay is open. Preferences routes through the appearance
+    /// save/discard guard (Esc / scrim click); every other overlay closes immediately.
     pub fn close_overlay(&mut self) {
+        if self.overlay == Overlay::Prefs {
+            self.prefs_request_close();
+            return;
+        }
+        self.close_overlay_now();
+    }
+
+    /// Actually tear down the overlay (clears any appearance draft + confirm prompt).
+    fn close_overlay_now(&mut self) {
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
+            self.prefs_draft = None;
+            self.prefs_confirm = false;
+            self.font_custom = false;
             self.dirty = true;
         }
     }
@@ -804,17 +960,172 @@ impl State {
 
     pub fn open_prefs(&mut self) {
         self.overlay = Overlay::Prefs;
+        // Snapshot the appearance settings into a draft so edits preview without touching
+        // the live panes until Done.
+        self.prefs_draft = Some(PrefsDraft::from_settings(&self.settings));
+        self.prefs_confirm = false;
+        self.font_custom = prefs::is_custom_font(&self.settings.font_family);
         self.dirty = true;
+    }
+
+    /// Font picker: select option `idx` from `prefs::FONT_OPTIONS`, or enter "Custom…" mode
+    /// when `idx` is the trailing Custom entry (== `FONT_OPTIONS.len()`). Edits the draft.
+    pub fn font_select(&mut self, idx: usize) {
+        let Some(d) = self.prefs_draft.as_mut() else { return };
+        if let Some((_, value)) = prefs::FONT_OPTIONS.get(idx) {
+            d.font_family = value.to_string();
+            self.font_custom = false;
+        } else {
+            // Custom… — start from an empty field unless the current value is already custom.
+            if !prefs::is_custom_font(&d.font_family) {
+                d.font_family.clear();
+            }
+            self.font_custom = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Font picker: set the custom font path typed in the "Custom…" field (edits the draft).
+    pub fn font_custom_value(&mut self, value: String) {
+        if let Some(d) = self.prefs_draft.as_mut() {
+            d.font_family = value;
+            self.font_custom = true;
+            self.dirty = true;
+        }
+    }
+
+    /// The appearance values the dialog should display: the draft while Preferences is open,
+    /// else the committed settings. Returns `(resolved_font_path, frame_palette, terminal_theme,
+    /// font_px, show_frame, show_dot)`.
+    pub fn appearance_view(&self) -> (String, usize, usize, f32, bool, bool) {
+        match &self.prefs_draft {
+            Some(d) => (
+                prefs::resolve_or_default(&d.font_family),
+                d.frame_palette,
+                d.terminal_theme,
+                d.font_px,
+                d.show_frame,
+                d.show_dot,
+            ),
+            None => (
+                self.settings.font_path(),
+                self.settings.frame_palette,
+                self.settings.terminal_theme,
+                self.settings.font_px,
+                self.settings.show_frame,
+                self.settings.show_dot,
+            ),
+        }
+    }
+
+    /// Edit the appearance **draft** (no live change). Used for the appearance settings while
+    /// the dialog is open; a no-op if there's no draft or `s` isn't an appearance setting.
+    pub fn draft_setting(&mut self, s: Setting) {
+        let Some(d) = self.prefs_draft.as_mut() else { return };
+        match s {
+            Setting::FontFamily(path) => d.font_family = path,
+            Setting::FramePalette(idx) => d.frame_palette = idx,
+            Setting::TerminalTheme(idx) => d.terminal_theme = idx,
+            Setting::FontDelta(delta) => d.font_px = Settings::clamp_font(d.font_px + delta as f32),
+            Setting::ShowFrame(on) => d.show_frame = on,
+            Setting::ShowDot(on) => d.show_dot = on,
+            // Non-appearance settings never reach the draft.
+            Setting::DefaultShell(_) | Setting::ClickablePaths(_) | Setting::EditorCommand(_) => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Whether the appearance draft differs from the committed settings (un-applied edits).
+    pub fn prefs_dirty(&self) -> bool {
+        match &self.prefs_draft {
+            Some(d) => *d != PrefsDraft::from_settings(&self.settings),
+            None => false,
+        }
+    }
+
+    /// Commit the appearance draft to the live settings (Done / Save): apply each changed
+    /// field via [`Self::apply_setting`] so font reload + palette remap happen, then close.
+    pub fn prefs_done(&mut self) {
+        if let Some(d) = self.prefs_draft.take() {
+            if d.font_family != self.settings.font_family {
+                self.apply_setting(Setting::FontFamily(d.font_family.clone()));
+            }
+            if d.frame_palette != self.settings.frame_palette {
+                self.apply_setting(Setting::FramePalette(d.frame_palette));
+            }
+            if d.terminal_theme != self.settings.terminal_theme {
+                self.apply_setting(Setting::TerminalTheme(d.terminal_theme));
+            }
+            if d.font_px != self.settings.font_px {
+                // Apply the absolute drafted size (apply_setting takes a delta).
+                self.apply_setting(Setting::FontDelta(
+                    (d.font_px - self.settings.font_px).round() as i32,
+                ));
+            }
+            if d.show_frame != self.settings.show_frame {
+                self.apply_setting(Setting::ShowFrame(d.show_frame));
+            }
+            if d.show_dot != self.settings.show_dot {
+                self.apply_setting(Setting::ShowDot(d.show_dot));
+            }
+        }
+        self.close_overlay_now();
+    }
+
+    /// Esc / scrim click while Preferences is open: prompt to save/discard if there are
+    /// un-applied appearance edits, otherwise just close (discarding the empty draft).
+    pub fn prefs_request_close(&mut self) {
+        if self.prefs_dirty() {
+            self.prefs_confirm = true;
+            self.dirty = true;
+        } else {
+            self.close_overlay_now();
+        }
+    }
+
+    /// Resolve the save/discard prompt: 0 = keep editing · 1 = discard · 2 = save.
+    pub fn prefs_confirm_resolve(&mut self, action: i32) {
+        match action {
+            0 => {
+                self.prefs_confirm = false;
+                self.dirty = true;
+            }
+            1 => self.close_overlay_now(),       // discard the draft
+            2 => self.prefs_done(),              // commit the draft
+            _ => {}
+        }
     }
 
     /// Apply a single preferences edit: mutate the settings, persist the blob, and flag
     /// a resync (font edits additionally request a font reload on the next pump).
     pub fn apply_setting(&mut self, s: Setting) {
         match s {
-            Setting::FontFamily(idx) => {
-                if self.settings.font_family != idx {
-                    self.settings.font_family = idx;
+            Setting::FontFamily(path) => {
+                if self.settings.font_family != path {
+                    self.settings.font_family = path;
                     self.font_reload = true;
+                }
+            }
+            Setting::FramePalette(idx) => {
+                if self.settings.frame_palette != idx {
+                    self.settings.frame_palette = idx;
+                    // Recompute every pane's accent against the new palette (by creation
+                    // slot); pinned project colors are preserved by `relabel`.
+                    for t in &mut self.tabs {
+                        t.relabel(idx);
+                    }
+                }
+            }
+            Setting::TerminalTheme(idx) => {
+                if self.settings.terminal_theme != idx {
+                    self.settings.terminal_theme = idx;
+                    // Repaint every open pane with the new colour theme.
+                    let theme = theme::terminal_theme(idx);
+                    for t in &mut self.tabs {
+                        for p in &mut t.panes {
+                            p.pane.set_palette(theme);
+                        }
+                    }
                 }
             }
             Setting::FontDelta(d) => {
@@ -824,8 +1135,11 @@ impl State {
                     self.font_reload = true;
                 }
             }
+            Setting::DefaultShell(shell) => self.settings.default_shell = shell,
             Setting::ShowFrame(on) => self.settings.show_frame = on,
             Setting::ShowDot(on) => self.settings.show_dot = on,
+            Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
+            Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
         }
         prefs::save(&self.settings);
         self.dirty = true;
@@ -835,7 +1149,7 @@ impl State {
     /// pane to re-grid at the new cell metrics (resets each pane's `applied`). Called by
     /// the pump (which owns the scale) when `font_reload` is set.
     pub fn reload_font(&mut self, scale: f32) {
-        self.font = theme::load_font_at(self.settings.font_path(), self.settings.font_px, scale);
+        self.font = theme::load_font_at(&self.settings.font_path(), self.settings.font_px, scale);
         for t in &mut self.tabs {
             for p in &mut t.panes {
                 p.applied = (0, 0); // force a reflow at the new cell size
@@ -843,6 +1157,70 @@ impl State {
         }
         self.font_reload = false;
         self.dirty = true;
+    }
+
+    // ---- clickable paths (terminal link hover / activation) ----
+
+    /// Record a pane's on-screen terminal-surface size (logical px) from the widget's
+    /// `geometry-changed`, used to hit-test link coordinates. `idx` is an active-tab pane.
+    pub fn set_pane_surf(&mut self, idx: usize, w: f32, h: f32) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.surf = (w, h);
+        }
+    }
+
+    /// Hover hit-test for a clickable path under the cursor (logical px within the pane
+    /// surface). Updates the pane's link-overlay state. No-op (and clears any link) when
+    /// clickable paths are disabled. `idx` is an active-tab pane.
+    pub fn pane_link_moved(&mut self, idx: usize, x: f32, y: f32) {
+        let on = self.settings.clickable_paths;
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            if !on {
+                if p.link.is_some() {
+                    p.link = None;
+                    self.dirty = true;
+                }
+                return;
+            }
+            let (w, h) = p.surf;
+            let hit = p.pane.link_at(x, y, w, h);
+            // Only repaint when the hovered link actually changes.
+            if hit != p.link {
+                p.link = hit;
+                p.link_cursor = (x, y);
+                self.dirty = true;
+            } else if p.link.is_some() {
+                p.link_cursor = (x, y); // keep the tooltip tracking the cursor
+            }
+        }
+    }
+
+    /// Clear a pane's hover link when the pointer leaves its surface.
+    pub fn pane_link_exited(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            if p.link.take().is_some() {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Activate the link under a click: open (plain) or copy (ctrl). Returns the action so
+    /// the caller can touch the OS (clipboard / launch). `None` when clickable paths are off
+    /// or the click missed a verified path. `idx` is an active-tab pane.
+    pub fn pane_link_activate(
+        &mut self,
+        idx: usize,
+        x: f32,
+        y: f32,
+        ctrl: bool,
+    ) -> Option<hyperpanes_terminal_widget::LinkAction> {
+        if !self.settings.clickable_paths {
+            return None;
+        }
+        let editor = self.settings.editor_command.clone();
+        let p = self.active_tab_mut().panes.get_mut(idx)?;
+        let (w, h) = p.surf;
+        p.pane.activate_link(x, y, w, h, ctrl, &editor)
     }
 
     // ---- sidebar / projects ----
@@ -1000,5 +1378,5 @@ fn parse_hex(s: &str) -> Color {
             return Color::from_rgb_u8(r, g, b);
         }
     }
-    theme::accent_for(0)
+    theme::accent_for(0, 0)
 }

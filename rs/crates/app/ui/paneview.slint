@@ -3,8 +3,7 @@
 // dividers over them, and reserves an overlay slot for Wave-2 panels.
 
 import { Theme } from "theme.slint";
-import { PaneItem, DividerItem, PaletteItem, PrefOption } from "types.slint";
-import { OverlayLayer } from "overlays.slint";
+import { PaneItem, DividerItem, PaletteItem, PrefOption, FramePaletteOption } from "types.slint";
 import { TerminalPane, KeyMsg } from "@widgets";
 
 // A draggable resize seam. Reports the cursor's offset from the seam centre each
@@ -108,6 +107,23 @@ export component PaneView inherits Rectangle {
     in property <[PaletteItem]> palette;
     in property <int> palette-sel: 0;
     in property <[PrefOption]> pref-families;
+    in property <string> pref-font-label;
+    in property <bool> pref-font-custom: false;
+    in property <string> pref-font-custom-value: "";
+    in property <string> pref-preview-font;
+    in property <color> pref-preview-accent;
+    in property <color> pref-preview-bg;
+    in property <color> pref-preview-fg;
+    in property <color> pref-preview-green;
+    in property <color> pref-preview-blue;
+    in property <color> pref-preview-dim;
+    in property <[PrefOption]> pref-themes;
+    in property <string> pref-theme-label;
+    in property <[FramePaletteOption]> pref-palettes;
+    in property <[PrefOption]> pref-shells;
+    in property <bool> pref-clickable: true;
+    in property <string> pref-editor: "";
+    in property <bool> prefs-confirm: false;
     in property <int> pref-fontpx: 14;
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
@@ -127,12 +143,20 @@ export component PaneView inherits Rectangle {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // clickable-paths: surface geometry (for hit-testing) + hover/click reports.
+    callback pane-geometry(int, length, length);
+    callback pane-link-moved(int, length, length);
+    callback pane-link-exited(int);
+    callback pane-link-activated(int, length, length, bool);
     // Wave-2 overlay callbacks (each maps to a Command in the controller).
     callback palette-query(string);
     callback palette-nav(int);
     callback palette-activate();
     callback palette-pick(int);
     callback pref-action(int, int);
+    callback pref-text(int, string);
+    callback pref-done();
+    callback pref-confirm(int);
     callback overlay-dismiss();
 
     background: Theme.bg;
@@ -244,12 +268,21 @@ export component PaneView inherits Rectangle {
                         surface: pane.surface;
                         accent: pane.accent;
                         chrome: false;
+                        // clickable-path hover overlay (controller-driven after hit-testing)
+                        link-visible: pane.link-visible;
+                        link-x: pane.link-x;
+                        link-y: pane.link-y;
+                        link-w: pane.link-w;
+                        link-tip: pane.link-tip;
+                        link-tip-x: pane.link-tip-x;
+                        link-tip-y: pane.link-tip-y;
                         key(m) => { root.key(idx, m); }
-                    }
-                    TouchArea {
-                        clicked => {
+                        geometry-changed(w, h) => { root.pane-geometry(idx, w, h); }
+                        link-moved(x, y) => { root.pane-link-moved(idx, x, y); }
+                        link-exited => { root.pane-link-exited(idx); }
+                        link-activated(x, y, ctrl) => {
                             root.focus-pane(idx);
-                            tp.focus();
+                            root.pane-link-activated(idx, x, y, ctrl);
                         }
                     }
                 }
@@ -296,31 +329,6 @@ export component PaneView inherits Rectangle {
         }
     }
 
-    // ===== Wave-2 overlay/panel slot =====
-    // A full-area scrim + the OverlayLayer that hosts the command palette, preferences
-    // dialog, and sidebar. Shown whenever `overlay-kind != 0`; a scrim click dismisses.
-    // Mounted here so the slot lives in the tree and Wave-2 work never restructures the
-    // pane-area layout.
-    if root.overlay-kind != 0 : Rectangle {
-        background: #00000080;
-        // scrim click dismisses the overlay (the panels eat their own clicks)
-        TouchArea { clicked => { root.overlay-dismiss(); } }
-        OverlayLayer {
-            width: 100%;
-            height: 100%;
-            kind: root.overlay-kind;
-            palette: root.palette;
-            palette-sel: root.palette-sel;
-            families: root.pref-families;
-            font-px: root.pref-fontpx;
-            show-frame: root.pref-frame;
-            show-dot: root.pref-dot;
-            palette-query(q) => { root.palette-query(q); }
-            palette-nav(d) => { root.palette-nav(d); }
-            palette-activate => { root.palette-activate(); }
-            palette-pick(i) => { root.palette-pick(i); }
-            pref-action(k, a) => { root.pref-action(k, a); }
-            dismiss => { root.overlay-dismiss(); }
-        }
-    }
+    // (The Wave-2 overlay — command palette / preferences — is mounted at the app root
+    //  now, so its frosted scrim covers the top bar + sidebar too; see app.slint.)
 }

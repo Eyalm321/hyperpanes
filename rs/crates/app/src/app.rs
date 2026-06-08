@@ -335,7 +335,12 @@ impl App {
             }
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
-                    w.state.borrow_mut().note_cwd(&cwd);
+                    let mut st = w.state.borrow_mut();
+                    // Resolve clickable paths relative to this pane's live directory.
+                    if let Some((ti, pi)) = st.find_pane(&uid) {
+                        st.tabs[ti].panes[pi].pane.set_cwd(Some(cwd.clone()));
+                    }
+                    st.note_cwd(&cwd);
                 }
             }
         }
@@ -397,6 +402,12 @@ impl App {
         // Other modifier chords (Alt+… focus, bare F11) — run + swallow.
         if let Some(cmd) = crate::route_chord(&msg) {
             self.run_command(win, cmd);
+            return;
+        }
+        // Escape while an overlay is open closes it; Preferences routes through the
+        // appearance save/discard guard (so unsaved edits prompt) rather than reaching the shell.
+        if crate::is_key(&msg.text, Key::Escape) && win.state.borrow().overlay_open() {
+            self.run_command(win, Command::CloseOverlay);
             return;
         }
         // Escape: a tap reaches the shell; HOLDING it in fullscreen exits fullscreen.
@@ -945,6 +956,50 @@ impl App {
             });
         }
 
+        // clickable paths: track each pane's surface size + drive hover/click hit-testing.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_geometry(move |i, w, h| {
+                if let Some(win) = app.window_by_id(id) {
+                    win.state.borrow_mut().set_pane_surf(i as usize, w, h);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_link_moved(move |i, x, y| {
+                if let Some(win) = app.window_by_id(id) {
+                    win.state.borrow_mut().pane_link_moved(i as usize, x, y);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_link_exited(move |i| {
+                if let Some(win) = app.window_by_id(id) {
+                    win.state.borrow_mut().pane_link_exited(i as usize);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_link_activated(move |i, x, y, ctrl| {
+                if let Some(win) = app.window_by_id(id) {
+                    let action = win
+                        .state
+                        .borrow_mut()
+                        .pane_link_activate(i as usize, x, y, ctrl);
+                    if let Some(hyperpanes_terminal_widget::LinkAction::Copy(path)) = action {
+                        copy_to_clipboard(&path);
+                    }
+                }
+            });
+        }
+
         // tabs
         cb0!(on_new_tab, Command::NewTab);
         cb_usize!(on_select_tab, Command::SwitchTab);
@@ -1009,6 +1064,8 @@ impl App {
         cb0!(on_toggle_projects, Command::ToggleProjects);
         cb0!(on_palette_activate, Command::PaletteActivate);
         cb0!(on_overlay_dismiss, Command::CloseOverlay);
+        cb0!(on_pref_done, Command::PrefsDone);
+        cb_i32!(on_pref_confirm, Command::PrefsConfirm);
         cb_i32!(on_palette_nav, Command::PaletteNav);
         cb_usize!(on_palette_pick, Command::PaletteSelect);
         cb_usize!(on_open_project, Command::OpenProject);
@@ -1045,11 +1102,49 @@ impl App {
             let id = win.id;
             win.app.on_pref_action(move |kind, arg| {
                 let Some(w) = app.window_by_id(id) else { return };
+                // Font selection (kind 0) is its own command (handles presets + Custom… mode).
+                if kind == 0 {
+                    app.run_command(&w, Command::FontSelect(arg.max(0) as usize));
+                    return;
+                }
                 let setting = match kind {
-                    0 => crate::state::Setting::FontFamily(arg as usize),
                     1 => crate::state::Setting::FontDelta(arg),
                     2 => crate::state::Setting::ShowFrame(arg != 0),
                     3 => crate::state::Setting::ShowDot(arg != 0),
+                    4 => crate::state::Setting::FramePalette(arg as usize),
+                    9 => crate::state::Setting::TerminalTheme(arg as usize),
+                    5 => crate::state::Setting::DefaultShell(
+                        crate::prefs::SHELL_OPTIONS
+                            .get(arg as usize)
+                            .map(|(_, v)| v.to_string())
+                            .unwrap_or_default(),
+                    ),
+                    6 => crate::state::Setting::ClickablePaths(arg != 0),
+                    _ => return,
+                };
+                // Appearance settings (0–4, 9 = theme) edit the draft (commit on Done);
+                // General/Terminal settings (5–6) apply immediately, matching the renderer.
+                let cmd = if kind <= 4 || kind == 9 {
+                    Command::DraftSetting(setting)
+                } else {
+                    Command::ApplySetting(setting)
+                };
+                app.run_command(&w, cmd);
+            });
+        }
+        // String-valued settings (editor command).
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pref_text(move |kind, value| {
+                let Some(w) = app.window_by_id(id) else { return };
+                // Custom font path (kind 8) is its own command; editor command (7) is a setting.
+                if kind == 8 {
+                    app.run_command(&w, Command::FontCustomValue(value.to_string()));
+                    return;
+                }
+                let setting = match kind {
+                    7 => crate::state::Setting::EditorCommand(value.to_string()),
                     _ => return,
                 };
                 app.run_command(&w, Command::ApplySetting(setting));
@@ -1144,4 +1239,17 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
     windows
         .iter()
         .find(|w| w.state.borrow_mut().find_pane(uid).is_some())
+}
+
+/// Copy `text` to the Windows clipboard via the built-in `clip` utility (no extra crate /
+/// Win32 feature needed). Used by the Ctrl+click branch of clickable paths. Best-effort.
+pub(crate) fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if let Ok(mut child) = Command::new("clip").stdin(Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }
