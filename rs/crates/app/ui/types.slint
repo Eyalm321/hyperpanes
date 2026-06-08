@@ -39,3 +39,24 @@ export struct LayoutOption {
     glyph: string,
     active: bool,
 }
+
+// ===== Wave-2 overlay rows =====
+
+// One visible command-palette row (already filtered + ranked by Rust).
+export struct PaletteItem {
+    title: string,
+    subtitle: string,
+}
+
+// One git-project row in the sidebar panel.
+export struct ProjectItem {
+    name: string,
+    color: color,
+}
+
+// One option in a preferences picker (font family). `active` marks the current value.
+export struct PrefOption {
+    id: int,
+    label: string,
+    active: bool,
+}

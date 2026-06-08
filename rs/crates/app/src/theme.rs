@@ -72,7 +72,6 @@ pub fn layout_glyph(l: Layout) -> &'static str {
 
 /// Load a monospace font at the given UI scale (best-available Cascadia/Consolas).
 pub fn load_font(scale: f32) -> Font {
-    let px = (14.0 * scale).round().max(8.0);
     let candidates = [
         "C:/Windows/Fonts/CascadiaMono.ttf",
         "C:/Windows/Fonts/CascadiaCode.ttf",
@@ -83,5 +82,18 @@ pub fn load_font(scale: f32) -> Font {
         .find(|p| std::path::Path::new(p).exists())
         .copied()
         .unwrap_or("C:/Windows/Fonts/consola.ttf");
-    Font::from_path(path, px).expect("load monospace font")
+    load_font_at(path, 14.0, scale)
+}
+
+/// Load a monospace font from `path` at `base_px` logical points, scaled for DPI.
+/// The Wave-2 preferences feature uses this to re-load the terminal font when the user
+/// changes family/size (the new font flows through `relayout`'s cell-metric reflow).
+pub fn load_font_at(path: &str, base_px: f32, scale: f32) -> Font {
+    let px = (base_px * scale).round().max(8.0);
+    let real = if std::path::Path::new(path).exists() {
+        path
+    } else {
+        "C:/Windows/Fonts/consola.ttf"
+    };
+    Font::from_path(real, px).expect("load monospace font")
 }

@@ -2231,6 +2231,8 @@ dependencies = [
  "hyperpanes-core",
  "hyperpanes-terminal-widget",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
  "tokio",

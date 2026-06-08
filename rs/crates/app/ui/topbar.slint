@@ -198,6 +198,9 @@ export component TopBar inherits Rectangle {
     callback rename-tab(int, string);
     callback set-layout(int);
     callback new-pane();
+    callback open-palette();
+    callback open-prefs();
+    callback toggle-sidebar();
     callback toggle-zoom();
     callback toggle-fullscreen();
     callback start-drag();
@@ -328,7 +331,7 @@ export component TopBar inherits Rectangle {
         x: 8px;
         y: 36px;
         width: 230px;
-        height: 372px;
+        height: 476px;
 
         Rectangle {
             background: Theme.mantle;
@@ -343,6 +346,10 @@ export component TopBar inherits Rectangle {
                 padding: 5px;
                 spacing: 1px;
 
+                MenuItem {
+                    label: "Command palette…";
+                    clicked => { root.open-palette(); menu-popup.close(); }
+                }
                 MenuItem {
                     label: "New pane";
                     clicked => { root.new-pane(); menu-popup.close(); }
@@ -384,6 +391,15 @@ export component TopBar inherits Rectangle {
                     checked: root.fullscreen;
                     show-check: true;
                     clicked => { root.toggle-fullscreen(); menu-popup.close(); }
+                }
+                Rectangle { height: 7px; Rectangle { y: 3px; height: 1px; background: Theme.border; } }
+                MenuItem {
+                    label: "Projects sidebar";
+                    clicked => { root.toggle-sidebar(); menu-popup.close(); }
+                }
+                MenuItem {
+                    label: "Preferences…";
+                    clicked => { root.open-prefs(); menu-popup.close(); }
                 }
                 Rectangle { vertical-stretch: 1; }
             }

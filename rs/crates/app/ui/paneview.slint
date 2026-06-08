@@ -3,7 +3,8 @@
 // dividers over them, and reserves an overlay slot for Wave-2 panels.
 
 import { Theme } from "theme.slint";
-import { PaneItem, DividerItem } from "types.slint";
+import { PaneItem, DividerItem, PaletteItem, ProjectItem, PrefOption } from "types.slint";
+import { OverlayLayer } from "overlays.slint";
 import { TerminalPane, KeyMsg } from "@widgets";
 
 // A draggable resize seam. Reports the cursor's offset from the seam centre each
@@ -99,8 +100,18 @@ export component PaneView inherits Rectangle {
     in property <[DividerItem]> dividers;
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
-    // Wave-2 overlay/panel slot (command palette / prefs / sidebar mount here).
-    in property <bool> overlay-visible: false;
+    // Wave-2 appearance prefs applied to the panes themselves.
+    in property <bool> show-frame: true;
+    in property <bool> show-dot: true;
+    // Wave-2 overlay/panel slot (0 none · 1 palette · 2 prefs · 3 sidebar).
+    in property <int> overlay-kind: 0;
+    in property <[PaletteItem]> palette;
+    in property <int> palette-sel: 0;
+    in property <[PrefOption]> pref-families;
+    in property <int> pref-fontpx: 14;
+    in property <bool> pref-frame: true;
+    in property <bool> pref-dot: true;
+    in property <[ProjectItem]> projects;
 
     callback key(int, KeyMsg);
     callback focus-pane(int);
@@ -109,6 +120,14 @@ export component PaneView inherits Rectangle {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // Wave-2 overlay callbacks (each maps to a Command in the controller).
+    callback palette-query(string);
+    callback palette-nav(int);
+    callback palette-activate();
+    callback palette-pick(int);
+    callback pref-action(int, int);
+    callback open-project(int);
+    callback overlay-dismiss();
 
     background: Theme.bg;
     clip: true;
@@ -128,8 +147,12 @@ export component PaneView inherits Rectangle {
             visible: pane.visible;
             background: Theme.bg;
             border-radius: 7px;
-            border-width: 1px;
-            border-color: pane.focused ? Theme.accent : Theme.border;
+            // Frame border: accent when focused; hidden entirely when the frame pref
+            // is off (a hairline border still separates focused panes).
+            border-width: root.show-frame ? 1px : (pane.focused ? 1px : 0px);
+            border-color: root.show-frame
+                ? (pane.focused ? pane.accent : Theme.border)
+                : (pane.focused ? Theme.accent : transparent);
             clip: true;
 
             VerticalLayout {
@@ -145,6 +168,17 @@ export component PaneView inherits Rectangle {
                         padding-left: 8px;
                         padding-right: 8px;
                         spacing: 6px;
+                        // accent color dot (toggleable via Preferences)
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: pane.accent;
+                                visible: root.show-dot;
+                            }
+                        }
                         Text {
                             text: pane.title;
                             color: pane.focused ? Theme.text : Theme.subtext;
@@ -220,15 +254,32 @@ export component PaneView inherits Rectangle {
     }
 
     // ===== Wave-2 overlay/panel slot =====
-    // A full-area scrim + centred container that future features (command palette,
-    // preferences dialog, sidebar) mount into. Empty + hidden in Wave 1; toggled by
-    // `overlay-visible` and dispatched commands. Kept here so the slot exists in the
-    // tree and Wave-2 work never has to touch the pane-area layout.
-    if root.overlay-visible : Rectangle {
+    // A full-area scrim + the OverlayLayer that hosts the command palette, preferences
+    // dialog, and sidebar. Shown whenever `overlay-kind != 0`; a scrim click dismisses.
+    // Mounted here so the slot lives in the tree and Wave-2 work never restructures the
+    // pane-area layout.
+    if root.overlay-kind != 0 : Rectangle {
         background: #00000080;
-        TouchArea { /* eat clicks behind the panel */ }
-        overlay-slot := Rectangle {
-            // Wave-2 panels populate this container.
+        // scrim click dismisses the overlay (the panels eat their own clicks)
+        TouchArea { clicked => { root.overlay-dismiss(); } }
+        OverlayLayer {
+            width: 100%;
+            height: 100%;
+            kind: root.overlay-kind;
+            palette: root.palette;
+            palette-sel: root.palette-sel;
+            families: root.pref-families;
+            font-px: root.pref-fontpx;
+            show-frame: root.pref-frame;
+            show-dot: root.pref-dot;
+            projects: root.projects;
+            palette-query(q) => { root.palette-query(q); }
+            palette-nav(d) => { root.palette-nav(d); }
+            palette-activate => { root.palette-activate(); }
+            palette-pick(i) => { root.palette-pick(i); }
+            pref-action(k, a) => { root.pref-action(k, a); }
+            open-project(i) => { root.open-project(i); }
+            dismiss => { root.overlay-dismiss(); }
         }
     }
 }

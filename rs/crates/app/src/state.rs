@@ -23,7 +23,33 @@ use hyperpanes_terminal_widget::{SoftwareRenderer, TerminalPane};
 
 use slint::{Color, Image, SharedString};
 
+use crate::command::Command;
+use crate::palette::{self, Entry};
+use crate::prefs::{self, Settings};
+use crate::sidebar::{self, Project};
 use crate::theme;
+
+/// Which Wave-2 overlay panel (if any) is mounted in the overlay slot (**Seam #3**).
+/// Exactly one is shown at a time; opening one replaces the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    Palette,
+    Prefs,
+    Sidebar,
+}
+
+/// A single preferences edit, carried by `Command::ApplySetting`. Keeps the `Command`
+/// enum flat (one variant) while still typing each field of [`Settings`].
+#[derive(Debug, Clone, Copy)]
+pub enum Setting {
+    /// Select font family by index into `prefs::FONT_FAMILIES`.
+    FontFamily(usize),
+    /// Nudge the base font size by ±N points.
+    FontDelta(i32),
+    ShowFrame(bool),
+    ShowDot(bool),
+}
 
 /// One pane's controller-side state (terminal grid + placement + chrome).
 pub struct PaneState {
@@ -41,6 +67,8 @@ pub struct PaneState {
     /// Whether the shell has produced its first output yet (gate the startup write).
     pub started: bool,
     pub startup: Option<String>,
+    /// A fixed accent (e.g. a project color) that survives relabel; `None` = by-index.
+    pub pinned_accent: Option<Color>,
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -70,11 +98,12 @@ impl Tab {
         }
     }
 
-    /// Re-label + recolor panes so titles/accents stay 1..N in order.
+    /// Re-label + recolor panes so titles/accents stay 1..N in order. A pinned accent
+    /// (a project color) is preserved.
     fn relabel(&mut self) {
         for (i, p) in self.panes.iter_mut().enumerate() {
             p.title = format!("{}", i + 1).into();
-            p.accent = theme::accent_for(i);
+            p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i));
         }
     }
 
@@ -100,6 +129,25 @@ pub struct State {
     pub last_hud: Instant,
     /// The UI models (tabs / panes / dividers) need a full rebuild.
     pub dirty: bool,
+    // ---- Wave-2: overlay panels (Seam #3) ----
+    /// Which overlay panel is mounted (palette / prefs / sidebar / none).
+    pub overlay: Overlay,
+    /// Persisted appearance preferences (font, frame/dot).
+    pub settings: Settings,
+    /// Set when the font family/size changed — the pump reloads the font (it owns the
+    /// DPI scale) then clears this.
+    pub font_reload: bool,
+    /// Cached, newest-first git-project list for the sidebar panel.
+    pub projects: Vec<Project>,
+    // ---- command palette working state ----
+    /// The registry snapshot built when the palette opened.
+    palette_entries: Vec<Entry>,
+    /// Indices into `palette_entries` that survive the current query, best-first.
+    pub palette_view: Vec<usize>,
+    /// The highlighted row within `palette_view`.
+    pub palette_sel: usize,
+    /// The live search query.
+    pub palette_query: String,
     // ---- hold-Esc-to-exit-fullscreen tracking (no key-release events, so we
     // infer a held key from rapid auto-repeat) ----
     esc_last: Option<Instant>,
@@ -136,6 +184,15 @@ impl State {
             frames: 0,
             last_hud: Instant::now(),
             dirty: true,
+            overlay: Overlay::None,
+            settings: prefs::load(),
+            // Apply the saved font family/size on the first pump (it owns the scale).
+            font_reload: true,
+            projects: Vec::new(),
+            palette_entries: Vec::new(),
+            palette_view: Vec::new(),
+            palette_sel: 0,
+            palette_query: String::new(),
             esc_last: None,
             esc_hold_start: None,
             esc_holding: false,
@@ -169,7 +226,13 @@ impl State {
         None
     }
 
-    fn make_pane(&mut self, mgr: &SessionManager, idx: usize) -> Option<PaneState> {
+    fn make_pane(
+        &mut self,
+        mgr: &SessionManager,
+        idx: usize,
+        cwd: Option<String>,
+        accent: Option<Color>,
+    ) -> Option<PaneState> {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let (cols, rows) = (80u16, 24u16);
@@ -178,6 +241,7 @@ impl State {
             cols: Some(cols),
             rows: Some(rows),
             pane_id: Some(uid.clone()),
+            cwd,
             ..Default::default()
         }) {
             eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
@@ -186,7 +250,7 @@ impl State {
         Some(PaneState {
             uid,
             title: format!("{}", idx + 1).into(),
-            accent: theme::accent_for(idx),
+            accent: accent.unwrap_or_else(|| theme::accent_for(idx)),
             pane: TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new())),
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
@@ -194,6 +258,7 @@ impl State {
             visible: true,
             started: false,
             startup: None,
+            pinned_accent: accent,
         })
     }
 
@@ -201,8 +266,14 @@ impl State {
 
     /// Spawn a new pane + shell in the active tab and focus it.
     pub fn add_pane(&mut self, mgr: &SessionManager) {
+        self.add_pane_cwd(mgr, None, None);
+    }
+
+    /// Spawn a new pane in the active tab with an optional working directory + accent
+    /// (used to open a sidebar project cd'd into its repo), and focus it.
+    pub fn add_pane_cwd(&mut self, mgr: &SessionManager, cwd: Option<String>, accent: Option<Color>) {
         let idx = self.active_tab().panes.len();
-        let Some(ps) = self.make_pane(mgr, idx) else {
+        let Some(ps) = self.make_pane(mgr, idx, cwd, accent) else {
             return;
         };
         let auto = self.active_tab().layout == Layout::Auto;
@@ -453,6 +524,160 @@ impl State {
         }
     }
 
+    // ---- Wave-2: overlay panels (Seam #3) ----
+
+    /// Close whatever overlay is open (a no-op when none is).
+    pub fn close_overlay(&mut self) {
+        if self.overlay != Overlay::None {
+            self.overlay = Overlay::None;
+            self.dirty = true;
+        }
+    }
+
+    // ---- command palette ----
+
+    /// Open the palette: snapshot the command registry from current state, reset the
+    /// query + selection. Rebuilt every open so pane/layout entries stay fresh.
+    pub fn open_palette(&mut self) {
+        self.palette_entries = palette::build(self);
+        self.palette_query.clear();
+        self.palette_view = (0..self.palette_entries.len()).collect();
+        self.palette_sel = 0;
+        self.overlay = Overlay::Palette;
+        self.dirty = true;
+    }
+
+    /// Update the palette query → refilter + re-rank, keeping the selection in range.
+    pub fn palette_set_query(&mut self, query: &str) {
+        self.palette_query = query.to_string();
+        self.palette_view = palette::filter(&self.palette_entries, query);
+        self.palette_sel = 0;
+        self.dirty = true;
+    }
+
+    /// Move the palette selection by `delta` rows, clamped to the visible results.
+    pub fn palette_nav(&mut self, delta: i32) {
+        let n = self.palette_view.len();
+        if n == 0 {
+            return;
+        }
+        let cur = self.palette_sel as i32;
+        let next = (cur + delta).clamp(0, n as i32 - 1);
+        if next as usize != self.palette_sel {
+            self.palette_sel = next as usize;
+            self.dirty = true;
+        }
+    }
+
+    /// Set the palette selection to a specific visible row (e.g. a mouse click).
+    pub fn palette_select(&mut self, idx: usize) {
+        if idx < self.palette_view.len() && idx != self.palette_sel {
+            self.palette_sel = idx;
+            self.dirty = true;
+        }
+    }
+
+    /// The command for the currently-highlighted palette row (consumed on activate).
+    pub fn palette_command(&self) -> Option<Command> {
+        let entry = self.palette_view.get(self.palette_sel)?;
+        self.palette_entries.get(*entry).map(|e| e.command.clone())
+    }
+
+    /// The visible palette rows as `(title, subtitle)` pairs, in display order.
+    pub fn palette_rows(&self) -> Vec<(SharedString, SharedString)> {
+        self.palette_view
+            .iter()
+            .filter_map(|i| self.palette_entries.get(*i))
+            .map(|e| (e.title.as_str().into(), e.subtitle.as_str().into()))
+            .collect()
+    }
+
+    // ---- preferences ----
+
+    pub fn open_prefs(&mut self) {
+        self.overlay = Overlay::Prefs;
+        self.dirty = true;
+    }
+
+    /// Apply a single preferences edit: mutate the settings, persist the blob, and flag
+    /// a resync (font edits additionally request a font reload on the next pump).
+    pub fn apply_setting(&mut self, s: Setting) {
+        match s {
+            Setting::FontFamily(idx) => {
+                if self.settings.font_family != idx {
+                    self.settings.font_family = idx;
+                    self.font_reload = true;
+                }
+            }
+            Setting::FontDelta(d) => {
+                let next = Settings::clamp_font(self.settings.font_px + d as f32);
+                if next != self.settings.font_px {
+                    self.settings.font_px = next;
+                    self.font_reload = true;
+                }
+            }
+            Setting::ShowFrame(on) => self.settings.show_frame = on,
+            Setting::ShowDot(on) => self.settings.show_dot = on,
+        }
+        prefs::save(&self.settings);
+        self.dirty = true;
+    }
+
+    /// Reload the terminal font from the current settings at DPI `scale`, forcing every
+    /// pane to re-grid at the new cell metrics (resets each pane's `applied`). Called by
+    /// the pump (which owns the scale) when `font_reload` is set.
+    pub fn reload_font(&mut self, scale: f32) {
+        self.font = theme::load_font_at(self.settings.font_path(), self.settings.font_px, scale);
+        for t in &mut self.tabs {
+            for p in &mut t.panes {
+                p.applied = (0, 0); // force a reflow at the new cell size
+            }
+        }
+        self.font_reload = false;
+        self.dirty = true;
+    }
+
+    // ---- sidebar / projects ----
+
+    /// Toggle the sidebar panel; refresh the project list when opening it.
+    pub fn toggle_sidebar(&mut self) {
+        if self.overlay == Overlay::Sidebar {
+            self.overlay = Overlay::None;
+        } else {
+            self.projects = sidebar::list();
+            self.overlay = Overlay::Sidebar;
+        }
+        self.dirty = true;
+    }
+
+    /// A pane reported a cwd — if it's inside a repo, remember it and refresh the cache
+    /// (so an open sidebar updates live).
+    pub fn note_cwd(&mut self, cwd: &str) {
+        if let Some(list) = sidebar::note_cwd(cwd) {
+            self.projects = list;
+            if self.overlay == Overlay::Sidebar {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// The cached project rows as `(name, color)` for the panel.
+    pub fn project_rows(&self) -> Vec<(SharedString, Color)> {
+        self.projects
+            .iter()
+            .map(|p| (p.name.as_str().into(), parse_hex(&p.color)))
+            .collect()
+    }
+
+    /// Open project `idx` (from the panel) in a new pane cd'd into its repo, focused.
+    pub fn open_project(&mut self, idx: usize, mgr: &SessionManager) {
+        let Some(p) = self.projects.get(idx).cloned() else {
+            return;
+        };
+        self.overlay = Overlay::None;
+        self.add_pane_cwd(mgr, Some(p.path.clone()), Some(parse_hex(&p.color)));
+    }
+
     /// Record an Escape key event and decide what to do with it. A lone tap
     /// forwards to the shell; holding Escape (rapid auto-repeat) while in
     /// fullscreen sets [`Self::esc_holding`] (so the hint + its progress fill
@@ -511,4 +736,20 @@ impl State {
         }
         false
     }
+}
+
+/// Parse a `#rrggbb` hex string (the project palette format) into a Slint [`Color`],
+/// falling back to the default accent on a malformed value.
+fn parse_hex(s: &str) -> Color {
+    let h = s.trim_start_matches('#');
+    if h.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&h[0..2], 16),
+            u8::from_str_radix(&h[2..4], 16),
+            u8::from_str_radix(&h[4..6], 16),
+        ) {
+            return Color::from_rgb_u8(r, g, b);
+        }
+    }
+    theme::accent_for(0)
 }
