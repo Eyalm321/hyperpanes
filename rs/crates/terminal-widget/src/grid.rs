@@ -192,6 +192,15 @@ impl TermGrid {
         self.size
     }
 
+    /// Whether the application has enabled **bracketed paste** mode (DECSET 2004). When on, a
+    /// paste must be wrapped in `ESC[200~ … ESC[201~` so the shell/line-editor (e.g. PSReadLine)
+    /// treats it as one literal insertion instead of replaying each embedded newline as Enter —
+    /// which is what fragments a multi-line paste across `>>` continuation prompts and strands the
+    /// caret. See [`TerminalPane::paste_from_clipboard`](crate::pane::TerminalPane).
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+    }
+
     // ---- Scrollback access + scrolling (for in-pane search) ---------------------------------
 
     /// How far the viewport is scrolled up into history, in lines (0 = pinned to the bottom /
@@ -441,6 +450,16 @@ mod tests {
         // The block paints in the default fg; the glyph in the default bg.
         assert_eq!([c.bg[0], c.bg[1], c.bg[2]], [snap.default_fg[0], snap.default_fg[1], snap.default_fg[2]]);
         assert_eq!([c.fg[0], c.fg[1], c.fg[2]], [snap.default_bg[0], snap.default_bg[1], snap.default_bg[2]]);
+    }
+
+    #[test]
+    fn bracketed_paste_mode_tracks_decset_2004() {
+        let mut g = TermGrid::new(20, 4);
+        assert!(!g.bracketed_paste(), "off by default");
+        g.feed(b"\x1b[?2004h"); // DECSET 2004 — app turns bracketed paste ON (PSReadLine does)
+        assert!(g.bracketed_paste(), "enabled after DECSET 2004h");
+        g.feed(b"\x1b[?2004l"); // DECRST — back off
+        assert!(!g.bracketed_paste(), "disabled after DECRST 2004l");
     }
 
     #[test]

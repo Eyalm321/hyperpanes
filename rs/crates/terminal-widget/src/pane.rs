@@ -480,7 +480,16 @@ impl TerminalPane {
         let text = self.clipboard.paste()?;
         let n = text.chars().count();
         self.set_toast(format!("Pasted {} char{}", n, if n == 1 { "" } else { "s" }));
-        Some(text)
+        // When the app enabled bracketed-paste mode (PSReadLine does), wrap the payload in
+        // `ESC[200~ … ESC[201~`. The shell then inserts the whole thing as one literal paste —
+        // the caret lands at the end — instead of replaying each embedded newline as Enter, which
+        // is what fragmented a multi-line paste across `>>` continuation prompts and stranded the
+        // caret behind the text. The char-count toast stays on the *visible* text, not the markers.
+        if self.grid.bracketed_paste() {
+            Some(format!("\u{1b}[200~{text}\u{1b}[201~"))
+        } else {
+            Some(text)
+        }
     }
 
     /// Pin the viewport back to the live edge (display offset 0) so the cursor is visible at the
