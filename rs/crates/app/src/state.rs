@@ -20,7 +20,7 @@ use hyperpanes_core::layout::sizes::{
 };
 use hyperpanes_core::persistence::projects;
 use hyperpanes_core::session_manager::{SessionManager, SpawnOptions};
-use hyperpanes_terminal_widget::{SoftwareRenderer, TerminalPane};
+use hyperpanes_terminal_widget::{Font, RenderOpts, SoftwareRenderer, TerminalPane};
 
 use slint::{Color, Image, SharedString};
 
@@ -199,6 +199,17 @@ pub struct State {
     pub prefs_confirm: bool,
     /// Whether the font picker is in "Custom…" mode (showing the free-text font path field).
     pub font_custom: bool,
+    // ---- appearance preview: a real, locked (no-pty) terminal showing sample output ----
+    /// The preview pane (fed canned sample output once; never bound to a session).
+    preview_pane: TerminalPane,
+    /// The font the preview renders with, reloaded when the drafted family/size/scale change.
+    preview_font: Option<Font>,
+    /// Cache key for `preview_font`: `(font_path, px, scale)`.
+    preview_key: (String, f32, f32),
+    /// Last terminal-theme index applied to the preview pane (-1 = none yet).
+    preview_theme: i32,
+    /// The latest rendered preview image (shown in the Appearance preview).
+    pub preview_surface: Image,
     /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
@@ -256,6 +267,11 @@ impl State {
             prefs_draft: None,
             prefs_confirm: false,
             font_custom: false,
+            preview_pane: TerminalPane::new(64, 7, Box::new(SoftwareRenderer::new())),
+            preview_font: None,
+            preview_key: (String::new(), 0.0, 0.0),
+            preview_theme: -1,
+            preview_surface: Image::default(),
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
@@ -271,7 +287,46 @@ impl State {
         };
         let tab = s.fresh_tab();
         s.tabs.push(tab);
+        // Canned sample output for the appearance preview (a real, locked terminal). ANSI SGR
+        // so the terminal theme's colours show: green prompt, dim build line, blue "Finished".
+        s.preview_pane.feed(
+            "\x1b[32m$\x1b[0m cargo run\r\n\
+             \x1b[90m   Compiling hyperpanes v0.1.0\x1b[0m\r\n\
+             \x1b[34m    Finished\x1b[0m dev in 1.24s\r\n\
+             \x1b[35mthe quick brown fox\x1b[0m \x1b[36mjumps 0123\x1b[0m\r\n\
+             $ ",
+        );
         s
+    }
+
+    /// Render the appearance preview (a real, locked terminal) with the drafted font + theme,
+    /// returning the freshly-rendered image when anything changed (else `None`). Called by the
+    /// pump while Preferences is open; `scale` is the window DPI scale.
+    pub fn render_preview(&mut self, scale: f32) -> Option<Image> {
+        let (font_path, px, theme_idx) = match &self.prefs_draft {
+            Some(d) => (prefs::resolve_or_default(&d.font_family), d.font_px, d.terminal_theme),
+            None => (self.settings.font_path(), self.settings.font_px, self.settings.terminal_theme),
+        };
+        let key = (font_path.clone(), px, scale);
+        let mut changed = false;
+        if self.preview_font.is_none() || self.preview_key != key {
+            self.preview_font = Some(theme::load_font_at(&font_path, px, scale));
+            self.preview_key = key;
+            changed = true;
+        }
+        if self.preview_theme != theme_idx as i32 {
+            self.preview_pane.set_palette(theme::terminal_theme(theme_idx));
+            self.preview_theme = theme_idx as i32;
+            changed = true;
+        }
+        if changed || self.preview_pane.take_dirty() {
+            let font = self.preview_font.as_mut().unwrap();
+            // Locked: no live cursor blink.
+            self.preview_surface = self.preview_pane.render(font, &RenderOpts { cursor_on: false });
+            Some(self.preview_surface.clone())
+        } else {
+            None
+        }
     }
 
     fn fresh_tab(&mut self) -> Tab {

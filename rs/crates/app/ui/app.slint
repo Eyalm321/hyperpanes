@@ -56,13 +56,9 @@ export component AppWindow inherits Window {
     in property <string> pref-font-label;
     in property <bool> pref-font-custom: false;
     in property <string> pref-font-custom-value: "";
-    in property <string> pref-preview-font;
+    in property <image> pref-preview-surface;
     in property <color> pref-preview-accent;
     in property <color> pref-preview-bg;
-    in property <color> pref-preview-fg;
-    in property <color> pref-preview-green;
-    in property <color> pref-preview-blue;
-    in property <color> pref-preview-dim;
     in property <[PrefOption]> pref-themes;
     in property <string> pref-theme-label;
     in property <[FramePaletteOption]> pref-palettes;
@@ -202,30 +198,6 @@ export component AppWindow inherits Window {
                 fullscreen: root.fullscreen;
                 show-frame: root.show-frame;
                 show-dot: root.show-dot;
-                overlay-kind: root.overlay-kind;
-                palette: root.palette;
-                palette-sel: root.palette-sel;
-                pref-families: root.pref-families;
-                pref-font-label: root.pref-font-label;
-                pref-font-custom: root.pref-font-custom;
-                pref-font-custom-value: root.pref-font-custom-value;
-                pref-preview-font: root.pref-preview-font;
-                pref-preview-accent: root.pref-preview-accent;
-                pref-preview-bg: root.pref-preview-bg;
-                pref-preview-fg: root.pref-preview-fg;
-                pref-preview-green: root.pref-preview-green;
-                pref-preview-blue: root.pref-preview-blue;
-                pref-preview-dim: root.pref-preview-dim;
-                pref-themes: root.pref-themes;
-                pref-theme-label: root.pref-theme-label;
-                pref-palettes: root.pref-palettes;
-                pref-shells: root.pref-shells;
-                pref-fontpx: root.pref-fontpx;
-                pref-frame: root.pref-frame;
-                pref-dot: root.pref-dot;
-                prefs-confirm: root.prefs-confirm;
-                pref-clickable: root.pref-clickable;
-                pref-editor: root.pref-editor;
                 drop-rect-x: root.drop-rect-x;
                 drop-rect-y: root.drop-rect-y;
                 drop-rect-w: root.drop-rect-w;
@@ -245,15 +217,6 @@ export component AppWindow inherits Window {
                 pane-link-moved(i, x, y) => { root.pane-link-moved(i, x, y); }
                 pane-link-exited(i) => { root.pane-link-exited(i); }
                 pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
-                palette-query(q) => { root.palette-query(q); }
-                palette-nav(d) => { root.palette-nav(d); }
-                palette-activate => { root.palette-activate(); }
-                palette-pick(i) => { root.palette-pick(i); }
-                pref-action(k, a) => { root.pref-action(k, a); }
-                pref-text(k, v) => { root.pref-text(k, v); }
-                pref-done => { root.pref-done(); }
-                pref-confirm(a) => { root.pref-confirm(a); }
-                overlay-dismiss => { root.overlay-dismiss(); }
             }
 
             // Shown whenever the setting is on AND not fullscreen (mirrors
@@ -305,13 +268,9 @@ export component AppWindow inherits Window {
             font-label: root.pref-font-label;
             font-custom: root.pref-font-custom;
             font-custom-value: root.pref-font-custom-value;
-            preview-font: root.pref-preview-font;
+            preview-surface: root.pref-preview-surface;
             preview-accent: root.pref-preview-accent;
             preview-bg: root.pref-preview-bg;
-            preview-fg: root.pref-preview-fg;
-            preview-green: root.pref-preview-green;
-            preview-blue: root.pref-preview-blue;
-            preview-dim: root.pref-preview-dim;
             themes: root.pref-themes;
             theme-label: root.pref-theme-label;
             frame-palettes: root.pref-palettes;

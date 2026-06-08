@@ -332,18 +332,11 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         font_label = prefs::FONT_OPTIONS[0].0.to_string();
     }
     sync_model(&ui.families, families);
-    // Preview font-family name for Slint's text renderer: the family label for a preset, or
-    // Consolas for the system default / a custom path (Slint matches by name, not path).
-    let preview_font = if custom || font_label == prefs::FONT_OPTIONS[0].0 {
-        "Consolas".to_string()
-    } else {
-        font_label.clone()
-    };
     app.set_pref_font_label(font_label.into());
     app.set_pref_font_custom(custom);
     app.set_pref_font_custom_value(raw_font.into());
-    app.set_pref_preview_font(preview_font.into());
-    // Preview accent = the drafted palette's first slot.
+    // Preview header accent = the drafted palette's first slot (the surface itself is
+    // rendered by the controller's locked preview terminal; see State::render_preview).
     app.set_pref_preview_accent(theme::accent_for(0, view_palette));
 
     // frame-palette options (label + 8 slot color chips), active = drafted/current
@@ -380,12 +373,8 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .collect();
     sync_model(&ui.themes, themes);
     app.set_pref_theme_label(theme_label.into());
-    // preview terminal colours from the drafted theme (bg/fg + a couple of ANSI accents)
+    // preview letterbox background = the drafted theme's background colour.
     app.set_pref_preview_bg(theme::theme_color(view_theme, 0));
-    app.set_pref_preview_fg(theme::theme_color(view_theme, 7));
-    app.set_pref_preview_green(theme::theme_color(view_theme, 2));
-    app.set_pref_preview_blue(theme::theme_color(view_theme, 4));
-    app.set_pref_preview_dim(theme::theme_color(view_theme, 8));
 
     // default-shell options; active = the one whose token matches the saved setting.
     let shells: Vec<PrefOption> = prefs::SHELL_OPTIONS
@@ -445,6 +434,13 @@ pub fn pump(
     if state.dirty {
         resync(state, app, ui, area, scale, mgr);
         state.dirty = false;
+    }
+
+    // ---- render the appearance preview (a real, locked terminal) while Prefs is open ----
+    if state.overlay == Overlay::Prefs {
+        if let Some(img) = state.render_preview(scale) {
+            app.set_pref_preview_surface(img);
+        }
     }
 
     // ---- cursor blink (~530 ms) ----

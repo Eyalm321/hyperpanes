@@ -82,17 +82,11 @@ component NavItem inherits Rectangle {
 // visible before Done. (Terminal color theme + idle-glow aren't wired in the native widget
 // yet, so the preview doesn't reflect those — TODO(phase5).)
 component AppearancePreview inherits Rectangle {
-    in property <string> font-name;
-    in property <int> px;
+    in property <image> surface;   // the rendered locked-terminal image
     in property <color> accent;
     in property <bool> show-frame;
     in property <bool> show-dot;
-    // terminal colour-theme colours
     in property <color> bg;
-    in property <color> fg;
-    in property <color> green;
-    in property <color> blue;
-    in property <color> dim;
     height: 134px;
     border-radius: 8px;
     background: root.bg;
@@ -129,37 +123,20 @@ component AppearancePreview inherits Rectangle {
                 }
             }
         }
-        // sample terminal output, rendered in the drafted font + size + theme colours
+        // the real, locked terminal surface (rendered by the controller in the drafted
+        // font + theme), letterboxed on the theme background.
         Rectangle {
             background: root.bg;
-            VerticalLayout {
-                padding: 8px;
-                spacing: 2px;
-                alignment: start;
-                Text {
-                    text: "PS C:\\hyperpanes> cargo run";
-                    color: root.fg;
-                    font-family: root.font-name;
-                    font-size: root.px * 1px;
-                }
-                Text {
-                    text: "   Compiling hyperpanes v0.1.0";
-                    color: root.green;
-                    font-family: root.font-name;
-                    font-size: root.px * 1px;
-                }
-                Text {
-                    text: "    Finished dev in 1.24s";
-                    color: root.blue;
-                    font-family: root.font-name;
-                    font-size: root.px * 1px;
-                }
-                Text {
-                    text: "the quick brown fox 0123 ▮";
-                    color: root.dim;
-                    font-family: root.font-name;
-                    font-size: root.px * 1px;
-                }
+            clip: true;
+            Image {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+                source: root.surface;
+                image-fit: contain;
+                image-rendering: pixelated;
+                horizontal-alignment: left;
             }
         }
     }
@@ -282,13 +259,9 @@ export component OverlayLayer inherits Rectangle {
     in property <string> font-label;
     in property <bool> font-custom: false;
     in property <string> font-custom-value: "";
-    in property <string> preview-font;
+    in property <image> preview-surface;
     in property <color> preview-accent;
     in property <color> preview-bg;
-    in property <color> preview-fg;
-    in property <color> preview-green;
-    in property <color> preview-blue;
-    in property <color> preview-dim;
     in property <[PrefOption]> themes;
     in property <string> theme-label;
     in property <[FramePaletteOption]> frame-palettes;
@@ -479,16 +452,11 @@ export component OverlayLayer inherits Rectangle {
             // ---- live preview ----
             Text { text: "Preview"; color: Theme.faint; font-size: 11px; }
             AppearancePreview {
-                font-name: root.preview-font;
-                px: root.font-px;
+                surface: root.preview-surface;
                 accent: root.preview-accent;
                 show-frame: root.show-frame;
                 show-dot: root.show-dot;
                 bg: root.preview-bg;
-                fg: root.preview-fg;
-                green: root.preview-green;
-                blue: root.preview-blue;
-                dim: root.preview-dim;
             }
 
             // ---- frame color palette (pane dot + border) ----
