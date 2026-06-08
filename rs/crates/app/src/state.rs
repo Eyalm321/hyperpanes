@@ -57,6 +57,8 @@ pub enum Setting {
     FontFamily(String),
     /// Select the frame palette by index into `theme::FRAME_PALETTES` (remaps pane accents).
     FramePalette(usize),
+    /// Select the terminal colour theme by index into `theme::TERMINAL_THEMES`.
+    TerminalTheme(usize),
     /// Set the default shell token for new panes ("" = system default).
     DefaultShell(String),
     /// Nudge the base font size by ±N points.
@@ -77,6 +79,7 @@ pub enum Setting {
 pub struct PrefsDraft {
     pub font_family: String,
     pub frame_palette: usize,
+    pub terminal_theme: usize,
     pub font_px: f32,
     pub show_frame: bool,
     pub show_dot: bool,
@@ -88,6 +91,7 @@ impl PrefsDraft {
         PrefsDraft {
             font_family: s.font_family.clone(),
             frame_palette: s.frame_palette,
+            terminal_theme: s.terminal_theme,
             font_px: s.font_px,
             show_frame: s.show_frame,
             show_dot: s.show_dot,
@@ -322,11 +326,14 @@ impl State {
             eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
             return None;
         }
+        let mut pane =
+            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         Some(PaneState {
             uid,
             title: format!("{}", idx + 1).into(),
             accent: accent.unwrap_or_else(|| theme::accent_for(idx, palette)),
-            pane: TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new())),
+            pane,
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
@@ -468,6 +475,7 @@ impl State {
         let (cols, rows) = (80u16, 24u16);
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         // Replay the rolling buffer so the re-hosted pane shows recent output instantly.
         if let Some(replay) = mgr.replay(&det.uid) {
             pane.feed(&replay);
@@ -925,13 +933,14 @@ impl State {
     }
 
     /// The appearance values the dialog should display: the draft while Preferences is open,
-    /// else the committed settings. Returns `(resolved_font_path, frame_palette, font_px,
-    /// show_frame, show_dot)`.
-    pub fn appearance_view(&self) -> (String, usize, f32, bool, bool) {
+    /// else the committed settings. Returns `(resolved_font_path, frame_palette, terminal_theme,
+    /// font_px, show_frame, show_dot)`.
+    pub fn appearance_view(&self) -> (String, usize, usize, f32, bool, bool) {
         match &self.prefs_draft {
             Some(d) => (
                 prefs::resolve_or_default(&d.font_family),
                 d.frame_palette,
+                d.terminal_theme,
                 d.font_px,
                 d.show_frame,
                 d.show_dot,
@@ -939,6 +948,7 @@ impl State {
             None => (
                 self.settings.font_path(),
                 self.settings.frame_palette,
+                self.settings.terminal_theme,
                 self.settings.font_px,
                 self.settings.show_frame,
                 self.settings.show_dot,
@@ -953,6 +963,7 @@ impl State {
         match s {
             Setting::FontFamily(path) => d.font_family = path,
             Setting::FramePalette(idx) => d.frame_palette = idx,
+            Setting::TerminalTheme(idx) => d.terminal_theme = idx,
             Setting::FontDelta(delta) => d.font_px = Settings::clamp_font(d.font_px + delta as f32),
             Setting::ShowFrame(on) => d.show_frame = on,
             Setting::ShowDot(on) => d.show_dot = on,
@@ -979,6 +990,9 @@ impl State {
             }
             if d.frame_palette != self.settings.frame_palette {
                 self.apply_setting(Setting::FramePalette(d.frame_palette));
+            }
+            if d.terminal_theme != self.settings.terminal_theme {
+                self.apply_setting(Setting::TerminalTheme(d.terminal_theme));
             }
             if d.font_px != self.settings.font_px {
                 // Apply the absolute drafted size (apply_setting takes a delta).
@@ -1037,6 +1051,18 @@ impl State {
                     // slot); pinned project colors are preserved by `relabel`.
                     for t in &mut self.tabs {
                         t.relabel(idx);
+                    }
+                }
+            }
+            Setting::TerminalTheme(idx) => {
+                if self.settings.terminal_theme != idx {
+                    self.settings.terminal_theme = idx;
+                    // Repaint every open pane with the new colour theme.
+                    let theme = theme::terminal_theme(idx);
+                    for t in &mut self.tabs {
+                        for p in &mut t.panes {
+                            p.pane.set_palette(theme);
+                        }
                     }
                 }
             }

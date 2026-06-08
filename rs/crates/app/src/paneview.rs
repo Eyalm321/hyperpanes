@@ -47,6 +47,7 @@ pub struct Ui {
     pub families: Rc<VecModel<PrefOption>>,
     pub palettes: Rc<VecModel<FramePaletteOption>>,
     pub shells: Rc<VecModel<PrefOption>>,
+    pub themes: Rc<VecModel<PrefOption>>,
 }
 
 impl Ui {
@@ -62,6 +63,7 @@ impl Ui {
             families: Rc::new(VecModel::default()),
             palettes: Rc::new(VecModel::default()),
             shells: Rc::new(VecModel::default()),
+            themes: Rc::new(VecModel::default()),
         })
     }
 
@@ -76,6 +78,7 @@ impl Ui {
         app.set_pref_families(ModelRc::from(self.families.clone()));
         app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
         app.set_pref_shells(ModelRc::from(self.shells.clone()));
+        app.set_pref_themes(ModelRc::from(self.themes.clone()));
     }
 }
 
@@ -295,7 +298,8 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
 
     // Appearance controls reflect the DRAFT while Preferences is open (so edits preview
     // without touching the live panes), else the committed settings.
-    let (_view_font, view_palette, view_px, view_frame, view_dot) = state.appearance_view();
+    let (_view_font, view_palette, view_theme, view_px, view_frame, view_dot) =
+        state.appearance_view();
 
     // Font family: the fixed option list (mirrors the renderer) + a trailing "Custom…"
     // entry. Active = the option whose value matches the drafted raw value, or Custom when
@@ -360,6 +364,28 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         })
         .collect();
     sync_model(&ui.palettes, palettes);
+
+    // terminal colour-theme options (active = drafted/current); preview colors come from it.
+    let mut theme_label = String::new();
+    let themes: Vec<PrefOption> = theme::TERMINAL_THEMES
+        .iter()
+        .enumerate()
+        .map(|(id, (label, _))| {
+            let active = id == view_theme;
+            if active {
+                theme_label = (*label).to_string();
+            }
+            PrefOption { id: id as i32, label: (*label).into(), active }
+        })
+        .collect();
+    sync_model(&ui.themes, themes);
+    app.set_pref_theme_label(theme_label.into());
+    // preview terminal colours from the drafted theme (bg/fg + a couple of ANSI accents)
+    app.set_pref_preview_bg(theme::theme_color(view_theme, 0));
+    app.set_pref_preview_fg(theme::theme_color(view_theme, 7));
+    app.set_pref_preview_green(theme::theme_color(view_theme, 2));
+    app.set_pref_preview_blue(theme::theme_color(view_theme, 4));
+    app.set_pref_preview_dim(theme::theme_color(view_theme, 8));
 
     // default-shell options; active = the one whose token matches the saved setting.
     let shells: Vec<PrefOption> = prefs::SHELL_OPTIONS

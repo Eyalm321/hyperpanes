@@ -1112,6 +1112,7 @@ impl App {
                     2 => crate::state::Setting::ShowFrame(arg != 0),
                     3 => crate::state::Setting::ShowDot(arg != 0),
                     4 => crate::state::Setting::FramePalette(arg as usize),
+                    9 => crate::state::Setting::TerminalTheme(arg as usize),
                     5 => crate::state::Setting::DefaultShell(
                         crate::prefs::SHELL_OPTIONS
                             .get(arg as usize)
@@ -1121,9 +1122,9 @@ impl App {
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
                     _ => return,
                 };
-                // Appearance settings (0–4) edit the draft (commit on Done); General/Terminal
-                // settings (5–6) apply immediately, matching the renderer dialog.
-                let cmd = if kind <= 4 {
+                // Appearance settings (0–4, 9 = theme) edit the draft (commit on Done);
+                // General/Terminal settings (5–6) apply immediately, matching the renderer.
+                let cmd = if kind <= 4 || kind == 9 {
                     Command::DraftSetting(setting)
                 } else {
                     Command::ApplySetting(setting)

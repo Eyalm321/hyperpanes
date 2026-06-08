@@ -85,6 +85,9 @@ pub struct Settings {
     /// Index into [`crate::theme::FRAME_PALETTES`] for the active pane dot/frame palette.
     /// Switching it remaps panes by creation slot (the native port of `framePalette`).
     pub frame_palette: usize,
+    /// Index into [`crate::theme::TERMINAL_THEMES`] for the active terminal colour theme
+    /// (the terminal's own bg/fg + 16 ANSI colours). Mirrors `terminalTheme`.
+    pub terminal_theme: usize,
     /// Default shell for new panes (the token from [`SHELL_OPTIONS`], e.g. "pwsh"). Empty
     /// = the system default. Mirrors the renderer `Settings.defaultShell`.
     pub default_shell: String,
@@ -113,6 +116,7 @@ impl Default for Settings {
         Settings {
             font_family: String::new(),
             frame_palette: 0,
+            terminal_theme: 0,
             default_shell: String::new(),
             font_px: DEFAULT_FONT_PX,
             show_frame: true,

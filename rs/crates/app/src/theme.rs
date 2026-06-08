@@ -76,6 +76,113 @@ pub fn frame_palette(idx: usize) -> &'static [(u8, u8, u8); 8] {
     &FRAME_PALETTES[idx.min(FRAME_PALETTES.len() - 1)].1
 }
 
+/// The selectable terminal colour themes (the terminal's own bg/fg + 16 ANSI colours),
+/// the native port of the renderer's `TERMINAL_THEMES`. Each is the 16 base colours the
+/// glyph grid uses: index 0 = background, 7 = foreground, 1–6 the ANSI colours, 8–15 the
+/// bright variants (see `terminal-widget`'s `set_base16`). Index 0 (Dark) is the default.
+pub const TERMINAL_THEMES: [(&str, [[u8; 3]; 16]); 4] = [
+    // "Dark" — Catppuccin Mocha (the original look).
+    (
+        "Dark",
+        [
+            [0x11, 0x11, 0x1b], // bg
+            [0xf3, 0x8b, 0xa8], // red
+            [0xa6, 0xe3, 0xa1], // green
+            [0xf9, 0xe2, 0xaf], // yellow
+            [0x89, 0xb4, 0xfa], // blue
+            [0xf5, 0xc2, 0xe7], // magenta
+            [0x94, 0xe2, 0xd5], // cyan
+            [0xcd, 0xd6, 0xf4], // fg
+            [0x58, 0x5b, 0x70], // bright black
+            [0xf3, 0x8b, 0xa8],
+            [0xa6, 0xe3, 0xa1],
+            [0xf9, 0xe2, 0xaf],
+            [0x89, 0xb4, 0xfa],
+            [0xf5, 0xc2, 0xe7],
+            [0x94, 0xe2, 0xd5],
+            [0xa6, 0xad, 0xc8],
+        ],
+    ),
+    // "Black" — pure-black background (OLED-friendly).
+    (
+        "Black",
+        [
+            [0x00, 0x00, 0x00],
+            [0xff, 0x5c, 0x57],
+            [0x5a, 0xf7, 0x8e],
+            [0xf3, 0xf9, 0x9d],
+            [0x57, 0xc7, 0xff],
+            [0xff, 0x6a, 0xc1],
+            [0x9a, 0xed, 0xfe],
+            [0xe6, 0xe6, 0xe6],
+            [0x68, 0x68, 0x68],
+            [0xff, 0x5c, 0x57],
+            [0x5a, 0xf7, 0x8e],
+            [0xf3, 0xf9, 0x9d],
+            [0x57, 0xc7, 0xff],
+            [0xff, 0x6a, 0xc1],
+            [0x9a, 0xed, 0xfe],
+            [0xff, 0xff, 0xff],
+        ],
+    ),
+    // "Light" — Catppuccin Latte (light background, light-tuned ANSI).
+    (
+        "Light",
+        [
+            [0xef, 0xf1, 0xf5],
+            [0xd2, 0x0f, 0x39],
+            [0x40, 0xa0, 0x2b],
+            [0xdf, 0x8e, 0x1d],
+            [0x1e, 0x66, 0xf5],
+            [0xea, 0x76, 0xcb],
+            [0x17, 0x92, 0x99],
+            [0x4c, 0x4f, 0x69],
+            [0x6c, 0x6f, 0x85],
+            [0xd2, 0x0f, 0x39],
+            [0x40, 0xa0, 0x2b],
+            [0xdf, 0x8e, 0x1d],
+            [0x1e, 0x66, 0xf5],
+            [0xea, 0x76, 0xcb],
+            [0x17, 0x92, 0x99],
+            [0xbc, 0xc0, 0xcc],
+        ],
+    ),
+    // "High contrast" — white-on-black with vivid ANSI colours.
+    (
+        "High contrast",
+        [
+            [0x00, 0x00, 0x00],
+            [0xff, 0x55, 0x55],
+            [0x00, 0xff, 0x00],
+            [0xff, 0xff, 0x00],
+            [0x5c, 0x5c, 0xff],
+            [0xff, 0x55, 0xff],
+            [0x00, 0xff, 0xff],
+            [0xff, 0xff, 0xff],
+            [0x88, 0x88, 0x88],
+            [0xff, 0x55, 0x55],
+            [0x55, 0xff, 0x55],
+            [0xff, 0xff, 0x55],
+            [0x7c, 0x7c, 0xff],
+            [0xff, 0x7c, 0xff],
+            [0x55, 0xff, 0xff],
+            [0xff, 0xff, 0xff],
+        ],
+    ),
+];
+
+/// Clamp a (possibly stale) theme index to a real theme, returning its 16 base colours
+/// (defaults to index 0 = Dark).
+pub fn terminal_theme(idx: usize) -> [[u8; 3]; 16] {
+    TERMINAL_THEMES[idx.min(TERMINAL_THEMES.len() - 1)].1
+}
+
+/// A colour from a theme's base-16 slot, as a Slint `Color` (used by the preview).
+pub fn theme_color(idx: usize, slot: usize) -> Color {
+    let c = terminal_theme(idx)[slot.min(15)];
+    Color::from_rgb_u8(c[0], c[1], c[2])
+}
+
 /// The pane accent for creation index `i` under frame-palette `palette`.
 pub fn accent_for(i: usize, palette: usize) -> Color {
     let slots = frame_palette(palette);

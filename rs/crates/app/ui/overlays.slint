@@ -87,9 +87,15 @@ component AppearancePreview inherits Rectangle {
     in property <color> accent;
     in property <bool> show-frame;
     in property <bool> show-dot;
+    // terminal colour-theme colours
+    in property <color> bg;
+    in property <color> fg;
+    in property <color> green;
+    in property <color> blue;
+    in property <color> dim;
     height: 134px;
     border-radius: 8px;
-    background: #16161e;
+    background: root.bg;
     border-width: root.show-frame ? 1px : 0px;
     border-color: root.accent.with-alpha(0.55);
     clip: true;
@@ -97,8 +103,8 @@ component AppearancePreview inherits Rectangle {
         // header chip
         Rectangle {
             height: 26px;
-            background: #1a1b26;
-            Rectangle { y: parent.height - 1px; height: 1px; background: #2a2b3c; }
+            background: root.bg.darker(0.2);
+            Rectangle { y: parent.height - 1px; height: 1px; background: #ffffff14; }
             HorizontalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
@@ -123,34 +129,34 @@ component AppearancePreview inherits Rectangle {
                 }
             }
         }
-        // sample terminal output, rendered in the drafted font + size
+        // sample terminal output, rendered in the drafted font + size + theme colours
         Rectangle {
-            background: #16161e;
+            background: root.bg;
             VerticalLayout {
                 padding: 8px;
                 spacing: 2px;
                 alignment: start;
                 Text {
                     text: "PS C:\\hyperpanes> cargo run";
-                    color: #c0caf5;
+                    color: root.fg;
                     font-family: root.font-name;
                     font-size: root.px * 1px;
                 }
                 Text {
                     text: "   Compiling hyperpanes v0.1.0";
-                    color: #9ece6a;
+                    color: root.green;
                     font-family: root.font-name;
                     font-size: root.px * 1px;
                 }
                 Text {
                     text: "    Finished dev in 1.24s";
-                    color: #7aa2f7;
+                    color: root.blue;
                     font-family: root.font-name;
                     font-size: root.px * 1px;
                 }
                 Text {
                     text: "the quick brown fox 0123 ▮";
-                    color: #565f89;
+                    color: root.dim;
                     font-family: root.font-name;
                     font-size: root.px * 1px;
                 }
@@ -278,6 +284,13 @@ export component OverlayLayer inherits Rectangle {
     in property <string> font-custom-value: "";
     in property <string> preview-font;
     in property <color> preview-accent;
+    in property <color> preview-bg;
+    in property <color> preview-fg;
+    in property <color> preview-green;
+    in property <color> preview-blue;
+    in property <color> preview-dim;
+    in property <[PrefOption]> themes;
+    in property <string> theme-label;
     in property <[FramePaletteOption]> frame-palettes;
     in property <[PrefOption]> shells;
     in property <int> font-px: 14;
@@ -471,6 +484,11 @@ export component OverlayLayer inherits Rectangle {
                 accent: root.preview-accent;
                 show-frame: root.show-frame;
                 show-dot: root.show-dot;
+                bg: root.preview-bg;
+                fg: root.preview-fg;
+                green: root.preview-green;
+                blue: root.preview-blue;
+                dim: root.preview-dim;
             }
 
             // ---- frame color palette (pane dot + border) ----
@@ -556,6 +574,14 @@ export component OverlayLayer inherits Rectangle {
                 }
             }
 
+            // ---- terminal color theme ----
+            Text { text: "Color theme"; color: Theme.faint; font-size: 11px; }
+            FontDropdown {
+                options: root.themes;
+                current-label: root.theme-label;
+                selected(id) => { root.pref-action(9, id); }
+            }
+
             // ---- font size ----
             HorizontalLayout {
                 spacing: 10px;
@@ -592,9 +618,6 @@ export component OverlayLayer inherits Rectangle {
                 toggled(v) => { root.pref-action(3, v ? 1 : 0); }
             }
 
-            // TODO(phase5): terminal color-theme picker — needs a terminal-widget palette/theme
-            //   API (TermGrid has a fixed 256-colour palette today, no setter). Persist + expose
-            //   once the widget gains `set_palette`/a theme table.
             // TODO(phase5): idle-glow settings (idleAlert / idleEffect / idleAlertSeconds) — the
             //   AI-pane glow effect isn't built in the native shell yet.
 
