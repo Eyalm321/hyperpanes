@@ -51,7 +51,7 @@ pub fn git_root_of(cwd: &str) -> Option<PathBuf> {
 //
 // The second level of the sidebar tree: each remembered project's git worktrees, listed
 // via `git worktree list --porcelain` run in the repo `path`, and removable via
-// `git worktree remove "<path>"`. All self-contained here so the sidebar feature doesn't
+// `git worktree remove -- "<path>"`. All self-contained here so the sidebar feature doesn't
 // reach into the central `State` (a parallel track owns that).
 
 /// One worktree of a project's repo. `branch` is a human label (the short branch name, or
@@ -170,13 +170,15 @@ fn enumerate_worktrees(repo_path: &str) -> Vec<WorktreeRow> {
     parse_porcelain(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Remove the worktree at `path` via `git worktree remove "<path>"`, run from that repo's
+/// Remove the worktree at `path` via `git worktree remove -- "<path>"`, run from that repo's
 /// main checkout (`-C` not needed — git resolves the worktree from the path). Plain remove
-/// (no `--force`): git refuses dirty/locked worktrees and the error is surfaced. Returns the
-/// trimmed stderr on failure.
+/// (no `--force`): git refuses dirty/locked worktrees and the error is surfaced. The `--`
+/// end-of-options sentinel is mandatory: a worktree path beginning with `-` (or any
+/// `-`-prefixed token git would otherwise read as a flag) must be treated as a positional
+/// path, never an option. Returns the trimmed stderr on failure.
 pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let out = Command::new("git")
-        .args(["worktree", "remove", worktree_path])
+        .args(["worktree", "remove", "--", worktree_path])
         .current_dir(repo_path)
         .no_window()
         .output()
