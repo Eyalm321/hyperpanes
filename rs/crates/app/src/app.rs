@@ -1265,6 +1265,22 @@ impl App {
             });
         }
         {
+            // Plain mouse-wheel over a pane body → scroll its scrollback viewport. The
+            // TerminalPane emits `scroll-requested(±lines)`; paneview forwards it here as
+            // `pane-scroll`. (Ctrl+wheel is handled separately as font-zoom.) `scroll_by`
+            // marks the grid dirty, so the render pump repaints the new viewport.
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_scroll(move |i, d| {
+                if let Some(win) = app.window_by_id(id) {
+                    let mut st = win.state.borrow_mut();
+                    if let Some(p) = st.active_tab_mut().panes.get_mut(i as usize) {
+                        p.pane.scroll_by(d as i32);
+                    }
+                }
+            });
+        }
+        {
             let app = app.clone();
             let id = win.id;
             win.app.on_pane_link_activated(move |i, x, y, ctrl| {

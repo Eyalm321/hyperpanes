@@ -260,6 +260,8 @@ export component PaneView inherits Rectangle {
     callback pane-link-activated(int, length, length, bool);
     // Ctrl+wheel over a pane body → zoom the terminal font (±1 px per notch).
     callback pane-font-zoom(int);
+    // Plain wheel over a pane body → scroll the scrollback viewport (±lines).
+    callback pane-scroll(int, float);
     // text selection (drag to select; copy-on-release) routed from the focused pane.
     callback pane-selection-begin(int, length, length);
     callback pane-selection-update(int, length, length);
@@ -525,6 +527,7 @@ export component PaneView inherits Rectangle {
                         search-closed => { root.pane-search-closed(idx); }
                         key(m) => { root.key(idx, m); }
                         geometry-changed(w, h) => { root.pane-geometry(idx, w, h); }
+                        scroll-requested(d) => { root.pane-scroll(idx, d); }
                         link-moved(x, y) => { root.pane-link-moved(idx, x, y); }
                         link-exited => { root.pane-link-exited(idx); }
                         // Click anywhere in the pane body (incl. blank terminal area) focuses
