@@ -1,0 +1,60 @@
+name: Test (Rust native)
+
+# Push/PR test gate for the native Rust app: runs the test suite + clippy + rustfmt
+# on every push and pull request — the check mature terminals (Alacritty, WezTerm)
+# run before merge. Complements release-rust.yml, which now `needs:` this job to pass
+# before it will build/publish an installer.
+#
+# `rs/` is split into independent Cargo workspaces: every crate that pulls the heavy
+# Slint/wgpu fork is its own workspace root. We gate the two that own tests:
+#   * `rs`                        — the lean headless core (~370 unit + integration tests),
+#   * `rs/crates/terminal-widget` — the live-terminal widget (owns the seeded grid/keymap
+#                                   reference tests under tests/).
+# The GUI `rs/crates/app` workspace is compiled — and thus build-verified — by
+# release-rust.yml at tag time, so its heavy GPU build is kept off the per-push path to
+# keep this gate fast.
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.workspace }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace:
+          - rs
+          - rs/crates/terminal-widget
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.workspace }}
+
+      - name: Test
+        run: cd ${{ matrix.workspace }} && cargo test --all
+
+      - name: Clippy (deny warnings)
+        run: cd ${{ matrix.workspace }} && cargo clippy --all-targets -- -D warnings
+
+      - name: Rustfmt (check)
+        run: cd ${{ matrix.workspace }} && cargo fmt -- --check
