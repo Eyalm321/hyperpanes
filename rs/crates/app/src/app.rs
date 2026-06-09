@@ -43,6 +43,15 @@ const TOPBAR_H: f32 = 32.0;
 /// `paneview.slint`. Used to show the open-hand cursor only over the handle, not the body.
 const HEADER_BAND: f32 = 26.0;
 
+/// Sentinel "row" the context-menu click-away catcher hands to `ctx-pick` to request a
+/// right-click *chain* (Task 7): close the open menu and reopen the one under the new cursor
+/// in a single action. `app.slint` is owned by another track and can't gain a dedicated
+/// callback, so the catcher rides the existing `pick(int)` surface with this out-of-range
+/// row — the same encode-on-a-frozen-callback trick as `open-project`'s worktree-delete
+/// codes. Kept in sync with `reopen-chain-row` in `contextmenu.slint`. Far out of any real
+/// row range, so it can never collide with a genuine menu row.
+const CTX_REOPEN_CHAIN_ROW: i32 = -987654;
+
 /// What a freshly-spawned window is seeded with once its area is known (the first pane
 /// is sized against the real area, exactly as the single-window path did).
 pub enum PendingSeed {
@@ -942,6 +951,81 @@ impl App {
         (slot, over)
     }
 
+    /// Right-click chaining (Task 7): a right-click *while a context menu is open* should close
+    /// it AND open the menu for whatever target sits under the new cursor — in one action,
+    /// without a second click. The click-away catcher in `contextmenu.slint` can't carry the
+    /// cursor up a dedicated callback (`app.slint` is frozen), so it signals via
+    /// `ctx-pick(CTX_REOPEN_CHAIN_ROW)`; here we read the *global* cursor ourselves and hit-test
+    /// it with the same window/strip/pane geometry the drag-hover uses, then route to the same
+    /// `Open*Context` command a normal right-click would. Reopening replaces the open menu
+    /// (`State::ctx` is a single slot), so the swap is atomic.
+    ///
+    /// Borrow discipline (the #18 fix): every geometry read is bound to a LOCAL and the shared
+    /// `state` borrow is dropped *before* `run_command` takes `borrow_mut()`. Never hold a
+    /// `state.borrow()` across the reopen.
+    fn reopen_context_at_cursor(self: &Rc<Self>, win: &Rc<Window>) {
+        let cursor = drag::cursor_pos();
+        let raw = win.hwnd.get();
+
+        // Resolve the chained menu to a single Command while the shared borrow is held ONLY to
+        // read geometry; it is gone before we run anything below.
+        let next: Option<Command> = (|| {
+            if raw == 0 {
+                return None;
+            }
+            let (l, t, r, b) = drag::window_rect(raw);
+            if !(cursor.0 >= l && cursor.0 < r && cursor.1 >= t && cursor.1 < b) {
+                return None; // cursor left the window → no chain target
+            }
+            let scale = win.app.window().scale_factor().max(1.0);
+            let lx = (cursor.0 - l) as f32 / scale; // window-logical x
+            let ly = (cursor.1 - t) as f32 / scale; // window-logical y (from window top)
+
+            // `.fullscreen` is Copy, so this borrow ends with the statement.
+            let fullscreen = win.state.borrow().fullscreen;
+
+            // Over the top bar → a tab-strip target (reuses `tab_hit`, which re-borrows on its
+            // own, so our borrow is already released here).
+            if !fullscreen && ly < TOPBAR_H {
+                let (_slot, over) = self.tab_hit(win, lx);
+                return over.map(|i| Command::OpenTabContext(i, lx, ly));
+            }
+
+            // Otherwise the pane area (area-relative: subtract the top bar). Bind the pane hit
+            // out of a scoped borrow, then drop it before we build the command.
+            let ax = lx;
+            let ay = ly - if fullscreen { 0.0 } else { TOPBAR_H };
+            let pane_hit = {
+                let st = win.state.borrow();
+                let mut hit = None;
+                for (j, p) in st.active_tab().panes.iter().enumerate() {
+                    if !p.visible {
+                        continue;
+                    }
+                    let (px, py, pw, ph) = p.rect;
+                    if ax >= px && ax < px + pw && ay >= py && ay < py + ph {
+                        // Only the header band opens the pane menu, matching a normal
+                        // right-click (the body below is the terminal). A body / gap hit falls
+                        // through to a plain close.
+                        if (ay - py) < HEADER_BAND {
+                            hit = Some(j);
+                        }
+                        break;
+                    }
+                }
+                hit
+            };
+            pane_hit.map(|j| Command::OpenPaneContext(j, lx, ly))
+        })();
+
+        // Borrow released. Open the chained menu (replaces the open one) or, with no target
+        // under the cursor, treat the right-click as a plain dismiss.
+        match next {
+            Some(cmd) => self.run_command(win, cmd),
+            None => self.run_command(win, Command::CloseContext),
+        }
+    }
+
     /// Resolve a completed drop: reorder in-window, stitch / dock cross-window, or spawn a
     /// new window for an empty-space drop. Re-host uses detach→adopt (replay-primed, no PTY
     /// restart); `State` was untouched until this moment.
@@ -1436,12 +1520,20 @@ impl App {
                 }
             });
         }
-        // A top-level row: run its command, then dismiss the menu.
+        // A top-level row: run its command, then dismiss the menu. The click-away catcher
+        // overloads this surface with `CTX_REOPEN_CHAIN_ROW` to ask for a right-click *chain*
+        // (close this menu + reopen the one under the new cursor) — see
+        // `reopen_context_at_cursor`.
         {
             let app = app.clone();
             let id = win.id;
             win.app.on_ctx_pick(move |row| {
                 if let Some(w) = app.window_by_id(id) {
+                    if row == CTX_REOPEN_CHAIN_ROW {
+                        app.reopen_context_at_cursor(&w);
+                        return;
+                    }
+                    // Bind the command out of the shared borrow before mutating (the #18 rule).
                     let cmd = w.state.borrow().ctx_command(row as usize);
                     if let Some(cmd) = cmd {
                         app.run_command(&w, cmd);
