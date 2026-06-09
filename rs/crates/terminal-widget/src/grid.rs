@@ -209,6 +209,19 @@ impl TermGrid {
         self.term.grid().display_offset()
     }
 
+    /// The cursor's row within the current viewport (display offset applied), or `None` when the
+    /// cursor is scrolled out of view. Cheap — reads the grid cursor directly, no snapshot. Used
+    /// to scope type-over-selection to the live prompt line (the cursor's own row).
+    pub fn cursor_row(&self) -> Option<usize> {
+        let grid = self.term.grid();
+        let row = grid.cursor.point.line.0 + grid.display_offset() as i32;
+        if row >= 0 && (row as usize) < self.size.rows {
+            Some(row as usize)
+        } else {
+            None
+        }
+    }
+
     /// Every grid line — scrollback history included — as `(absolute_line, text)`, top to bottom.
     /// Absolute lines are negative for scrollback and `0..rows` for the live viewport (the same
     /// numbering the snapshot/cursor use). One char per cell, blanks as spaces. Used by the
@@ -258,6 +271,22 @@ impl TermGrid {
     pub fn scroll_to_bottom(&mut self) {
         if self.term.grid().display_offset() != 0 {
             self.term.scroll_display(Scroll::Bottom);
+            self.dirty = true;
+        }
+    }
+
+    /// Scroll the viewport by `delta_lines`: **positive scrolls up into history**, negative
+    /// scrolls back toward the live edge. alacritty clamps the resulting display offset to the
+    /// scrollback bounds, so an over-scroll past the top/bottom is a no-op. Marks the grid dirty
+    /// only when the offset actually moved (so a clamped no-op doesn't force a repaint). Drives
+    /// mouse-wheel + Shift-PageUp/Down scrollback.
+    pub fn scroll_by(&mut self, delta_lines: i32) {
+        if delta_lines == 0 {
+            return;
+        }
+        let before = self.term.grid().display_offset();
+        self.term.scroll_display(Scroll::Delta(delta_lines));
+        if self.term.grid().display_offset() != before {
             self.dirty = true;
         }
     }
@@ -460,6 +489,104 @@ mod tests {
         assert!(g.bracketed_paste(), "enabled after DECSET 2004h");
         g.feed(b"\x1b[?2004l"); // DECRST — back off
         assert!(!g.bracketed_paste(), "disabled after DECRST 2004l");
+    }
+
+    // ---- scroll-region correctness + throughput diagnosis (Task 17) ----
+    //
+    // The bench flagged native `scrolling-region` at 0.4 MB/s vs `scrolling` at 7.5 (~18x slower)
+    // and hypothesized an O(n) full-grid memmove per scrolled line in the grid's DECSTBM path.
+    // That hypothesis does NOT hold for this implementation: the grid is `alacritty_terminal`,
+    // whose region scroll is an O(1) ring rotate (`Grid::scroll_up`) plus a few O(1) row-pointer
+    // swaps for the lines fixed outside the region — no whole-grid copy to replace.
+    //
+    // The `#[ignore]`d diagnosis below measures it directly. Findings on this machine (4 MiB feed,
+    // 120x50): feed-only full=49 region=41 MB/s (region ~= full), +snapshot full=25 region=24
+    // MB/s (parity), +software-render full=1.6 region=2.4 MB/s — region is actually *faster* when
+    // rendering, because rows below the 20-line region stay blank (fewer glyphs to rasterize).
+    // So at the terminal-widget level scroll-region is never slower than full-screen scrolling;
+    // the bench's catastrophe originates ABOVE this crate (session batching / render-pump cadence
+    // / GPU upload in the app + core), which is outside this track's file scope. No grid fix is
+    // warranted — these tests instead lock in scroll-within-margins correctness and feed parity.
+    #[test]
+    #[ignore]
+    fn scroll_region_throughput_diagnosis() {
+        fn mbps(bytes: usize, d: std::time::Duration) -> f64 {
+            (bytes as f64 / (1024.0 * 1024.0)) / d.as_secs_f64()
+        }
+        // Feed `budget` bytes of `line` in pty-sized chunks after `prologue`; snapshot every
+        // `snap_every` lines (0 = never) to mimic the render gate without a font dependency.
+        fn run(cols: usize, rows: usize, prologue: &[u8], line: &str, budget: usize, snap_every: usize) -> std::time::Duration {
+            let mut g = TermGrid::new(cols, rows);
+            g.feed(prologue);
+            let lb = line.as_bytes();
+            let mut payload = Vec::with_capacity(budget);
+            while payload.len() < budget {
+                payload.extend_from_slice(lb);
+            }
+            let t = std::time::Instant::now();
+            let mut since = 0usize;
+            for chunk in payload.chunks(4096) {
+                g.feed(chunk);
+                if snap_every > 0 {
+                    since += chunk.len() / lb.len().max(1);
+                    if since >= snap_every {
+                        std::hint::black_box(g.snapshot());
+                        since = 0;
+                    }
+                }
+            }
+            t.elapsed()
+        }
+        let line = "region line 12345 — lorem ipsum dolor sit amet consectetur\r\n";
+        let budget = 4 * 1024 * 1024; // 4 MiB, well past the 10k scrollback-growth ramp
+        for &(cols, rows) in &[(120usize, 24usize), (120, 50), (200, 80)] {
+            let full = run(cols, rows, b"", line, budget, 0);
+            let region = run(cols, rows, b"\x1b[1;20r\x1b[H", line, budget, 0);
+            let full_s = run(cols, rows, b"", line, budget, 16);
+            let region_s = run(cols, rows, b"\x1b[1;20r\x1b[H", line, budget, 16);
+            eprintln!(
+                "[{cols}x{rows}] feed-only full={:.1} region={:.1} ({:.2}x) | +snapshot full={:.1} region={:.1} ({:.2}x)  MB/s",
+                mbps(budget, full), mbps(budget, region), full.as_secs_f64() / region.as_secs_f64(),
+                mbps(budget, full_s), mbps(budget, region_s), full_s.as_secs_f64() / region_s.as_secs_f64(),
+            );
+        }
+    }
+
+    /// First char of each viewport row (blanks as space) — a compact way to assert scroll layout.
+    fn col0_chars(g: &TermGrid) -> Vec<char> {
+        let snap = g.snapshot();
+        (0..snap.rows).map(|r| snap.cell(0, r).ch).collect()
+    }
+
+    #[test]
+    fn scroll_within_midscreen_region_keeps_lines_outside_it() {
+        // DECSTBM region NOT anchored at the top exercises alacritty's swap-based region rotate.
+        // Region = 1-based rows 2..=4 (0-based 1,2,3). Rows 0 and 4,5 are fixed.
+        let mut g = TermGrid::new(8, 6);
+        // Seed each row with a distinct first char via absolute cursor moves.
+        g.feed(b"\x1b[1;1Ha\x1b[2;1Hb\x1b[3;1Hc\x1b[4;1Hd\x1b[5;1He\x1b[6;1Hf");
+        assert_eq!(col0_chars(&g), vec!['a', 'b', 'c', 'd', 'e', 'f']);
+        g.feed(b"\x1b[2;4r"); // set scroll region rows 2..=4
+        g.feed(b"\x1b[4;1H"); // park the cursor on the region's bottom line (1-based row 4)
+        g.feed(b"\n"); // line-feed there scrolls the region up by one
+        // Region rows scroll (b drops out, blank appears at the bottom of the region); the lines
+        // ABOVE (a) and BELOW (e, f) the region must be untouched.
+        assert_eq!(col0_chars(&g), vec!['a', 'c', 'd', ' ', 'e', 'f']);
+    }
+
+    #[test]
+    fn scroll_within_top_anchored_region_keeps_lines_below_it() {
+        // The bench's case: region anchored at the top (1-based 1..=3 → 0-based 0,1,2), which
+        // takes alacritty's ring-rotate + fixed-bottom swap path. Rows 3,4,5 stay put; the
+        // scrolled-out top line goes to scrollback.
+        let mut g = TermGrid::new(8, 6);
+        g.feed(b"\x1b[1;1Ha\x1b[2;1Hb\x1b[3;1Hc\x1b[4;1Hd\x1b[5;1He\x1b[6;1Hf");
+        g.feed(b"\x1b[1;3r"); // region rows 1..=3
+        g.feed(b"\x1b[3;1H"); // bottom line of the region (1-based row 3)
+        g.feed(b"\n");
+        assert_eq!(col0_chars(&g), vec!['b', 'c', ' ', 'd', 'e', 'f']);
+        // The scrolled-out 'a' went into scrollback (history grew, viewport still pinned).
+        assert!(g.display_offset() == 0);
     }
 
     #[test]

@@ -332,6 +332,14 @@ impl TerminalPane {
         ctrl: bool,
         editor_command: &str,
     ) -> Option<LinkAction> {
+        // Suppress link open/copy at the end of a drag-selection. The widget fires
+        // `selection-end` then `link-activated` on the same left-button release, and a dragged
+        // selection is kept alive (copied, not cleared) by the shell — so a release that just
+        // finished selecting text must NOT also open/copy the link under the release point. A
+        // plain click begins a fresh, non-dragged selection, so this never blocks real clicks.
+        if self.selection_is_drag() {
+            return None;
+        }
         let hit = self.link_at(x, y, surf_w, surf_h)?;
         if ctrl {
             return Some(LinkAction::Copy(hit.abs_path));
@@ -422,6 +430,25 @@ impl TerminalPane {
         self.selection.map_or(false, |s| s.dragged)
     }
 
+    /// True when there's an active *dragged* selection lying entirely on the cursor's own viewport
+    /// row — i.e. over the live shell input line, the only row a terminal can safely treat as
+    /// editable text. Scopes type-over-selection to the prompt line: typing over a selection here
+    /// drops the highlight (you're replacing your own input), whereas a selection on any other row
+    /// (scrollback / command output) isn't in the shell's buffer and is left untouched, so no
+    /// speculative deletes are ever sent (no PTY corruption). False for no selection, a non-dragged
+    /// click, a multi-row span, or when the cursor is scrolled out of view.
+    pub fn selection_on_cursor_row(&self) -> bool {
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return false,
+        };
+        let (start, end) = sel.ordered();
+        if start.row != end.row {
+            return false; // a multi-row selection is never a single prompt line
+        }
+        self.grid.cursor_row() == Some(start.row)
+    }
+
     /// Highlight rectangles (logical px) for the active *dragged* selection over a surface of
     /// `surf_w`×`surf_h`. Empty for no selection or a non-dragged click — so a plain click never
     /// leaves a stray one-cell highlight.
@@ -503,6 +530,22 @@ impl TerminalPane {
     /// end of whatever was just written — e.g. after a paste, regardless of scrollback position.
     pub fn scroll_to_bottom(&mut self) {
         self.grid.scroll_to_bottom();
+    }
+
+    /// Scroll the scrollback viewport by `delta_lines` (positive = up into history, negative =
+    /// toward the live edge), clamped to the history bounds. Drives mouse-wheel scrolling (a few
+    /// lines per notch — see the widget's `scroll-requested` callback).
+    pub fn scroll_by(&mut self, delta_lines: i32) {
+        self.grid.scroll_by(delta_lines);
+    }
+
+    /// Scroll the scrollback viewport by one page (`up` = into history, else toward the live
+    /// edge). A page is the visible row count less one row of overlap, so successive pages keep a
+    /// line of context. Drives Shift+PageUp / Shift+PageDown.
+    pub fn scroll_page(&mut self, up: bool) {
+        let (_, rows) = self.grid_size();
+        let page = (rows as i32 - 1).max(1);
+        self.grid.scroll_by(if up { page } else { -page });
     }
 
     // ---- Copy/paste indicator ("toast") -----------------------------------------------------
@@ -774,6 +817,33 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_selection_suppresses_link_activation() {
+        // After a drag-select, the same left-release must NOT also open/copy the link under it
+        // (the widget fires selection-end then link-activated on one release).
+        let dir = std::env::temp_dir().join(format!("hp_pane_seldrag_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = unit_pane(20, 2);
+        p.set_cwd(Some(dir.to_string_lossy().into_owned()));
+        p.feed("a.txt"); // cols 0..5, 1px/cell on a 20x2 surface
+        // A real drag past the threshold marks the selection dragged.
+        p.selection_begin(0.5, 0.5, 20.0, 2.0);
+        p.selection_update(5.5, 0.5, 20.0, 2.0); // 5px move > DRAG_THRESHOLD_PX
+        assert!(p.selection_is_drag());
+        // Activation over the path is suppressed while the drag selection stands — both a plain
+        // click (would open) and Ctrl+click (would re-copy and clobber the just-copied selection).
+        assert!(p.activate_link(2.5, 0.5, 20.0, 2.0, false, "").is_none());
+        assert!(p.activate_link(2.5, 0.5, 20.0, 2.0, true, "").is_none());
+        // Once the selection is cleared, a click activates the link normally again.
+        p.selection_clear();
+        assert!(matches!(
+            p.activate_link(2.5, 0.5, 20.0, 2.0, true, ""),
+            Some(LinkAction::Copy(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn prepare_paste_normalizes_newlines_to_cr() {
         // LF and CRLF both collapse to CR (the Enter the Windows console expects); a paste with
         // no bracketed-paste mode is sent bare.
@@ -812,6 +882,31 @@ mod tests {
         p.selection_update(55.0, 5.0, 100.0, 100.0); // 50px move → well past threshold, cell 5
         assert!(p.selection_is_drag(), "a real drag past the threshold selects");
         assert_eq!(p.selection_text().as_deref(), Some("abcdef"));
+    }
+
+    #[test]
+    fn selection_on_cursor_row_is_prompt_line_only() {
+        // 1px/cell on a 20x5 surface. Put the cursor (the "prompt") on row 2.
+        let mut p = unit_pane(20, 5);
+        p.feed("a\r\nb\r\nprompt"); // rows 0,1,2; cursor ends on row 2
+        let (w, h) = (20.0, 5.0);
+        assert!(!p.selection_on_cursor_row(), "no selection → false");
+        // A single-row drag ON the cursor row is the editable prompt line.
+        p.selection_begin(0.5, 2.5, w, h);
+        p.selection_update(5.5, 2.5, w, h);
+        assert!(p.selection_is_drag());
+        assert!(p.selection_on_cursor_row(), "selection on the cursor row is the prompt line");
+        // A drag on a different row is not the prompt line.
+        p.selection_begin(0.5, 0.5, w, h);
+        p.selection_update(3.5, 0.5, w, h);
+        assert!(!p.selection_on_cursor_row(), "an off-row selection is not the prompt line");
+        // A multi-row selection (even one touching the cursor row) is not a single prompt line.
+        p.selection_begin(0.5, 0.5, w, h);
+        p.selection_update(3.5, 2.5, w, h);
+        assert!(!p.selection_on_cursor_row(), "a multi-row selection is not a prompt line");
+        // A stationary click (not dragged) is not a selection.
+        p.selection_begin(0.5, 2.5, w, h);
+        assert!(!p.selection_on_cursor_row(), "a click is not a drag-selection");
     }
 
     #[test]

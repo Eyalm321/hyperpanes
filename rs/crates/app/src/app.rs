@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use hyperpanes_core::layout::presets::DividerKind;
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
-use hyperpanes_terminal_widget::encode_key;
+use hyperpanes_terminal_widget::{encode_key, keys};
 
 use slint::platform::Key;
 use slint::{ComponentHandle, LogicalPosition};
@@ -634,13 +634,44 @@ impl App {
                 EscOutcome::Forward => {}
             }
         }
+        // Shift+PageUp / Shift+PageDown scroll the pane's scrollback by one page instead of
+        // reaching the shell (plain PageUp/Down still go to the shell). Handled before the
+        // forwardable/encode path since PageUp/Down are otherwise pty-bound keys. The grid marks
+        // itself dirty, so the 8 ms render pump repaints the new viewport.
+        if let Some(up) = keys::scroll_page_key(&msg.text, msg.shift) {
+            let mut st = win.state.borrow_mut();
+            if let Some(p) = st.active_tab_mut().panes.get_mut(idx) {
+                p.pane.scroll_page(up);
+            }
+            return;
+        }
         // Drop bare modifiers / F-keys / special private-use keys.
         if !crate::forwardable(&msg.text) {
             return;
         }
         if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
-            let st = win.state.borrow();
-            if let Some(ps) = st.active_tab().panes.get(idx) {
+            // Type-over selection (prompt-line-only, safe scope): a printable character (ordinary
+            // text, no Ctrl/Alt) typed over a drag-selection that sits entirely on the cursor's
+            // own row — the live shell input line — drops the selection highlight first, since
+            // you're replacing your own prompt input. A selection on any other row (scrollback /
+            // command output) is left intact: that text isn't in the shell's editable buffer, so
+            // we never emit speculative deletes for it (the brief's no-PTY-corruption fallback —
+            // we clear only the on-screen highlight, never edit off-row text).
+            let printable = !msg.control
+                && !msg.alt
+                && msg.text.chars().next().is_some_and(|c| {
+                    let u = c as u32;
+                    u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
+                });
+            let mut st = win.state.borrow_mut();
+            if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
+                if printable && ps.pane.selection_on_cursor_row() {
+                    ps.pane.selection_clear();
+                }
+                // Any key that reaches the shell snaps the viewport back to the live edge so the
+                // user sees their input echoed at the prompt even after scrolling up to read
+                // history (a no-op when already at the bottom).
+                ps.pane.scroll_to_bottom();
                 self.mgr.write(&ps.uid, &String::from_utf8_lossy(&bytes));
             }
         }
