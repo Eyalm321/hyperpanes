@@ -73,6 +73,12 @@ pub struct DetachedTab {
     pub layout: Layout,
     pub sizes: Vec<f64>,
     pub main_fraction: f64,
+    /// The focused pane index, carried so a reopened/moved tab restores focus instead of
+    /// snapping back to pane 0.
+    pub focused: usize,
+    /// The zoomed (maximised-in-tab) pane, carried so a reopened/moved tab keeps its
+    /// maximized pane instead of dropping the zoom.
+    pub zoomed: Option<usize>,
     pub panes: Vec<DetachedPane>,
 }
 
@@ -160,6 +166,10 @@ impl PrefsDraft {
 pub struct AiLine {
     pub full: String,
     pub reveal: f32,
+    /// Cached `full.chars().count()` — the typewriter reveal needs this every frame for every
+    /// AI pane, so it's computed once here (on `set_target`) rather than re-walking `full` each
+    /// tick. Kept in lock-step with `full`: only `set_target` mutates either.
+    pub len: usize,
 }
 
 impl AiLine {
@@ -167,6 +177,7 @@ impl AiLine {
     pub fn set_target(&mut self, text: &str) {
         if self.full != text {
             self.full = text.to_string();
+            self.len = self.full.chars().count();
             self.reveal = 0.0;
         }
     }
@@ -258,9 +269,10 @@ impl PaneState {
     }
 }
 
-/// Whether `label` is still a default auto-name ("shell" / "pane N" / a bare slot number),
-/// so a git-project tint may overwrite it — never a name the user chose. Mirrors the
-/// renderer's `/^(shell|pane \d+)$/i` test (plus the legacy bare-number default).
+/// Whether `label` is still a default auto-name ("shell" / "pane N"), so a git-project tint
+/// may overwrite it — never a name the user chose. Mirrors the renderer's `/^(shell|pane \d+)$/i`
+/// test. A bare number (e.g. "42") is NOT treated as default: it's a valid user rename, and
+/// silently overwriting it with the repo name on a cwd change would clobber that choice.
 fn is_default_label(label: &str) -> bool {
     let l = label.trim();
     if l.eq_ignore_ascii_case("shell") {
@@ -269,7 +281,7 @@ fn is_default_label(label: &str) -> bool {
     if let Some(rest) = l.strip_prefix("pane ").or_else(|| l.strip_prefix("Pane ")) {
         return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
-    !l.is_empty() && l.chars().all(|c| c.is_ascii_digit())
+    false
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -2398,17 +2410,64 @@ impl State {
             return;
         };
         let layout = src.layout;
-        let n = src.panes.len().max(1);
         let title = src.title.clone();
+        let sizes = src.sizes.clone();
+        let main_fraction = src.main_fraction;
+        let focused = src.focused;
+        let zoomed = src.zoomed;
+        // Snapshot each source pane's chrome so the duplicate carries it (label, color/pin,
+        // frame/dot, subtitle, per-pane zoom) — not just the pane count + layout. The accent is
+        // pinned only when the source's was; an unpinned pane re-derives its by-slot color at
+        // the same index, so order-preserving duplication keeps the same colors.
+        let chrome: Vec<(NewPaneOpts, Option<SharedString>, f32)> = src
+            .panes
+            .iter()
+            .map(|p| {
+                (
+                    NewPaneOpts {
+                        label: Some(p.title.to_string()),
+                        accent: p.pinned_accent,
+                        show_frame: p.show_frame,
+                        show_dot: p.show_dot,
+                        ..Default::default()
+                    },
+                    p.subtitle.clone(),
+                    p.font_px,
+                )
+            })
+            .collect();
         let mut tab = self.fresh_tab();
         tab.layout = layout;
         tab.title = title;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
-        for _ in 0..n {
+        if chrome.is_empty() {
+            // A tab should always have ≥1 pane, but guard the empty case with a default pane.
             self.add_pane(mgr);
+        } else {
+            for (opts, subtitle, font_px) in chrome {
+                self.add_pane_opts(mgr, opts);
+                if let Some(p) = self.active_tab_mut().panes.last_mut() {
+                    p.subtitle = subtitle;
+                    if (p.font_px - font_px).abs() > f32::EPSILON {
+                        p.font_px = font_px;
+                        p.font_dirty = true; // pump reloads the font at the carried zoom
+                    }
+                }
+            }
         }
+        // Carry the split geometry + focus/zoom from the source (clamped to the new pane count).
+        let t = self.active_tab_mut();
+        if sizes.len() == t.panes.len() {
+            t.sizes = sizes;
+        }
+        t.main_fraction = main_fraction;
+        if !t.panes.is_empty() {
+            t.focused = focused.min(t.panes.len() - 1);
+        }
+        t.zoomed = zoomed.filter(|&z| z < t.panes.len());
+        self.dirty = true;
     }
 
     /// Park a closed tab on the reopen stack, capping it (evicted entries' sessions are killed).
@@ -2438,6 +2497,8 @@ impl State {
         }
         self.editing_tab = -1;
         self.dirty = true;
+        let focused = tab.focused;
+        let zoomed = tab.zoomed;
         let panes = tab
             .panes
             .into_iter()
@@ -2457,6 +2518,8 @@ impl State {
                 layout: tab.layout,
                 sizes: tab.sizes,
                 main_fraction: tab.main_fraction,
+                focused,
+                zoomed,
                 panes,
             },
             true,
@@ -2517,9 +2580,14 @@ impl State {
             self.tabs[ti].sizes = det.sizes;
         }
         self.tabs[ti].main_fraction = det.main_fraction;
-        if !self.tabs[ti].panes.is_empty() {
-            self.tabs[ti].focused = 0;
+        // Restore the detached focus + zoom (clamped to the adopted pane count) rather than
+        // snapping to pane 0 / dropping the maximized pane. `adopt_into_tab` clears `zoomed`
+        // on each pane, so this must run after the adopt loop.
+        let n = self.tabs[ti].panes.len();
+        if n > 0 {
+            self.tabs[ti].focused = det.focused.min(n - 1);
         }
+        self.tabs[ti].zoomed = det.zoomed.filter(|&z| z < n);
         self.dirty = true;
     }
 
@@ -2536,9 +2604,14 @@ impl State {
             self.tabs[ti].sizes = det.sizes;
         }
         self.tabs[ti].main_fraction = det.main_fraction;
-        if !self.tabs[ti].panes.is_empty() {
-            self.tabs[ti].focused = 0;
+        // Restore the detached focus + zoom (clamped to the adopted pane count) rather than
+        // snapping to pane 0 / dropping the maximized pane. `adopt_into_tab` clears `zoomed`
+        // on each pane, so this must run after the adopt loop.
+        let n = self.tabs[ti].panes.len();
+        if n > 0 {
+            self.tabs[ti].focused = det.focused.min(n - 1);
         }
+        self.tabs[ti].zoomed = det.zoomed.filter(|&z| z < n);
         self.dirty = true;
     }
 

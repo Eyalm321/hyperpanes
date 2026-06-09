@@ -204,6 +204,12 @@ pub(crate) fn key_tok_from_text(text: &str, control: bool) -> Option<keybindings
     if c == ' ' {
         return Some(KeyTok::Space);
     }
+    // On many keyboard layouts "+" is Shift+"=", so a Ctrl++ chord arrives with the literal
+    // "+" text. Normalize it to "=" so it resolves to the zoom-in binding (Ctrl+=) the same as
+    // the unshifted key (match_chord is also Shift-tolerant for "=").
+    if c == '+' {
+        return Some(KeyTok::Char('='));
+    }
     let lc = c.to_ascii_lowercase();
     let lu = lc as u32;
     // Any other printable, non-control character is a Char token.

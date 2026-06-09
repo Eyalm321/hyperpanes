@@ -184,7 +184,7 @@ fn pane_item(
     let ai_subtitle: SharedString = if manual_subtitle || ps.ai_muted || ps.ai.full.is_empty() {
         SharedString::new()
     } else {
-        let shown = (ps.ai.reveal as usize).min(ps.ai.full.chars().count());
+        let shown = (ps.ai.reveal as usize).min(ps.ai.len);
         ps.ai.full.chars().take(shown).collect::<String>().into()
     };
     PaneItem {
@@ -932,7 +932,7 @@ pub fn pump(
         let ai_target = if manual_subtitle || ps.ai_muted {
             0
         } else {
-            ps.ai.full.chars().count()
+            ps.ai.len
         };
         let ai_changed = if ai_target > 0 && (ps.ai.reveal as usize) < ai_target {
             ps.ai.reveal = (ps.ai.reveal + AI_REVEAL_PER_TICK).min(ai_target as f32);
