@@ -1456,7 +1456,12 @@ impl App {
             let id = win.id;
             win.app.on_ctx_swatch(move |sw| {
                 if let Some(w) = app.window_by_id(id) {
-                    if let Some(t) = w.state.borrow().ctx_target() {
+                    // Bind the target out of the borrow first: holding `state.borrow()` across
+                    // `run_command` (which takes `state.borrow_mut()`) double-borrows the RefCell
+                    // and panics — in edition 2021 the `if let Some(_) = …borrow()…` temporary
+                    // lives for the whole arm (see the `on_ctx_pick` pattern above).
+                    let target = w.state.borrow().ctx_target();
+                    if let Some(t) = target {
                         app.run_command(&w, Command::RecolorPane(t, sw as usize));
                     }
                 }
@@ -1467,7 +1472,8 @@ impl App {
             let id = win.id;
             win.app.on_ctx_swatch_none(move || {
                 if let Some(w) = app.window_by_id(id) {
-                    if let Some(t) = w.state.borrow().ctx_target() {
+                    let target = w.state.borrow().ctx_target();
+                    if let Some(t) = target {
                         app.run_command(&w, Command::SetPaneFrame(t, false));
                         app.run_command(&w, Command::SetPaneDot(t, false));
                     }
@@ -1479,7 +1485,8 @@ impl App {
             let id = win.id;
             win.app.on_ctx_frame_set(move |on| {
                 if let Some(w) = app.window_by_id(id) {
-                    if let Some(t) = w.state.borrow().ctx_target() {
+                    let target = w.state.borrow().ctx_target();
+                    if let Some(t) = target {
                         app.run_command(&w, Command::SetPaneFrame(t, on));
                     }
                 }
@@ -1490,7 +1497,8 @@ impl App {
             let id = win.id;
             win.app.on_ctx_dot_set(move |on| {
                 if let Some(w) = app.window_by_id(id) {
-                    if let Some(t) = w.state.borrow().ctx_target() {
+                    let target = w.state.borrow().ctx_target();
+                    if let Some(t) = target {
                         app.run_command(&w, Command::SetPaneDot(t, on));
                     }
                 }
@@ -1502,7 +1510,8 @@ impl App {
             let id = win.id;
             win.app.on_ctx_move_tab(move |tab| {
                 if let Some(w) = app.window_by_id(id) {
-                    if let Some(t) = w.state.borrow().ctx_target() {
+                    let target = w.state.borrow().ctx_target();
+                    if let Some(t) = target {
                         app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
                     }
                     app.run_command(&w, Command::CloseContext);
@@ -1514,7 +1523,10 @@ impl App {
             let id = win.id;
             win.app.on_ctx_layout(move |lid| {
                 if let Some(w) = app.window_by_id(id) {
-                    if let Some(t) = w.state.borrow().ctx_target() {
+                    // The crash that was issue #18: the hamburger Layout submenu held this
+                    // `state.borrow()` across `run_command`'s `borrow_mut()`. Drop it first.
+                    let target = w.state.borrow().ctx_target();
+                    if let Some(t) = target {
                         app.run_command(&w, Command::SetTabLayout(t, theme::layout_from_id(lid)));
                     }
                     app.run_command(&w, Command::CloseContext);

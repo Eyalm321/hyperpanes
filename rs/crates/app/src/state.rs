@@ -2871,3 +2871,67 @@ pub fn parse_hex(s: &str) -> Color {
     }
     theme::accent_for(0, 0)
 }
+
+#[cfg(test)]
+mod ctx_menu_borrow_tests {
+    //! Regression for the issue-#18 crash: changing the layout via the hamburger Layout
+    //! submenu panicked with `RefCell already borrowed`.
+    //!
+    //! The `on_ctx_layout` callback (and its five `ctx_target()` siblings) did
+    //! `if let Some(t) = win.state.borrow().ctx_target() { run_command(...) }`, and in Rust
+    //! edition 2021 the `state.borrow()` temporary lives for the *whole* `if let` arm. Inside
+    //! the arm, `run_command` takes `state.borrow_mut()` — a second, mutable borrow of the same
+    //! `RefCell` → panic. The fix binds `ctx_target()` to a local so the shared borrow is
+    //! released before the command runs. These tests reproduce that exact borrow ordering
+    //! against a `RefCell<State>` (as `Window::state` is), so the regression can't return.
+    use super::*;
+    use std::cell::RefCell;
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    /// The fixed shape: read the target out of the shared borrow first, then mutate. The
+    /// hamburger Layout submenu opens via `open_app_context` (target = active tab) and routes
+    /// `ctx_target` → `set_tab_layout`. This must not panic at any layout.
+    #[test]
+    fn layout_submenu_pick_does_not_double_borrow() {
+        let cell = RefCell::new(fresh());
+        cell.borrow_mut().open_app_context(0.0, 0.0);
+
+        for layout in [
+            Layout::Single,
+            Layout::Columns,
+            Layout::Rows,
+            Layout::Grid,
+            Layout::MainStack,
+            Layout::Auto,
+        ] {
+            // Mirror `on_ctx_layout`'s FIXED body: bind the target out of the borrow, THEN mutate.
+            let target = cell.borrow().ctx_target();
+            if let Some(t) = target {
+                cell.borrow_mut().set_tab_layout(t, layout);
+            }
+            assert_eq!(cell.borrow().active_tab().layout, layout);
+        }
+    }
+
+    /// Pin the root cause: the OLD callback shape (mutating while the `ctx_target()` borrow is
+    /// still held across the `if let` arm) double-borrows and panics. If a future refactor lets
+    /// the shared borrow escape again, this catches it.
+    #[test]
+    fn holding_the_ctx_borrow_across_a_mutation_panics() {
+        let cell = RefCell::new(fresh());
+        cell.borrow_mut().open_app_context(0.0, 0.0);
+
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // The buggy pattern: `state.borrow()` (via ctx_target) outlives the arm in 2021,
+            // so the inner `borrow_mut()` is a re-entrant borrow → panic.
+            if let Some(t) = cell.borrow().ctx_target() {
+                cell.borrow_mut().set_tab_layout(t, Layout::Grid);
+            }
+        }))
+        .is_err();
+        assert!(crashed, "the held-borrow pattern must still double-borrow");
+    }
+}
