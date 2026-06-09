@@ -18,6 +18,8 @@ component CtxRow inherits Rectangle {
     in property <bool> sub-open;
     out property <bool> hovered: ta.has-hover;
     callback clicked();
+    // Fires on hover enter/leave (true/false) so the menu can open a submenu on hover.
+    callback hover-changed(bool);
     // The hamburger menu's action icons are Segoe MDL2 Assets glyphs in the Unicode
     // Private-Use Area, which render *only* in the icon font; the geometric layout glyphs
     // (▤▥▦…) render in any UI font. Mirror theme::menu_glyph so the row picks the font per
@@ -77,6 +79,7 @@ component CtxRow inherits Rectangle {
     ta := TouchArea {
         enabled: !e.disabled;
         clicked => { root.clicked(); }
+        changed has-hover => { root.hover-changed(self.has-hover); }
     }
 }
 
@@ -206,9 +209,18 @@ export component ContextMenu inherits Rectangle {
                     e: entry;
                     has-sub: entry.kind >= 2;
                     sub-open: root.open-sub == i;
+                    // Submenus (Layout ▸ etc.) open on hover; hovering a plain row closes any
+                    // open submenu. Acting only on the rising edge (h) means moving the pointer
+                    // off the row into its flyout does NOT close it — the flyout sits flush to
+                    // the row's edge, so there's no plain-row hover in between (no flicker).
+                    hover-changed(h) => {
+                        if (h) {
+                            root.open-sub = entry.kind >= 2 ? i : -1;
+                        }
+                    }
                     clicked => {
                         if (entry.kind >= 2) {
-                            root.open-sub = (root.open-sub == i) ? -1 : i;
+                            root.open-sub = i;
                         } else {
                             root.pick(i);
                         }
