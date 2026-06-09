@@ -218,6 +218,9 @@ impl App {
         self.wire(&win);
         // The running build version is constant — push it once (the General panel's "About").
         win.app.set_pref_app_version(crate::update::CURRENT_VERSION.into());
+        // Seed the auto-update toggle from the just-loaded settings (read-only borrow, no
+        // command in flight, so the #18 borrow rule is moot here).
+        win.app.set_pref_auto_update(win.state.borrow().settings.auto_update);
         // Cascade additional windows so they don't land exactly on top of each other.
         if id > 0 {
             let off = 36.0 * id as f32;
@@ -1873,6 +1876,15 @@ impl App {
                 }
                 if kind == 16 {
                     app.control.set_allow_input(arg != 0);
+                    return;
+                }
+                // Auto-update toggle (persisted) — apply + mirror the prop back immediately.
+                if kind == 17 {
+                    app.run_command(
+                        &w,
+                        Command::ApplySetting(crate::state::Setting::AutoUpdate(arg != 0)),
+                    );
+                    w.app.set_pref_auto_update(arg != 0);
                     return;
                 }
                 // Self-update (General panel) — all off-thread + offline-safe.

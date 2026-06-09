@@ -108,6 +108,8 @@ pub enum Setting {
     IdleEffect(usize),
     /// Nudge the idle threshold (seconds) by ±N, clamped to the supported range.
     IdleSeconds(i32),
+    /// Toggle the startup auto-update check (Task 8).
+    AutoUpdate(bool),
 }
 
 /// The "New pane" dialog's payload — full spawn options for a configured pane. The simple
@@ -1624,7 +1626,8 @@ impl State {
             | Setting::EditorCommand(_)
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
-            | Setting::IdleSeconds(_) => {}
+            | Setting::IdleSeconds(_)
+            | Setting::AutoUpdate(_) => {}
         }
         self.dirty = true;
     }
@@ -1756,6 +1759,7 @@ impl State {
                     .clamp(prefs::MIN_IDLE_SECONDS as i32 / step, prefs::MAX_IDLE_SECONDS as i32 / step);
                 self.settings.idle_alert_seconds = (steps * step) as u32;
             }
+            Setting::AutoUpdate(on) => self.settings.auto_update = on,
         }
         prefs::save(&self.settings);
         self.dirty = true;
