@@ -101,7 +101,10 @@ component ProjectMenu inherits PopupWindow {
 
             Text { text: "Change Color"; color: Theme.subtext; font-size: 10px; font-weight: 700; }
             HorizontalLayout {
-                spacing: 5px;
+                // tight, cohesive swatch group, left-aligned to match the menu's other rows
+                // (the default `stretch` would spread the fixed-width swatches apart).
+                spacing: 3px;
+                alignment: start;
                 Swatch { hue: #e5484d; picked => { root.recolor(0); root.close(); } }
                 Swatch { hue: #f5a623; picked => { root.recolor(1); root.close(); } }
                 Swatch { hue: #30a46c; picked => { root.recolor(2); root.close(); } }
