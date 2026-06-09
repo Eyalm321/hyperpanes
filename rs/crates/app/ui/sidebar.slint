@@ -361,6 +361,23 @@ export component SidebarRail inherits Rectangle {
     property <int> DELETE-BASE: 1000000;
     property <int> DELETE-STRIDE: 1000;
 
+    // TOCTOU guard. The delete travels as the (proj, wt) INDICES captured when the popup
+    // opened, but the projects/worktrees models can change underneath us while it's open (a
+    // background pane reporting a new cwd re-sorts projects newest-first; an enumeration
+    // refresh reorders worktrees). Before dispatching we re-check that those indices STILL
+    // address the exact path the user saw and confirmed (`wt-del-name`); if not — the list
+    // moved — we abort rather than delete whatever now sits at that slot. Bounds-checked so a
+    // shrunk model can't index out of range.
+    pure function captured-still-valid() -> bool {
+        if (root.wt-del-proj < 0 || root.wt-del-proj >= root.projects.length) {
+            return false;
+        }
+        if (root.wt-del-wt < 0 || root.wt-del-wt >= root.projects[root.wt-del-proj].worktrees.length) {
+            return false;
+        }
+        return root.projects[root.wt-del-proj].worktrees[root.wt-del-wt].path == root.wt-del-name;
+    }
+
     width: 44px;
     background: Theme.mantle;
 
@@ -518,7 +535,14 @@ export component SidebarRail inherits Rectangle {
         // use Cancel/Esc so a misclick can't silently delete).
         Rectangle {
             background: #0b0c12cc;
-            TouchArea {}
+            // Swallow scrim clicks (no outside-click dismissal — use Cancel/Esc) AND, if the
+            // click did land here, pull keyboard focus back to the FocusScope so Esc/Enter keep
+            // working afterwards.
+            TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { fs.focus(); }
+                }
+            }
         }
 
         // the card
@@ -527,6 +551,9 @@ export component SidebarRail inherits Rectangle {
             height: 168px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
+            // Any focus landing on the card delegates to the key-handling FocusScope, so a
+            // click on the card chrome can't silently strand Esc/Enter.
+            forward-focus: fs;
             background: Theme.mantle;
             border-radius: 10px;
             border-width: 1px;
@@ -595,7 +622,11 @@ export component SidebarRail inherits Rectangle {
                         cfa := TouchArea {
                             mouse-cursor: pointer;
                             clicked => {
-                                root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                                // TOCTOU guard: only dispatch if the captured indices still
+                                // point at the confirmed path; otherwise abort (no delete).
+                                if (root.captured-still-valid()) {
+                                    root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                                }
                                 root.wt-del-visible = false;
                             }
                         }
@@ -613,7 +644,10 @@ export component SidebarRail inherits Rectangle {
                         return EventResult.accept;
                     }
                     if (e.text == Key.Return) {
-                        root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                        // Same TOCTOU guard as the Confirm button (see captured-still-valid).
+                        if (root.captured-still-valid()) {
+                            root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                        }
                         root.wt-del-visible = false;
                         return EventResult.accept;
                     }
