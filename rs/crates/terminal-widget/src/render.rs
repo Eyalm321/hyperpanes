@@ -289,6 +289,11 @@ pub struct GpuRenderer {
     atlas_tex: wgpu::Texture,
     atlas_alloc: etagere::AtlasAllocator,
     atlas_map: std::collections::HashMap<GlyphKey, AtlasEntry>,
+    /// Generation of the `Font` the atlas was packed from. `GlyphKey` is keyed only by
+    /// (font_id, gid, …), so on a font/size reload the gids/metrics change but the key can
+    /// collide — guard against stale-glyph bleed + leak by clearing the atlas when this no
+    /// longer matches `Font::generation()`. `0` = nothing packed yet.
+    atlas_gen: u64,
 
     uniform_buf: wgpu::Buffer,
     bg_pipeline: wgpu::RenderPipeline,
@@ -512,6 +517,7 @@ impl GpuRenderer {
             atlas_tex,
             atlas_alloc: etagere::AtlasAllocator::new(etagere::size2(ATLAS as i32, ATLAS as i32)),
             atlas_map: std::collections::HashMap::new(),
+            atlas_gen: 0,
             uniform_buf,
             bg_pipeline,
             glyph_pipeline,
@@ -597,6 +603,15 @@ impl GpuRenderer {
     /// Do the GPU work (build instances, upload, draw into the per-pane target, submit).
     /// Separated from the Slint import so the benchmark can time pure render throughput.
     pub fn render_to_texture(&mut self, grid: &GridSnapshot, font: &mut Font, opts: &RenderOpts) {
+        // Font/size reload? The glyph keys carry no font epoch, so old atlas entries would
+        // bleed stale glyphs (and leak until "atlas full"). Drop them and start the packer
+        // over against the new font.
+        if font.generation() != self.atlas_gen {
+            self.atlas_map.clear();
+            self.atlas_alloc.clear();
+            self.atlas_gen = font.generation();
+        }
+
         let cw = font.cell_w;
         let ch = font.cell_h;
         let w = (grid.cols as u32 * cw).max(1);
