@@ -12,6 +12,8 @@ use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
 
 use slint::{Color, Model, ModelRc, SharedString, VecModel};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::contextmenu::CtxKind;
@@ -19,7 +21,7 @@ use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
     AppWindow, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem, LayoutOption,
-    MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
+    MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem, WorktreeRow,
 };
 use crate::prefs;
 
@@ -63,6 +65,12 @@ pub struct Ui {
     pub ctx_swatches: Rc<VecModel<Color>>,
     pub ctx_tabs: Rc<VecModel<CtxTab>>,
     pub ctx_layouts: Rc<VecModel<LayoutOption>>,
+    // ---- sidebar worktree subtrees ----
+    /// Per-project worktree models, keyed by repo path and reused across ticks so each
+    /// `ProjectItem.worktrees` keeps a STABLE model identity. Without this the projection's
+    /// per-tick rebuild would recreate the worktree rows every frame, dropping in-flight
+    /// clicks on the trash icons. Pruned to the live project set each resync.
+    pub wt_models: RefCell<HashMap<String, Rc<VecModel<WorktreeRow>>>>,
 }
 
 impl Ui {
@@ -87,6 +95,7 @@ impl Ui {
             ctx_swatches: Rc::new(VecModel::default()),
             ctx_tabs: Rc::new(VecModel::default()),
             ctx_layouts: Rc::new(VecModel::default()),
+            wt_models: RefCell::new(HashMap::new()),
         })
     }
 
@@ -626,11 +635,47 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     // sidebar / projects: the rail gating + flyout state + rows
     app.set_show_sidebar(state.settings.show_sidebar);
     app.set_sidebar_open(state.sidebar_open);
+    // Refresh the worktree cache on the closed→open edge, then build the two-level tree:
+    // each project header carries its enumerated worktrees (only while the flyout is open —
+    // no point spawning git for a hidden panel). Order matches `state.projects`, so the
+    // flyout row index `i` indexes both the model and `state.projects` (used by delete).
+    let sidebar_open = state.sidebar_open;
+    crate::sidebar::note_flyout_open(sidebar_open);
     let projects: Vec<ProjectItem> = state
         .project_rows()
         .into_iter()
-        .map(|(name, color)| ProjectItem { name, color })
+        .zip(state.projects.iter())
+        .map(|((name, color), proj)| {
+            let rows: Vec<WorktreeRow> = if sidebar_open {
+                crate::sidebar::worktrees_for(&proj.path)
+                    .into_iter()
+                    .map(|w| WorktreeRow {
+                        path: w.path.into(),
+                        branch: w.branch.into(),
+                        is_main: w.is_main,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Reuse this project's worktree model (stable identity) and update its contents
+            // in place, so the inner repeater isn't rebuilt every frame (see `wt_models`).
+            let model = ui
+                .wt_models
+                .borrow_mut()
+                .entry(proj.path.clone())
+                .or_insert_with(|| Rc::new(VecModel::default()))
+                .clone();
+            sync_model(&model, rows);
+            ProjectItem { name, color, worktrees: ModelRc::from(model) }
+        })
         .collect();
+    // Drop cached worktree models for projects no longer present.
+    {
+        let live: std::collections::HashSet<&str> =
+            state.projects.iter().map(|p| p.path.as_str()).collect();
+        ui.wt_models.borrow_mut().retain(|k, _| live.contains(k.as_str()));
+    }
     sync_model(&ui.projects, projects);
 
     // ---- context menu (pane header / tab strip) ----
