@@ -106,6 +106,12 @@ impl EventHub {
         self.inner.lock().unwrap().clients.retain(|c| c.id != id);
     }
 
+    /// Drop every client's sender (server stop): each `handle_ws` `rx.recv()` then returns `None`
+    /// and its socket task exits, so no WS task lingers holding an `Arc<Shared>` after a stop/toggle.
+    pub fn clear_clients(&self) {
+        self.inner.lock().unwrap().clients.clear();
+    }
+
     /// Deliver one frame to a single client (the `hello` greeting on connect).
     pub fn send_to(&self, id: u64, event: &ControlEvent) {
         let json = event.to_json();
@@ -241,5 +247,19 @@ mod tests {
         assert!(!hub.has_clients());
         hub.broadcast(&ControlEvent::State);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn clear_clients_closes_every_receiver() {
+        let hub = EventHub::new();
+        let (_a, mut ra) = hub.add_client(None);
+        let (_b, mut rb) = hub.add_client(None);
+        assert!(hub.has_clients());
+        hub.clear_clients();
+        assert!(!hub.has_clients());
+        // Both senders dropped ⇒ each receiver reports the channel closed (recv → None),
+        // which is what makes the `handle_ws` loop break and the socket task exit.
+        assert!(matches!(ra.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
+        assert!(matches!(rb.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
     }
 }
