@@ -41,7 +41,7 @@ export function detectAll() {
         note = [note, t.buildNote?.()].filter(Boolean).join('; ');
       }
     } else if (t.id === 'hyperpanes-electron' && !installed) {
-      note = 'installed Electron app not found under %LOCALAPPDATA%\\Programs\\hyperpanes';
+      note = 'Electron baseline not built — git worktree add ../electron-baseline archive/electron && (cd it; npm ci && npm run build)';
     }
     const version = installed ? readVersion(t, exePath) : null;
     return { id: t.id, name: t.name, installed, exePath, version, note, wingetId: t.wingetId };

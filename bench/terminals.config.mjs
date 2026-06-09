@@ -90,8 +90,24 @@ function nativeVersion() {
   }
 }
 
-// The installed Electron build (the pre-rewrite baseline), `%LOCALAPPDATA%\Programs\hyperpanes`.
-const ELECTRON_INSTALLED = join(LOCALAPPDATA, 'Programs', 'hyperpanes', 'hyperpanes.exe');
+// ---- hyperpanes (Electron baseline) ----
+//
+// The installed production app is now the NATIVE build (Electron was retired), so the Electron
+// baseline comes from a `git worktree` of branch `archive/electron` built next to this one:
+//   git worktree add ../electron-baseline archive/electron && (cd ../electron-baseline && npm ci && npm run build)
+// We then run it in dev mode — the worktree's `electron` binary + `out/main/index.js` — which spawns
+// the real multi-process Electron tree (main + GPU + renderer + utility helpers) the proctree sums.
+const ELECTRON_WT = join(REPO_ROOT, '..', 'electron-baseline');
+const ELECTRON_EXE = join(ELECTRON_WT, 'node_modules', 'electron', 'dist', 'electron.exe');
+const ELECTRON_MAIN = join(ELECTRON_WT, 'out', 'main', 'index.js');
+
+function electronVersion() {
+  try {
+    return JSON.parse(readFileSync(join(ELECTRON_WT, 'package.json'), 'utf8')).version || '?';
+  } catch {
+    return '?';
+  }
+}
 
 export const TERMINALS = [
   {
@@ -138,17 +154,21 @@ export const TERMINALS = [
     id: 'hyperpanes-electron',
     name: 'hyperpanes (Electron)',
     wingetId: null,
-    exeNames: ['hyperpanes.exe'],
-    searchDirs: [join(LOCALAPPDATA, 'Programs', 'hyperpanes'), join(PROGRAMFILES, 'hyperpanes')],
+    exeNames: ['electron.exe'],
+    searchDirs: [],
     versionArgs: null,
+    fixedVersion: electronVersion,
     driven: false,
     memoryIdleOnly: true,
-    procMatch: ['hyperpanes.exe', 'electron.exe'],
+    procMatch: ['electron.exe'],
     suites: ['memory'],
-    resolveExe: () => (existsSync(ELECTRON_INSTALLED) ? ELECTRON_INSTALLED : null),
+    // Available only once the archive/electron worktree is built (both the electron binary AND the
+    // built main entry must exist).
+    resolveExe: () => (existsSync(ELECTRON_EXE) && existsSync(ELECTRON_MAIN) ? ELECTRON_EXE : null),
     launch() {
       const dataDir = makeTempDataDir('hpbench-electron');
-      return { exe: this.resolveExe(), args: ['--user-data-dir', dataDir], temp: [dataDir + '\\'] };
+      // electron <main.js> --user-data-dir <temp>  → a fresh isolated Electron instance.
+      return { exe: this.resolveExe(), args: [ELECTRON_MAIN, '--user-data-dir', dataDir], temp: [dataDir + '\\'] };
     }
   },
   {
