@@ -241,6 +241,10 @@ pub struct PaneState {
     /// forces a repaint on the next tick (a DPI / family / base-size change reloads via
     /// [`State::reload_font`] instead).
     pub font_dirty: bool,
+    /// The pane's latest reported working directory (OSC-7 / OSC-9;9 sniff), mirrored from
+    /// the session's `Cwd` events. Surfaced into the control read-model's `/state` so agents
+    /// (and `list_panes`) see each pane's live cwd. `None` until the shell reports one.
+    pub cwd: Option<String>,
 }
 
 impl PaneState {
@@ -705,6 +709,7 @@ impl State {
             font_px,
             font,
             font_dirty: false,
+            cwd: None,
         })
     }
 
@@ -884,6 +889,7 @@ impl State {
             font_px: det.font_px,
             font,
             font_dirty: false,
+            cwd: None,
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -2329,6 +2335,7 @@ impl State {
             font_px: det.font_px,
             font,
             font_dirty: false,
+            cwd: None,
         };
         let auto = self.tabs[ti].layout == Layout::Auto;
         let t = &mut self.tabs[ti];
@@ -2753,6 +2760,7 @@ impl State {
             font_px,
             font,
             font_dirty: false,
+            cwd: None,
         })
     }
 }
@@ -2777,7 +2785,7 @@ fn layout_from_name(name: &str) -> Layout {
 
 /// Parse a `#rrggbb` hex string (the project palette format) into a Slint [`Color`],
 /// falling back to the default accent on a malformed value.
-fn parse_hex(s: &str) -> Color {
+pub fn parse_hex(s: &str) -> Color {
     let h = s.trim_start_matches('#');
     if h.len() == 6 {
         if let (Ok(r), Ok(g), Ok(b)) = (
