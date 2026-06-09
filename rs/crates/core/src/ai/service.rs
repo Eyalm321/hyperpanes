@@ -396,6 +396,7 @@ impl<S: Summarizer> AiService<S> {
         for p in panes {
             seen.insert(p.session_uid.clone());
             let prev = self.ctx_by_uid.get(&p.session_uid);
+            let is_new = prev.is_none();
             let was_muted = prev.map(|c| c.muted).unwrap_or(false);
             let (cwd, project_path, project_name) = prev
                 .map(|c| (c.cwd.clone(), c.project_path.clone(), c.project_name.clone()))
@@ -420,6 +421,13 @@ impl<S: Summarizer> AiService<S> {
                 );
                 self.scheduler.forget(&p.session_uid);
                 self.last_hash.remove(&p.session_uid);
+            } else if is_new {
+                // First sight of a (non-muted) pane: arm the settle timer so a
+                // LAUNCHED-but-quiet pane gets summarized even before any on_data —
+                // the activity-driven scheduler is otherwise never told it exists.
+                // Idempotent: a later real on_data just re-arms, and prepare_job
+                // still skips alt-screen / <3-char panes, so no false summaries.
+                self.scheduler.note_output(&p.session_uid);
             }
         }
         // Drop context for this window's panes that are no longer published.
@@ -1009,5 +1017,34 @@ mod tests {
         // a later publish with a different pane prunes the now-orphaned p1 record
         publish(&mut svc, 1, "u2", "p2", false);
         assert!(svc.store.get_pane("p1").is_none());
+    }
+
+    #[test]
+    fn newly_published_pane_is_scheduled_without_any_on_data() {
+        // Regression for the "launched-but-quiet pane never summarizes" bug: the
+        // scheduler is activity-driven (only `on_data` -> `note_output` arms it), so a
+        // freshly LAUNCHED pane that hasn't emitted yet must be seeded by the publish
+        // itself. We can't read the scheduler's private `known`, so we observe the
+        // arming through the bridge: once the settle timer elapses the scheduler
+        // dispatches the uid (pushed onto `ready` -> popped by `next_due`).
+        let tp = TempPaths::new();
+        let (mut svc, _meta) = build(&tp, Fake::ok("x"));
+        svc.init();
+        svc.set_enabled(true);
+
+        // Publish a pane, but feed NO on_data — the only thing that can have armed
+        // the settle timer is `on_pane_context`'s first-sight seeding.
+        publish(&mut svc, 1, "u1", "p1", false);
+        svc.tick(2000); // > default settle_ms (1500)
+        assert_eq!(
+            svc.next_due().as_deref(),
+            Some("u1"),
+            "a newly-published quiet pane should be scheduled by the publish alone"
+        );
+
+        // A fresh pane published MUTED must NOT be seeded.
+        publish(&mut svc, 1, "u2", "p2", true);
+        svc.tick(2000);
+        assert_eq!(svc.next_due(), None, "a muted pane must never be scheduled");
     }
 }
