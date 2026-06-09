@@ -95,6 +95,9 @@ pub struct Window {
     pub last_maximized: Cell<Option<bool>>,
     /// Last `(enabled, allow_input, status)` pushed to the control Preferences props, same reason.
     pub last_control: RefCell<Option<(bool, bool, slint::SharedString)>>,
+    /// Last `(phase, status, progress)` pushed to the self-update Preferences props (same
+    /// idle-render guard — the updater snapshot is polled every tick but only written on change).
+    pub last_update: RefCell<Option<(i32, slint::SharedString, f32)>>,
 }
 
 /// The app: the window registry + the shared session engine + the shared event stream.
@@ -138,6 +141,9 @@ pub struct App {
     /// tabs→panes tree into `core::control`'s read-model + applies inbound `/command`s to the
     /// GUI in-process, so the MCP / agent orchestration drives this process like Electron.
     pub control: crate::control_host::ControlHost,
+    /// The offline-safe self-updater (Task 8): GitHub-releases check + installer download on
+    /// background threads; its live status is mirrored into every window's General panel.
+    pub update: crate::update::Updater,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -169,6 +175,7 @@ impl App {
             ai_ctx_sig: RefCell::new(std::collections::HashMap::new()),
             ai_feed: RefCell::new(std::collections::HashMap::new()),
             control,
+            update: crate::update::Updater::new(),
         })
     }
 
@@ -205,6 +212,7 @@ impl App {
             tab_geom: RefCell::new(Vec::new()),
             last_maximized: Cell::new(None),
             last_control: RefCell::new(None),
+            last_update: RefCell::new(None),
         });
 
         self.wire(&win);
@@ -339,6 +347,23 @@ impl App {
                 w.app.set_pref_control_enabled(cur.0);
                 w.app.set_pref_control_allow_input(cur.1);
                 w.app.set_pref_control_status(cur.2.clone());
+            }
+        }
+
+        // 2d. Self-update: mirror the off-thread updater's snapshot (phase/message/progress)
+        //     into every window's General panel. Same idle-render guard as the control props —
+        //     polled each tick (cheap) but only written when something actually changed.
+        {
+            let snap = self.update.snapshot();
+            let cur = (snap.phase, slint::SharedString::from(snap.message), snap.progress);
+            for w in &windows {
+                if w.last_update.borrow().as_ref() == Some(&cur) {
+                    continue;
+                }
+                *w.last_update.borrow_mut() = Some(cur.clone());
+                w.app.set_pref_update_phase(cur.0);
+                w.app.set_pref_update_status(cur.1.clone());
+                w.app.set_pref_update_progress(cur.2);
             }
         }
 
@@ -1848,6 +1873,31 @@ impl App {
                 }
                 if kind == 16 {
                     app.control.set_allow_input(arg != 0);
+                    return;
+                }
+                // Self-update (General panel) — all off-thread + offline-safe.
+                if kind == 18 {
+                    app.update.check(false); // manual check: report every outcome
+                    return;
+                }
+                if kind == 19 {
+                    app.update.download();
+                    return;
+                }
+                if kind == 20 {
+                    // Launch the staged installer silently, then quit so it can replace our
+                    // files. We never overwrite the running exe in place.
+                    match app.update.installer_path() {
+                        Some(path) => match crate::update::launch_installer(&path) {
+                            Ok(()) => {
+                                let _ = slint::quit_event_loop();
+                            }
+                            Err(e) => {
+                                app.update.set_error(format!("Couldn't launch installer: {e}"))
+                            }
+                        },
+                        None => app.update.set_error("No downloaded installer to run".to_string()),
+                    }
                     return;
                 }
                 let setting = match kind {
