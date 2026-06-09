@@ -262,6 +262,22 @@ impl TermGrid {
         }
     }
 
+    /// Scroll the viewport by `delta_lines`: **positive scrolls up into history**, negative
+    /// scrolls back toward the live edge. alacritty clamps the resulting display offset to the
+    /// scrollback bounds, so an over-scroll past the top/bottom is a no-op. Marks the grid dirty
+    /// only when the offset actually moved (so a clamped no-op doesn't force a repaint). Drives
+    /// mouse-wheel + Shift-PageUp/Down scrollback.
+    pub fn scroll_by(&mut self, delta_lines: i32) {
+        if delta_lines == 0 {
+            return;
+        }
+        let before = self.term.grid().display_offset();
+        self.term.scroll_display(Scroll::Delta(delta_lines));
+        if self.term.grid().display_offset() != before {
+            self.dirty = true;
+        }
+    }
+
     fn resolve(&self, c: AnsiColor, default_fg: bool) -> [u8; 4] {
         let rgb = match c {
             AnsiColor::Spec(rgb) => rgb,

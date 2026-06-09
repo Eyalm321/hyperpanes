@@ -505,6 +505,22 @@ impl TerminalPane {
         self.grid.scroll_to_bottom();
     }
 
+    /// Scroll the scrollback viewport by `delta_lines` (positive = up into history, negative =
+    /// toward the live edge), clamped to the history bounds. Drives mouse-wheel scrolling (a few
+    /// lines per notch — see the widget's `scroll-requested` callback).
+    pub fn scroll_by(&mut self, delta_lines: i32) {
+        self.grid.scroll_by(delta_lines);
+    }
+
+    /// Scroll the scrollback viewport by one page (`up` = into history, else toward the live
+    /// edge). A page is the visible row count less one row of overlap, so successive pages keep a
+    /// line of context. Drives Shift+PageUp / Shift+PageDown.
+    pub fn scroll_page(&mut self, up: bool) {
+        let (_, rows) = self.grid_size();
+        let page = (rows as i32 - 1).max(1);
+        self.grid.scroll_by(if up { page } else { -page });
+    }
+
     // ---- Copy/paste indicator ("toast") -----------------------------------------------------
 
     /// Raise a transient indicator over the pane (e.g. "Copied 12 chars to clipboard"). It

@@ -11,7 +11,7 @@ use slint::platform::Key;
 /// Encode a key press into PTY bytes, or `None` if nothing should be sent (e.g. a bare
 /// modifier press). `text` is the Slint `KeyEvent.text`; `ctrl`/`alt`/`shift` are its
 /// modifier flags.
-pub fn encode_key(text: &str, ctrl: bool, alt: bool, _shift: bool) -> Option<Vec<u8>> {
+pub fn encode_key(text: &str, ctrl: bool, alt: bool, shift: bool) -> Option<Vec<u8>> {
     if text.is_empty() {
         return None;
     }
@@ -22,6 +22,14 @@ pub fn encode_key(text: &str, ctrl: bool, alt: bool, _shift: bool) -> Option<Vec
         let s: slint::SharedString = k.into();
         text == s.as_str()
     };
+
+    // Shift+PageUp / Shift+PageDown are the scrollback gesture — the controller turns them into
+    // a one-page viewport scroll (see [`scroll_page_key`] + `TerminalPane::scroll_page`), so they
+    // must NEVER reach the shell. Gate them here too (defense-in-depth) so a direct caller can't
+    // leak a CSI ~ into the pty. Plain (un-shifted) PageUp/Down fall through to their sequences.
+    if shift && (is(Key::PageUp) || is(Key::PageDown)) {
+        return None;
+    }
 
     // ---- special keys → VT/xterm sequences ----
     if is(Key::UpArrow) {
@@ -97,6 +105,30 @@ pub fn encode_key(text: &str, ctrl: bool, alt: bool, _shift: bool) -> Option<Vec
     Some(text.as_bytes().to_vec())
 }
 
+/// Classify a key as the **scrollback** gesture (Shift+PageUp / Shift+PageDown), which scrolls
+/// the viewport instead of going to the shell. Returns `Some(true)` for page-up (into history),
+/// `Some(false)` for page-down (toward the live edge), and `None` for everything else — including
+/// plain (un-shifted) PageUp/PageDown, which still encode to their CSI sequences via
+/// [`encode_key`]. The app shell calls this first and, on `Some`, scrolls the focused pane
+/// ([`TerminalPane::scroll_page`](crate::pane::TerminalPane::scroll_page)) rather than writing the
+/// key to the pty.
+pub fn scroll_page_key(text: &str, shift: bool) -> Option<bool> {
+    if !shift {
+        return None;
+    }
+    let is = |k: Key| -> bool {
+        let s: slint::SharedString = k.into();
+        text == s.as_str()
+    };
+    if is(Key::PageUp) {
+        Some(true)
+    } else if is(Key::PageDown) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +173,30 @@ mod tests {
     #[test]
     fn empty_text_sends_nothing() {
         assert_eq!(encode_key("", false, false, false), None);
+    }
+
+    #[test]
+    fn plain_pageup_down_still_reach_the_shell() {
+        // Without Shift, PageUp/PageDown encode to their CSI sequences (unchanged behavior).
+        assert_eq!(encode_key(&special(Key::PageUp), false, false, false), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(encode_key(&special(Key::PageDown), false, false, false), Some(b"\x1b[6~".to_vec()));
+    }
+
+    #[test]
+    fn shift_pageup_down_are_gated_from_the_pty() {
+        // The scrollback gesture must never leak bytes to the shell.
+        assert_eq!(encode_key(&special(Key::PageUp), false, false, true), None);
+        assert_eq!(encode_key(&special(Key::PageDown), false, false, true), None);
+    }
+
+    #[test]
+    fn scroll_page_key_classifies_shift_pageup_down_only() {
+        assert_eq!(scroll_page_key(&special(Key::PageUp), true), Some(true));
+        assert_eq!(scroll_page_key(&special(Key::PageDown), true), Some(false));
+        // Un-shifted PageUp/Down are NOT scroll keys (they go to the shell).
+        assert_eq!(scroll_page_key(&special(Key::PageUp), false), None);
+        assert_eq!(scroll_page_key(&special(Key::PageDown), false), None);
+        // A plain printable key is never a scroll key.
+        assert_eq!(scroll_page_key("a", true), None);
     }
 }

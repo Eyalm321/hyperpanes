@@ -153,6 +153,11 @@ export component TerminalPane inherits Rectangle {
     callback selection-end();
     // Right button pressed (or Ctrl+V) → paste the clipboard into this pane's session.
     callback paste-requested();
+    // Mouse wheel over the surface → scroll the scrollback by this many lines (positive = up /
+    // into history, negative = down / toward the live edge). The app maps it to
+    // `TerminalPane::scroll_by`. Ctrl/Cmd+wheel is NOT reported here — it bubbles up to the pane
+    // body's font-zoom handler instead, so zoom and scrollback don't fight.
+    callback scroll-requested(float);
 
     // --- in-pane search ---
     // The query text changed (find-as-you-type).
@@ -241,6 +246,21 @@ export component TerminalPane inherits Rectangle {
                 root.link-activated(self.mouse-x, self.mouse-y,
                                     e.modifiers.control || e.modifiers.meta);
             }
+        }
+        scroll-event(e) => {
+            // Ctrl/Cmd+wheel is the terminal font-zoom gesture — reject so the event bubbles up
+            // to the pane body's zoom handler instead of scrolling the scrollback.
+            if (e.modifiers.control || e.modifiers.meta) {
+                return reject;
+            }
+            // Plain wheel scrolls the scrollback: ~3 lines per notch, direction from the wheel
+            // sign (up = into history). The controller clamps to the history bounds.
+            if (e.delta-y > 0) {
+                root.scroll-requested(3);
+            } else if (e.delta-y < 0) {
+                root.scroll-requested(-3);
+            }
+            return accept;
         }
     }
 

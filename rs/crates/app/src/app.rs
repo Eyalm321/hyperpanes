@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use hyperpanes_core::layout::presets::DividerKind;
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
-use hyperpanes_terminal_widget::encode_key;
+use hyperpanes_terminal_widget::{encode_key, keys};
 
 use slint::platform::Key;
 use slint::{ComponentHandle, LogicalPosition};
@@ -634,13 +634,28 @@ impl App {
                 EscOutcome::Forward => {}
             }
         }
+        // Shift+PageUp / Shift+PageDown scroll the pane's scrollback by one page instead of
+        // reaching the shell (plain PageUp/Down still go to the shell). Handled before the
+        // forwardable/encode path since PageUp/Down are otherwise pty-bound keys. The grid marks
+        // itself dirty, so the 8 ms render pump repaints the new viewport.
+        if let Some(up) = keys::scroll_page_key(&msg.text, msg.shift) {
+            let mut st = win.state.borrow_mut();
+            if let Some(p) = st.active_tab_mut().panes.get_mut(idx) {
+                p.pane.scroll_page(up);
+            }
+            return;
+        }
         // Drop bare modifiers / F-keys / special private-use keys.
         if !crate::forwardable(&msg.text) {
             return;
         }
         if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
-            let st = win.state.borrow();
-            if let Some(ps) = st.active_tab().panes.get(idx) {
+            let mut st = win.state.borrow_mut();
+            if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
+                // Any key that reaches the shell snaps the viewport back to the live edge so the
+                // user sees their input echoed at the prompt even after scrolling up to read
+                // history (a no-op when already at the bottom).
+                ps.pane.scroll_to_bottom();
                 self.mgr.write(&ps.uid, &String::from_utf8_lossy(&bytes));
             }
         }
