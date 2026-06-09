@@ -18,9 +18,8 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { REPO_ROOT } from './lib/launch.mjs';
+import { REPO_ROOT, makeTempDataDir } from './lib/launch.mjs';
 
 const LOCALAPPDATA = process.env.LOCALAPPDATA || join(process.env.USERPROFILE || 'C:\\', 'AppData', 'Local');
 const PROGRAMFILES = process.env.ProgramFiles || 'C:\\Program Files';
@@ -35,7 +34,10 @@ function whichExe(name) {
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean)[0];
-    if (first && existsSync(first)) return first;
+    // Trust `where`'s resolution. `existsSync` returns false for App Execution Aliases (the
+    // WindowsApps `wt.exe` is a 0-byte reparse point) even though they are launchable on PATH,
+    // so an `existsSync` gate would wrongly drop Windows Terminal.
+    if (first) return first;
   }
   return null;
 }
@@ -63,51 +65,90 @@ function resolver(exeNames, searchDirs = []) {
 // `cmd /c <wrapper>` argv used by every -e-style driven terminal.
 const CMD_RUN = (wrapperPath) => ['cmd', '/c', wrapperPath];
 
-// hyperpanes app version comes from the repo's package.json (running the exe with
-// an unknown --version flag would just open a window).
-function hyperpanesVersion() {
+// ---- hyperpanes (native Rust) ----
+
+// The native GUI binary built by `cargo build --release --manifest-path rs/crates/app/Cargo.toml`.
+// Prefer release; fall back to a debug build if that's all that exists (noted in the report).
+const NATIVE_RELEASE = join(REPO_ROOT, 'rs', 'crates', 'app', 'target', 'release', 'hyperpanes.exe');
+const NATIVE_DEBUG = join(REPO_ROOT, 'rs', 'crates', 'app', 'target', 'debug', 'hyperpanes.exe');
+
+function resolveNativeExe() {
+  if (existsSync(NATIVE_RELEASE)) return NATIVE_RELEASE;
+  if (existsSync(NATIVE_DEBUG)) return NATIVE_DEBUG;
+  return null;
+}
+
+// Native app version comes from the crate's Cargo.toml (running the exe with an unknown flag would
+// just open a window — the GUI ignores argv).
+function nativeVersion() {
   try {
-    return JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version || '?';
+    const toml = readFileSync(join(REPO_ROOT, 'rs', 'crates', 'app', 'Cargo.toml'), 'utf8');
+    const m = toml.match(/^\s*version\s*=\s*"([^"]+)"/m);
+    return m ? m[1] : '?';
   } catch {
     return '?';
   }
 }
 
-function resolveElectron() {
-  const require = createRequire(import.meta.url);
-  return require(join(REPO_ROOT, 'node_modules', 'electron')); // returns path to electron.exe
-}
+// The installed Electron build (the pre-rewrite baseline), `%LOCALAPPDATA%\Programs\hyperpanes`.
+const ELECTRON_INSTALLED = join(LOCALAPPDATA, 'Programs', 'hyperpanes', 'hyperpanes.exe');
 
 export const TERMINALS = [
   {
+    // The NATIVE Rust app (the rewrite). The GUI binary ignores CLI argv and has no
+    // run-a-command flag, so — like the config-only terminals — it is launched bare and reports
+    // IDLE memory/CPU of a fresh instance (one default-shell pane). Throughput/startup-in-pane
+    // need command injection the native GUI v0.0.1 does not yet wire (only core + the headless
+    // daemon parse argv), so those suites are n/a for native. Idle memory is the headline.
     id: 'hyperpanes',
-    name: 'hyperpanes',
+    name: 'hyperpanes (native)',
     wingetId: null,
-    exeNames: ['Hyperpanes.exe'],
-    searchDirs: [join(LOCALAPPDATA, 'Programs', 'Hyperpanes'), join(PROGRAMFILES, 'Hyperpanes')],
+    exeNames: ['hyperpanes.exe'],
+    searchDirs: [],
     versionArgs: null,
-    fixedVersion: hyperpanesVersion,
-    driven: true,
-    procMatch: ['Hyperpanes.exe', 'electron.exe'],
-    suites: DRIVEN_SUITES,
-    resolveExe: resolver(['Hyperpanes.exe'], [
-      join(LOCALAPPDATA, 'Programs', 'Hyperpanes'),
-      join(PROGRAMFILES, 'Hyperpanes')
-    ]),
-    // Prefer the installed exe; fall back to dev electron when HYPERPANES_DEV=1 or no exe.
-    launch({ wrapperPath, cwd, label = 'bench' }) {
-      const installed = this.resolveExe();
-      const wantDev = process.env.HYPERPANES_DEV === '1' || !installed;
-      const tail = ['--shell', 'cmd.exe', '-c', wrapperPath, '--name', label, '--cwd', cwd];
-      if (wantDev) {
-        return { exe: resolveElectron(), args: [join(REPO_ROOT, 'out', 'main', 'index.js'), ...tail], dev: true };
-      }
-      return { exe: installed, args: tail, dev: false };
+    fixedVersion: nativeVersion,
+    driven: false,
+    memoryIdleOnly: true,
+    procMatch: ['hyperpanes.exe'],
+    suites: ['memory'],
+    resolveExe: resolveNativeExe,
+    // Launch the native exe bare with an ISOLATED %APPDATA% so it starts as a clean fresh
+    // instance (no restored session/prefs; data dir keys on %APPDATA%). `temp` is cleaned up by
+    // the caller after sampling.
+    launch() {
+      const dataDir = makeTempDataDir('hpbench-native');
+      return { exe: this.resolveExe(), args: [], env: { APPDATA: dataDir }, temp: [dataDir + '\\'] };
     },
-    // hyperpanes is "available" if either the installed exe or a dev build exists.
+    // True iff a native build exists (release preferred, debug fallback).
     isAvailable() {
-      if (this.resolveExe()) return true;
-      return existsSync(join(REPO_ROOT, 'out', 'main', 'index.js'));
+      return !!resolveNativeExe();
+    },
+    // Note whether we fell back to a debug build (release is the fair comparison target).
+    buildNote() {
+      const exe = resolveNativeExe();
+      if (!exe) return '';
+      return exe === NATIVE_DEBUG ? 'DEBUG build (release not found — slower/larger; rebuild with --release)' : '';
+    }
+  },
+  {
+    // The pre-rewrite Electron build, as the memory baseline. The INSTALLED app launched bare with
+    // an isolated --user-data-dir gives a fresh instance (and its own single-instance lock keyed on
+    // that dir, so a running installed copy won't capture it). Idle-only, to compare apples-to-apples
+    // with the native idle figure (both: fresh instance, one default pane, no in-pane workload).
+    id: 'hyperpanes-electron',
+    name: 'hyperpanes (Electron)',
+    wingetId: null,
+    exeNames: ['hyperpanes.exe'],
+    searchDirs: [join(LOCALAPPDATA, 'Programs', 'hyperpanes'), join(PROGRAMFILES, 'hyperpanes')],
+    versionArgs: null,
+    driven: false,
+    memoryIdleOnly: true,
+    procMatch: ['hyperpanes.exe', 'electron.exe'],
+    suites: ['memory'],
+    resolveExe: () => (existsSync(ELECTRON_INSTALLED) ? ELECTRON_INSTALLED : null),
+    launch() {
+      const dataDir = makeTempDataDir('hpbench-electron');
+      return { exe: this.resolveExe(), args: ['--user-data-dir', dataDir], temp: [dataDir + '\\'] };
     }
   },
   {
@@ -122,6 +163,9 @@ export const TERMINALS = [
     suites: DRIVEN_SUITES,
     resolveExe: resolver(['wt.exe'], [join(LOCALAPPDATA, 'Microsoft', 'WindowsApps')]),
     launch({ wrapperPath }) {
+      // Bare form (wrapperPath null, e.g. `--idle-bare`): open a new window with the default
+      // profile shell so WT can serve as an idle-memory reference alongside the hyperpanes apps.
+      if (!wrapperPath) return { exe: this.resolveExe(), args: ['-w', 'new'] };
       return { exe: this.resolveExe(), args: ['-w', 'new', '--', ...CMD_RUN(wrapperPath)] };
     }
   },

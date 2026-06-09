@@ -26,8 +26,7 @@ import {
   waitForFile,
   readJsonSafe,
   killTreeAndWait,
-  processesByName,
-  repoElectronRunning,
+  nativeRepoRunning,
   cleanup
 } from './lib/launch.mjs';
 
@@ -35,6 +34,7 @@ const WORKLOADS = join(REPO_ROOT, 'bench', 'workloads');
 const DEFAULT_CASES = ['dense', 'scrolling', 'scrolling-region', 'alt-screen', 'unicode', 'cursor-motion'];
 const SETTLE_MS = 4000; // after ready-marker, before sampling memory
 const BARE_STARTUP_MS = 6000; // config-only apps have no ready-marker
+const DEFAULT_CPU_MS = 2000; // idle-CPU sample window (0 disables CPU sampling)
 
 const log = (...a) => console.log('[bench]', ...a);
 
@@ -102,60 +102,76 @@ async function startupSuite(term, { runs, timeout }) {
 }
 
 /** Spawn a workload, wait for its ready-marker, settle, sample the tree, kill. */
-async function memorySample(term, workloadFile, workloadArgs, { readyTimeout }) {
+async function memorySample(term, workloadFile, workloadArgs, { readyTimeout, cpuMs = 0 }) {
   const id = uid('mem');
   const ready = join(RESULTS_DIR, `${id}.ready.json`);
   const wrapper = writeCmdWrapper(id, join(WORKLOADS, workloadFile), ['--ready', ready, ...workloadArgs]);
-  const { exe, args } = term.launch({ wrapperPath: wrapper, cwd: REPO_ROOT, label: 'bench' });
-  const child = spawnTerminal(exe, args);
+  const { exe, args, env, temp } = term.launch({ wrapperPath: wrapper, cwd: REPO_ROOT, label: 'bench' });
+  const child = spawnTerminal(exe, args, { env });
   await waitForFile(ready, readyTimeout);
   await sleep(SETTLE_MS);
-  const sample = sampleTree(child.pid);
+  const sample = sampleTree(child.pid, { cpuMs });
   await killTreeAndWait(child.pid);
-  cleanup([wrapper, ready]);
+  cleanup([wrapper, ready, ...(temp || [])]);
   return sample;
 }
 
-async function memorySuite(term, { lines, idleOnly }) {
-  const row = { idleWorkingSetMB: null, idlePrivateMB: null, loadWorkingSetMB: null, procCount: null, note: '' };
+async function memorySuite(term, { lines, idleOnly, cpuMs = 0 }) {
+  const row = {
+    idleWorkingSetMB: null,
+    idlePrivateMB: null,
+    loadWorkingSetMB: null,
+    idleCpuPct: null,
+    procCount: null,
+    note: ''
+  };
 
   if (idleOnly) {
-    // Config-only: no run-a-command flag, so launch bare and sample after a fixed wait.
-    const { exe, args } = term.launch({ wrapperPath: null, cwd: REPO_ROOT, label: 'bench' });
-    const child = spawnTerminal(exe, args);
+    // No run-a-command flag (config-only terminals + the native hyperpanes GUI): launch bare with
+    // whatever isolated data dir the entry mints, settle, then sample idle memory + CPU.
+    const { exe, args, env, temp } = term.launch({ wrapperPath: null, cwd: REPO_ROOT, label: 'bench' });
+    const child = spawnTerminal(exe, args, { env });
     await sleep(BARE_STARTUP_MS);
-    const s = sampleTree(child.pid);
+    const s = sampleTree(child.pid, { cpuMs });
     await killTreeAndWait(child.pid);
+    cleanup(temp || []);
     row.idleWorkingSetMB = s.ok ? s.workingSetMB : null;
     row.idlePrivateMB = s.ok ? s.privateBytesMB : null;
+    row.idleCpuPct = s.ok ? s.cpuPercent : null;
     row.procCount = s.ok ? s.count : null;
-    row.note = s.ok && s.count > 0 ? 'idle only (not driven)' : 'idle only; tree empty — app may have forwarded to a running instance';
-    log(`  memory ${term.id} (idle-only): ${row.idleWorkingSetMB == null ? 'n/a' : row.idleWorkingSetMB + ' MB'}`);
+    row.note =
+      s.ok && s.count > 0 ? 'idle only (not driven)' : 'idle only; tree empty — app may be a launcher stub that exited';
+    log(
+      `  memory ${term.id} (idle-only): ${row.idleWorkingSetMB == null ? 'n/a' : row.idleWorkingSetMB + ' MB'}` +
+        `${row.idleCpuPct == null ? '' : `, cpu ${row.idleCpuPct}%`}, ${row.procCount ?? '?'} procs`
+    );
     return row;
   }
 
-  const idle = await memorySample(term, 'idle.mjs', [], { readyTimeout: 30000 });
+  const idle = await memorySample(term, 'idle.mjs', [], { readyTimeout: 30000, cpuMs });
   row.idleWorkingSetMB = idle.ok ? idle.workingSetMB : null;
   row.idlePrivateMB = idle.ok ? idle.privateBytesMB : null;
+  row.idleCpuPct = idle.ok ? idle.cpuPercent : null;
   row.procCount = idle.ok ? idle.count : null;
   if (idle.ok && idle.count === 0) row.note = 'tree empty (launcher stub exited — see WT caveat)';
 
   const load = await memorySample(term, 'fill-scrollback.mjs', ['--lines', String(lines)], { readyTimeout: 180000 });
   row.loadWorkingSetMB = load.ok ? load.workingSetMB : null;
 
-  if (term.id === 'hyperpanes') row.note = [row.note, 'cross-check via in-app "Performance: Dump metrics"'].filter(Boolean).join('; ');
   log(`  memory ${term.id}: idle ${row.idleWorkingSetMB ?? 'n/a'} MB, load ${row.loadWorkingSetMB ?? 'n/a'} MB`);
   return row;
 }
 
-/** Returns an error string if the terminal can't be measured cleanly, else null. */
+/**
+ * Soft preflight. The native GUI has no single-instance lock and every measured hyperpanes
+ * (native or Electron) is launched with an isolated data dir, so a running instance does NOT
+ * capture the harness's launch — there is nothing to hard-skip. We only surface an informational
+ * note when a repo-built native instance is already up (it shares the machine's CPU/RAM, which can
+ * nudge the idle numbers). Returns null (never blocks).
+ */
 function preflight(term) {
-  if (term.id !== 'hyperpanes') return null;
-  if (process.env.HYPERPANES_DEV === '1') {
-    if (repoElectronRunning())
-      return 'a hyperpanes dev instance (electron) is already running — close it so the harness owns a fresh instance (the single-instance lock would forward the workload to it).';
-  } else if (processesByName(['Hyperpanes.exe']).length) {
-    return 'hyperpanes is already running — close it so the harness owns a fresh instance (single-instance lock forwards args and exits).';
+  if (term.id === 'hyperpanes' && nativeRepoRunning()) {
+    log('  note: a repo-built native hyperpanes is already running — measuring a separate fresh (isolated-APPDATA) instance; close it for the cleanest idle numbers.');
   }
   return null;
 }
@@ -170,6 +186,11 @@ async function main() {
   const lines = numFlag(flags.lines, 200000);
   const tpTimeout = numFlag(flags.timeout, 60000);
   const label = (flags.label && String(flags.label)) || 'report';
+  // `--idle-bare` forces EVERY targeted terminal through the bare idle sample (no in-pane
+  // workload), so a native-vs-Electron-vs-WT memory/CPU comparison is identical methodology
+  // for all of them. `--cpu-ms=0` disables idle-CPU sampling.
+  const idleBare = !!flags['idle-bare'];
+  const cpuMs = numFlag(flags['cpu-ms'], DEFAULT_CPU_MS);
 
   ensureResultsDir();
   log('detecting terminals…');
@@ -214,7 +235,7 @@ async function main() {
         suites.startup.rows.push({ ...base, ...r });
       }
       if (applicable.includes('memory')) {
-        const r = await memorySuite(term, { lines, idleOnly: !!term.memoryIdleOnly });
+        const r = await memorySuite(term, { lines, idleOnly: idleBare || !!term.memoryIdleOnly, cpuMs });
         suites.memory.rows.push({ ...base, ...r });
       }
     } catch (err) {
