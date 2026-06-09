@@ -163,6 +163,10 @@ component ProjectMenu inherits PopupWindow {
 component WorktreeRowView inherits Rectangle {
     in property <WorktreeRow> wt;
     callback request-delete();
+    // Removable only when it's neither the main checkout NOR locked — git refuses a plain
+    // (`--force`-less) `worktree remove` on both, so the trash is disabled rather than letting
+    // a click fall into a swallowed error.
+    property <bool> deletable: !root.wt.is-main && !root.wt.locked;
     height: 36px;
     border-radius: 5px;
     background: rowa.has-hover ? Theme.surface2 : transparent;
@@ -179,7 +183,10 @@ component WorktreeRowView inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             Text {
-                text: root.wt.branch + (root.wt.is-main ? "  ·  main" : "");
+                text: root.wt.branch
+                    + (root.wt.is-main ? "  ·  main" : "")
+                    + (root.wt.locked ? "  ·  locked" : "")
+                    + (root.wt.prunable ? "  ·  prunable" : "");
                 color: Theme.text;
                 font-size: 12px;
                 overflow: elide;
@@ -199,15 +206,15 @@ component WorktreeRowView inherits Rectangle {
                 width: 26px;
                 height: 26px;
                 border-radius: 6px;
-                background: (!root.wt.is-main && tta.has-hover) ? Theme.danger : transparent;
+                background: (root.deletable && tta.has-hover) ? Theme.danger : transparent;
                 TrashGlyph {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    ink: root.wt.is-main ? Theme.faint : (tta.has-hover ? #ffffff : Theme.subtext);
+                    ink: !root.deletable ? Theme.faint : (tta.has-hover ? #ffffff : Theme.subtext);
                 }
                 tta := TouchArea {
-                    mouse-cursor: root.wt.is-main ? not-allowed : pointer;
-                    clicked => { if (!root.wt.is-main) { root.request-delete(); } }
+                    mouse-cursor: root.deletable ? pointer : not-allowed;
+                    clicked => { if (root.deletable) { root.request-delete(); } }
                 }
             }
         }

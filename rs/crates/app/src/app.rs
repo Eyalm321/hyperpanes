@@ -1578,11 +1578,16 @@ impl App {
                     })
                 };
                 let Some((repo, Some(row))) = target else { return };
-                // Defense-in-depth: NEVER delete the main checkout from code, regardless of git
-                // also refusing it (we pass no `--force`). The disabled trash in the UI is not a
-                // guarantee — re-check here before touching the filesystem.
+                // Defense-in-depth: NEVER delete the main checkout (or a locked worktree) from
+                // code, regardless of git also refusing both without `--force`. The disabled
+                // trash in the UI is not a guarantee — re-check here before touching the
+                // filesystem.
                 if row.is_main {
                     crate::dbg_log("worktree remove refused: target is the main checkout");
+                    return;
+                }
+                if row.locked {
+                    crate::dbg_log("worktree remove refused: target worktree is locked");
                     return;
                 }
                 let wt_path = row.path;
