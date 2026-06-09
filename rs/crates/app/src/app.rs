@@ -35,6 +35,16 @@ use crate::paneview::{self, Ui};
 use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, State};
 use crate::{theme, window, AppWindow, KeyMsg};
 
+/// Fast (active) pump cadence in ms — the responsive default whenever there's work to do.
+pub const TICK_FAST_MS: u64 = 8;
+/// Idle pump cadence in ms — the pump drops to this after a stretch with no work, so the
+/// 125 Hz wakeups stop burning idle CPU. Kept conservative (≈31 Hz) so streamed output and
+/// the OS maximize-state poll still refresh within a frame; input wakes back to fast
+/// instantly. ⚠ INPUT-LATENCY-SENSITIVE — see `App::wake` and the Task-17 #3 notes.
+pub const TICK_IDLE_MS: u64 = 32;
+/// Consecutive idle fast-cadence ticks before dropping to the idle cadence (≈0.6 s at 8 ms).
+const IDLE_TICKS_BEFORE_SLOW: u32 = 75;
+
 /// Logical height of the top bar (where a tab-strip drop lands). Hidden in fullscreen,
 /// so the pane area then starts at the window's top edge.
 const TOPBAR_H: f32 = 32.0;
@@ -144,6 +154,14 @@ pub struct App {
     /// The offline-safe self-updater (Task 8): GitHub-releases check + installer download on
     /// background threads; its live status is mirrored into every window's General panel.
     pub update: crate::update::Updater,
+    /// The shared pump timer, owned here so [`App::tick`] can re-interval it for the adaptive
+    /// idle cadence (#3). Set once from `main` via [`App::set_timer`]; `None` until then.
+    timer: RefCell<Option<slint::Timer>>,
+    /// Consecutive pump ticks with no work — drives the drop to the idle cadence.
+    idle_ticks: Cell<u32>,
+    /// Whether the pump is currently at the slow (idle) cadence (so we re-interval only on a
+    /// transition, never every tick).
+    cadence_slow: Cell<bool>,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -176,12 +194,59 @@ impl App {
             ai_feed: RefCell::new(std::collections::HashMap::new()),
             control,
             update: crate::update::Updater::new(),
+            timer: RefCell::new(None),
+            idle_ticks: Cell::new(0),
+            cadence_slow: Cell::new(false),
         })
+    }
+
+    /// Hand the shared pump timer to the app so the adaptive cadence (#3) can re-interval it.
+    /// Called once from `main` after the timer is started at the fast cadence.
+    pub fn set_timer(&self, timer: slint::Timer) {
+        *self.timer.borrow_mut() = Some(timer);
+    }
+
+    /// Switch the pump cadence (no-op when already there, so we never churn the timer). Safe
+    /// to call from inside the timer callback — Slint releases the timer-registry borrow
+    /// before invoking the callback — and from input callbacks on the UI thread.
+    fn set_cadence(&self, slow: bool) {
+        if self.cadence_slow.get() == slow {
+            return;
+        }
+        self.cadence_slow.set(slow);
+        if let Some(t) = self.timer.borrow().as_ref() {
+            let ms = if slow { TICK_IDLE_MS } else { TICK_FAST_MS };
+            t.set_interval(Duration::from_millis(ms));
+        }
+    }
+
+    /// Wake the pump to the fast cadence immediately and reset the idle counter. Called from
+    /// the input paths (keystrokes, command dispatch) so a keystroke's echo renders without
+    /// the idle-cadence delay. ⚠ This is what keeps adaptive cadence input-latency-safe.
+    pub fn wake(&self) {
+        self.idle_ticks.set(0);
+        self.set_cadence(false);
     }
 
     /// Realize a new OS window, wire its callbacks to act on its own state, show it, and
     /// register it. `seed` decides its first pane (empty shell, or a re-hosted session).
     pub fn spawn_window(self: &Rc<Self>, seed: PendingSeed) {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+
+        // The real DPI-scaled font is (re)loaded on the first pump (which owns the
+        // scale); `State::new` flags `font_reload`, so a scale-1 placeholder is fine.
+        let mut state = State::new(theme::load_font(1.0));
+
+        // #2 startup: seed the first pane (spawn the pty → shell) BEFORE the heavy
+        // `AppWindow::new` (wgpu device init), so the shell's process startup overlaps GPU
+        // realize instead of running after it + a multi-tick wait to learn the pane area.
+        // `make_pane` fixes the pty at 80×24, so seeding needs no area; the first render pump
+        // relayouts it. Window 0 only — re-host/tear-off windows are also seeded here.
+        crate::perf::mark("spawn_window: seeding first pane");
+        self.apply_seed(&mut state, seed);
+        crate::perf::mark("spawn_window: first pane seeded (pty spawned)");
+
         let aw = match AppWindow::new() {
             Ok(a) => a,
             Err(e) => {
@@ -189,15 +254,9 @@ impl App {
                 return;
             }
         };
+        crate::perf::mark("spawn_window: AppWindow::new done (wgpu device ready)");
         let ui = Ui::new();
         ui.attach(&aw);
-
-        let id = self.next_id.get();
-        self.next_id.set(id + 1);
-
-        // The real DPI-scaled font is (re)loaded on the first pump (which owns the
-        // scale); `State::new` flags `font_reload`, so a scale-1 placeholder is fine.
-        let state = State::new(theme::load_font(1.0));
 
         let win = Rc::new(Window {
             id,
@@ -207,7 +266,8 @@ impl App {
             area: Cell::new((0.0, 0.0)),
             hwnd: Cell::new(0),
             saved: RefCell::new(None),
-            seed: RefCell::new(seed),
+            // Already seeded above (eagerly) — nothing pending for the pump to do.
+            seed: RefCell::new(PendingSeed::Done),
             closing: Cell::new(false),
             tab_geom: RefCell::new(Vec::new()),
             last_maximized: Cell::new(None),
@@ -240,6 +300,9 @@ impl App {
 
     /// Run `cmd` against `win`'s state and apply any window-level [`Effect`].
     fn run_command(self: &Rc<Self>, win: &Rc<Window>, cmd: Command) {
+        // Any command is user activity — snap the pump back to the fast cadence (#3) so the
+        // result renders immediately even if we'd dropped to the idle cadence.
+        self.wake();
         crate::dbg_log(&format!("cmd[{}] {cmd:?}", win.id));
         let eff = {
             let mut st = win.state.borrow_mut();
@@ -301,6 +364,9 @@ impl App {
         if windows.is_empty() {
             return;
         }
+        // Perf instrumentation (#1) — inert unless `HYPERPANES_PERFLOG` is set.
+        let perf_on = crate::perf::enabled();
+        let t_tick = perf_on.then(std::time::Instant::now);
 
         // 1. Lazily strip each window's frame once its HWND exists; keep the maximize/
         //    restore icon in sync with the OS maximized state.
@@ -324,13 +390,18 @@ impl App {
         // 2. Drain the ONE shared event channel, routing each event to its window. Each event
         //    is teed to the control server (live `/events` WS frames + model cwd/exit) before
         //    the GUI consumes it — a cheap no-op when the server is stopped.
+        let mut events: u64 = 0;
+        let mut bytes: u64 = 0;
+        let t_drain = perf_on.then(std::time::Instant::now);
         {
             let mut rx = self.erx.borrow_mut();
             while let Ok(ev) = rx.try_recv() {
                 self.control.tee_event(&ev);
-                self.route_event(&windows, ev);
+                bytes += self.route_event(&windows, ev) as u64;
+                events += 1;
             }
         }
+        let drain_ns = t_drain.map(|s| s.elapsed().as_nanos()).unwrap_or(0);
 
         // 2c. Control plane: reconcile any inbound `/command` structural change into the live
         //     GUI (on this UI thread), then republish the live tree into the read-model so
@@ -374,10 +445,18 @@ impl App {
         //     and mirror the engine status into the Preferences props.
         self.pump_ai(&windows);
 
-        // 3. Render each window from its own state.
+        // 3. Render each window from its own state. Aggregate per-window activity so the
+        //    adaptive cadence (#3) can tell a busy frame (streaming output / animation) from a
+        //    truly idle one (a bare cursor blink does NOT count as work — see `paneview::pump`).
+        let t_render = perf_on.then(std::time::Instant::now);
+        let mut renders: u64 = 0;
+        let mut any_active = false;
         for w in &windows {
-            self.pump_window(w);
+            let r = self.pump_window(w);
+            renders += r.rendered as u64;
+            any_active |= r.active;
         }
+        let render_ns = t_render.map(|s| s.elapsed().as_nanos()).unwrap_or(0);
 
         // 3a. Drive any in-flight drag/tear-off from the global cursor (ghost + previews;
         // resolves the drop on release). No-ops when nothing is being dragged.
@@ -425,18 +504,43 @@ impl App {
                 let _ = slint::quit_event_loop();
             }
         }
+
+        // ---- adaptive idle cadence (#3) ----
+        // A tick "did work" if it drained any session output, animated/rendered real pane
+        // content, has a drag in flight, or the control server is live (keep MCP/agent drivers
+        // responsive). After a stretch of idle ticks the pump drops to the slow cadence; any
+        // work — or an input via `App::wake` — snaps it back to fast.
+        let did_work =
+            events > 0 || any_active || self.drag.borrow().is_some() || self.control.status().0;
+        if did_work {
+            self.idle_ticks.set(0);
+            self.set_cadence(false);
+        } else {
+            let n = self.idle_ticks.get().saturating_add(1);
+            self.idle_ticks.set(n);
+            if n >= IDLE_TICKS_BEFORE_SLOW {
+                self.set_cadence(true);
+            }
+        }
+
+        if let Some(t) = t_tick {
+            crate::perf::tick(events, bytes, renders, drain_ns, render_ns, t.elapsed().as_nanos());
+        }
     }
 
-    /// Route one session event to the window hosting its `uid`.
-    fn route_event(&self, windows: &[Rc<Window>], ev: SessionEvent) {
+    /// Route one session event to the window hosting its `uid`. Returns the number of output
+    /// bytes fed into a pane (0 for non-`Data` events / no owning pane) so the pump can report
+    /// feed throughput in the perf log (#1).
+    fn route_event(&self, windows: &[Rc<Window>], ev: SessionEvent) -> usize {
         match ev {
             SessionEvent::Data { uid, data } => {
                 // NB: the ambient-AI engine is NOT fed the raw redraw byte stream here — a
                 // repainting TUI (e.g. an agent CLI) would drown the quiescence scheduler in
                 // noise. Instead `pump_ai` feeds each pane's *rendered screen text* on a
                 // cadence (what the user actually sees). See `App::pump_ai`.
-                let Some(w) = find_window(windows, &uid) else { return };
+                let Some(w) = find_window(windows, &uid) else { return 0 };
                 let mut st = w.state.borrow_mut();
+                let mut fed = 0;
                 if let Some((ti, pi)) = st.find_pane(&uid) {
                     let pc = &mut st.tabs[ti].panes[pi];
                     // Sniff the shell's OSC window title so the idle glow can tell an agent
@@ -445,6 +549,7 @@ impl App {
                         pc.shell_title = title;
                     }
                     pc.pane.feed(&data);
+                    fed = data.len();
                     let replies = pc.pane.take_replies();
                     if !replies.is_empty() {
                         self.mgr.write(&uid, &String::from_utf8_lossy(&replies));
@@ -456,6 +561,7 @@ impl App {
                         }
                     }
                 }
+                fed
             }
             SessionEvent::Exit { uid, .. } => {
                 self.ai.send(crate::ai::AiMsg::Exit { uid: uid.clone() });
@@ -466,6 +572,7 @@ impl App {
                         w.closing.set(true);
                     }
                 }
+                0
             }
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
@@ -485,6 +592,7 @@ impl App {
                     // context + per-project memory).
                     self.ai.send(crate::ai::AiMsg::Cwd { uid, cwd, project });
                 }
+                0
             }
         }
     }
@@ -564,78 +672,93 @@ impl App {
         }
     }
 
-    /// Seed (if pending + area known) and render one window.
-    fn pump_window(self: &Rc<Self>, win: &Rc<Window>) {
+    /// Seed a window's first pane(s) from its [`PendingSeed`]. Called EAGERLY from
+    /// `spawn_window` (#2 startup) — the pty spawn no longer waits for the pane area to be
+    /// known, because [`State::make_pane`] sizes the pty at a fixed 80×24 and the first render
+    /// pump relayouts it to the real area. Seeding here (before the heavy `AppWindow::new`)
+    /// overlaps the shell's process startup with wgpu/device init instead of running it after.
+    fn apply_seed(self: &Rc<Self>, st: &mut State, seed: PendingSeed) {
+        match seed {
+            PendingSeed::EmptyTab => {
+                st.add_pane(&self.mgr);
+                if self.first_seed.replace(false) {
+                    if std::env::var_os("HYPERPANES_DEMO").is_some() {
+                        crate::demo_seed(st, &self.mgr);
+                    }
+                    if let Some(which) = std::env::var_os("HYPERPANES_OPEN") {
+                        match which.to_string_lossy().as_ref() {
+                            "palette" => { dispatch(st, Command::PaletteOpen, &self.mgr); }
+                            "prefs" => { dispatch(st, Command::PrefsOpen, &self.mgr); }
+                            // The rail is persistent; open its projects flyout so a
+                            // screenshot exercises the full surface.
+                            "sidebar" => { dispatch(st, Command::ToggleProjects, &self.mgr); }
+                            // Open a context menu at a fixed anchor (screenshot scaffold).
+                            "panemenu" => { dispatch(st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr); }
+                            "tabmenu" => { dispatch(st, Command::OpenTabContext(0, 90.0, 44.0), &self.mgr); }
+                            // Phase-5 chrome-parity scaffolds:
+                            // the hamburger (application) menu, anchored under the button.
+                            "appmenu" => { dispatch(st, Command::OpenAppContext(10.0, 32.0), &self.mgr); }
+                            // three panes in the single preset → the bottom pane taskbar shows.
+                            "taskbar" => {
+                                dispatch(st, Command::NewPane, &self.mgr);
+                                dispatch(st, Command::NewPane, &self.mgr);
+                                dispatch(st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
+                            }
+                            // taskbar + its right-click pane menu (inTaskbar variant: Show + no Maximize).
+                            "taskbarmenu" => {
+                                dispatch(st, Command::NewPane, &self.mgr);
+                                dispatch(st, Command::NewPane, &self.mgr);
+                                dispatch(st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
+                                dispatch(st, Command::OpenTaskbarContext(0, 40.0, 805.0), &self.mgr);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            PendingSeed::Workspace(file) => {
+                st.load_workspace(*file, &self.mgr);
+                // A contentless spec (no spawnable panes) would leave the window blank —
+                // fall back to a fresh shell so a launch never yields an empty window.
+                if st.tabs.is_empty() {
+                    st.add_pane(&self.mgr);
+                }
+            }
+            PendingSeed::Adopt(det) => st.adopt_pane(&self.mgr, det),
+            PendingSeed::AdoptTab(det) => st.adopt_tab(&self.mgr, det),
+            PendingSeed::Done => {}
+        }
+    }
+
+    /// Render one window. Returns its [`paneview::PumpResult`] (panes repainted + whether the
+    /// pass was active) for the perf log + adaptive cadence. The first pane is seeded eagerly
+    /// in `spawn_window`, so this only renders once the pane area is known.
+    fn pump_window(self: &Rc<Self>, win: &Rc<Window>) -> paneview::PumpResult {
         let scale = win.app.window().scale_factor().max(1.0);
         let (aw, ah) = win.area.get();
 
-        // Apply the deferred first-pane seed once the area is known.
-        if aw > 1.0 && ah > 1.0 {
-            let pending = std::mem::replace(&mut *win.seed.borrow_mut(), PendingSeed::Done);
-            match pending {
-                PendingSeed::EmptyTab => {
-                    let mut st = win.state.borrow_mut();
-                    st.add_pane(&self.mgr);
-                    if self.first_seed.replace(false) {
-                        if std::env::var_os("HYPERPANES_DEMO").is_some() {
-                            crate::demo_seed(&mut st, &self.mgr);
-                        }
-                        if let Some(which) = std::env::var_os("HYPERPANES_OPEN") {
-                            match which.to_string_lossy().as_ref() {
-                                "palette" => { dispatch(&mut st, Command::PaletteOpen, &self.mgr); }
-                                "prefs" => { dispatch(&mut st, Command::PrefsOpen, &self.mgr); }
-                                // The rail is persistent; open its projects flyout so a
-                                // screenshot exercises the full surface.
-                                "sidebar" => { dispatch(&mut st, Command::ToggleProjects, &self.mgr); }
-                                // Open a context menu at a fixed anchor (screenshot scaffold).
-                                "panemenu" => { dispatch(&mut st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr); }
-                                "tabmenu" => { dispatch(&mut st, Command::OpenTabContext(0, 90.0, 44.0), &self.mgr); }
-                                // Phase-5 chrome-parity scaffolds:
-                                // the hamburger (application) menu, anchored under the button.
-                                "appmenu" => { dispatch(&mut st, Command::OpenAppContext(10.0, 32.0), &self.mgr); }
-                                // three panes in the single preset → the bottom pane taskbar shows.
-                                "taskbar" => {
-                                    dispatch(&mut st, Command::NewPane, &self.mgr);
-                                    dispatch(&mut st, Command::NewPane, &self.mgr);
-                                    dispatch(&mut st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
-                                }
-                                // taskbar + its right-click pane menu (inTaskbar variant: Show + no Maximize).
-                                "taskbarmenu" => {
-                                    dispatch(&mut st, Command::NewPane, &self.mgr);
-                                    dispatch(&mut st, Command::NewPane, &self.mgr);
-                                    dispatch(&mut st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
-                                    dispatch(&mut st, Command::OpenTaskbarContext(0, 40.0, 805.0), &self.mgr);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                PendingSeed::Workspace(file) => {
-                    let mut st = win.state.borrow_mut();
-                    st.load_workspace(*file, &self.mgr);
-                    // A contentless spec (no spawnable panes) would leave the window blank —
-                    // fall back to a fresh shell so a launch never yields an empty window.
-                    if st.tabs.is_empty() {
-                        st.add_pane(&self.mgr);
-                    }
-                }
-                PendingSeed::Adopt(det) => win.state.borrow_mut().adopt_pane(&self.mgr, det),
-                PendingSeed::AdoptTab(det) => win.state.borrow_mut().adopt_tab(&self.mgr, det),
-                PendingSeed::Done => {}
-            }
+        // Defensive: if a seed is still pending (it normally isn't — `spawn_window` seeds
+        // eagerly), apply it now. Area-independent (the pty is fixed 80×24 until relayout).
+        let pending = std::mem::replace(&mut *win.seed.borrow_mut(), PendingSeed::Done);
+        if !matches!(pending, PendingSeed::Done) {
+            let mut st = win.state.borrow_mut();
+            self.apply_seed(&mut st, pending);
         }
 
         if aw <= 1.0 || ah <= 1.0 {
-            return;
+            return paneview::PumpResult { rendered: 0, active: false };
         }
         let mut st = win.state.borrow_mut();
-        paneview::pump(&win.app, &mut st, &win.ui, (aw, ah), scale, &self.mgr);
+        paneview::pump(&win.app, &mut st, &win.ui, (aw, ah), scale, &self.mgr)
     }
 
     // ---- key routing for one window (app chords first, else encode to the pane) ----
 
     fn on_key(self: &Rc<Self>, win: &Rc<Window>, idx: usize, msg: KeyMsg) {
+        // A keystroke is the latency-critical input: wake the pump to the fast cadence now so
+        // the echo renders without the idle-cadence delay (#3). Commands go through
+        // `run_command` (which also wakes); this covers raw typing routed straight to the pty.
+        self.wake();
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
             let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
@@ -1979,6 +2102,7 @@ impl App {
                 if let Some(w) = app.window_by_id(id) {
                     w.area.set((w_, h_));
                     w.state.borrow_mut().dirty = true;
+                    app.wake(); // live window/pane resize → keep the fast cadence (#3)
                 }
             });
         }
@@ -1988,6 +2112,7 @@ impl App {
             let id = win.id;
             win.app.on_divider_drag(move |index, main, vertical, dx, dy| {
                 let Some(w) = app.window_by_id(id) else { return };
+                app.wake(); // dragging a divider is active input → keep the fast cadence (#3)
                 let (aw, ah) = w.area.get();
                 let delta = if vertical {
                     if aw > 0.0 { (dx / aw) as f64 } else { 0.0 }

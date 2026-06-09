@@ -65,7 +65,137 @@ pub fn dbg_log(msg: &str) {
     }
 }
 
+/// Lightweight perf instrumentation for the Wave-2 perf track (Task 17). Enabled by setting
+/// `HYPERPANES_PERFLOG` to a file path (or `1` / empty for a default temp path), so the
+/// startup-latency (#2) and scroll-region-throughput (#1) work can be measured before/after
+/// without an external profiler. Completely inert (one `OnceLock` load) when the env var is
+/// unset, so it costs nothing in normal runs. Single UI thread, so the tick aggregates live
+/// in a `thread_local`.
+pub(crate) mod perf {
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static START: OnceLock<Instant> = OnceLock::new();
+    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+
+    /// Capture t0 + resolve the log path. Call once at the very top of `main`.
+    pub fn init() {
+        let _ = START.get_or_init(Instant::now);
+        let _ = PATH.get_or_init(|| {
+            std::env::var_os("HYPERPANES_PERFLOG").map(|v| {
+                let s = v.to_string_lossy();
+                if s.is_empty() || s == "1" {
+                    std::env::temp_dir().join("hyperpanes-perf.log")
+                } else {
+                    std::path::PathBuf::from(s.as_ref())
+                }
+            })
+        });
+    }
+
+    /// Whether perf logging is on (cheap — a resolved `OnceLock` load).
+    #[inline]
+    pub fn enabled() -> bool {
+        matches!(PATH.get(), Some(Some(_)))
+    }
+
+    /// Milliseconds since [`init`].
+    pub fn elapsed_ms() -> f64 {
+        START.get().map(|s| s.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0)
+    }
+
+    fn write_line(line: &str) {
+        if let Some(Some(p)) = PATH.get() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    }
+
+    /// Record a one-off timestamped milestone (used for the startup path, #2).
+    pub fn mark(label: &str) {
+        if !enabled() {
+            return;
+        }
+        write_line(&format!("[+{:.1}ms] {label}", elapsed_ms()));
+    }
+
+    struct TickStats {
+        ticks: u64,
+        events: u64,
+        bytes: u64,
+        renders: u64,
+        drain_ns: u128,
+        render_ns: u128,
+        tick_ns: u128,
+        window: Option<Instant>,
+    }
+    impl TickStats {
+        const fn zero() -> Self {
+            TickStats {
+                ticks: 0,
+                events: 0,
+                bytes: 0,
+                renders: 0,
+                drain_ns: 0,
+                render_ns: 0,
+                tick_ns: 0,
+                window: None,
+            }
+        }
+    }
+    thread_local! {
+        static TICK: RefCell<TickStats> = const { RefCell::new(TickStats::zero()) };
+    }
+
+    /// Accumulate one tick's work; flush a `[tick/s]` summary ~once a second while there is
+    /// activity. `drain_ns` covers the session-event drain+feed, `render_ns` the per-window
+    /// render pump, `tick_ns` the whole tick — so the summary shows the app's busy fraction
+    /// (is the app the throughput bottleneck, or is it idle waiting on the pty?).
+    pub fn tick(events: u64, bytes: u64, renders: u64, drain_ns: u128, render_ns: u128, tick_ns: u128) {
+        if !enabled() {
+            return;
+        }
+        TICK.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.window.is_none() {
+                t.window = Some(Instant::now());
+            }
+            t.ticks += 1;
+            t.events += events;
+            t.bytes += bytes;
+            t.renders += renders;
+            t.drain_ns += drain_ns;
+            t.render_ns += render_ns;
+            t.tick_ns += tick_ns;
+            let elapsed = t.window.map(|w| w.elapsed()).unwrap_or_default();
+            if elapsed.as_millis() >= 1000 && (t.events > 0 || t.renders > 0) {
+                let secs = elapsed.as_secs_f64().max(1e-6);
+                write_line(&format!(
+                    "[tick/s] ticks={} events={} bytes={} ({:.2} MB/s) renders={} drain={:.1}ms/s render={:.1}ms/s busy={:.1}ms/s",
+                    t.ticks,
+                    t.events,
+                    t.bytes,
+                    (t.bytes as f64 / 1e6) / secs,
+                    t.renders,
+                    t.drain_ns as f64 / 1e6 / secs,
+                    t.render_ns as f64 / 1e6 / secs,
+                    t.tick_ns as f64 / 1e6 / secs,
+                ));
+                *t = TickStats { window: Some(Instant::now()), ..TickStats::zero() };
+            }
+        });
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // t0 for the perf log (#2 startup) — must be the very first thing so every mark is
+    // relative to process entry. Inert unless `HYPERPANES_PERFLOG` is set.
+    perf::init();
+    perf::mark("main: enter");
+
     // Capture any panic to a crash log (the windowed subsystem has no console).
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
@@ -100,7 +230,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(file) => PendingSeed::Workspace(Box::new(file)),
         None => PendingSeed::EmptyTab,
     };
+    perf::mark("main: spawn_window begin");
     application.spawn_window(seed);
+    perf::mark("main: spawn_window done");
 
     // If auto-update is on, do a quiet GitHub-releases check on startup. This runs on a
     // background thread inside `check`, so it never blocks startup; an offline/failed check
@@ -111,15 +243,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         application.update.check(true);
     }
 
-    // One shared pump timer drives every window (drain → render → reap).
+    // One shared pump timer drives every window (drain → render → reap). The interval is
+    // ADAPTIVE (#3): it starts at the fast cadence and `App::tick` slows it to the idle
+    // cadence after a stretch with no work, waking back to fast on input/output. The closure
+    // holds a `Weak` so storing the `Timer` inside the `App` (so `tick` can re-interval it)
+    // doesn't create a strong reference cycle.
     let timer = slint::Timer::default();
-    timer.start(slint::TimerMode::Repeated, Duration::from_millis(8), {
-        let application = application.clone();
-        move || application.tick()
-    });
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(app::TICK_FAST_MS),
+        {
+            let weak = std::rc::Rc::downgrade(&application);
+            move || {
+                if let Some(app) = weak.upgrade() {
+                    app.tick();
+                }
+            }
+        },
+    );
+    application.set_timer(timer); // App owns the timer for the whole loop + adjusts its interval
 
     slint::run_event_loop()?;
-    drop(timer); // keep the pump alive for the whole loop
     mgr.kill_all();
     Ok(())
 }
