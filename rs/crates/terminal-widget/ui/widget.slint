@@ -115,6 +115,12 @@ export component TerminalPane inherits Rectangle {
     // Indicator scale relative to the 14px base font (1.0 at default zoom).
     property <float> ind-scale: root.term-font-px / 14px;
 
+    // Whether Ctrl/Cmd is currently held — tracked from the focused pane's key stream (Slint's
+    // TouchArea `moved` carries no modifiers, so a hover can't read them directly). Drives the
+    // link tooltip's hint, which emphasizes "Ctrl+click to copy" while Ctrl is down. Reset on
+    // focus loss so a Ctrl-held-then-blur can't leave it stuck on.
+    property <bool> ctrl-held: false;
+
     // --- in-pane search (Ctrl+F): the box anchored top-right + the match highlights ---
     in property <bool> search-open: false;
     // Bumped by the controller each time Ctrl+F (re)invokes search — even while the box is
@@ -322,9 +328,12 @@ export component TerminalPane inherits Rectangle {
                 font-size: 11px;
                 font-family: "Consolas";
             }
+            // Hint line — emphasizes "Ctrl+click to copy" (brighter + bold) while Ctrl is held,
+            // otherwise shows both actions dimmed. Mirrors the plain-click-opens / Ctrl-copies split.
             Text {
-                text: "click to open · Ctrl+click to copy";
-                color: #7f849c;
+                text: root.ctrl-held ? "Ctrl+click to copy" : "click to open · Ctrl+click to copy";
+                color: root.ctrl-held ? #cdd6f4 : #7f849c;
+                font-weight: root.ctrl-held ? 700 : 400;
                 font-size: 10px;
             }
         }
@@ -332,6 +341,11 @@ export component TerminalPane inherits Rectangle {
 
     fs := FocusScope {
         key-pressed(e) => {
+            // Track the live Ctrl/Cmd state so the link tooltip can switch its hint while the
+            // modifier is held (the modifier flag rides every key event, incl. the bare Ctrl/Meta
+            // press Slint delivers as Key.Control / Key.Meta).
+            if (e.text == Key.Control || e.text == Key.ControlR
+                || e.text == Key.Meta || e.text == Key.MetaR) { root.ctrl-held = true; }
             root.key({
                 text: e.text,
                 control: e.modifiers.control,
@@ -339,6 +353,16 @@ export component TerminalPane inherits Rectangle {
                 shift: e.modifiers.shift,
             });
             accept
+        }
+        key-released(e) => {
+            if (e.text == Key.Control || e.text == Key.ControlR
+                || e.text == Key.Meta || e.text == Key.MetaR) { root.ctrl-held = false; }
+            accept
+        }
+        changed has-focus => {
+            // Dropping focus while Ctrl is held would otherwise strand `ctrl-held` on (no
+            // key-released arrives once focus moves away).
+            if (!self.has-focus) { root.ctrl-held = false; }
         }
     }
 

@@ -332,6 +332,14 @@ impl TerminalPane {
         ctrl: bool,
         editor_command: &str,
     ) -> Option<LinkAction> {
+        // Suppress link open/copy at the end of a drag-selection. The widget fires
+        // `selection-end` then `link-activated` on the same left-button release, and a dragged
+        // selection is kept alive (copied, not cleared) by the shell — so a release that just
+        // finished selecting text must NOT also open/copy the link under the release point. A
+        // plain click begins a fresh, non-dragged selection, so this never blocks real clicks.
+        if self.selection_is_drag() {
+            return None;
+        }
         let hit = self.link_at(x, y, surf_w, surf_h)?;
         if ctrl {
             return Some(LinkAction::Copy(hit.abs_path));
@@ -786,6 +794,33 @@ mod tests {
             }
             other => panic!("ctrl+click should copy, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drag_selection_suppresses_link_activation() {
+        // After a drag-select, the same left-release must NOT also open/copy the link under it
+        // (the widget fires selection-end then link-activated on one release).
+        let dir = std::env::temp_dir().join(format!("hp_pane_seldrag_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let mut p = unit_pane(20, 2);
+        p.set_cwd(Some(dir.to_string_lossy().into_owned()));
+        p.feed("a.txt"); // cols 0..5, 1px/cell on a 20x2 surface
+        // A real drag past the threshold marks the selection dragged.
+        p.selection_begin(0.5, 0.5, 20.0, 2.0);
+        p.selection_update(5.5, 0.5, 20.0, 2.0); // 5px move > DRAG_THRESHOLD_PX
+        assert!(p.selection_is_drag());
+        // Activation over the path is suppressed while the drag selection stands — both a plain
+        // click (would open) and Ctrl+click (would re-copy and clobber the just-copied selection).
+        assert!(p.activate_link(2.5, 0.5, 20.0, 2.0, false, "").is_none());
+        assert!(p.activate_link(2.5, 0.5, 20.0, 2.0, true, "").is_none());
+        // Once the selection is cleared, a click activates the link normally again.
+        p.selection_clear();
+        assert!(matches!(
+            p.activate_link(2.5, 0.5, 20.0, 2.0, true, ""),
+            Some(LinkAction::Copy(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
