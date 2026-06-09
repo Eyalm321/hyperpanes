@@ -31,11 +31,17 @@ export function detectAll() {
       return { id: t.id, name: t.name, installed: false, exePath: null, version: null, note: 'n/a (no Windows build)' };
     }
     const exePath = t.resolveExe();
-    let installed = !!exePath;
-    let note = t.driven ? '' : 'config-only (idle memory only)';
-    if (t.id === 'hyperpanes' && !exePath && t.isAvailable?.()) {
-      installed = true;
-      note = 'dev build (out/main/index.js)';
+    const installed = !!exePath;
+    let note = t.driven ? '' : 'idle memory/CPU only';
+    if (t.id === 'hyperpanes') {
+      // Native Rust build.
+      if (!installed) {
+        note = 'not built — run: cargo build --release --manifest-path rs/crates/app/Cargo.toml';
+      } else {
+        note = [note, t.buildNote?.()].filter(Boolean).join('; ');
+      }
+    } else if (t.id === 'hyperpanes-electron' && !installed) {
+      note = 'Electron baseline not built — git worktree add ../electron-baseline archive/electron && (cd it; npm ci && npm run build)';
     }
     const version = installed ? readVersion(t, exePath) : null;
     return { id: t.id, name: t.name, installed, exePath, version, note, wingetId: t.wingetId };

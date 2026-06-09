@@ -14,6 +14,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { writeFileSync, existsSync, readFileSync, mkdirSync, unlinkSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { sleep } from '../measure/timing.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,9 +49,28 @@ export function writeCmdWrapper(id, scriptPath, scriptArgs = []) {
   return path;
 }
 
-/** Spawn a terminal (GUI window visible). stdio ignored — the workload writes to its own pane. */
-export function spawnTerminal(exe, args, { cwd = REPO_ROOT } = {}) {
-  return spawn(exe, args, { cwd, stdio: 'ignore', windowsHide: false });
+/** Spawn a terminal (GUI window visible). stdio ignored — the workload writes to its own pane.
+ * `env` overlays onto the harness env (used to hand each measured app an isolated data dir). */
+export function spawnTerminal(exe, args, { cwd = REPO_ROOT, env } = {}) {
+  return spawn(exe, args, {
+    cwd,
+    stdio: 'ignore',
+    windowsHide: false,
+    env: env ? { ...process.env, ...env } : process.env
+  });
+}
+
+/**
+ * Create a fresh throwaway data dir under the OS temp dir and return its path. Used to give each
+ * measured hyperpanes (native or Electron) an ISOLATED userData/APPDATA so it starts as a clean,
+ * fresh instance — the native data dir keys on %APPDATA% and Electron's on --user-data-dir, so an
+ * isolated dir avoids restoring a saved session and (for Electron) sidesteps the single-instance
+ * lock that would otherwise forward the launch to a running instance. Caller cleans it up.
+ */
+export function makeTempDataDir(prefix = 'hpbench') {
+  const dir = join(tmpdir(), `${prefix}-${uid('d')}`);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /** Poll for a file to appear. Resolves true if it shows up before timeout. */
@@ -123,31 +143,42 @@ export function processesByName(names) {
 }
 
 /**
- * True if a hyperpanes *dev* instance (electron running from this repo) is already
- * up. A dev instance runs as electron.exe with the repo path in its command line and
- * shares hyperpanes' single-instance lock, so a dev-mode bench spawn would forward
- * its workload to it instead of measuring a fresh process.
+ * True if a NATIVE hyperpanes instance built from this repo is already up — a `hyperpanes.exe`
+ * whose executable path lives under `…\rs\crates\app\target\…` (the cargo build output). Replaces
+ * the Electron-era `repoElectronRunning()` (which looked for `electron.exe` with the repo path).
+ *
+ * The native GUI has no single-instance lock and we always launch with an isolated %APPDATA%, so a
+ * running dev instance does NOT capture the harness's launch — this is informational only (the
+ * preflight surfaces it as a note, not a hard skip).
  */
-export function repoElectronRunning() {
+export function nativeRepoRunning() {
   const res = spawnSync(
     'powershell.exe',
     [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | ForEach-Object { $_.CommandLine }"
+      "Get-CimInstance Win32_Process -Filter \"Name='hyperpanes.exe'\" | ForEach-Object { $_.ExecutablePath }"
     ],
     { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }
   );
   if (res.status !== 0 || !res.stdout) return false;
-  return res.stdout.toLowerCase().includes(REPO_ROOT.toLowerCase());
+  const needle = join(REPO_ROOT, 'rs', 'crates', 'app', 'target').toLowerCase();
+  return res.stdout.toLowerCase().includes(needle);
 }
 
-/** Delete generated temp files, ignoring errors. */
+/**
+ * Delete generated temp files, ignoring errors. A path ending in `\` is a directory
+ * (the isolated data dirs minted by makeTempDataDir): remove it recursively — a plain
+ * rmSync without {recursive:true} throws EISDIR on a non-empty dir and would silently
+ * leak it under %TEMP%.
+ */
 export function cleanup(paths) {
   for (const p of paths) {
     try {
-      if (p && existsSync(p)) (p.endsWith('\\') ? rmSync : unlinkSync)(p);
+      if (!p || !existsSync(p)) continue;
+      if (p.endsWith('\\')) rmSync(p, { recursive: true, force: true });
+      else unlinkSync(p);
     } catch {
       /* ignore */
     }

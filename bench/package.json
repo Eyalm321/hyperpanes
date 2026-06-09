@@ -1,0 +1,8 @@
+{
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "bench": "node run.mjs",
+    "bench:detect": "node detect.mjs"
+  }
+}
