@@ -11,7 +11,7 @@
 //!    `wgpu::Texture` (Rgba8Unorm) on Slint's *own* device, imported via
 //!    `slint::Image::try_from`.
 
-use crate::font::{Font, GlyphKey};
+use crate::font::{CachedGlyph, Font, GlyphKey};
 use crate::grid::GridSnapshot;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
@@ -31,6 +31,49 @@ fn lerp_u8(b: u8, f: u8, cov: u8) -> u8 {
     let b = b as i32;
     let f = f as i32;
     (b + (f - b) * cov as i32 / 255) as u8
+}
+
+/// Blend a rasterized glyph's coverage mask into `px` in `color`, with the cell's pen at
+/// (`x0`,`y0`) and the baseline at `y0 + ascent`. Shared by the normal glyph pass and the
+/// cursor's true-invert redraw so the two never drift. Clips to the `w`×`h` buffer.
+#[inline]
+fn blit_glyph(
+    px: &mut [Rgba8Pixel],
+    w: u32,
+    h: u32,
+    stride: usize,
+    g: &CachedGlyph,
+    x0: u32,
+    y0: u32,
+    ascent: i32,
+    color: [u8; 4],
+) {
+    if g.w == 0 {
+        return;
+    }
+    let pen_x = x0 as i32 + g.left;
+    let gy0 = y0 as i32 + ascent - g.top;
+    for gy in 0..g.h as i32 {
+        let dy = gy0 + gy;
+        if dy < 0 || dy >= h as i32 {
+            continue;
+        }
+        for gx in 0..g.w as i32 {
+            let dx = pen_x + gx;
+            if dx < 0 || dx >= w as i32 {
+                continue;
+            }
+            let cov = g.mask[(gy * g.w as i32 + gx) as usize];
+            if cov == 0 {
+                continue;
+            }
+            let p = &mut px[dy as usize * stride + dx as usize];
+            p.r = lerp_u8(p.r, color[0], cov);
+            p.g = lerp_u8(p.g, color[1], cov);
+            p.b = lerp_u8(p.b, color[2], cov);
+            p.a = 255;
+        }
+    }
 }
 
 // =================================================================================
@@ -118,6 +161,7 @@ impl PaneRenderer for SoftwareRenderer {
                 // Glyph.
                 if cell.ch != ' ' && cell.ch != '\0' {
                     let (font_id, gid) = font.resolve(cell.ch);
+                    let ascent = font.ascent;
                     let g = font
                         .rasterize(GlyphKey {
                             font_id,
@@ -126,37 +170,14 @@ impl PaneRenderer for SoftwareRenderer {
                             italic: cell.italic,
                         })
                         .clone();
-                    if g.w > 0 {
-                        let pen_x = x0 as i32 + g.left;
-                        let base_y = y0 as i32 + font.ascent;
-                        let gy0 = base_y - g.top;
-                        for gy in 0..g.h as i32 {
-                            let dy = gy0 + gy;
-                            if dy < 0 || dy >= h as i32 {
-                                continue;
-                            }
-                            for gx in 0..g.w as i32 {
-                                let dx = pen_x + gx;
-                                if dx < 0 || dx >= w as i32 {
-                                    continue;
-                                }
-                                let cov = g.mask[(gy * g.w as i32 + gx) as usize];
-                                if cov == 0 {
-                                    continue;
-                                }
-                                let p = &mut px[dy as usize * stride + dx as usize];
-                                p.r = lerp_u8(p.r, cell.fg[0], cov);
-                                p.g = lerp_u8(p.g, cell.fg[1], cov);
-                                p.b = lerp_u8(p.b, cell.fg[2], cov);
-                                p.a = 255;
-                            }
-                        }
-                    }
+                    blit_glyph(px, w, h, stride, &g, x0, y0, ascent, cell.fg);
                 }
 
-                // Underline.
+                // Underline. Compute in i32 (a negative ascent must not wrap to a huge u32)
+                // and clamp WITHIN this cell's band — never to the bottom screen row.
                 if cell.underline {
-                    let uy = (y0 + font.ascent as u32 + 2).min(h - 1);
+                    let uy = (y0 as i32 + font.ascent + 2)
+                        .clamp(y0 as i32, (y0 + ch) as i32 - 1) as u32;
                     let row_off = uy as usize * stride + x0 as usize;
                     for xx in 0..cell_px_w {
                         if (x0 + xx) >= w {
@@ -171,27 +192,53 @@ impl PaneRenderer for SoftwareRenderer {
             }
         }
 
-        // Cursor (block) — invert the cell.
+        // Cursor (block) — TRUE invert: paint the block in the cell's fg, then redraw the
+        // glyph on top in the colour it sits on (the cell bg, or the grid default bg when the
+        // cell is transparent) so the character under the cursor stays visible instead of being
+        // erased by a solid fg block.
         if grid.cursor_visible && opts.cursor_on {
             let (col, row) = grid.cursor;
-            let x0 = col as u32 * cw;
-            let y0 = row as u32 * ch;
-            let cell = grid.cell(col.min(grid.cols - 1), row.min(grid.rows - 1));
+            let ccol = col.min(grid.cols - 1);
+            let crow = row.min(grid.rows - 1);
+            let x0 = ccol as u32 * cw;
+            let y0 = crow as u32 * ch;
+            let cell = *grid.cell(ccol, crow);
+            let block_w = if cell.wide { cw * 2 } else { cw };
+            // The colour the inverted glyph is drawn in: the cell's own bg if opaque, else the
+            // grid default bg — i.e. whatever the block colour "replaced", so it reads as invert.
+            let under = if cell.bg[3] > 0 { cell.bg } else { grid.default_bg };
+
+            // 1) Fill the cursor block with the cell's fg colour.
             for yy in 0..ch {
                 if y0 + yy >= h {
                     break;
                 }
                 let row_off = (y0 + yy) as usize * stride + x0 as usize;
-                for xx in 0..cw {
+                for xx in 0..block_w {
                     if x0 + xx >= w {
                         break;
                     }
                     let p = &mut px[row_off + xx as usize];
-                    // invert toward fg colour
                     p.r = cell.fg[0];
                     p.g = cell.fg[1];
                     p.b = cell.fg[2];
+                    p.a = 255;
                 }
+            }
+
+            // 2) Redraw the glyph over the block in `under` so it inverts cleanly.
+            if cell.ch != ' ' && cell.ch != '\0' {
+                let (font_id, gid) = font.resolve(cell.ch);
+                let ascent = font.ascent;
+                let g = font
+                    .rasterize(GlyphKey {
+                        font_id,
+                        gid,
+                        bold: cell.bold,
+                        italic: cell.italic,
+                    })
+                    .clone();
+                blit_glyph(px, w, h, stride, &g, x0, y0, ascent, under);
             }
         }
 
@@ -242,6 +289,11 @@ pub struct GpuRenderer {
     atlas_tex: wgpu::Texture,
     atlas_alloc: etagere::AtlasAllocator,
     atlas_map: std::collections::HashMap<GlyphKey, AtlasEntry>,
+    /// Generation of the `Font` the atlas was packed from. `GlyphKey` is keyed only by
+    /// (font_id, gid, …), so on a font/size reload the gids/metrics change but the key can
+    /// collide — guard against stale-glyph bleed + leak by clearing the atlas when this no
+    /// longer matches `Font::generation()`. `0` = nothing packed yet.
+    atlas_gen: u64,
 
     uniform_buf: wgpu::Buffer,
     bg_pipeline: wgpu::RenderPipeline,
@@ -257,6 +309,9 @@ pub struct GpuRenderer {
     target: Option<wgpu::Texture>,
     tw: u32,
     th: u32,
+    /// Last successfully-imported frame, returned as a fallback if a later texture import
+    /// fails (transient device-lost / RDP transition) so the UI thread never panics.
+    last_image: Option<Image>,
 }
 
 impl GpuRenderer {
@@ -465,6 +520,7 @@ impl GpuRenderer {
             atlas_tex,
             atlas_alloc: etagere::AtlasAllocator::new(etagere::size2(ATLAS as i32, ATLAS as i32)),
             atlas_map: std::collections::HashMap::new(),
+            atlas_gen: 0,
             uniform_buf,
             bg_pipeline,
             glyph_pipeline,
@@ -477,6 +533,7 @@ impl GpuRenderer {
             target: None,
             tw: 0,
             th: 0,
+            last_image: None,
         }
     }
 
@@ -550,6 +607,15 @@ impl GpuRenderer {
     /// Do the GPU work (build instances, upload, draw into the per-pane target, submit).
     /// Separated from the Slint import so the benchmark can time pure render throughput.
     pub fn render_to_texture(&mut self, grid: &GridSnapshot, font: &mut Font, opts: &RenderOpts) {
+        // Font/size reload? The glyph keys carry no font epoch, so old atlas entries would
+        // bleed stale glyphs (and leak until "atlas full"). Drop them and start the packer
+        // over against the new font.
+        if font.generation() != self.atlas_gen {
+            self.atlas_map.clear();
+            self.atlas_alloc.clear();
+            self.atlas_gen = font.generation();
+        }
+
         let cw = font.cell_w;
         let ch = font.cell_h;
         let w = (grid.cols as u32 * cw).max(1);
@@ -627,7 +693,9 @@ impl GpuRenderer {
                 }
 
                 if cell.underline {
-                    let uy = y0 + font.ascent as f32 + 2.0;
+                    // Clamp the underline within this cell's band (ascent is i32 → f32, so no
+                    // u32 wrap), keeping it off the next row / bottom of the target.
+                    let uy = (y0 + font.ascent as f32 + 2.0).clamp(y0, y0 + ch as f32 - 1.0);
                     bgs.push(BgInstance {
                         rect: [x0, uy, cell_w, 1.0],
                         color: to_f(cell.fg),
@@ -747,8 +815,22 @@ impl PaneRenderer for GpuRenderer {
     fn render(&mut self, grid: &GridSnapshot, font: &mut Font, opts: &RenderOpts) -> Image {
         self.render_to_texture(grid, font, opts);
         // Import the freshly-rendered texture as a Slint Image (shared device → zero copy).
+        // A transient failure (device-lost / RDP transition) must NOT panic the UI thread:
+        // fall back to the last good frame, or a blank Image if we have none yet. The
+        // controller can additionally swap to the SoftwareRenderer on persistent failure.
         let target = self.target.as_ref().unwrap();
-        Image::try_from(target.clone()).expect("wgpu texture import into slint failed")
+        match Image::try_from(target.clone()) {
+            Ok(img) => {
+                self.last_image = Some(img.clone());
+                img
+            }
+            Err(_) => {
+                eprintln!(
+                    "[gpu] wgpu texture import into slint failed; using fallback frame"
+                );
+                self.last_image.clone().unwrap_or_default()
+            }
+        }
     }
 }
 
