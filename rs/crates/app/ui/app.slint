@@ -95,6 +95,10 @@ export component AppWindow inherits Window {
     in property <bool> pref-frame: true;
     in property <bool> pref-dot: true;
     in property <bool> prefs-confirm: false;
+    // ---- New Pane dialog (overlay kind 3) seeds ----
+    in property <int> np-default-idx;
+    in property <[color]> np-swatches;
+    in property <[PrefOption]> np-shells;
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
@@ -165,6 +169,9 @@ export component AppWindow inherits Window {
     callback tab-geom(int, length, length);  // report a tab's window-x + width
     // panes / layout
     callback new-pane();
+    callback open-new-pane();   // Shift+＋ / "New pane…" → open the options dialog
+    // submit the New Pane dialog: label · color · show-frame · show-dot · command · cwd · shell-idx
+    callback submit-new-pane(string, color, bool, bool, string, string, int);
     callback close-focused();
     callback set-layout(int);
     callback toggle-zoom();
@@ -311,6 +318,7 @@ export component AppWindow inherits Window {
                 projects: root.projects;
                 projects-open: root.sidebar-open;
                 new-pane => { root.new-pane(); }
+                open-new-pane => { root.open-new-pane(); }
                 toggle-projects => { root.toggle-projects(); }
                 open-project(i) => { root.open-project(i); }
                 recolor-project(i, s) => { root.recolor-project(i, s); }
@@ -380,6 +388,12 @@ export component AppWindow inherits Window {
             clickable-paths: root.pref-clickable;
             editor-command: root.pref-editor;
             prefs-confirm: root.prefs-confirm;
+            np-default-idx: root.np-default-idx;
+            np-swatches: root.np-swatches;
+            np-shells: root.np-shells;
+            new-pane-create(l, c, fr, dt, cmd, cwd, sh) => {
+                root.submit-new-pane(l, c, fr, dt, cmd, cwd, sh);
+            }
             palette-query(q) => { root.palette-query(q); }
             palette-nav(d) => { root.palette-nav(d); }
             palette-activate => { root.palette-activate(); }

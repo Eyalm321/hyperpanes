@@ -1,0 +1,377 @@
+// The "New pane" options dialog — the native port of `components/NewPaneDialog.tsx`
+// (with ColorSwatches + ShellPicker folded in). Opened by Shift-clicking the sidebar ＋
+// and the hamburger / pane menus' "New pane…" entries; a plain ＋ still adds immediately.
+//
+// A centred modal card (reusing the prefs/modal Catppuccin look) that configures a pane
+// before it spawns: Label · Color (+ Show-Frame / Show-Dot toggles) · Command · Working
+// directory · Shell. Enter submits, Esc closes. The whole form lives in this component's
+// local state, so re-instantiating it on open (the `if root.kind == 3` in overlays.slint)
+// resets every field; the color seeds from `default-color` (the next palette-rotation slot).
+
+import { Theme } from "theme.slint";
+import { PrefOption } from "types.slint";
+
+// A drawn checkmark (vector, font-independent) — mirrors overlays.slint's `Check`.
+component NpCheck inherits Path {
+    in property <color> ink: Theme.accent;
+    width: 12px;
+    height: 10px;
+    viewbox-width: 12;
+    viewbox-height: 10;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: "M 1 5.5 L 4.5 9 L 11 1";
+}
+
+// A drawn chevron (points up while the popup is open) — mirrors overlays.slint's `Chevron`.
+component NpChevron inherits Path {
+    in property <color> ink: Theme.subtext;
+    in property <bool> up: false;
+    width: 12px;
+    height: 8px;
+    viewbox-width: 12;
+    viewbox-height: 8;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: root.up ? "M 1 6.5 L 6 1.5 L 11 6.5" : "M 1 1.5 L 6 6.5 L 11 1.5";
+}
+
+// A single-line text input with a placeholder, in a bordered field (the prefs input look).
+// Bubbles Enter/Esc up so the dialog can submit/close from any field.
+component NpInput inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> autofocus: false;
+    out property <string> text <=> ti.text;
+    callback submit();
+    callback escape();
+    height: 34px;
+    border-radius: 7px;
+    background: Theme.bg;
+    border-width: 1px;
+    border-color: ti.has-focus ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        ti := TextInput {
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            single-line: true;
+            init => { if (root.autofocus) { ti.focus(); } }
+            key-pressed(e) => {
+                if (e.text == Key.Return) { root.submit(); return EventResult.accept; }
+                if (e.text == Key.Escape) { root.escape(); return EventResult.accept; }
+                return EventResult.reject;
+            }
+        }
+    }
+    Text {
+        x: 10px;
+        text: root.placeholder;
+        color: Theme.faint;
+        font-size: 13px;
+        vertical-alignment: center;
+        visible: ti.text == "";
+    }
+}
+
+// A labelled checkbox row (Show Frame / Show Dot) — mirrors contextmenu.slint's `CtxToggle`.
+component NpToggle inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    callback toggled(bool);
+    height: 26px;
+    border-radius: 6px;
+    background: ta.has-hover ? Theme.surface2 : transparent;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 15px;
+                height: 15px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.on ? Theme.accent : Theme.border;
+                background: root.on ? Theme.accent : transparent;
+                if root.on : NpCheck { ink: #11111b; }
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.toggled(!root.on); } }
+}
+
+// The shell dropdown — a button showing the current pick that opens a popup list (the prefs
+// FontDropdown look, re-implemented here so newpane.slint stays self-contained).
+component NpDropdown inherits Rectangle {
+    in property <[PrefOption]> options;
+    in property <int> sel: 0;
+    callback selected(int);
+    height: 34px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: ta.has-hover ? Theme.surface : Theme.bg;
+    property <string> current-label: root.options[root.sel].label;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: root.current-label;
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            NpChevron { up: popup.is-open; }
+        }
+    }
+    ta := TouchArea { clicked => { popup.show(); } }
+    popup := PopupWindow {
+        x: 0;
+        y: parent.height + 4px;
+        width: root.width;
+        Rectangle {
+            background: Theme.mantle;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.scrim;
+            drop-shadow-offset-y: 8px;
+            VerticalLayout {
+                padding: 4px;
+                for opt[i] in root.options : Rectangle {
+                    height: 28px;
+                    border-radius: 5px;
+                    background: i == root.sel ? Theme.surface2 : (ita.has-hover ? Theme.surface : transparent);
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        Text {
+                            text: opt.label;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            width: 14px;
+                            if i == root.sel : NpCheck {}
+                        }
+                    }
+                    ita := TouchArea { clicked => { root.selected(i); popup.close(); } }
+                }
+            }
+        }
+    }
+}
+
+// A small footer button (Cancel / Create pane).
+component NpButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+    height: 32px;
+    min-width: 84px;
+    border-radius: 7px;
+    background: root.primary ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface);
+    border-width: 1px;
+    border-color: root.primary ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.label;
+            color: root.primary ? #11111b : Theme.text;
+            font-size: 13px;
+            font-weight: root.primary ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component NewPaneDialog inherits Rectangle {
+    // seeds: the default swatch index (next palette-rotation slot), the palette swatches,
+    // and the shell picker options (id 0 = "Use default shell").
+    in property <int> default-idx: 0;
+    in property <[color]> swatches;
+    in property <[PrefOption]> shells;
+    // label · color · show-frame · show-dot · command · cwd · shell-idx
+    callback create(string, color, bool, bool, string, string, int);
+    callback cancel();
+
+    // ---- local form state (reset every open via re-instantiation) ----
+    property <int> color-idx: root.default-idx;
+    property <bool> frame-on: false;
+    property <bool> dot-on: false;
+    property <int> shell-idx: 0;
+    // "no color" is selected when neither frame nor dot is shown (mirrors ColorSwatches).
+    property <bool> none-selected: !root.frame-on && !root.dot-on;
+
+    // gather the fields + fire `create` (Enter / the Create button both route here).
+    callback do-submit();
+    do-submit => {
+        root.create(
+            label-input.text, root.swatches[root.color-idx], root.frame-on, root.dot-on,
+            cmd-input.text, cwd-input.text, root.shell-idx);
+    }
+
+    // eat scrim clicks behind the card
+    TouchArea {}
+
+    card := Rectangle {
+        width: 460px;
+        x: (parent.width - self.width) / 2;
+        y: max(60px, (parent.height - self.height) / 2);
+        height: body.preferred-height;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        TouchArea {} // keep clicks on the card from dismissing
+
+        body := VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: "New pane";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 700;
+            }
+
+            // ---- Label ----
+            VerticalLayout {
+                spacing: 5px;
+                Text { text: "Label"; color: Theme.faint; font-size: 11px; }
+                label-input := NpInput {
+                    placeholder: "pane name";
+                    autofocus: true;
+                    submit => { root.do-submit(); }
+                    escape => { root.cancel(); }
+                }
+            }
+
+            // ---- Color (swatches + Show-Frame / Show-Dot toggles) ----
+            VerticalLayout {
+                spacing: 6px;
+                Text { text: "Color"; color: Theme.faint; font-size: 11px; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    // "no color" chip — a Photoshop-style red slash; picking it hides frame + dot.
+                    Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 5px;
+                        border-width: 1px;
+                        border-color: root.none-selected ? Theme.text : Theme.border;
+                        Path {
+                            width: 100%;
+                            height: 100%;
+                            viewbox-width: 22;
+                            viewbox-height: 22;
+                            stroke: Theme.danger;
+                            stroke-width: 1.6px;
+                            commands: "M 5 17 L 17 5";
+                        }
+                        TouchArea {
+                            clicked => { root.frame-on = false; root.dot-on = false; }
+                        }
+                    }
+                    for c[ci] in root.swatches : Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 5px;
+                        background: c;
+                        border-width: (!root.none-selected && ci == root.color-idx) ? 2px : 0px;
+                        border-color: Theme.text;
+                        TouchArea {
+                            // picking a color shows it (frame + dot on), like ColorSwatches.pickColor.
+                            clicked => { root.color-idx = ci; root.frame-on = true; root.dot-on = true; }
+                        }
+                    }
+                }
+                NpToggle { label: "Show Frame"; on: root.frame-on; toggled(v) => { root.frame-on = v; } }
+                NpToggle { label: "Show Dot"; on: root.dot-on; toggled(v) => { root.dot-on = v; } }
+            }
+
+            // ---- Command (optional) ----
+            VerticalLayout {
+                spacing: 5px;
+                HorizontalLayout {
+                    spacing: 5px;
+                    Text { text: "Command"; color: Theme.faint; font-size: 11px; }
+                    Text { text: "(optional)"; color: Theme.faint; font-size: 11px; font-italic: true; }
+                }
+                cmd-input := NpInput {
+                    placeholder: "leave empty for an interactive shell";
+                    submit => { root.do-submit(); }
+                    escape => { root.cancel(); }
+                }
+            }
+
+            // ---- Working directory (optional) ----
+            VerticalLayout {
+                spacing: 5px;
+                HorizontalLayout {
+                    spacing: 5px;
+                    Text { text: "Working directory"; color: Theme.faint; font-size: 11px; }
+                    Text { text: "(optional)"; color: Theme.faint; font-size: 11px; font-italic: true; }
+                }
+                cwd-input := NpInput {
+                    placeholder: "defaults to home";
+                    submit => { root.do-submit(); }
+                    escape => { root.cancel(); }
+                }
+            }
+
+            // ---- Shell (optional) ----
+            VerticalLayout {
+                spacing: 5px;
+                HorizontalLayout {
+                    spacing: 5px;
+                    Text { text: "Shell"; color: Theme.faint; font-size: 11px; }
+                    Text { text: "(optional)"; color: Theme.faint; font-size: 11px; font-italic: true; }
+                }
+                NpDropdown {
+                    options: root.shells;
+                    sel: root.shell-idx;
+                    selected(i) => { root.shell-idx = i; }
+                }
+            }
+
+            // ---- actions ----
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                NpButton { label: "Cancel"; clicked => { root.cancel(); } }
+                NpButton { label: "Create pane"; primary: true; clicked => { root.do-submit(); } }
+            }
+        }
+    }
+}

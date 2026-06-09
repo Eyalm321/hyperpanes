@@ -41,6 +41,9 @@ pub enum Overlay {
     None,
     Palette,
     Prefs,
+    /// The "New pane" options dialog (Shift+＋ / the menus' "New pane…"). Configures a pane
+    /// before it spawns; submitting routes through [`State::add_pane_opts`].
+    NewPane,
 }
 
 /// A session detached from its window for re-hosting in another (Wave-1 multi-window
@@ -99,6 +102,25 @@ pub enum Setting {
     IdleEffect(usize),
     /// Nudge the idle threshold (seconds) by ±N, clamped to the supported range.
     IdleSeconds(i32),
+}
+
+/// The "New pane" dialog's payload — full spawn options for a configured pane. The simple
+/// [`State::add_pane`] / [`State::add_pane_cwd`] paths build a default of this. The native
+/// port of the Electron `addPane({ label, color, showFrame, showDot, command, cwd, shell })`.
+#[derive(Debug, Clone, Default)]
+pub struct NewPaneOpts {
+    /// Label override (empty → the slot default, e.g. "pane 3").
+    pub label: Option<String>,
+    pub cwd: Option<String>,
+    /// A command to run instead of an interactive shell (empty → interactive).
+    pub command: Option<String>,
+    /// Shell token override ("" / `None` → the default-shell preference).
+    pub shell: Option<String>,
+    /// The chosen accent (the swatch). `None` = the by-slot palette color (a plain new pane).
+    pub accent: Option<Color>,
+    /// Explicit frame/dot. `None` = the default (tinted when `accent` is pinned, else off).
+    pub show_frame: Option<bool>,
+    pub show_dot: Option<bool>,
 }
 
 /// The in-dialog draft of the **appearance** settings. While Preferences is open these edit
@@ -586,15 +608,21 @@ impl State {
         &mut self,
         mgr: &SessionManager,
         idx: usize,
-        cwd: Option<String>,
-        accent: Option<Color>,
+        opts: NewPaneOpts,
     ) -> Option<PaneState> {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let palette = self.settings.frame_palette;
-        // Honour the default-shell preference ("" = prefer pwsh when available, else core's
-        // system default).
-        let shell = prefs::effective_shell(&self.settings.default_shell);
+        let cwd = opts.cwd.filter(|c| !c.is_empty());
+        let accent = opts.accent;
+        // A command to run instead of an interactive shell ("" → interactive).
+        let command = opts.command.filter(|c| !c.is_empty());
+        // Shell: an explicit token from the dialog is used verbatim; otherwise honour the
+        // default-shell preference ("" = prefer pwsh when available, else core's default).
+        let shell = match opts.shell {
+            Some(s) if !s.is_empty() => Some(s),
+            _ => prefs::effective_shell(&self.settings.default_shell),
+        };
         // Inject shell integration so the shell reports its cwd (OSC-7 for pwsh/bash, OSC
         // 9;9 for cmd). That's what lets a pane's cwd → git-project tint (and clickable-path
         // resolution) actually fire — without it pwsh never emits a cwd OSC. Additive: the
@@ -603,14 +631,18 @@ impl State {
         let shell_path = shell
             .clone()
             .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
-        let integration = hyperpanes_core::shell_integration::integration_for(
-            &shell_path,
-            &hyperpanes_core::shell_integration::shell_integration_dir(),
-        )
-        .map(|si| hyperpanes_core::session_manager::Integration {
-            args: si.args,
-            env: si.env.into_iter().collect(),
-        });
+        // Integration applies to the interactive branch only; a one-off `command` pane is
+        // not an interactive shell, so skip it there (core would ignore it anyway).
+        let integration = command.is_none().then(|| {
+            hyperpanes_core::shell_integration::integration_for(
+                &shell_path,
+                &hyperpanes_core::shell_integration::shell_integration_dir(),
+            )
+            .map(|si| hyperpanes_core::session_manager::Integration {
+                args: si.args,
+                env: si.env.into_iter().collect(),
+            })
+        }).flatten();
         let (cols, rows) = (80u16, 24u16);
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
@@ -619,6 +651,7 @@ impl State {
             pane_id: Some(uid.clone()),
             cwd,
             shell,
+            command,
             integration,
             ..Default::default()
         }) {
@@ -629,14 +662,18 @@ impl State {
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         let glow = Glow::new(crate::glow::seed_from(&uid));
-        // A pane spawned WITH an accent is a project pane (opened from the sidebar cd'd into
-        // a repo): tint it on. A plain new pane is clean — it still gets a palette color
-        // VALUE by slot, but its frame/dot overrides default OFF (mirrors `addPane`).
+        // A pane spawned WITH an accent is a project/dialog pane: by default tint it on. A
+        // plain new pane is clean — it still gets a palette color VALUE by slot, but its
+        // frame/dot overrides default OFF (mirrors `addPane`). The New Pane dialog passes
+        // explicit `show_frame`/`show_dot` (both default off — a fresh pane is clean) which
+        // win over this default.
         let project = accent.is_some();
-        let label = if idx == 0 {
-            "shell".to_string()
-        } else {
-            format!("pane {}", idx + 1)
+        let show_frame = opts.show_frame.unwrap_or(project);
+        let show_dot = opts.show_dot.unwrap_or(project);
+        let label = match opts.label {
+            Some(l) if !l.trim().is_empty() => l,
+            _ if idx == 0 => "shell".to_string(),
+            _ => format!("pane {}", idx + 1),
         };
         // Each pane owns its font (per-pane zoom); start at the configured base size.
         let font_px = self.settings.font_px;
@@ -645,8 +682,8 @@ impl State {
             uid,
             title: label.into(),
             subtitle: None,
-            show_frame: Some(project),
-            show_dot: Some(project),
+            show_frame: Some(show_frame),
+            show_dot: Some(show_dot),
             accent: accent.unwrap_or_else(|| theme::accent_for(idx, palette)),
             pane,
             applied: (cols as usize, rows as usize),
@@ -681,8 +718,14 @@ impl State {
     /// Spawn a new pane in the active tab with an optional working directory + accent
     /// (used to open a sidebar project cd'd into its repo), and focus it.
     pub fn add_pane_cwd(&mut self, mgr: &SessionManager, cwd: Option<String>, accent: Option<Color>) {
+        self.add_pane_opts(mgr, NewPaneOpts { cwd, accent, ..Default::default() });
+    }
+
+    /// Spawn a new pane in the active tab from the full [`NewPaneOpts`] (the New Pane
+    /// dialog's payload), and focus it.
+    pub fn add_pane_opts(&mut self, mgr: &SessionManager, opts: NewPaneOpts) {
         let idx = self.active_tab().panes.len();
-        let Some(ps) = self.make_pane(mgr, idx, cwd, accent) else {
+        let Some(ps) = self.make_pane(mgr, idx, opts) else {
             return;
         };
         let auto = self.active_tab().layout == Layout::Auto;
@@ -1356,6 +1399,24 @@ impl State {
             self.capture_conflict = None;
             self.dirty = true;
         }
+    }
+
+    // ---- New Pane dialog ----
+
+    /// Open the "New pane" options dialog (Shift+＋ / the menus' "New pane…").
+    pub fn open_new_pane(&mut self) {
+        self.overlay = Overlay::NewPane;
+        self.dirty = true;
+    }
+
+    /// The active frame palette's 8 swatches (the New Pane dialog's color row). The default
+    /// swatch index the dialog seeds is the next palette-rotation slot (mirrors the
+    /// renderer's `nextColor(seq)`), computed in the resync from `panes.len()`.
+    pub fn frame_swatches(&self) -> Vec<Color> {
+        theme::frame_palette(self.settings.frame_palette)
+            .iter()
+            .map(|(r, g, b)| Color::from_rgb_u8(*r, *g, *b))
+            .collect()
     }
 
     // ---- command palette ----

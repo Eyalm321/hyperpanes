@@ -159,7 +159,7 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
         b.sep();
     }
 
-    b.item("New Pane…", Command::NewPane);
+    b.item("New Pane…", Command::OpenNewPane);
     b.item("Rename…", Command::BeginRenamePane(idx as i32));
     b.row("Change Color", "", "", false, false, false, false, sub::COLOR, None);
     b.row("Show Frame", "", "", frame_on, true, false, false, sub::NONE, Some(Command::SetPaneFrame(idx, !frame_on)));
@@ -232,7 +232,7 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
     let palette_sc = state.keymap.label_for("palette.toggle").unwrap_or_default();
     let sidebar_on = state.settings.show_sidebar;
 
-    b.row("New pane…", "", "＋", false, false, false, false, sub::NONE, Some(Command::NewPane));
+    b.row("New pane…", "", "＋", false, false, false, false, sub::NONE, Some(Command::OpenNewPane));
     b.row(
         "Command palette", &palette_sc, "⌘", false, false, false, false, sub::NONE,
         Some(Command::PaletteOpen),
