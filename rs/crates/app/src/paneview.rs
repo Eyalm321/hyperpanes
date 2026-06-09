@@ -653,6 +653,8 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                         path: w.path.into(),
                         branch: w.branch.into(),
                         is_main: w.is_main,
+                        locked: w.locked,
+                        prunable: w.prunable,
                     })
                     .collect()
             } else {

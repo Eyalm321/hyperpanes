@@ -103,11 +103,16 @@ export struct PaletteItem {
 
 // One git worktree under a project in the sidebar tree. `branch` is the short label
 // (branch name, or "(detached …)" / "(bare)"); `is-main` marks the main checkout, whose
-// trash affordance is shown disabled (git refuses `worktree remove` on it).
+// trash affordance is shown disabled (git refuses `worktree remove` on it). `locked` mirrors
+// git's porcelain `locked` flag — git also refuses a plain remove of a locked worktree, so
+// its trash is disabled too; `prunable` (stale / missing working dir) is shown as an
+// annotation only.
 export struct WorktreeRow {
     path: string,
     branch: string,
     is-main: bool,
+    locked: bool,
+    prunable: bool,
 }
 
 // One git-project row in the sidebar panel — now the top level of a two-level tree: the

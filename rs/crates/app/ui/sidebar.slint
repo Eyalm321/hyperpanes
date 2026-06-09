@@ -163,6 +163,10 @@ component ProjectMenu inherits PopupWindow {
 component WorktreeRowView inherits Rectangle {
     in property <WorktreeRow> wt;
     callback request-delete();
+    // Removable only when it's neither the main checkout NOR locked — git refuses a plain
+    // (`--force`-less) `worktree remove` on both, so the trash is disabled rather than letting
+    // a click fall into a swallowed error.
+    property <bool> deletable: !root.wt.is-main && !root.wt.locked;
     height: 36px;
     border-radius: 5px;
     background: rowa.has-hover ? Theme.surface2 : transparent;
@@ -179,7 +183,10 @@ component WorktreeRowView inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             Text {
-                text: root.wt.branch + (root.wt.is-main ? "  ·  main" : "");
+                text: root.wt.branch
+                    + (root.wt.is-main ? "  ·  main" : "")
+                    + (root.wt.locked ? "  ·  locked" : "")
+                    + (root.wt.prunable ? "  ·  prunable" : "");
                 color: Theme.text;
                 font-size: 12px;
                 overflow: elide;
@@ -199,15 +206,15 @@ component WorktreeRowView inherits Rectangle {
                 width: 26px;
                 height: 26px;
                 border-radius: 6px;
-                background: (!root.wt.is-main && tta.has-hover) ? Theme.danger : transparent;
+                background: (root.deletable && tta.has-hover) ? Theme.danger : transparent;
                 TrashGlyph {
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
-                    ink: root.wt.is-main ? Theme.faint : (tta.has-hover ? #ffffff : Theme.subtext);
+                    ink: !root.deletable ? Theme.faint : (tta.has-hover ? #ffffff : Theme.subtext);
                 }
                 tta := TouchArea {
-                    mouse-cursor: root.wt.is-main ? not-allowed : pointer;
-                    clicked => { if (!root.wt.is-main) { root.request-delete(); } }
+                    mouse-cursor: root.deletable ? pointer : not-allowed;
+                    clicked => { if (root.deletable) { root.request-delete(); } }
                 }
             }
         }
@@ -360,6 +367,23 @@ export component SidebarRail inherits Rectangle {
     // Encoding for the worktree-delete signal smuggled through `open-project` (see header).
     property <int> DELETE-BASE: 1000000;
     property <int> DELETE-STRIDE: 1000;
+
+    // TOCTOU guard. The delete travels as the (proj, wt) INDICES captured when the popup
+    // opened, but the projects/worktrees models can change underneath us while it's open (a
+    // background pane reporting a new cwd re-sorts projects newest-first; an enumeration
+    // refresh reorders worktrees). Before dispatching we re-check that those indices STILL
+    // address the exact path the user saw and confirmed (`wt-del-name`); if not — the list
+    // moved — we abort rather than delete whatever now sits at that slot. Bounds-checked so a
+    // shrunk model can't index out of range.
+    pure function captured-still-valid() -> bool {
+        if (root.wt-del-proj < 0 || root.wt-del-proj >= root.projects.length) {
+            return false;
+        }
+        if (root.wt-del-wt < 0 || root.wt-del-wt >= root.projects[root.wt-del-proj].worktrees.length) {
+            return false;
+        }
+        return root.projects[root.wt-del-proj].worktrees[root.wt-del-wt].path == root.wt-del-name;
+    }
 
     width: 44px;
     background: Theme.mantle;
@@ -518,7 +542,14 @@ export component SidebarRail inherits Rectangle {
         // use Cancel/Esc so a misclick can't silently delete).
         Rectangle {
             background: #0b0c12cc;
-            TouchArea {}
+            // Swallow scrim clicks (no outside-click dismissal — use Cancel/Esc) AND, if the
+            // click did land here, pull keyboard focus back to the FocusScope so Esc/Enter keep
+            // working afterwards.
+            TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { fs.focus(); }
+                }
+            }
         }
 
         // the card
@@ -527,6 +558,9 @@ export component SidebarRail inherits Rectangle {
             height: 168px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
+            // Any focus landing on the card delegates to the key-handling FocusScope, so a
+            // click on the card chrome can't silently strand Esc/Enter.
+            forward-focus: fs;
             background: Theme.mantle;
             border-radius: 10px;
             border-width: 1px;
@@ -595,7 +629,11 @@ export component SidebarRail inherits Rectangle {
                         cfa := TouchArea {
                             mouse-cursor: pointer;
                             clicked => {
-                                root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                                // TOCTOU guard: only dispatch if the captured indices still
+                                // point at the confirmed path; otherwise abort (no delete).
+                                if (root.captured-still-valid()) {
+                                    root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                                }
                                 root.wt-del-visible = false;
                             }
                         }
@@ -613,7 +651,10 @@ export component SidebarRail inherits Rectangle {
                         return EventResult.accept;
                     }
                     if (e.text == Key.Return) {
-                        root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                        // Same TOCTOU guard as the Confirm button (see captured-still-valid).
+                        if (root.captured-still-valid()) {
+                            root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                        }
                         root.wt-del-visible = false;
                         return EventResult.accept;
                     }

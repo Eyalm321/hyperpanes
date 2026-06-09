@@ -51,17 +51,23 @@ pub fn git_root_of(cwd: &str) -> Option<PathBuf> {
 //
 // The second level of the sidebar tree: each remembered project's git worktrees, listed
 // via `git worktree list --porcelain` run in the repo `path`, and removable via
-// `git worktree remove "<path>"`. All self-contained here so the sidebar feature doesn't
+// `git worktree remove -- "<path>"`. All self-contained here so the sidebar feature doesn't
 // reach into the central `State` (a parallel track owns that).
 
 /// One worktree of a project's repo. `branch` is a human label (the short branch name, or
 /// `(detached)` / `(bare)`); `is_main` marks the main checkout — `git worktree remove`
-/// refuses it, so its trash affordance is shown disabled.
+/// refuses it, so its trash affordance is shown disabled. `locked` mirrors the porcelain
+/// `locked` flag: git also refuses a plain (`--force`-less) remove of a locked worktree, so
+/// its trash is shown disabled too (rather than letting the user click into a swallowed
+/// error). `prunable` mirrors the porcelain `prunable` flag (the working dir is missing /
+/// the worktree is stale) and is surfaced purely as an annotation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeRow {
     pub path: String,
     pub branch: String,
     pub is_main: bool,
+    pub locked: bool,
+    pub prunable: bool,
 }
 
 /// Spawn a child process without flashing a console window — the same `CREATE_NO_WINDOW`
@@ -99,6 +105,8 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
     let mut branch: Option<String> = None;
     let mut detached = false;
     let mut bare = false;
+    let mut locked = false;
+    let mut prunable = false;
 
     // Flush the record accumulated so far (if any) into a row.
     let mut flush = |path: &mut Option<String>,
@@ -106,6 +114,8 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
                      branch: &mut Option<String>,
                      detached: &mut bool,
                      bare: &mut bool,
+                     locked: &mut bool,
+                     prunable: &mut bool,
                      rows: &mut Vec<WorktreeRow>| {
         if let Some(p) = path.take() {
             let label = if *bare {
@@ -121,23 +131,31 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
                 "(no branch)".to_string()
             };
             let is_main = rows.is_empty();
-            rows.push(WorktreeRow { path: p, branch: label, is_main });
+            rows.push(WorktreeRow {
+                path: p,
+                branch: label,
+                is_main,
+                locked: *locked,
+                prunable: *prunable,
+            });
         }
         *head = None;
         *branch = None;
         *detached = false;
         *bare = false;
+        *locked = false;
+        *prunable = false;
     };
 
     for line in out.lines() {
         let line = line.trim_end();
         if line.is_empty() {
-            flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut rows);
+            flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut locked, &mut prunable, &mut rows);
             continue;
         }
         if let Some(rest) = line.strip_prefix("worktree ") {
             // A new record begins — flush the previous one first.
-            flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut rows);
+            flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut locked, &mut prunable, &mut rows);
             path = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("HEAD ") {
             head = Some(rest.to_string());
@@ -147,9 +165,15 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
             detached = true;
         } else if line == "bare" {
             bare = true;
+        } else if line == "locked" || line.starts_with("locked ") {
+            // `locked` or `locked <reason>` — git refuses a plain `worktree remove` either way.
+            locked = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            // `prunable` or `prunable <reason>` — the working tree is stale / its dir is gone.
+            prunable = true;
         }
     }
-    flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut rows);
+    flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut locked, &mut prunable, &mut rows);
     rows
 }
 
@@ -170,13 +194,15 @@ fn enumerate_worktrees(repo_path: &str) -> Vec<WorktreeRow> {
     parse_porcelain(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Remove the worktree at `path` via `git worktree remove "<path>"`, run from that repo's
+/// Remove the worktree at `path` via `git worktree remove -- "<path>"`, run from that repo's
 /// main checkout (`-C` not needed — git resolves the worktree from the path). Plain remove
-/// (no `--force`): git refuses dirty/locked worktrees and the error is surfaced. Returns the
-/// trimmed stderr on failure.
+/// (no `--force`): git refuses dirty/locked worktrees and the error is surfaced. The `--`
+/// end-of-options sentinel is mandatory: a worktree path beginning with `-` (or any
+/// `-`-prefixed token git would otherwise read as a flag) must be treated as a positional
+/// path, never an option. Returns the trimmed stderr on failure.
 pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let out = Command::new("git")
-        .args(["worktree", "remove", worktree_path])
+        .args(["worktree", "remove", "--", worktree_path])
         .current_dir(repo_path)
         .no_window()
         .output()
@@ -276,6 +302,34 @@ branch refs/heads/dev
         assert!(rows[0].is_main);
         assert_eq!(rows[0].branch, "(bare)");
         assert_eq!(rows[1].branch, "dev");
+    }
+
+    #[test]
+    fn parses_locked_and_prunable_flags() {
+        // `locked`/`prunable` appear with or without a trailing reason.
+        let out = "\
+worktree /home/u/repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /home/u/repo-locked
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/feature
+locked being-worked-on
+
+worktree /home/u/repo-prunable
+HEAD 3333333333333333333333333333333333333333
+branch refs/heads/old
+prunable
+";
+        let rows = parse_porcelain(out);
+        assert_eq!(rows.len(), 3);
+        // main carries neither flag
+        assert!(!rows[0].locked && !rows[0].prunable);
+        // locked (with reason) → locked, not prunable
+        assert!(rows[1].locked && !rows[1].prunable);
+        // prunable (bare keyword) → prunable, not locked
+        assert!(!rows[2].locked && rows[2].prunable);
     }
 
     #[test]

@@ -1565,20 +1565,48 @@ impl App {
                 }
                 let proj = ((code - DELETE_BASE) / DELETE_STRIDE) as usize;
                 let wt = ((code - DELETE_BASE) % DELETE_STRIDE) as usize;
-                // Resolve the repo + worktree paths (read-only borrow, dropped before spawn).
+                // Resolve the repo + the WHOLE worktree row (path + is_main) under a read-only
+                // borrow, dropped before we spawn git. The sidebar already verified, at confirm
+                // time, that these indices still map to the path the user saw (the TOCTOU guard
+                // lives in sidebar.slint); resolving by index here reads that same model
+                // snapshot synchronously.
                 let target = {
                     let st = w.state.borrow();
                     st.projects.get(proj).map(|p| {
-                        let path = crate::sidebar::worktrees_for(&p.path)
-                            .get(wt)
-                            .map(|x| x.path.clone());
-                        (p.path.clone(), path)
+                        let row = crate::sidebar::worktrees_for(&p.path).get(wt).cloned();
+                        (p.path.clone(), row)
                     })
                 };
-                let Some((repo, Some(wt_path))) = target else { return };
+                let Some((repo, Some(row))) = target else { return };
+                // Defense-in-depth: NEVER delete the main checkout (or a locked worktree) from
+                // code, regardless of git also refusing both without `--force`. The disabled
+                // trash in the UI is not a guarantee — re-check here before touching the
+                // filesystem.
+                if row.is_main {
+                    crate::dbg_log("worktree remove refused: target is the main checkout");
+                    return;
+                }
+                if row.locked {
+                    crate::dbg_log("worktree remove refused: target worktree is locked");
+                    return;
+                }
+                let wt_path = row.path;
                 match crate::sidebar::remove_worktree(&repo, &wt_path) {
                     Ok(()) => crate::sidebar::invalidate(&repo),
-                    Err(e) => crate::dbg_log(&format!("worktree remove failed for {wt_path}: {e}")),
+                    Err(e) => {
+                        // Surface the failure (git refused: dirty / locked / etc.) instead of
+                        // swallowing it to a debug log — the popup closed, so the user believes
+                        // it worked. Toast it on the focused pane and invalidate so the next
+                        // projection re-enumerates reality (the worktree is still there).
+                        crate::dbg_log(&format!("worktree remove failed for {wt_path}: {e}"));
+                        crate::sidebar::invalidate(&repo);
+                        let mut st = w.state.borrow_mut();
+                        let f = st.active_tab().focused;
+                        if let Some(p) = st.active_tab_mut().panes.get_mut(f) {
+                            p.pane.set_toast(format!("Worktree remove failed: {e}"));
+                        }
+                        st.dirty = true;
+                    }
                 }
             });
         }
