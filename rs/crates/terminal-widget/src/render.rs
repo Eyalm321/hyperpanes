@@ -173,9 +173,11 @@ impl PaneRenderer for SoftwareRenderer {
                     blit_glyph(px, w, h, stride, &g, x0, y0, ascent, cell.fg);
                 }
 
-                // Underline.
+                // Underline. Compute in i32 (a negative ascent must not wrap to a huge u32)
+                // and clamp WITHIN this cell's band — never to the bottom screen row.
                 if cell.underline {
-                    let uy = (y0 + font.ascent as u32 + 2).min(h - 1);
+                    let uy = (y0 as i32 + font.ascent + 2)
+                        .clamp(y0 as i32, (y0 + ch) as i32 - 1) as u32;
                     let row_off = uy as usize * stride + x0 as usize;
                     for xx in 0..cell_px_w {
                         if (x0 + xx) >= w {
@@ -672,7 +674,9 @@ impl GpuRenderer {
                 }
 
                 if cell.underline {
-                    let uy = y0 + font.ascent as f32 + 2.0;
+                    // Clamp the underline within this cell's band (ascent is i32 → f32, so no
+                    // u32 wrap), keeping it off the next row / bottom of the target.
+                    let uy = (y0 + font.ascent as f32 + 2.0).clamp(y0, y0 + ch as f32 - 1.0);
                     bgs.push(BgInstance {
                         rect: [x0, uy, cell_w, 1.0],
                         color: to_f(cell.fg),
