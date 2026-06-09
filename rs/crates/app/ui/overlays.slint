@@ -14,6 +14,7 @@
 
 import { Theme } from "theme.slint";
 import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem } from "types.slint";
+import { NewPaneDialog } from "newpane.slint";
 
 // A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
 // used to mark the active option in the pickers. Same Path-with-commands pattern the window
@@ -366,7 +367,7 @@ component IconUnbind inherits Path {      // ⊘ circle-slash — "unbind (no sh
 }
 
 export component OverlayLayer inherits Rectangle {
-    // 0 none · 1 palette · 2 prefs
+    // 0 none · 1 palette · 2 prefs · 3 new-pane dialog
     in property <int> kind: 0;
 
     // palette
@@ -411,6 +412,12 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> clickable-paths: true;
     in property <string> editor-command: "";
     in property <bool> prefs-confirm: false;  // showing the unsaved-changes prompt
+    // ---- New Pane dialog (kind 3) ----
+    in property <int> np-default-idx;
+    in property <[color]> np-swatches;
+    in property <[PrefOption]> np-shells;
+    // label · color · show-frame · show-dot · command · cwd · shell-idx
+    callback new-pane-create(string, color, bool, bool, string, string, int);
     callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
     callback pref-text(int, string); // (kind, value) — string-valued settings
     callback pref-done();            // commit the appearance draft + close (Done / Save)
@@ -1204,5 +1211,18 @@ export component OverlayLayer inherits Rectangle {
                 }
             }
         }
+    }
+
+    // ===== New Pane options dialog =====
+    if root.kind == 3 : NewPaneDialog {
+        width: 100%;
+        height: 100%;
+        default-idx: root.np-default-idx;
+        swatches: root.np-swatches;
+        shells: root.np-shells;
+        create(l, c, fr, dt, cmd, cwd, sh) => {
+            root.new-pane-create(l, c, fr, dt, cmd, cwd, sh);
+        }
+        cancel => { root.dismiss(); }
     }
 }

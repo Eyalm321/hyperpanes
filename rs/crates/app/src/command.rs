@@ -11,14 +11,19 @@ use hyperpanes_core::layout::navigate::Direction;
 use hyperpanes_core::layout::presets::{DividerKind, Layout};
 use hyperpanes_core::session_manager::SessionManager;
 
-use crate::state::{DetachedPane, DetachedTab, Setting, State};
+use crate::state::{DetachedPane, DetachedTab, NewPaneOpts, Setting, State};
 use crate::theme;
 
 /// An action against the workspace. Construct these from any input source.
 #[derive(Debug, Clone)]
 pub enum Command {
     // panes
+    /// Immediately spawn a default pane (the plain ＋ click / palette "New pane").
     NewPane,
+    /// Open the "New pane" options dialog (Shift+＋ / the menus' "New pane…").
+    OpenNewPane,
+    /// Submit the New Pane dialog: spawn a pane from the configured options + close the dialog.
+    SubmitNewPane(NewPaneOpts),
     CloseFocused,
     ClosePane(usize),
     FocusPane(usize),
@@ -206,6 +211,11 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
     }
     match cmd {
         Command::NewPane => state.add_pane(mgr),
+        Command::OpenNewPane => state.open_new_pane(),
+        Command::SubmitNewPane(opts) => {
+            state.add_pane_opts(mgr, opts);
+            state.close_overlay();
+        }
         Command::CloseFocused => {
             let f = state.active_tab().focused;
             if !state.close_pane(f, mgr) {

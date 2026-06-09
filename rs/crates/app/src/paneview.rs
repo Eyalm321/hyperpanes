@@ -55,6 +55,9 @@ pub struct Ui {
     pub themes: Rc<VecModel<PrefOption>>,
     pub idle_effects: Rc<VecModel<PrefOption>>,
     pub keybindings: Rc<VecModel<KeybindingItem>>,
+    // ---- New Pane dialog models ----
+    pub np_swatches: Rc<VecModel<Color>>,
+    pub np_shells: Rc<VecModel<PrefOption>>,
     // ---- context-menu models ----
     pub ctx_entries: Rc<VecModel<MenuEntry>>,
     pub ctx_swatches: Rc<VecModel<Color>>,
@@ -78,6 +81,8 @@ impl Ui {
             themes: Rc::new(VecModel::default()),
             idle_effects: Rc::new(VecModel::default()),
             keybindings: Rc::new(VecModel::default()),
+            np_swatches: Rc::new(VecModel::default()),
+            np_shells: Rc::new(VecModel::default()),
             ctx_entries: Rc::new(VecModel::default()),
             ctx_swatches: Rc::new(VecModel::default()),
             ctx_tabs: Rc::new(VecModel::default()),
@@ -99,6 +104,8 @@ impl Ui {
         app.set_pref_themes(ModelRc::from(self.themes.clone()));
         app.set_pref_idle_effects(ModelRc::from(self.idle_effects.clone()));
         app.set_pref_keybindings(ModelRc::from(self.keybindings.clone()));
+        app.set_np_swatches(ModelRc::from(self.np_swatches.clone()));
+        app.set_np_shells(ModelRc::from(self.np_shells.clone()));
         app.set_ctx_entries(ModelRc::from(self.ctx_entries.clone()));
         app.set_ctx_swatches(ModelRc::from(self.ctx_swatches.clone()));
         app.set_ctx_tabs(ModelRc::from(self.ctx_tabs.clone()));
@@ -406,8 +413,32 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         Overlay::None => 0,
         Overlay::Palette => 1,
         Overlay::Prefs => 2,
+        Overlay::NewPane => 3,
     };
     app.set_overlay_kind(kind);
+
+    // New Pane dialog seeds: the default swatch index (next palette-rotation slot), the
+    // palette swatches, and the shell-picker options (id 0 = "Use default shell"). The dialog
+    // reads these once at open (it's re-instantiated each time `kind` becomes 3), so
+    // refreshing them every resync is harmless.
+    let np_swatches = state.frame_swatches();
+    let np_default_idx = if np_swatches.is_empty() {
+        0
+    } else {
+        (state.active_tab().panes.len() % np_swatches.len()) as i32
+    };
+    app.set_np_default_idx(np_default_idx);
+    sync_model(&ui.np_swatches, np_swatches);
+    let np_shells: Vec<PrefOption> = prefs::SHELL_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(id, (label, _))| PrefOption {
+            id: id as i32,
+            label: if id == 0 { "Use default shell".into() } else { (*label).into() },
+            active: false,
+        })
+        .collect();
+    sync_model(&ui.np_shells, np_shells);
 
     // command palette rows + selection
     let palette: Vec<PaletteItem> = state

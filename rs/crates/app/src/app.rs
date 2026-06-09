@@ -31,7 +31,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::command::{dispatch, set_layout_from_id, Command, Effect};
 use crate::drag::{self, DragKind, DragState, Hover};
 use crate::paneview::{self, Ui};
-use crate::state::{DetachedPane, DetachedTab, EscOutcome, State};
+use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, State};
 use crate::{theme, window, AppWindow, KeyMsg};
 
 /// Logical height of the top bar (where a tab-strip drop lands). Hidden in fullscreen,
@@ -1081,6 +1081,31 @@ impl App {
         // panes
         cb_usize!(on_focus_pane, Command::FocusPane);
         cb0!(on_new_pane, Command::NewPane);
+        cb0!(on_open_new_pane, Command::OpenNewPane);
+        // New Pane dialog submit: build the options payload (empty fields are normalized by
+        // `make_pane`) and spawn the configured pane. The shell index maps back to its token.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_submit_new_pane(move |label, color, frame, dot, command, cwd, shell_idx| {
+                if let Some(w) = app.window_by_id(id) {
+                    let shell = crate::prefs::SHELL_OPTIONS
+                        .get(shell_idx as usize)
+                        .map(|(_, tok)| (*tok).to_string())
+                        .unwrap_or_default();
+                    let opts = NewPaneOpts {
+                        label: Some(label.to_string()),
+                        cwd: Some(cwd.to_string()),
+                        command: Some(command.to_string()),
+                        shell: Some(shell),
+                        accent: Some(color),
+                        show_frame: Some(frame),
+                        show_dot: Some(dot),
+                    };
+                    app.run_command(&w, Command::SubmitNewPane(opts));
+                }
+            });
+        }
         cb0!(on_close_focused, Command::CloseFocused);
         cb0!(on_toggle_zoom, Command::ToggleZoom);
         cb0!(on_toggle_fullscreen, Command::ToggleFullscreen);

@@ -197,6 +197,7 @@ export component SidebarRail inherits Rectangle {
     in property <[ProjectItem]> projects;
     in property <bool> projects-open: false;
     callback new-pane();
+    callback open-new-pane();   // Shift+click → open the New Pane options dialog
     callback toggle-projects();
     callback open-project(int);
     callback recolor-project(int, int);   // row, swatch
@@ -222,9 +223,18 @@ export component SidebarRail inherits Rectangle {
             y: (parent.height - self.height) / 2;
             ink: pa.has-hover ? Theme.text : Theme.subtext;
         }
+        // Plain click adds a default pane immediately; Shift-click opens the New Pane
+        // options dialog (mirrors Electron's Sidebar ＋). Shift is sampled on press and
+        // consumed on the resulting click.
+        property <bool> shift-down: false;
         pa := TouchArea {
             mouse-cursor: pointer;
-            clicked => { root.new-pane(); }
+            clicked => {
+                if (parent.shift-down) { root.open-new-pane(); } else { root.new-pane(); }
+            }
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) { parent.shift-down = e.modifiers.shift; }
+            }
         }
     }
 
