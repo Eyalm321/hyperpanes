@@ -2699,15 +2699,25 @@ impl State {
     /// `serializeWorkspace()` (`{ name, layout, panes }`; runtime-only fields dropped). Pane
     /// identity is the label + color; the cwd/command aren't tracked per-pane in the native
     /// state, so a reloaded pane re-spawns a plain shell at its saved label/color.
+    ///
+    /// Per-pane zoom (Task 14) IS persisted: a pane whose terminal font differs from the base
+    /// size carries its `font_size`, so a zoomed pane keeps its zoom across save→load. A pane
+    /// at the base size omits it (it then tracks the current base on reload).
     pub fn to_workspace_file(&self) -> WorkspaceFile {
         let t = self.active_tab();
+        let base = self.settings.font_px.round() as u32;
         let panes: Vec<PaneSpec> = t
             .panes
             .iter()
-            .map(|p| PaneSpec {
-                label: Some(p.title.to_string()),
-                color: Some(color_hex(p.accent)),
-                ..Default::default()
+            .map(|p| {
+                let px = p.font_px.round() as u32;
+                PaneSpec {
+                    label: Some(p.title.to_string()),
+                    color: Some(color_hex(p.accent)),
+                    // Only a zoomed pane records its size (keeps un-zoomed files clean).
+                    font_size: (px != base).then_some(px),
+                    ..Default::default()
+                }
             })
             .collect();
         WorkspaceFile {
@@ -2863,7 +2873,11 @@ impl State {
             _ if idx == 0 => "shell".to_string(),
             _ => format!("pane {}", idx + 1),
         };
-        let font_px = self.settings.font_px;
+        // Restore the pane's persisted per-pane zoom (Task 14); absent → the configured base.
+        let font_px = spec
+            .font_size
+            .map(|s| Settings::clamp_font(s as f32))
+            .unwrap_or(self.settings.font_px);
         let font = theme::load_font_at(&self.settings.font_path(), font_px, self.last_scale);
         Some(PaneState {
             uid,
