@@ -12,6 +12,7 @@
 //! `%APPDATA%\hyperpanes\native-keybindings.json`.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use hyperpanes_core::layout::navigate::Direction;
 use hyperpanes_core::persistence::paths;
@@ -229,6 +230,15 @@ pub fn default_bindings() -> Vec<Binding> {
     ]
 }
 
+/// The default keymap built once and reused. [`default_bindings`] allocates a `Vec` of 15
+/// owned `Command`s; the key router consults this table on **every** key event
+/// ([`Keymap::match_chord`]) and the menus on every render ([`Keymap::label_for`]), so caching
+/// it behind a [`OnceLock`] avoids rebuilding the whole table each time.
+fn bindings() -> &'static [Binding] {
+    static BINDINGS: OnceLock<Vec<Binding>> = OnceLock::new();
+    BINDINGS.get_or_init(default_bindings)
+}
+
 /// One row of the Preferences → Keybindings list: its binding id, category, label, the
 /// **effective** chord pieces (override or default), whether it's been overridden (so the
 /// editor can show a "reset" affordance), and whether it's currently **unbound** (the user
@@ -261,7 +271,7 @@ impl Keymap {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Ok(map) = serde_json::from_str::<BTreeMap<String, Option<ChordRepr>>>(&raw) {
                 let valid: std::collections::HashSet<&str> =
-                    default_bindings().iter().map(|b| b.id).collect();
+                    bindings().iter().map(|b| b.id).collect();
                 for (id, repr) in map {
                     if !valid.contains(id.as_str()) {
                         continue;
@@ -318,7 +328,7 @@ impl Keymap {
     /// renderer's `comboLabel(combos[id])`, used to annotate context-menu rows. `None` for an
     /// unknown *or* unbound binding (so the menu shows no shortcut).
     pub fn label_for(&self, id: &str) -> Option<String> {
-        default_bindings()
+        bindings()
             .iter()
             .find(|b| b.id == id)
             .and_then(|b| self.effective(id, b.chord))
@@ -329,21 +339,21 @@ impl Keymap {
     /// **effective** chord (override wins over default; an unbound binding never matches),
     /// first match in table order.
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
-        default_bindings()
-            .into_iter()
+        bindings()
+            .iter()
             .find(|b| {
                 self.effective(b.id, b.chord)
                     .is_some_and(|c| c.matches(ctrl, alt, shift, key))
             })
-            .map(|b| b.command)
+            .map(|b| b.command.clone())
     }
 
     /// The id of a *different* binding whose **effective** chord already equals `chord` (the
     /// current owner of that combo), or `None` when the combo is free. Used to "steal" a chord:
     /// rebinding to an in-use combo unbinds its previous owner.
     pub fn owner_of(&self, chord: Chord, except: &str) -> Option<&'static str> {
-        default_bindings()
-            .into_iter()
+        bindings()
+            .iter()
             .find(|b| {
                 b.id != except
                     && self
@@ -355,7 +365,7 @@ impl Keymap {
 
     /// Override binding `id` with `chord`, persisting. Unknown ids are ignored.
     pub fn set(&mut self, id: &str, chord: Chord) {
-        if default_bindings().iter().any(|b| b.id == id) {
+        if bindings().iter().any(|b| b.id == id) {
             self.overrides.insert(id.to_string(), Some(chord));
             self.save();
         }
@@ -363,7 +373,7 @@ impl Keymap {
 
     /// Explicitly unbind `id` (no chord fires it), persisting. Unknown ids are ignored.
     pub fn unbind(&mut self, id: &str) {
-        if default_bindings().iter().any(|b| b.id == id) {
+        if bindings().iter().any(|b| b.id == id) {
             self.overrides.insert(id.to_string(), None);
             self.save();
         }
@@ -393,7 +403,7 @@ impl Keymap {
     /// editor's row model, with each row's **effective** chord chips, overridden flag, and
     /// unbound flag. Each category's rows are contiguous so the view can draw a heading per group.
     pub fn rows(&self) -> Vec<BindingRow> {
-        let bindings = default_bindings();
+        let bindings = bindings();
         let mut rows = Vec::with_capacity(bindings.len());
         for category in CATEGORY_ORDER {
             for b in bindings.iter().filter(|b| b.category == category) {
