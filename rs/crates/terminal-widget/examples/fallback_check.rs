@@ -29,7 +29,9 @@ fn main() -> anyhow::Result<()> {
 
     // A wide candidate set of glyphs a TUI like Claude Code draws. We auto-select the ones
     // FiraCode actually LACKS so the before/after is striking rather than mostly-identical.
-    let candidates: Vec<char> = "╭╮╰╯╱╲╳⎿⎸⎹✻✶✦✧✩●○◉◌◍◎⏺⏸⏵⏴⠋⠙⠿⣿⚠⚡ℹ★☆»«›‹•·‣⁃↵⏎➜➤➔⌘⌥⇧⌃✅❌🚀🔥"
+    // Standard-Unicode TUI glyphs + a row of Nerd-font private-use icons (powerline
+    // separators, home/folder/git/branch/code devicons) that ONLY the Symbols Nerd Font maps.
+    let candidates: Vec<char> = "╭╮╰╯⎿⎸⎹✻✶✦✧✩●○◉◌◍⏺⏸⏵⏴⠋⠙⠿⣿⚠⚡ℹ★☆‣⁃↵➜➤\u{e0b0}\u{e0b2}\u{e0b1}\u{e0b3}\u{f015}\u{f07b}\u{f07c}\u{f02a}\u{e702}\u{e718}\u{f121}\u{f126}"
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
@@ -39,7 +41,7 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .copied()
         .filter(|&c| primary.charmap().map(c) == 0)
-        .take(28)
+        .take(48)
         .collect();
     let line: Vec<char> = if line.is_empty() {
         candidates // (shouldn't happen) — fall back to showing everything
@@ -53,7 +55,8 @@ fn main() -> anyhow::Result<()> {
         0 => "primary(FiraCode)",
         1 => "JetBrainsMono",
         2 => "SegoeUISymbol",
-        3 => "SegoeUIEmoji",
+        3 => "SymbolsNerdFont",
+        4 => "SegoeUIEmoji",
         _ => "?",
     };
     println!("char  codepoint  primaryGid  ->  (font_id, gid)  face");

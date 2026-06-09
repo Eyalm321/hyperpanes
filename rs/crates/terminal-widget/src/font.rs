@@ -27,6 +27,12 @@ use swash::{FontRef, GlyphId};
 const JETBRAINS_MONO: &[u8] =
     include_bytes!("../../app/assets/fonts/JetBrainsMono-Regular.ttf");
 
+/// Symbols Nerd Font Mono — covers the private-use icon ranges (powerline, devicons,
+/// font-awesome, etc., roughly U+E000–U+F8FF + supplementary) that neither the primary nor
+/// JetBrains Mono / Segoe map. Bundled in this crate's own `assets/fonts` (it's the
+/// canonical symbols-only Nerd Font; see assets/fonts/SymbolsNerdFont-LICENSE).
+const SYMBOLS_NERD: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+
 #[derive(Clone)]
 pub struct CachedGlyph {
     pub mask: Vec<u8>, // coverage, row-major, w*h bytes (Content::Mask). Empty if blank.
@@ -227,12 +233,15 @@ impl FallbackSpec {
 }
 
 /// The fallback chain after the primary, in priority order: the bundled JetBrains Mono
-/// (broad coverage — symbols, box-drawing, powerline, nerd glyphs), then system Segoe UI
-/// Symbol, then Segoe UI Emoji (monochrome). Missing files are simply skipped.
+/// (broad Unicode coverage), then system Segoe UI Symbol (box-drawing/misc symbols), then
+/// the bundled Symbols Nerd Font (private-use icon ranges), then Segoe UI Emoji
+/// (monochrome). Missing files are simply skipped. Order matters only for codepoints more
+/// than one font maps — the nerd PUA ranges are unique to the Symbols font.
 fn fallback_specs() -> Vec<FallbackSpec> {
     vec![
         FallbackSpec::Embedded(JETBRAINS_MONO),
         FallbackSpec::WindowsFont("seguisym.ttf"),
+        FallbackSpec::Embedded(SYMBOLS_NERD),
         FallbackSpec::WindowsFont("seguiemj.ttf"),
     ]
 }
