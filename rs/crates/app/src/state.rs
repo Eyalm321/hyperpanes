@@ -18,6 +18,7 @@ use hyperpanes_core::layout::presets::{
 use hyperpanes_core::layout::sizes::{
     clamp_fraction, equal_sizes, insert_size, remove_size, resize_at,
 };
+use hyperpanes_core::ai::service::AiProjectRef;
 use hyperpanes_core::persistence::projects;
 use hyperpanes_core::session_manager::{SessionManager, SpawnOptions};
 use hyperpanes_core::workspace::io::{read_workspace, windows_of, write_workspace};
@@ -128,6 +129,27 @@ impl PrefsDraft {
     }
 }
 
+/// The ambient-AI subtitle state for one pane: the latest engine-produced summary line
+/// (`full`, already redacted by `core::ai`) and a typewriter `reveal` cursor (chars shown
+/// so far, as a float so the pump can advance it a sub-character per tick for a smooth
+/// reveal). Empty `full` = no AI line for this pane. A manual subtitle and the per-pane
+/// Mute flag both suppress the AI line at render time (manual always wins).
+#[derive(Debug, Clone, Default)]
+pub struct AiLine {
+    pub full: String,
+    pub reveal: f32,
+}
+
+impl AiLine {
+    /// Set the target summary text; restart the typewriter when it actually changed.
+    pub fn set_target(&mut self, text: &str) {
+        if self.full != text {
+            self.full = text.to_string();
+            self.reveal = 0.0;
+        }
+    }
+}
+
 /// One pane's controller-side state (terminal grid + placement + chrome).
 pub struct PaneState {
     pub uid: String,
@@ -175,6 +197,9 @@ pub struct PaneState {
     /// Whether the pane's ambient-AI summary line is muted (the pane menu's "Mute AI Summary"
     /// toggle; mirrors the renderer's `ui.aiMuted` set). New panes default unmuted.
     pub ai_muted: bool,
+    /// Ambient-AI subtitle + typewriter reveal state (the local projection of this pane's
+    /// `meta['ai.subtitle']`; produced by the `core::ai` engine when enabled).
+    pub ai: AiLine,
     /// The last polled value of the widget's transient bottom-right indicator ("toast" —
     /// copy/paste confirmations + the Ctrl-zoom font %), cached so the pump can detect a
     /// change and update/clear the row even when the surface itself isn't dirty.
@@ -567,12 +592,9 @@ impl State {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let palette = self.settings.frame_palette;
-        // Honour the default-shell preference ("" = let core pick the system default).
-        let shell = if self.settings.default_shell.is_empty() {
-            None
-        } else {
-            Some(self.settings.default_shell.clone())
-        };
+        // Honour the default-shell preference ("" = prefer pwsh when available, else core's
+        // system default).
+        let shell = prefs::effective_shell(&self.settings.default_shell);
         // Inject shell integration so the shell reports its cwd (OSC-7 for pwsh/bash, OSC
         // 9;9 for cmd). That's what lets a pane's cwd → git-project tint (and clickable-path
         // resolution) actually fire — without it pwsh never emits a cwd OSC. Additive: the
@@ -640,6 +662,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            ai: AiLine::default(),
             last_toast: String::new(),
             search_focus_seq: 0,
             font_px,
@@ -812,6 +835,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            ai: AiLine::default(),
             last_toast: String::new(),
             search_focus_seq: 0,
             font_px: det.font_px,
@@ -1220,10 +1244,10 @@ impl State {
     /// port of `applyProjectToPane`): adopt the project color, turn the per-pane frame + dot
     /// ON, and rename the pane to the repo name **only if its label is still a default**.
     /// A clean pane outside any repo is left untouched (stays frame/dot OFF).
-    pub fn note_pane_cwd(&mut self, uid: &str, cwd: &str) {
-        let Some(root) = sidebar::git_root_of(cwd) else {
-            return;
-        };
+    /// Returns the resolved git project (root path + name) so the caller can feed the
+    /// ambient-AI engine's `on_cwd`; `None` when the cwd isn't inside a git repo.
+    pub fn note_pane_cwd(&mut self, uid: &str, cwd: &str) -> Option<AiProjectRef> {
+        let root = sidebar::git_root_of(cwd)?;
         let project = projects::upsert_project_by_root(&root.to_string_lossy());
         let color = parse_hex(&project.color);
         if let Some((ti, pi)) = self.find_pane(uid) {
@@ -1243,6 +1267,58 @@ impl State {
         // Refresh the cached, newest-first project list (rail badge + flyout).
         self.projects = sidebar::list();
         self.dirty = true;
+        Some(AiProjectRef {
+            path: root.to_string_lossy().to_string(),
+            name: project.name,
+        })
+    }
+
+    /// Apply an ambient-AI subtitle produced by the engine to the pane with session `uid`
+    /// (the typewriter reveal restarts when the text changes). No-op for an unknown uid.
+    pub fn set_ai_subtitle(&mut self, uid: &str, text: &str) {
+        if let Some((ti, pi)) = self.find_pane(uid) {
+            self.tabs[ti].panes[pi].ai.set_target(text);
+        }
+    }
+
+    /// The ambient-AI watch list for this window: one entry per pane across all tabs, keyed
+    /// by its session uid (used as the stable pane id), carrying the current label + Mute
+    /// flag so the engine can summarise unmuted panes and clear muted ones.
+    pub fn ai_pane_publish(&self) -> Vec<hyperpanes_core::ai::service::AiPanePublish> {
+        let mut out = Vec::new();
+        for tab in &self.tabs {
+            for p in &tab.panes {
+                out.push(hyperpanes_core::ai::service::AiPanePublish {
+                    pane_id: p.uid.clone(),
+                    session_uid: p.uid.clone(),
+                    label: p.title.to_string(),
+                    muted: p.ai_muted,
+                });
+            }
+        }
+        out
+    }
+
+    /// A cheap signature of the AI watch list (uid + label + mute), so the controller only
+    /// re-publishes the pane context when something the engine cares about changed.
+    pub fn ai_context_sig(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut mix = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        };
+        for tab in &self.tabs {
+            for p in &tab.panes {
+                mix(p.uid.as_bytes());
+                mix(b"\x1f");
+                mix(p.title.as_bytes());
+                mix(if p.ai_muted { b"\x01" } else { b"\x00" });
+                mix(b"\x1e");
+            }
+        }
+        h
     }
 
     pub fn set_fullscreen(&mut self, on: bool) {
@@ -2085,11 +2161,7 @@ impl State {
         let (cols, rows) = (cols.max(2) as u16, rows.max(1) as u16);
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
-        let shell = if self.settings.default_shell.is_empty() {
-            None
-        } else {
-            Some(self.settings.default_shell.clone())
-        };
+        let shell = prefs::effective_shell(&self.settings.default_shell);
         let shell_path = shell
             .clone()
             .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
@@ -2190,6 +2262,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            ai: AiLine::default(),
             last_toast: String::new(),
             search_focus_seq: 0,
             font_px: det.font_px,
@@ -2548,13 +2621,10 @@ impl State {
         let uid = format!("pane-{}", self.next_uid);
         self.next_uid += 1;
         let palette = self.settings.frame_palette;
-        let shell = spec.shell.clone().or_else(|| {
-            if self.settings.default_shell.is_empty() {
-                None
-            } else {
-                Some(self.settings.default_shell.clone())
-            }
-        });
+        let shell = spec
+            .shell
+            .clone()
+            .or_else(|| prefs::effective_shell(&self.settings.default_shell));
         let shell_path = shell
             .clone()
             .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
@@ -2616,6 +2686,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            ai: AiLine::default(),
             last_toast: String::new(),
             search_focus_seq: 0,
             font_px,

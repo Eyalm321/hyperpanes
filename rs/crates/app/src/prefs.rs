@@ -112,6 +112,27 @@ pub const SHELL_OPTIONS: [(&str, &str); 4] = [
     ("cmd", "cmd"),
 ];
 
+/// Resolve the shell token to spawn for a new pane. An explicit pick (`default_shell`) is
+/// used verbatim; the empty "System" default prefers **pwsh** (PowerShell 7) when it's
+/// available, falling back to the OS default that core resolves. Mirrors the renderer's
+/// "use pwsh if installed" default. Returns `None` to mean "let core pick the system shell".
+pub fn effective_shell(default_shell: &str) -> Option<String> {
+    if !default_shell.is_empty() {
+        return Some(default_shell.to_string());
+    }
+    pwsh_available().then(|| "pwsh".to_string())
+}
+
+/// Whether `pwsh.exe` (PowerShell 7+) resolves — its canonical install dir, then `PATH`.
+fn pwsh_available() -> bool {
+    if std::path::Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe").exists() {
+        return true;
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join("pwsh.exe").exists()))
+        .unwrap_or(false)
+}
+
 /// Base (un-scaled) terminal font size bounds, mirroring `useSettings`' clamps.
 pub const MIN_FONT_PX: f32 = 8.0;
 pub const MAX_FONT_PX: f32 = 32.0;

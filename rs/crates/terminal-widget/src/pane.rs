@@ -169,6 +169,22 @@ impl TerminalPane {
         (s.cols, s.rows)
     }
 
+    /// The visible screen as plain text — one line per viewport row (blank cells as spaces),
+    /// with trailing whitespace and trailing blank lines trimmed. Lets a host feed an ambient
+    /// summariser the *rendered* screen (what the user actually sees) instead of the raw redraw
+    /// byte stream, so a continuously-repainting TUI (e.g. an agent CLI) is captured cleanly
+    /// rather than as redraw noise.
+    pub fn screen_text(&self) -> String {
+        let snap = self.grid.snapshot();
+        let mut lines: Vec<String> = (0..snap.rows)
+            .map(|r| Self::row_text(&snap, r).trim_end().to_string())
+            .collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
     /// A human-readable name for the active renderer (e.g. for a HUD/debug overlay).
     pub fn renderer_name(&self) -> &'static str {
         self.renderer.name()

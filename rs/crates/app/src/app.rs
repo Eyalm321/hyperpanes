@@ -104,7 +104,23 @@ pub struct App {
     /// over the same tab past [`SPRING_DELAY`], that window switches to the tab so the pane
     /// can be dropped into its layout.
     spring: RefCell<Option<(usize, usize, std::time::Instant)>>,
+    /// The ambient-AI engine bridge (runs `core::ai` on its own thread; default-OFF). Fed
+    /// the live session taps + per-window pane context; produces `ai.subtitle` lines.
+    ai: crate::ai::AiBridge,
+    /// Per-window signature of the last-published AI pane context, so we only re-publish
+    /// (and the engine only reconciles) when a watched pane's label / mute / set changed.
+    ai_ctx_sig: RefCell<std::collections::HashMap<usize, u64>>,
+    /// Per-pane (session uid) debounce state for the rendered-screen feed: the last screen
+    /// hash fed to the engine and when, so we feed only on change and at most every
+    /// [`AI_FEED_INTERVAL`].
+    ai_feed: RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>>,
 }
+
+/// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
+/// scheduler's settle window is shorter, so a quiet gap between feeds lets it summarise.
+/// Kept brisk so the subtitle tracks a live agent/chat pane; the real refresh floor is the
+/// model's per-call latency, not this.
+const AI_FEED_INTERVAL: Duration = Duration::from_millis(400);
 
 /// How long a pane drag must rest over a tab before it springs open (Chrome/Finder).
 const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
@@ -124,6 +140,9 @@ impl App {
             preview_on: Cell::new(false),
             drag_capture: Cell::new(false),
             spring: RefCell::new(None),
+            ai: crate::ai::AiBridge::spawn(),
+            ai_ctx_sig: RefCell::new(std::collections::HashMap::new()),
+            ai_feed: RefCell::new(std::collections::HashMap::new()),
         })
     }
 
@@ -263,6 +282,10 @@ impl App {
             }
         }
 
+        // 2b. Ambient-AI: apply produced subtitles, (re)publish each window's pane context,
+        //     and mirror the engine status into the Preferences props.
+        self.pump_ai(&windows);
+
         // 3. Render each window from its own state.
         for w in &windows {
             self.pump_window(w);
@@ -297,7 +320,11 @@ impl App {
             let mut survivors = Vec::new();
             for w in self.windows.borrow().iter() {
                 if w.closing.get() {
+                    // Tell the AI engine to forget this window's panes, and drop its context sig.
+                    self.ai.send(crate::ai::AiMsg::DropWindow { window_id: w.id as i64 });
+                    self.ai_ctx_sig.borrow_mut().remove(&w.id);
                     for uid in w.state.borrow().session_uids() {
+                        self.ai_feed.borrow_mut().remove(&uid);
                         self.mgr.kill(&uid);
                     }
                     let _ = w.app.window().hide();
@@ -316,6 +343,10 @@ impl App {
     fn route_event(&self, windows: &[Rc<Window>], ev: SessionEvent) {
         match ev {
             SessionEvent::Data { uid, data } => {
+                // NB: the ambient-AI engine is NOT fed the raw redraw byte stream here — a
+                // repainting TUI (e.g. an agent CLI) would drown the quiescence scheduler in
+                // noise. Instead `pump_ai` feeds each pane's *rendered screen text* on a
+                // cadence (what the user actually sees). See `App::pump_ai`.
                 let Some(w) = find_window(windows, &uid) else { return };
                 let mut st = w.state.borrow_mut();
                 if let Some((ti, pi)) = st.find_pane(&uid) {
@@ -339,6 +370,8 @@ impl App {
                 }
             }
             SessionEvent::Exit { uid, .. } => {
+                self.ai.send(crate::ai::AiMsg::Exit { uid: uid.clone() });
+                self.ai_feed.borrow_mut().remove(&uid);
                 if let Some(w) = find_window(windows, &uid) {
                     let alive = w.state.borrow_mut().pane_exited(&uid, &self.mgr);
                     if !alive {
@@ -348,14 +381,94 @@ impl App {
             }
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
-                    let mut st = w.state.borrow_mut();
-                    // Resolve clickable paths relative to this pane's live directory.
-                    if let Some((ti, pi)) = st.find_pane(&uid) {
-                        st.tabs[ti].panes[pi].pane.set_cwd(Some(cwd.clone()));
+                    let project = {
+                        let mut st = w.state.borrow_mut();
+                        // Resolve clickable paths relative to this pane's live directory.
+                        if let Some((ti, pi)) = st.find_pane(&uid) {
+                            st.tabs[ti].panes[pi].pane.set_cwd(Some(cwd.clone()));
+                        }
+                        // Refresh the remembered-projects list AND tint THIS pane if its cwd is
+                        // inside a git repo (project color + frame/dot on + project-name label).
+                        st.note_pane_cwd(&uid, &cwd)
+                    };
+                    // Feed the cwd + resolved project to the ambient-AI engine (for the prompt
+                    // context + per-project memory).
+                    self.ai.send(crate::ai::AiMsg::Cwd { uid, cwd, project });
+                }
+            }
+        }
+    }
+
+    /// Ambient-AI pump (UI thread): apply produced subtitles to pane state, (re)publish each
+    /// window's pane context to the engine when it changed, and mirror the latest engine
+    /// status into every window's Preferences props. Cheap when the engine is off/idle.
+    fn pump_ai(self: &Rc<Self>, windows: &[Rc<Window>]) {
+        // Apply each produced `ai.subtitle` to the owning pane (kicks its typewriter reveal).
+        for u in self.ai.drain_meta() {
+            if let Some(w) = windows.iter().find(|w| w.id as i64 == u.window_id) {
+                let mut st = w.state.borrow_mut();
+                for (k, v) in &u.pairs {
+                    if k == "ai.subtitle" {
+                        st.set_ai_subtitle(&u.pane_id, v);
                     }
-                    // Refresh the remembered-projects list AND tint THIS pane if its cwd is
-                    // inside a git repo (project color + frame/dot on + project-name label).
-                    st.note_pane_cwd(&uid, &cwd);
+                }
+            }
+        }
+        // Re-publish a window's pane context only when its watch list changed.
+        for w in windows {
+            let sig = w.state.borrow().ai_context_sig();
+            let changed = self.ai_ctx_sig.borrow().get(&w.id).copied() != Some(sig);
+            if changed {
+                self.ai_ctx_sig.borrow_mut().insert(w.id, sig);
+                let panes = w.state.borrow().ai_pane_publish();
+                self.ai.send(crate::ai::AiMsg::PaneContext {
+                    window_id: w.id as i64,
+                    panes,
+                });
+            }
+        }
+        // Mirror an engine status transition into the Preferences projection on every window.
+        if self.ai.drain_status() {
+            let st = self.ai.status();
+            for w in windows {
+                apply_ai_status_props(&w.app, &st);
+            }
+        }
+
+        // Feed each pane's RENDERED screen text (what the user sees) to the engine — debounced
+        // and only on change. This replaces the raw pty feed so a repainting agent TUI (Claude
+        // Code, etc.) is summarised from a clean snapshot rather than redraw noise. Skipped
+        // entirely when the engine is off, and per-pane when muted.
+        if self.ai.enabled() {
+            let now = std::time::Instant::now();
+            let mut feed = self.ai_feed.borrow_mut();
+            for w in windows {
+                let st = w.state.borrow();
+                for tab in &st.tabs {
+                    for p in &tab.panes {
+                        if p.ai_muted {
+                            continue;
+                        }
+                        let prev = feed.get(&p.uid).copied();
+                        if let Some((_, at)) = prev {
+                            if now.duration_since(at) < AI_FEED_INTERVAL {
+                                continue; // debounce: too soon since the last check
+                            }
+                        }
+                        let text = p.pane.screen_text();
+                        if text.trim().chars().count() < 3 {
+                            continue;
+                        }
+                        let hash = fnv1a(&text);
+                        // Unchanged screen → just bump the timestamp (re-check next interval),
+                        // don't re-feed (the engine would only dedupe it anyway).
+                        if prev.map(|(h, _)| h) == Some(hash) {
+                            feed.insert(p.uid.clone(), (hash, now));
+                            continue;
+                        }
+                        feed.insert(p.uid.clone(), (hash, now));
+                        self.ai.feed_data(&p.uid, &text);
+                    }
                 }
             }
         }
@@ -1421,6 +1534,12 @@ impl App {
                     app.run_command(&w, Command::FontSelect(arg.max(0) as usize));
                     return;
                 }
+                // Ambient-AI master toggle — drives the engine directly (its own ai-settings.json,
+                // not a drafted appearance Setting).
+                if kind == 13 {
+                    app.ai.send(crate::ai::AiMsg::SetEnabled(arg != 0));
+                    return;
+                }
                 let setting = match kind {
                     1 => crate::state::Setting::FontDelta(arg),
                     2 => crate::state::Setting::ShowFrame(arg != 0),
@@ -1459,6 +1578,17 @@ impl App {
                 // Custom font path (kind 8) is its own command; editor command (7) is a setting.
                 if kind == 8 {
                     app.run_command(&w, Command::FontCustomValue(value.to_string()));
+                    return;
+                }
+                // Ambient-AI Ollama host/base-URL (13) + model (14) — live-configure the engine.
+                if kind == 13 || kind == 14 {
+                    use hyperpanes_core::ai::service::AiSettingsPatch;
+                    let patch = if kind == 13 {
+                        AiSettingsPatch { endpoint: Some(value.to_string()), ..Default::default() }
+                    } else {
+                        AiSettingsPatch { model: Some(value.to_string()), ..Default::default() }
+                    };
+                    app.ai.send(crate::ai::AiMsg::Configure(patch));
                     return;
                 }
                 let setting = match kind {
@@ -1557,6 +1687,35 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
     windows
         .iter()
         .find(|w| w.state.borrow_mut().find_pane(uid).is_some())
+}
+
+/// Cheap FNV-1a hash of a string — used to detect when a pane's rendered screen text
+/// changed (so the ambient-AI feed only sends on a real change).
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Mirror the ambient-AI engine status into a window's Preferences props: the enabled
+/// toggle, the host/model field seeds, and a human-readable status line.
+fn apply_ai_status_props(app: &AppWindow, st: &hyperpanes_core::ai::service::AiStatus) {
+    app.set_pref_ai_enabled(st.enabled);
+    app.set_pref_ai_host(st.endpoint.clone().into());
+    app.set_pref_ai_model(st.model.clone().into());
+    let line = if !st.enabled {
+        "Disabled".to_string()
+    } else if st.online {
+        format!("Running · connected to {}", st.endpoint)
+    } else if let Some(err) = &st.last_error {
+        format!("Enabled · error: {err}")
+    } else {
+        "Enabled · connecting…".to_string()
+    };
+    app.set_pref_ai_status(line.into());
 }
 
 /// Copy `text` to the Windows clipboard via the built-in `clip` utility (no extra crate /

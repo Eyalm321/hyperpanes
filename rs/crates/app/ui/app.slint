@@ -79,6 +79,11 @@ export component AppWindow inherits Window {
     in property <[PrefOption]> pref-idle-effects;
     in property <string> pref-idle-effect-label;
     in property <int> pref-idle-seconds: 10;
+    // ambient-AI (local Ollama) prefs — mirrored from the engine status (default off)
+    in property <bool> pref-ai-enabled: false;
+    in property <string> pref-ai-host: "";
+    in property <string> pref-ai-model: "";
+    in property <string> pref-ai-status: "";
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-keybinds-overridden: false;
@@ -362,6 +367,10 @@ export component AppWindow inherits Window {
             idle-effects: root.pref-idle-effects;
             idle-effect-label: root.pref-idle-effect-label;
             idle-seconds: root.pref-idle-seconds;
+            ai-enabled: root.pref-ai-enabled;
+            ai-host: root.pref-ai-host;
+            ai-model: root.pref-ai-model;
+            ai-status: root.pref-ai-status;
             keybindings: root.pref-keybindings;
             keybinds-overridden: root.pref-keybinds-overridden;
             kb-conflict: root.pref-kb-conflict;

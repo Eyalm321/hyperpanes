@@ -364,8 +364,13 @@ export component PaneView inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             clip: true;
-                            VerticalLayout {
-                                alignment: center;
+                            // Title + secondary line laid out SIDE BY SIDE (the title at its
+                            // natural width, the subtitle filling the rest and eliding). The
+                            // shell's OSC title (e.g. pwsh's exe path) is noise — like Electron
+                            // it is NOT shown inline; only a real / ambient-AI subtitle appears.
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
                                 visible: !pane.editing;
                                 Text {
                                     text: pane.title;
@@ -374,16 +379,24 @@ export component PaneView inherits Rectangle {
                                     font-weight: 600;
                                     vertical-alignment: center;
                                     horizontal-alignment: left;
-                                    overflow: elide;
                                 }
-                                // secondary line: the user/ambient subtitle only. The shell's
-                                // OSC title (e.g. pwsh's exe path) is noise — like Electron, it
-                                // is NOT shown inline (it stays a hover tooltip / drives the AI
-                                // gate); only a real subtitle gets a second line here.
                                 if pane.subtitle != "" : Text {
                                     text: pane.subtitle;
                                     color: Theme.subtext;
                                     font-size: 9px;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
+                                // ambient-AI "what you're doing" line (typewriter-revealed by
+                                // the controller), shown only when no manual subtitle wins.
+                                if pane.subtitle == "" && pane.ai-subtitle != "" : Text {
+                                    text: pane.ai-subtitle;
+                                    color: Theme.accent;
+                                    font-size: 9px;
+                                    font-italic: true;
+                                    horizontal-stretch: 1;
                                     vertical-alignment: center;
                                     horizontal-alignment: left;
                                     overflow: elide;
