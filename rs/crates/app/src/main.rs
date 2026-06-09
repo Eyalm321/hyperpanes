@@ -34,6 +34,7 @@ mod sidebar;
 mod state;
 mod tetris;
 mod theme;
+mod update;
 mod window;
 
 use std::sync::Arc;
@@ -100,6 +101,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => PendingSeed::EmptyTab,
     };
     application.spawn_window(seed);
+
+    // If auto-update is on, do a quiet GitHub-releases check on startup. This runs on a
+    // background thread inside `check`, so it never blocks startup; an offline/failed check
+    // is silently skipped, and an available update only surfaces a hint in Preferences →
+    // General (never auto-downloads/-installs). Reads the persisted setting directly so we
+    // don't depend on a window's state being seeded yet.
+    if prefs::load().auto_update {
+        application.update.check(true);
+    }
 
     // One shared pump timer drives every window (drain → render → reap).
     let timer = slint::Timer::default();

@@ -266,4 +266,36 @@ mod tests {
         let parsed: WorkspaceFile = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, WorkspaceFile::default());
     }
+
+    /// Task 14: a zoomed pane's per-pane terminal font size survives the workspace
+    /// round-trip (`font_size` ⇄ `fontSize`), while a pane left at the base size omits it
+    /// (`skip_serializing_if`). This is the persistence contract the native app relies on to
+    /// restore per-pane zoom across a relaunch.
+    #[test]
+    fn pane_zoom_font_size_round_trips() {
+        let ws = WorkspaceFile {
+            name: Some("z".into()),
+            panes: Some(vec![
+                PaneSpec {
+                    label: Some("zoomed".into()),
+                    font_size: Some(20),
+                    ..Default::default()
+                },
+                PaneSpec {
+                    label: Some("base".into()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&ws).unwrap();
+        // The zoomed pane records fontSize; the base pane omits it entirely.
+        assert!(json.contains("\"fontSize\": 20"), "zoomed pane keeps its size: {json}");
+        let parsed: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let panes = parsed.panes.clone().unwrap();
+        assert_eq!(panes[0].font_size, Some(20));
+        assert_eq!(panes[1].font_size, None);
+        // Whole value round-trips identically.
+        assert_eq!(parsed, ws);
+    }
 }

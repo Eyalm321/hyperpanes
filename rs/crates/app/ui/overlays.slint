@@ -406,6 +406,12 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> control-enabled: false;
     in property <bool> control-allow-input: false;
     in property <string> control-status: "";
+    // General panel — app info + self-update (Task 8).
+    in property <string> app-version: "";        // running build version (env CARGO_PKG_VERSION)
+    in property <bool> auto-update: false;        // persisted "check on startup" toggle
+    in property <string> update-status: "";       // human status line from the updater
+    in property <int> update-phase: 0;            // 0 idle · 1 checking · 2 up-to-date · 3 available · 4 downloading · 5 downloaded · 6 error
+    in property <float> update-progress: 0;       // 0..1 download progress (phase 4)
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> keybindings;
     in property <bool> keybinds-overridden: false;  // any binding overridden → show "Reset all"
@@ -561,7 +567,7 @@ export component OverlayLayer inherits Rectangle {
         drop-shadow-color: Theme.scrim;
         drop-shadow-offset-y: 24px;
         clip: true;
-        // selected category: 0 = Appearance · 1 = Terminal
+        // selected category: 0 = Appearance · 1 = Terminal · 2 = AI features · 3 = Keybindings · 4 = General
         property <int> sel: 0;
         TouchArea {}
 
@@ -586,6 +592,7 @@ export component OverlayLayer inherits Rectangle {
                     NavItem { label: "Terminal"; active: prefs.sel == 1; clicked => { prefs.sel = 1; } }
                     NavItem { label: "AI features"; active: prefs.sel == 2; clicked => { prefs.sel = 2; } }
                     NavItem { label: "Keybindings"; active: prefs.sel == 3; clicked => { prefs.sel = 3; } }
+                    NavItem { label: "General"; active: prefs.sel == 4; clicked => { prefs.sel = 4; } }
                     Rectangle { vertical-stretch: 1; }
                 }
             }
@@ -1158,6 +1165,111 @@ export component OverlayLayer inherits Rectangle {
                                 }
                             }
                         } // end Keybindings panel
+
+                        // ===================== General =====================
+                        // App info + the self-update flow (Task 8). The update-* props are a
+                        // live mirror of the off-thread updater; the visible buttons follow its
+                        // phase (check → download → restart&install) so there are never dead
+                        // controls. Network work never blocks the UI and is offline-safe.
+                        if prefs.sel == 4 : VerticalLayout {
+                            spacing: 12px;
+
+            // ---- about ----
+            Text { text: "About"; color: Theme.faint; font-size: 11px; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "hyperpanes";
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "v" + root.app-version;
+                    color: Theme.subtext;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+            Text {
+                text: "github.com/Eyalm321/hyperpanes";
+                color: Theme.faint;
+                font-size: 11px;
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // ---- software update ----
+            Text { text: "Software update"; color: Theme.faint; font-size: 11px; }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Status:"; color: Theme.faint; font-size: 11px; vertical-alignment: center; }
+                Text {
+                    text: root.update-status == "" ? "Not checked yet" : root.update-status;
+                    color: root.update-phase == 3 ? Theme.accent : (root.update-phase == 6 ? Theme.danger : Theme.subtext);
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+            // download progress (phase 4) — a thin determinate bar.
+            if root.update-phase == 4 : Rectangle {
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.surface2;
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    height: parent.height;
+                    width: parent.width * root.update-progress;
+                    border-radius: 3px;
+                    background: Theme.accent;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Pill {
+                    // disabled-look + no-op while a check/download is in flight.
+                    label: root.update-phase == 1 ? "Checking…" : (root.update-phase == 4 ? "Downloading…" : "Check for updates");
+                    clicked => {
+                        if (root.update-phase != 1 && root.update-phase != 4) {
+                            root.pref-action(18, 0);
+                        }
+                    }
+                }
+                // a newer release exists → offer to fetch the installer.
+                if root.update-phase == 3 : Pill {
+                    label: "Download update";
+                    active: true;
+                    clicked => { root.pref-action(19, 0); }
+                }
+                // the installer is staged → offer to apply it (launches it silently + exits).
+                if root.update-phase == 5 : Pill {
+                    label: "Restart & install";
+                    active: true;
+                    clicked => { root.pref-action(20, 0); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // ---- automatic updates ----
+            PrefToggle {
+                label: "Automatically check for updates";
+                on: root.auto-update;
+                toggled(v) => { root.pref-action(17, v ? 1 : 0); }
+            }
+            Text {
+                text: "checks GitHub on startup and shows a hint here when a new version is out — never downloads or installs without your consent (offline is silently skipped)";
+                color: Theme.faint;
+                font-size: 11px;
+            }
+
+                        } // end General panel
                         } // close scrolling body layout (pbody)
                     } // close Flickable
                 }

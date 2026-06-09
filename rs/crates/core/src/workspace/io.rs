@@ -317,6 +317,25 @@ mod tests {
     }
 
     #[test]
+    fn write_then_read_preserves_pane_zoom() {
+        // Task 14: a zoomed pane's font_size survives a real on-disk save → load.
+        let path = temp_file("zoom");
+        let ws = WorkspaceFile {
+            name: Some("z".into()),
+            panes: Some(vec![PaneSpec {
+                label: Some("zoomed".into()),
+                font_size: Some(22),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert!(write_workspace(&path, &ws));
+        let back = read_workspace(&path).expect("reads back");
+        assert_eq!(back.panes.unwrap()[0].font_size, Some(22));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn has_panes_detects_any_nesting_level() {
         assert!(!has_panes(&WorkspaceFile::default()));
         assert!(has_panes(&WorkspaceFile {

@@ -88,6 +88,13 @@ export component AppWindow inherits Window {
     in property <bool> pref-control-enabled: false;
     in property <bool> pref-control-allow-input: false;
     in property <string> pref-control-status: "";
+    // General panel: app info + self-update (Task 8). Version is the running build;
+    // the update-* trio mirror the off-thread updater's live status (phase/message/progress).
+    in property <string> pref-app-version: "";
+    in property <bool> pref-auto-update: false;
+    in property <string> pref-update-status: "";
+    in property <int> pref-update-phase: 0;
+    in property <float> pref-update-progress: 0;
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-keybinds-overridden: false;
@@ -391,6 +398,11 @@ export component AppWindow inherits Window {
             control-enabled: root.pref-control-enabled;
             control-allow-input: root.pref-control-allow-input;
             control-status: root.pref-control-status;
+            app-version: root.pref-app-version;
+            auto-update: root.pref-auto-update;
+            update-status: root.pref-update-status;
+            update-phase: root.pref-update-phase;
+            update-progress: root.pref-update-progress;
             keybindings: root.pref-keybindings;
             keybinds-overridden: root.pref-keybinds-overridden;
             kb-conflict: root.pref-kb-conflict;

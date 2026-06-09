@@ -190,6 +190,10 @@ pub struct Settings {
     /// How long a pane must stay output-quiet before it glows, in seconds (clamped to
     /// [`MIN_IDLE_SECONDS`]..=[`MAX_IDLE_SECONDS`]). Mirrors `idleAlertSeconds`.
     pub idle_alert_seconds: u32,
+    /// Whether the app does a quiet GitHub-releases check on startup (Task 8). Off by default
+    /// — when on, an available update surfaces a hint in Preferences → General; it never
+    /// downloads or installs without consent, and an offline check is silently skipped.
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -209,6 +213,7 @@ impl Default for Settings {
             idle_alert: true,
             idle_effect: String::from("firefly"),
             idle_alert_seconds: DEFAULT_IDLE_SECONDS,
+            auto_update: false,
         }
     }
 }
