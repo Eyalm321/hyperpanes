@@ -48,6 +48,9 @@ const HEADER_BAND: f32 = 26.0;
 pub enum PendingSeed {
     /// A brand-new window → spawn one fresh interactive shell pane.
     EmptyTab,
+    /// Seed window 0 from a CLI-resolved workspace (`hyperpanes -c …` or a positional `.json`),
+    /// materialised through [`State::load_workspace`] (tabs/panes/layout from the spec).
+    Workspace(Box<hyperpanes_core::workspace::model::WorkspaceFile>),
     /// Re-host a session detached from another window (replay-primed, no PTY restart).
     Adopt(DetachedPane),
     /// Re-host a whole tab (its panes + title/layout) detached from another window.
@@ -76,6 +79,13 @@ pub struct Window {
     /// Per-tab strip geometry (window-logical `x`, `width`), reported by the UI and used
     /// to hit-test a tab-strip drop / reorder caret. Index = tab order.
     pub tab_geom: RefCell<Vec<(f32, f32)>>,
+    /// Last value pushed to `set_win_maximized` (`None` = never written). Slint property
+    /// setters mark the tree dirty without an equality check, so writing the same value
+    /// every 8 ms pump forces a wgpu re-render at ~125 Hz even when idle — these caches
+    /// gate the write so an unchanged value costs nothing.
+    pub last_maximized: Cell<Option<bool>>,
+    /// Last `(enabled, allow_input, status)` pushed to the control Preferences props, same reason.
+    pub last_control: RefCell<Option<(bool, bool, slint::SharedString)>>,
 }
 
 /// The app: the window registry + the shared session engine + the shared event stream.
@@ -184,6 +194,8 @@ impl App {
             seed: RefCell::new(seed),
             closing: Cell::new(false),
             tab_geom: RefCell::new(Vec::new()),
+            last_maximized: Cell::new(None),
+            last_control: RefCell::new(None),
         });
 
         self.wire(&win);
@@ -278,7 +290,13 @@ impl App {
                     w.hwnd.set(raw);
                 }
             }
-            w.app.set_win_maximized(window::is_maximized(w.hwnd.get()));
+            // Only push to Slint when the maximized state actually flips — an unconditional
+            // per-tick write would re-dirty the render tree and pin idle CPU at the pump rate.
+            let maxd = window::is_maximized(w.hwnd.get());
+            if w.last_maximized.get() != Some(maxd) {
+                w.last_maximized.set(Some(maxd));
+                w.app.set_win_maximized(maxd);
+            }
         }
 
         // 2. Drain the ONE shared event channel, routing each event to its window. Each event
@@ -300,10 +318,16 @@ impl App {
         {
             let (enabled, allow_input, port) = self.control.status();
             let status: slint::SharedString = control_status_line(enabled, allow_input, port).into();
+            let cur = (enabled, allow_input, status);
             for w in &windows {
-                w.app.set_pref_control_enabled(enabled);
-                w.app.set_pref_control_allow_input(allow_input);
-                w.app.set_pref_control_status(status.clone());
+                // Same idle-render guard as the maximized flag: only write when it changed.
+                if w.last_control.borrow().as_ref() == Some(&cur) {
+                    continue;
+                }
+                *w.last_control.borrow_mut() = Some(cur.clone());
+                w.app.set_pref_control_enabled(cur.0);
+                w.app.set_pref_control_allow_input(cur.1);
+                w.app.set_pref_control_status(cur.2.clone());
             }
         }
 
@@ -546,6 +570,15 @@ impl App {
                                 _ => {}
                             }
                         }
+                    }
+                }
+                PendingSeed::Workspace(file) => {
+                    let mut st = win.state.borrow_mut();
+                    st.load_workspace(*file, &self.mgr);
+                    // A contentless spec (no spawnable panes) would leave the window blank —
+                    // fall back to a fresh shell so a launch never yields an empty window.
+                    if st.tabs.is_empty() {
+                        st.add_pane(&self.mgr);
                     }
                 }
                 PendingSeed::Adopt(det) => win.state.borrow_mut().adopt_pane(&self.mgr, det),

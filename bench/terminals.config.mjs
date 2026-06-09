@@ -109,6 +109,24 @@ function electronVersion() {
   }
 }
 
+// ---- Windows Terminal version ----
+//
+// `wt.exe --version` has no stdout output — it OPENS the GUI About dialog. Probing it that way
+// pops a window on every `detect.mjs` (which runs on every `run.mjs`, even `--only=hyperpanes`).
+// Read the version from the installed Store package instead — no UI, best-effort.
+function wtVersion() {
+  try {
+    const res = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', '(Get-AppxPackage Microsoft.WindowsTerminal).Version'],
+      { encoding: 'utf8', timeout: 8000 }
+    );
+    return (res.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || '?';
+  } catch {
+    return '?';
+  }
+}
+
 export const TERMINALS = [
   {
     // The NATIVE Rust app (the rewrite). The GUI binary ignores CLI argv and has no
@@ -177,7 +195,9 @@ export const TERMINALS = [
     wingetId: 'Microsoft.WindowsTerminal',
     exeNames: ['wt.exe'],
     searchDirs: [join(LOCALAPPDATA, 'Microsoft', 'WindowsApps')],
-    versionArgs: ['--version'],
+    // No `--version` probe: `wt.exe --version` opens the GUI About dialog. Use the Appx package.
+    versionArgs: null,
+    fixedVersion: wtVersion,
     driven: true,
     procMatch: ['wt.exe', 'WindowsTerminal.exe', 'OpenConsole.exe'],
     suites: DRIVEN_SUITES,
