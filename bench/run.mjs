@@ -59,7 +59,6 @@ async function throughputSuite(term, { cases, runs, bytes, timeout }) {
     for (let r = 0; r < runs; r++) {
       const v = await throughputRun(term, kase, bytes, timeout);
       if (v != null) samples.push(v);
-      if (term.id === 'hyperpanes') await sleep(800); // let single-instance lock release
     }
     byCase[kase] = samples.length ? median(samples) : null;
     log(`  throughput ${term.id} ${kase}: ${byCase[kase] == null ? 'n/a' : byCase[kase].toFixed(1) + ' MB/s'}`);
@@ -94,7 +93,6 @@ async function startupSuite(term, { runs, timeout }) {
   for (let r = 0; r < runs; r++) {
     const d = await startupRun(term, timeout);
     if (d != null && d >= 0) samples.push(d);
-    if (term.id === 'hyperpanes') await sleep(800);
   }
   const s = summarize(samples);
   log(`  startup ${term.id}: ${Number.isNaN(s.median) ? 'n/a' : Math.round(s.median) + ' ms'}`);

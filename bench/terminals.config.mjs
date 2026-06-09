@@ -202,6 +202,8 @@ export const TERMINALS = [
     resolveExe: resolver(['wezterm.exe'], [join(PROGRAMFILES, 'WezTerm'), join(LOCALAPPDATA, 'Programs', 'WezTerm')]),
     launch({ wrapperPath }) {
       // --always-new-process avoids the wezterm mux reusing an existing GUI process.
+      // Bare form (wrapperPath null, e.g. `--idle-bare`): open a default-shell window.
+      if (!wrapperPath) return { exe: this.resolveExe(), args: ['start', '--always-new-process'] };
       return { exe: this.resolveExe(), args: ['start', '--always-new-process', '--', ...CMD_RUN(wrapperPath)] };
     }
   },
@@ -217,6 +219,8 @@ export const TERMINALS = [
     suites: DRIVEN_SUITES,
     resolveExe: resolver(['alacritty.exe'], [join(PROGRAMFILES, 'Alacritty')]),
     launch({ wrapperPath }) {
+      // Bare form (wrapperPath null, e.g. `--idle-bare`): no `-e`, so a default-shell window.
+      if (!wrapperPath) return { exe: this.resolveExe(), args: [] };
       return { exe: this.resolveExe(), args: ['-e', ...CMD_RUN(wrapperPath)] };
     }
   },
@@ -232,6 +236,8 @@ export const TERMINALS = [
     suites: DRIVEN_SUITES,
     resolveExe: resolver(['rio.exe'], [join(PROGRAMFILES, 'Rio'), join(LOCALAPPDATA, 'Programs', 'Rio')]),
     launch({ wrapperPath }) {
+      // Bare form (wrapperPath null, e.g. `--idle-bare`): no `-e`, so a default-shell window.
+      if (!wrapperPath) return { exe: this.resolveExe(), args: [] };
       return { exe: this.resolveExe(), args: ['-e', ...CMD_RUN(wrapperPath)] };
     }
   },
@@ -247,6 +253,8 @@ export const TERMINALS = [
     suites: DRIVEN_SUITES,
     resolveExe: resolver(['ConEmu64.exe', 'ConEmu.exe'], [join(PROGRAMFILES, 'ConEmu'), join(PROGRAMFILESX86, 'ConEmu')]),
     launch({ wrapperPath }) {
+      // Bare form (wrapperPath null, e.g. `--idle-bare`): no `-run`, so a default-task window.
+      if (!wrapperPath) return { exe: this.resolveExe(), args: [] };
       return { exe: this.resolveExe(), args: ['-run', ...CMD_RUN(wrapperPath)] };
     }
   },

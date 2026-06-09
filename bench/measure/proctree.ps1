@@ -53,7 +53,11 @@ if ($measureCpu) {
   foreach ($t in $tree) {
     try {
       $gp = Get-Process -Id ([int]$t.ProcessId) -ErrorAction Stop
-      $cpu0[[int]$t.ProcessId] = [double]$gp.TotalProcessorTime.TotalMilliseconds
+      # TotalProcessorTime can be $null for a protected/access-denied process even when
+      # Get-Process itself succeeds; coercing that null to [double] yields 0.0 and would
+      # make the delta count the WHOLE lifetime as in-window. Keep it $null so it is skipped.
+      $tpt = $gp.TotalProcessorTime
+      $cpu0[[int]$t.ProcessId] = if ($null -ne $tpt) { [double]$tpt.TotalMilliseconds } else { $null }
     } catch {
       $cpu0[[int]$t.ProcessId] = $null
     }
@@ -71,8 +75,9 @@ $result = foreach ($t in $tree) {
     $pb = [int64]$gp.PrivateMemorySize64
     if ($measureCpu) {
       $prev = $cpu0[[int]$t.ProcessId]
-      if ($null -ne $prev) {
-        $now = [double]$gp.TotalProcessorTime.TotalMilliseconds
+      $tpt = $gp.TotalProcessorTime
+      if (($null -ne $prev) -and ($null -ne $tpt)) {
+        $now = [double]$tpt.TotalMilliseconds
         $cpuPct = [Math]::Round((($now - $prev) / $CpuMs) * 100, 2)
         if ($cpuPct -lt 0) { $cpuPct = 0 }
       }

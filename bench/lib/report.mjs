@@ -75,9 +75,7 @@ function memorySection(mem) {
     fmt(r.loadWorkingSetMB),
     ...(hasCpu ? [fmt(r.idleCpuPct)] : []),
     r.procCount == null ? '—' : String(r.procCount),
-    [r.note, r.metricsCrossCheck != null ? `metrics(): ${fmt(r.metricsCrossCheck)} MB` : '']
-      .filter(Boolean)
-      .join('; ')
+    r.note || ''
   ]);
   return `## Memory (Win32_Process tree, lower is better)\n\n${table(headers, rows)}`;
 }

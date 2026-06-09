@@ -167,11 +167,18 @@ export function nativeRepoRunning() {
   return res.stdout.toLowerCase().includes(needle);
 }
 
-/** Delete generated temp files, ignoring errors. */
+/**
+ * Delete generated temp files, ignoring errors. A path ending in `\` is a directory
+ * (the isolated data dirs minted by makeTempDataDir): remove it recursively — a plain
+ * rmSync without {recursive:true} throws EISDIR on a non-empty dir and would silently
+ * leak it under %TEMP%.
+ */
 export function cleanup(paths) {
   for (const p of paths) {
     try {
-      if (p && existsSync(p)) (p.endsWith('\\') ? rmSync : unlinkSync)(p);
+      if (!p || !existsSync(p)) continue;
+      if (p.endsWith('\\')) rmSync(p, { recursive: true, force: true });
+      else unlinkSync(p);
     } catch {
       /* ignore */
     }
