@@ -87,7 +87,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The app owns the window registry + the shared session stream.
     let application = App::new(mgr.clone(), erx);
-    application.spawn_window(PendingSeed::EmptyTab);
+
+    // Wire CLI launch: `hyperpanes -c "<cmd>" --shell … --cwd … --name …` (or a positional
+    // workspace `.json`) seeds the first window from that spec; a bare launch stays an empty
+    // shell pane (no last-session restore — that fallback is intentionally GUI-excluded).
+    let argv: Vec<String> = std::env::args().collect();
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let seed = match hyperpanes_core::workspace::launch::resolve_cli_workspace(&argv, &cwd) {
+        Some(file) => PendingSeed::Workspace(Box::new(file)),
+        None => PendingSeed::EmptyTab,
+    };
+    application.spawn_window(seed);
 
     // One shared pump timer drives every window (drain → render → reap).
     let timer = slint::Timer::default();

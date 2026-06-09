@@ -18,18 +18,30 @@ pub fn resolve_launch_workspace(argv: &[String], cwd: &str) -> Option<WorkspaceF
     resolve_launch_workspace_with(argv, cwd, &paths::last_workspace_json())
 }
 
-/// The launch resolution with the last-session path injected (for testability).
-fn resolve_launch_workspace_with(
-    argv: &[String],
-    cwd: &str,
-    last_path: &Path,
-) -> Option<WorkspaceFile> {
+/// Resolve ONLY an explicitly-requested launch workspace from `argv` — an inline `-c …` flag
+/// set or a positional `.json` — WITHOUT the last-session fallback. The native GUI bootstrap
+/// uses this so a plain `hyperpanes` launch (no args) stays an empty shell pane rather than
+/// silently restoring a saved session. Relative cwds resolve against `cwd`.
+pub fn resolve_cli_workspace(argv: &[String], cwd: &str) -> Option<WorkspaceFile> {
     let parsed = parse_cli(argv);
     if let Some(ws) = parsed.workspace {
         return Some(io::resolve_cwds(&ws, cwd));
     }
     if let Some(json_path) = parsed.json_path {
         return io::read_workspace(json_path);
+    }
+    None
+}
+
+/// The launch resolution with the last-session path injected (for testability). Inline / explicit
+/// `.json` (via [`resolve_cli_workspace`]) win; otherwise fall back to the last session.
+fn resolve_launch_workspace_with(
+    argv: &[String],
+    cwd: &str,
+    last_path: &Path,
+) -> Option<WorkspaceFile> {
+    if let Some(ws) = resolve_cli_workspace(argv, cwd) {
+        return Some(ws);
     }
     if last_path.exists() {
         io::read_workspace(last_path)
@@ -93,6 +105,16 @@ mod tests {
         let last = temp_file("none-last");
         let _ = std::fs::remove_file(&last);
         assert!(resolve_launch_workspace_with(&argv(&[]), ".", &last).is_none());
+    }
+
+    #[test]
+    fn cli_workspace_takes_inline_but_never_last_session() {
+        // `resolve_cli_workspace` is what the GUI uses: inline `-c` resolves…
+        let ws = resolve_cli_workspace(&argv(&["-c", "npm run dev"]), ".").expect("inline workspace");
+        assert_eq!(ws.panes.unwrap()[0].command.as_deref(), Some("npm run dev"));
+        // …but a plain launch yields None even though a last-session file exists on disk (the GUI
+        // must stay EmptyTab on a bare launch — that fallback belongs only to resolve_launch_workspace).
+        assert!(resolve_cli_workspace(&argv(&[]), ".").is_none());
     }
 
     #[test]
