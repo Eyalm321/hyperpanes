@@ -2129,6 +2129,7 @@ dependencies = [
  "bytemuck",
  "etagere",
  "hyperpanes-core",
+ "png 0.17.16",
  "slint",
  "slint-build",
  "swash",

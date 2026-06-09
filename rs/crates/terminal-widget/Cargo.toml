@@ -51,6 +51,10 @@ arboard = "3"
 # core's feature set so the runtime has time/sync/macros available.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
+[dev-dependencies]
+# PNG encode for the headless font-fallback before/after verification bin only.
+png = "0.17"
+
 [build-dependencies]
 slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
 
