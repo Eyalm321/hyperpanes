@@ -239,6 +239,26 @@ pub fn layout_glyph(l: Layout) -> &'static str {
     }
 }
 
+/// Segoe MDL2 Assets glyphs for the application (hamburger) menu's action rows — the
+/// native-icon replacement for the earlier ad-hoc emoji set (`＋ ⌘ 📂 💾 ⚙`), so every
+/// menu row speaks one icon language. Same icon font as [`layout_glyph`]; these live in
+/// the Unicode Private-Use Area and so render *only* in the icon font, which the context
+/// menu applies (`font-family: "Segoe MDL2 Assets"`) for exactly these codepoints —
+/// unlike the geometric [`layout_icon`] set, which renders in any UI font. Kept in lock-
+/// step with the `mdl2-glyph` predicate in `ui/contextmenu.slint`.
+pub mod menu_glyph {
+    /// New pane — MDL2 `Add`.
+    pub const NEW_PANE: &str = "\u{E710}";
+    /// Command palette — MDL2 `CommandPrompt`.
+    pub const COMMAND_PALETTE: &str = "\u{E756}";
+    /// Open workspace — MDL2 `OpenFolderHorizontal`.
+    pub const OPEN_WORKSPACE: &str = "\u{ED25}";
+    /// Save workspace — MDL2 `Save`.
+    pub const SAVE_WORKSPACE: &str = "\u{E74E}";
+    /// Preferences — MDL2 `Setting` (gear).
+    pub const PREFERENCES: &str = "\u{E713}";
+}
+
 /// The geometric Unicode icon for each layout — the exact glyphs the Electron app uses
 /// (`presets.ts` `LAYOUTS[].icon` + `AUTO_LAYOUT.icon`). Unlike [`layout_glyph`] (Segoe
 /// MDL2 private-use codepoints, which need the icon font) these render in any UI font, so
