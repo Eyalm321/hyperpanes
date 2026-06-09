@@ -109,6 +109,12 @@ impl AiBridge {
         }
     }
 
+    /// Whether the engine is currently enabled (cached from the latest status). Gates the
+    /// per-tick rendered-screen scan so the default-OFF path does no work.
+    pub fn enabled(&self) -> bool {
+        self.enabled.get()
+    }
+
     /// Send a message to the engine thread (no-op if the thread has gone).
     pub fn send(&self, msg: AiMsg) {
         let _ = self.tx.send(msg);

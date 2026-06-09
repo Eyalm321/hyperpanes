@@ -110,7 +110,15 @@ pub struct App {
     /// Per-window signature of the last-published AI pane context, so we only re-publish
     /// (and the engine only reconciles) when a watched pane's label / mute / set changed.
     ai_ctx_sig: RefCell<std::collections::HashMap<usize, u64>>,
+    /// Per-pane (session uid) debounce state for the rendered-screen feed: the last screen
+    /// hash fed to the engine and when, so we feed only on change and at most every
+    /// [`AI_FEED_INTERVAL`].
+    ai_feed: RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>>,
 }
+
+/// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
+/// scheduler's settle window is shorter, so a quiet gap between feeds lets it summarise.
+const AI_FEED_INTERVAL: Duration = Duration::from_millis(1200);
 
 /// How long a pane drag must rest over a tab before it springs open (Chrome/Finder).
 const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
@@ -132,6 +140,7 @@ impl App {
             spring: RefCell::new(None),
             ai: crate::ai::AiBridge::spawn(),
             ai_ctx_sig: RefCell::new(std::collections::HashMap::new()),
+            ai_feed: RefCell::new(std::collections::HashMap::new()),
         })
     }
 
@@ -313,6 +322,7 @@ impl App {
                     self.ai.send(crate::ai::AiMsg::DropWindow { window_id: w.id as i64 });
                     self.ai_ctx_sig.borrow_mut().remove(&w.id);
                     for uid in w.state.borrow().session_uids() {
+                        self.ai_feed.borrow_mut().remove(&uid);
                         self.mgr.kill(&uid);
                     }
                     let _ = w.app.window().hide();
@@ -331,9 +341,10 @@ impl App {
     fn route_event(&self, windows: &[Rc<Window>], ev: SessionEvent) {
         match ev {
             SessionEvent::Data { uid, data } => {
-                // Tee the live pty output to the ambient-AI engine (gated on enabled, so the
-                // default-OFF path never copies). Same tap the glow/cwd paths read from.
-                self.ai.feed_data(&uid, &data);
+                // NB: the ambient-AI engine is NOT fed the raw redraw byte stream here — a
+                // repainting TUI (e.g. an agent CLI) would drown the quiescence scheduler in
+                // noise. Instead `pump_ai` feeds each pane's *rendered screen text* on a
+                // cadence (what the user actually sees). See `App::pump_ai`.
                 let Some(w) = find_window(windows, &uid) else { return };
                 let mut st = w.state.borrow_mut();
                 if let Some((ti, pi)) = st.find_pane(&uid) {
@@ -358,6 +369,7 @@ impl App {
             }
             SessionEvent::Exit { uid, .. } => {
                 self.ai.send(crate::ai::AiMsg::Exit { uid: uid.clone() });
+                self.ai_feed.borrow_mut().remove(&uid);
                 if let Some(w) = find_window(windows, &uid) {
                     let alive = w.state.borrow_mut().pane_exited(&uid, &self.mgr);
                     if !alive {
@@ -418,6 +430,44 @@ impl App {
             let st = self.ai.status();
             for w in windows {
                 apply_ai_status_props(&w.app, &st);
+            }
+        }
+
+        // Feed each pane's RENDERED screen text (what the user sees) to the engine — debounced
+        // and only on change. This replaces the raw pty feed so a repainting agent TUI (Claude
+        // Code, etc.) is summarised from a clean snapshot rather than redraw noise. Skipped
+        // entirely when the engine is off, and per-pane when muted.
+        if self.ai.enabled() {
+            let now = std::time::Instant::now();
+            let mut feed = self.ai_feed.borrow_mut();
+            for w in windows {
+                let st = w.state.borrow();
+                for tab in &st.tabs {
+                    for p in &tab.panes {
+                        if p.ai_muted {
+                            continue;
+                        }
+                        let prev = feed.get(&p.uid).copied();
+                        if let Some((_, at)) = prev {
+                            if now.duration_since(at) < AI_FEED_INTERVAL {
+                                continue; // debounce: too soon since the last check
+                            }
+                        }
+                        let text = p.pane.screen_text();
+                        if text.trim().chars().count() < 3 {
+                            continue;
+                        }
+                        let hash = fnv1a(&text);
+                        // Unchanged screen → just bump the timestamp (re-check next interval),
+                        // don't re-feed (the engine would only dedupe it anyway).
+                        if prev.map(|(h, _)| h) == Some(hash) {
+                            feed.insert(p.uid.clone(), (hash, now));
+                            continue;
+                        }
+                        feed.insert(p.uid.clone(), (hash, now));
+                        self.ai.feed_data(&p.uid, &text);
+                    }
+                }
             }
         }
     }
@@ -1635,6 +1685,17 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
     windows
         .iter()
         .find(|w| w.state.borrow_mut().find_pane(uid).is_some())
+}
+
+/// Cheap FNV-1a hash of a string — used to detect when a pane's rendered screen text
+/// changed (so the ambient-AI feed only sends on a real change).
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// Mirror the ambient-AI engine status into a window's Preferences props: the enabled
