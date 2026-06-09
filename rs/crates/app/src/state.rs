@@ -258,9 +258,10 @@ impl PaneState {
     }
 }
 
-/// Whether `label` is still a default auto-name ("shell" / "pane N" / a bare slot number),
-/// so a git-project tint may overwrite it — never a name the user chose. Mirrors the
-/// renderer's `/^(shell|pane \d+)$/i` test (plus the legacy bare-number default).
+/// Whether `label` is still a default auto-name ("shell" / "pane N"), so a git-project tint
+/// may overwrite it — never a name the user chose. Mirrors the renderer's `/^(shell|pane \d+)$/i`
+/// test. A bare number (e.g. "42") is NOT treated as default: it's a valid user rename, and
+/// silently overwriting it with the repo name on a cwd change would clobber that choice.
 fn is_default_label(label: &str) -> bool {
     let l = label.trim();
     if l.eq_ignore_ascii_case("shell") {
@@ -269,7 +270,7 @@ fn is_default_label(label: &str) -> bool {
     if let Some(rest) = l.strip_prefix("pane ").or_else(|| l.strip_prefix("Pane ")) {
         return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
-    !l.is_empty() && l.chars().all(|c| c.is_ascii_digit())
+    false
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
