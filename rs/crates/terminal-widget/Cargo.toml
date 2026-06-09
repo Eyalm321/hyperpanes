@@ -16,10 +16,12 @@ hyperpanes-core = { path = "../core" }
 # Slint UI + its wgpu interop seam. `unstable-wgpu-29` exposes `slint::wgpu_29`
 # (texture import via Image::try_from + a shared Device/Queue);
 # `renderer-femtovg-wgpu` is the concrete wgpu renderer Slint needs at runtime.
-# Pinned to our fork's `popup-is-open` branch for `PopupWindow.is-open` (slint-ui/slint#12000).
+# Pinned to our fork's exact rev 9dab2175b (PR head of slint-ui/slint#12000, branch popup-is-open)
+# for `PopupWindow.is-open`. Pinned by rev (not branch) to stop floating-branch drift; that commit
+# fixes is-open in the compiler passes (our COMPILED slint-build path). Must match the app crate.
 # Slint master's femtovg-wgpu renderer links wgpu 29, so we use `unstable-wgpu-29` to match.
 # default-features = false (minus `accessibility`) must match the app crate — see the note there.
-slint = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open", default-features = false, features = [
+slint = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93", default-features = false, features = [
     "std",
     "backend-default",
     "renderer-femtovg",
@@ -50,7 +52,7 @@ arboard = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [build-dependencies]
-slint-build = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open" }
+slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
 
 # Optimize deps even in dev so the software renderer is smooth in the demo.
 [profile.dev.package."*"]

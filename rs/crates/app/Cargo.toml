@@ -17,13 +17,16 @@ path = "src/main.rs"
 hyperpanes-core = { path = "../core" }
 hyperpanes-terminal-widget = { path = "../terminal-widget" }
 # `raw-window-handle-06` exposes the native HWND (for the frameless-window Win32 glue).
-# Pinned to our fork's `popup-is-open` branch for `PopupWindow.is-open` (slint-ui/slint#12000).
+# Pinned to our fork's exact rev 9dab2175b (PR head of slint-ui/slint#12000, branch popup-is-open)
+# for `PopupWindow.is-open`. Pinned by rev (not branch) to stop floating-branch drift: that commit
+# fixes is-open in the compiler `move_declarations`/`visit_all_named_references` passes — i.e. our
+# COMPILED (slint-build) path — despite its "in the interpreter" title.
 # Slint master's femtovg-wgpu renderer links wgpu 29, so we use `unstable-wgpu-29`.
 # Slint's default features minus `accessibility`: accesskit pins `windows 0.58`, which collides with
 # wgpu-hal 29's `windows 0.62` (gpu-allocator's loose range gets dragged down to 0.58). Dropping
 # accessibility lets gpu-allocator resolve up to 0.62 and unify with wgpu-hal. Must match the
 # terminal-widget crate (feature unification is additive across the workspace).
-slint = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open", default-features = false, features = [
+slint = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93", default-features = false, features = [
     "std",
     "backend-default",
     "renderer-femtovg",
@@ -55,7 +58,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [build-dependencies]
-slint-build = { git = "https://github.com/Eyalm321/slint", branch = "popup-is-open" }
+slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
 
 # Keep the software renderer + UI smooth in dev (matches the terminal-widget profile).
 [profile.dev.package."*"]
