@@ -267,8 +267,11 @@ component ProjectRow inherits Rectangle {
                     width: 20px;
                     Text {
                         text: root.expanded ? "▾" : "▸";
-                        color: cta.has-hover ? Theme.text : Theme.subtext;
-                        font-size: 11px;
+                        // visible by default (was a dim 11px Theme.subtext): bright, larger,
+                        // bold; the accent on hover makes the toggle target obvious.
+                        color: cta.has-hover ? Theme.accent : Theme.text;
+                        font-size: 13px;
+                        font-weight: 700;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
