@@ -339,6 +339,22 @@ impl Keymap {
     /// **effective** chord (override wins over default; an unbound binding never matches),
     /// first match in table order.
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
+        if let Some(cmd) = self.match_exact(ctrl, alt, shift, key) {
+            return Some(cmd);
+        }
+        // On layouts where "+" needs Shift, the zoom-in chord arrives as Ctrl+Shift+= (or
+        // Ctrl++, which key_tok_from_text normalizes to "="). Retry "=" with Shift dropped so
+        // the default Ctrl+= zoom-in still fires, without making every binding Shift-insensitive.
+        // The exact pass runs first, so a real binding on Ctrl+Shift+= would still win.
+        if shift && key == KeyTok::Char('=') {
+            return self.match_exact(ctrl, alt, false, key);
+        }
+        None
+    }
+
+    /// The command whose **effective** chord equals this exact combo (override-first, first match
+    /// in table order). The exact half of [`Self::match_chord`].
+    fn match_exact(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
         bindings()
             .iter()
             .find(|b| {
@@ -464,6 +480,16 @@ mod tests {
         assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('=')), Some(Command::FontZoom(1))));
         assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('-')), Some(Command::FontZoom(-1))));
         assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('0')), Some(Command::FontReset)));
+    }
+
+    #[test]
+    fn zoom_in_is_shift_tolerant() {
+        let km = empty_keymap();
+        // Ctrl+Shift+= (and Ctrl++ via key_tok_from_text normalizing "+"→"=") still zoom in,
+        // for layouts where "+" needs Shift. The unshifted Ctrl+= keeps working too.
+        assert!(matches!(km.match_chord(true, false, true, KeyTok::Char('=')), Some(Command::FontZoom(1))));
+        // Shift-tolerance is scoped to "=": Shift+other keys aren't silently coerced.
+        assert!(km.match_chord(true, false, true, KeyTok::Char('-')).is_none());
     }
 
     #[test]
