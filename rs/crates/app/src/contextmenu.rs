@@ -232,10 +232,13 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
     let palette_sc = state.keymap.label_for("palette.toggle").unwrap_or_default();
     let sidebar_on = state.settings.show_sidebar;
 
-    b.row("New pane…", "", "＋", false, false, false, false, sub::NONE, Some(Command::OpenNewPane));
     b.row(
-        "Command palette", &palette_sc, "⌘", false, false, false, false, sub::NONE,
-        Some(Command::PaletteOpen),
+        "New pane…", "", crate::theme::menu_glyph::NEW_PANE,
+        false, false, false, false, sub::NONE, Some(Command::OpenNewPane),
+    );
+    b.row(
+        "Command palette", &palette_sc, crate::theme::menu_glyph::COMMAND_PALETTE,
+        false, false, false, false, sub::NONE, Some(Command::PaletteOpen),
     );
     b.sep();
     // Layout submenu header: glyph + label of the CURRENT layout (the submenu lists Automatic
@@ -248,11 +251,20 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
         false, false, false, false, sub::LAYOUT, None,
     );
     b.sep();
-    b.row("Open workspace…", "", "📂", false, false, false, false, sub::NONE, Some(Command::OpenWorkspace));
-    b.row("Save workspace…", "", "💾", false, false, false, false, sub::NONE, Some(Command::SaveWorkspace));
+    b.row(
+        "Open workspace…", "", crate::theme::menu_glyph::OPEN_WORKSPACE,
+        false, false, false, false, sub::NONE, Some(Command::OpenWorkspace),
+    );
+    b.row(
+        "Save workspace…", "", crate::theme::menu_glyph::SAVE_WORKSPACE,
+        false, false, false, false, sub::NONE, Some(Command::SaveWorkspace),
+    );
     b.sep();
     b.row("Sidebar", "", "▥", sidebar_on, true, false, false, sub::NONE, Some(Command::ToggleSidebar));
-    b.row("Preferences…", "", "⚙", false, false, false, false, sub::NONE, Some(Command::PrefsOpen));
+    b.row(
+        "Preferences…", "", crate::theme::menu_glyph::PREFERENCES,
+        false, false, false, false, sub::NONE, Some(Command::PrefsOpen),
+    );
 
     // Target = the active tab, so the Layout submenu (which routes through `ctx_target` →
     // `SetTabLayout`) retargets the *current* tab's layout (mirrors Electron's `setLayout`).

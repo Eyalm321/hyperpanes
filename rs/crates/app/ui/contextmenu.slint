@@ -18,6 +18,16 @@ component CtxRow inherits Rectangle {
     in property <bool> sub-open;
     out property <bool> hovered: ta.has-hover;
     callback clicked();
+    // The hamburger menu's action icons are Segoe MDL2 Assets glyphs in the Unicode
+    // Private-Use Area, which render *only* in the icon font; the geometric layout glyphs
+    // (▤▥▦…) render in any UI font. Mirror theme::menu_glyph so the row picks the font per
+    // glyph (an empty family = the default UI font).
+    property <bool> mdl2-glyph:
+           e.glyph == "\u{E710}"   // New pane (Add)
+        || e.glyph == "\u{E756}"   // Command palette (CommandPrompt)
+        || e.glyph == "\u{ED25}"   // Open workspace (OpenFolderHorizontal)
+        || e.glyph == "\u{E74E}"   // Save workspace (Save)
+        || e.glyph == "\u{E713}";  // Preferences (Setting)
     height: 30px;
     border-radius: 6px;
     background: e.disabled ? transparent
@@ -30,10 +40,11 @@ component CtxRow inherits Rectangle {
         padding-right: 11px;
         spacing: 8px;
 
-        // optional leading glyph (layout submenu header)
+        // optional leading glyph (hamburger action icon / layout submenu header)
         Text {
             text: e.glyph;
             visible: e.glyph != "";
+            font-family: root.mdl2-glyph ? "Segoe MDL2 Assets" : "";
             color: e.disabled ? Theme.faint : Theme.subtext;
             font-size: 12px;
             vertical-alignment: center;
