@@ -160,6 +160,10 @@ impl PrefsDraft {
 pub struct AiLine {
     pub full: String,
     pub reveal: f32,
+    /// Cached `full.chars().count()` — the typewriter reveal needs this every frame for every
+    /// AI pane, so it's computed once here (on `set_target`) rather than re-walking `full` each
+    /// tick. Kept in lock-step with `full`: only `set_target` mutates either.
+    pub len: usize,
 }
 
 impl AiLine {
@@ -167,6 +171,7 @@ impl AiLine {
     pub fn set_target(&mut self, text: &str) {
         if self.full != text {
             self.full = text.to_string();
+            self.len = self.full.chars().count();
             self.reveal = 0.0;
         }
     }
