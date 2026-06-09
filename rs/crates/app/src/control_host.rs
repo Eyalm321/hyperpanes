@@ -31,6 +31,9 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
+
 use hyperpanes_core::app::VERSION;
 use hyperpanes_core::control::readmodel::{PaneInfo, PaneStatus, ReadModel, TabInfo, WindowInfo};
 use hyperpanes_core::control::server::{self, notify_state, Shared};
@@ -71,10 +74,17 @@ pub struct ControlHost {
     enabled: Cell<bool>,
     allow_input: Cell<bool>,
     control_file: PathBuf,
+    /// The tokio runtime the server tasks run on. Captured once (the app enters the runtime
+    /// guard before building the host) and used for every `spawn`, so a spawn from the UI thread
+    /// never depends on the ambient thread-local guard being present.
+    runtime: Handle,
     /// The running server's shared state (`None` when stopped).
     shared: RefCell<Option<Arc<Shared>>>,
     /// The serve task handle (aborted on stop).
-    task: RefCell<Option<tokio::task::JoinHandle<std::io::Result<()>>>>,
+    task: RefCell<Option<JoinHandle<std::io::Result<()>>>>,
+    /// The activity-ticker task handle (aborted on stop — it would otherwise loop forever holding
+    /// an `Arc<Shared>`, leaking one ticker per disable→enable toggle).
+    ticker: RefCell<Option<JoinHandle<()>>>,
     // ---- sync baselines (UI thread only) ----
     /// Stable control pane-id per GUI session uid (GUI panes use the uid itself; a control-
     /// created pane keeps the uuid `dispatch` minted).
@@ -102,8 +112,12 @@ impl ControlHost {
             enabled: Cell::new(settings.enabled),
             allow_input: Cell::new(allow_input),
             control_file,
+            // The app enters the tokio runtime guard before constructing the host, so the current
+            // handle is always available here.
+            runtime: Handle::current(),
             shared: RefCell::new(None),
             task: RefCell::new(None),
+            ticker: RefCell::new(None),
             pane_ids: RefCell::new(HashMap::new()),
             ctl: RefCell::new(HashMap::new()),
             prev: RefCell::new(HashMap::new()),
@@ -119,7 +133,9 @@ impl ControlHost {
     // ---- lifecycle ----
 
     /// Bind + serve on a fresh `Shared` over the shared engine (mirrors `server::run_server`:
-    /// ephemeral loopback port, master token, `control.json` discovery file, activity ticker).
+    /// ephemeral loopback port, master token, `control.json` discovery file). The activity ticker
+    /// is spawned as a SEPARATE task so [`Self::stop`] can abort it (it loops forever otherwise).
+    /// Every spawn goes through the stored runtime `Handle` (never the ambient guard).
     fn start(&self, mgr: &Arc<SessionManager>) {
         if self.shared.borrow().is_some() {
             return;
@@ -130,18 +146,27 @@ impl ControlHost {
             VERSION,
             self.control_file.clone(),
         );
-        let task = tokio::spawn(server::run_server(Arc::clone(&shared)));
+        // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.
+        shared.set_runtime(self.runtime.clone());
+        let task = self.runtime.spawn(server::run_server(Arc::clone(&shared)));
+        let ticker = self.runtime.spawn(server::run_activity_ticker(Arc::clone(&shared)));
         *self.shared.borrow_mut() = Some(shared);
         *self.task.borrow_mut() = Some(task);
+        *self.ticker.borrow_mut() = Some(ticker);
     }
 
-    /// Stop the server: abort the serve task and remove the stale discovery file. (The activity
-    /// ticker `run_server` spawned is detached; it idles harmlessly until the process exits.)
+    /// Stop the server: abort the serve task AND the activity ticker, drop every WS client (so
+    /// their `handle_ws` tasks see the channel close and exit, releasing their `Arc<Shared>`), and
+    /// remove the stale discovery file. Nothing is left looping or retaining `Shared` after this.
     fn stop(&self) {
         if let Some(t) = self.task.borrow_mut().take() {
             t.abort();
         }
+        if let Some(t) = self.ticker.borrow_mut().take() {
+            t.abort();
+        }
         if let Some(s) = self.shared.borrow_mut().take() {
+            s.events.clear_clients();
             server::remove_discovery(&s);
         }
         // Drop the sync baselines so a later re-enable republishes from scratch.
@@ -213,10 +238,10 @@ impl ControlHost {
         };
 
         // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
-        let (cur, cur_active) = self.snapshot_model(&shared, windows);
+        let (cur, cur_active, focus_uid) = self.snapshot_model(&shared, windows);
 
         // 2. Reconcile the model→GUI deltas (what the control plane changed) on the UI thread.
-        let reconciled = self.reconcile(windows, mgr, &cur, &cur_active);
+        let reconciled = self.reconcile(windows, mgr, &cur, &cur_active, &focus_uid);
 
         // 3. Republish the (now-updated) live GUI tree into the read-model.
         let republished = self.publish(&shared, windows);
@@ -227,13 +252,19 @@ impl ControlHost {
         }
     }
 
-    /// Read every pane the read-model currently holds (keyed by session uid) plus each GUI
-    /// window's active tab id.
+    /// Read every pane the read-model currently holds (keyed by session uid), each GUI window's
+    /// active tab id, and a representative session uid living in each window's active tab. The
+    /// representative uid lets the focus reconcile resolve the focused tab by a pane that's
+    /// actually in it (stable across GUI tab reorder/close) rather than parsing the positional id.
     fn snapshot_model(
         &self,
         shared: &Arc<Shared>,
         windows: &[Rc<Window>],
-    ) -> (HashMap<String, ModelPane>, HashMap<i64, Option<String>>) {
+    ) -> (
+        HashMap<String, ModelPane>,
+        HashMap<i64, Option<String>>,
+        HashMap<i64, Option<String>>,
+    ) {
         let model = shared.model.lock().unwrap();
         let mut cur = HashMap::new();
         for pr in model.panes() {
@@ -243,6 +274,7 @@ impl ControlHost {
                     ModelPane {
                         pane_id: p.id.clone(),
                         window_id: pr.coords.window_id,
+                        tab_id: pr.coords.tab_id.clone(),
                         label: p.label.clone(),
                         color: p.color.clone(),
                         subtitle: p.subtitle.clone(),
@@ -256,10 +288,17 @@ impl ControlHost {
             }
         }
         let mut active = HashMap::new();
+        let mut focus_uid = HashMap::new();
         for w in windows {
-            active.insert(w.id as i64, model.active_tab_id(w.id as i64));
+            let wid = w.id as i64;
+            let at = model.active_tab_id(wid);
+            let rep = at
+                .as_ref()
+                .and_then(|tid| cur.iter().find(|(_, m)| &m.tab_id == tid).map(|(u, _)| u.clone()));
+            active.insert(wid, at);
+            focus_uid.insert(wid, rep);
         }
-        (cur, active)
+        (cur, active, focus_uid)
     }
 
     /// Apply control-originated deltas (diffing the model snapshot against the last published
@@ -270,11 +309,15 @@ impl ControlHost {
         mgr: &Arc<SessionManager>,
         cur: &HashMap<String, ModelPane>,
         cur_active: &HashMap<i64, Option<String>>,
+        focus_uid: &HashMap<i64, Option<String>>,
     ) -> bool {
         let prev = self.prev.borrow();
         let mut ctl = self.ctl.borrow_mut();
         let state_uids = gui_uids(windows);
         let mut structural = false;
+        // Model tab id → the GUI tab a control-spawned tab was materialized into THIS tick, so the
+        // 2nd…nth pane of an `attach as:tab` group joins the same new tab instead of each making one.
+        let mut created_tabs: HashMap<String, (i64, usize)> = HashMap::new();
 
         // Refresh control-owned fields (command/args/shell/meta) for every model pane.
         for (uid, c) in cur {
@@ -295,10 +338,26 @@ impl ControlHost {
                     // The GUI removed it this tick; the republish will drop it from the model.
                     continue;
                 }
-                // A `/command newPane` (or `attach`) spawned it: adopt the already-live session
-                // into the target window's active tab (replay-primed, no PTY restart).
-                self.adopt_control_pane(windows, mgr, uid, c);
-                self.pane_ids.borrow_mut().insert(uid.clone(), c.pane_id.clone());
+                // A uid new to the GUI. Distinguish a RESPAWN (restartPane swaps a pane's
+                // session_uid while keeping its stable pane_id — the GUI still hosts the OLD uid
+                // under that pane_id) from a genuinely new control-spawned pane.
+                let respawn_of = {
+                    let ids = self.pane_ids.borrow();
+                    gui_uid_for_pane_id(windows, &ids, &c.pane_id)
+                };
+                match respawn_of {
+                    Some(old_uid) if old_uid != *uid => {
+                        // Rebind the existing GUI pane to the new session in place — no duplicate
+                        // adoption, no dropped terminal.
+                        self.rebind_respawn(windows, mgr, &old_uid, uid, c);
+                    }
+                    _ => {
+                        // Adopt the already-live session into the tab the MODEL placed it in
+                        // (replay-primed, no PTY restart).
+                        self.adopt_control_pane(windows, mgr, uid, c, cur, &mut created_tabs);
+                        self.pane_ids.borrow_mut().insert(uid.clone(), c.pane_id.clone());
+                    }
+                }
                 structural = true;
             } else if let Some(p) = prev.get(uid) {
                 // Present on both sides: apply a control rename / recolor / subtitle change.
@@ -317,17 +376,25 @@ impl ControlHost {
             }
         }
 
-        // Control `focusPane` flipped a window's active tab: mirror the tab switch.
+        // Control `focusPane` flipped a window's active tab: mirror the tab switch. Resolve the
+        // focused tab by a pane that actually lives in it (stable across tab reorder/close),
+        // falling back to the positional id only when the active tab is empty.
         let prev_active = self.prev_active.borrow();
         for (wid, act) in cur_active {
-            if prev_active.get(wid).map(|a| a.as_deref()) != Some(act.as_deref()) {
-                if let Some(tab_id) = act {
-                    if let Some(idx) = parse_tab_index(tab_id) {
-                        if let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) {
-                            w.state.borrow_mut().switch_tab(idx);
-                        }
-                    }
-                }
+            if prev_active.get(wid).map(|a| a.as_deref()) == Some(act.as_deref()) {
+                continue;
+            }
+            let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) else { continue };
+            if act.is_none() {
+                continue;
+            }
+            let by_uid = focus_uid
+                .get(wid)
+                .and_then(|u| u.as_ref())
+                .and_then(|u| w.state.borrow_mut().find_pane(u).map(|(ti, _)| ti));
+            let idx = by_uid.or_else(|| act.as_deref().and_then(parse_tab_index));
+            if let Some(idx) = idx {
+                w.state.borrow_mut().switch_tab(idx);
             }
         }
         drop(prev_active);
@@ -337,6 +404,39 @@ impl ControlHost {
         ctl.retain(|uid, _| live.contains(uid));
         self.pane_ids.borrow_mut().retain(|uid, _| live.contains(uid));
         structural
+    }
+
+    /// Rebind an existing GUI pane (currently bound to `old_uid`) to a control-respawned session
+    /// `new_uid` in place: clear the dead session's stale grid, re-prime from the new session's
+    /// replay buffer, re-arm startup gating, and re-pin the stable control pane-id onto the new
+    /// uid (so the republish keeps the pane's id steady for the MCP client).
+    fn rebind_respawn(
+        &self,
+        windows: &[Rc<Window>],
+        mgr: &Arc<SessionManager>,
+        old_uid: &str,
+        new_uid: &str,
+        c: &ModelPane,
+    ) {
+        for w in windows {
+            let mut st = w.state.borrow_mut();
+            if let Some((ti, pi)) = st.find_pane(old_uid) {
+                let p = &mut st.tabs[ti].panes[pi];
+                p.uid = new_uid.to_string();
+                p.pane.clear();
+                if let Some(replay) = mgr.replay(new_uid) {
+                    p.pane.feed(&replay);
+                }
+                p.started = true;
+                p.cwd = c.cwd.clone();
+                st.dirty = true;
+                drop(st);
+                let mut ids = self.pane_ids.borrow_mut();
+                ids.remove(old_uid);
+                ids.insert(new_uid.to_string(), c.pane_id.clone());
+                return;
+            }
+        }
     }
 
     /// Wholesale-rebuild the read-model from the live GUI tree, re-stamping the control-owned
@@ -421,14 +521,19 @@ impl ControlHost {
         structural
     }
 
-    /// Adopt a control-spawned session into the GUI: build a [`DetachedPane`] for the live uid
-    /// and re-host it into the target window's active tab (the PTY already exists).
+    /// Adopt a control-spawned session into the GUI: build a [`DetachedPane`] for the live uid and
+    /// re-host it into the tab the MODEL placed it in (the PTY already exists). The target tab is
+    /// resolved (in order): a sibling pane already in the GUI for the same model tab → a tab made
+    /// this tick for that model tab → the positional model tab id → otherwise a brand-new GUI tab
+    /// (an `attach as:tab` group). Adopting into a background tab does NOT steal the user's focus.
     fn adopt_control_pane(
         &self,
         windows: &[Rc<Window>],
         mgr: &Arc<SessionManager>,
         uid: &str,
         c: &ModelPane,
+        cur: &HashMap<String, ModelPane>,
+        created_tabs: &mut HashMap<String, (i64, usize)>,
     ) {
         let target = windows
             .iter()
@@ -446,7 +551,30 @@ impl ControlHost {
             show_dot: Some(true),
             font_px,
         };
-        w.state.borrow_mut().adopt_pane(mgr, det);
+
+        // Resolve the GUI tab index this pane belongs in (None ⇒ it needs a brand-new tab).
+        let target_ti = self.resolve_adopt_tab(w, c, uid, cur, created_tabs);
+
+        match target_ti {
+            Some(ti) => {
+                let mut st = w.state.borrow_mut();
+                let saved = st.active;
+                // adopt_pane targets the ACTIVE tab; switch to the target, adopt, switch back so
+                // a background adopt never moves the user's current tab.
+                st.switch_tab(ti);
+                st.adopt_pane(mgr, det);
+                st.switch_tab(saved);
+            }
+            None => {
+                let mut st = w.state.borrow_mut();
+                let saved = st.active;
+                st.adopt_pane_as_tab(mgr, det);
+                let new_ti = st.tabs.len().saturating_sub(1);
+                st.switch_tab(saved);
+                created_tabs.insert(c.tab_id.clone(), (c.window_id, new_ti));
+            }
+        }
+
         if let Some(cwd) = &c.cwd {
             let mut st = w.state.borrow_mut();
             if let Some((ti, pi)) = st.find_pane(uid) {
@@ -454,12 +582,47 @@ impl ControlHost {
             }
         }
     }
+
+    /// Resolve which existing GUI tab index a control-spawned pane should be adopted into, or
+    /// `None` if the model placed it in a tab the GUI doesn't host yet (→ make a new tab).
+    fn resolve_adopt_tab(
+        &self,
+        w: &Rc<Window>,
+        c: &ModelPane,
+        uid: &str,
+        cur: &HashMap<String, ModelPane>,
+        created_tabs: &HashMap<String, (i64, usize)>,
+    ) -> Option<usize> {
+        // 1. A sibling pane in the same model tab that the GUI already hosts → its live tab.
+        for (sib_uid, m) in cur {
+            if sib_uid != uid && m.tab_id == c.tab_id {
+                if let Some((ti, _)) = w.state.borrow_mut().find_pane(sib_uid) {
+                    return Some(ti);
+                }
+            }
+        }
+        // 2. A tab we materialized for this model tab earlier this tick (same window).
+        if let Some((wid, ti)) = created_tabs.get(&c.tab_id) {
+            if *wid == c.window_id {
+                return Some(*ti);
+            }
+        }
+        // 3. A positional "{window_id}:{index}" model tab id that maps to a live GUI tab.
+        if let Some(idx) = parse_tab_index(&c.tab_id) {
+            if idx < w.state.borrow().tabs.len() {
+                return Some(idx);
+            }
+        }
+        // 4. Otherwise the model put it in a brand-new tab → signal "make one".
+        None
+    }
 }
 
 /// A pane as read from the control read-model.
 struct ModelPane {
     pane_id: String,
     window_id: i64,
+    tab_id: String,
     label: String,
     color: String,
     subtitle: Option<String>,
@@ -468,6 +631,23 @@ struct ModelPane {
     shell: Option<String>,
     cwd: Option<String>,
     meta: Option<BTreeMap<String, String>>,
+}
+
+/// The GUI session uid currently mapped to control `pane_id`, if any. A GUI pane's effective
+/// pane-id is its own uid unless `pane_ids` pins a control-minted id onto it. Used to detect a
+/// respawn: the model carries a new `session_uid` under a still-live stable `pane_id`.
+fn gui_uid_for_pane_id(
+    windows: &[Rc<Window>],
+    pane_ids: &HashMap<String, String>,
+    pane_id: &str,
+) -> Option<String> {
+    for uid in gui_uids(windows) {
+        let effective = pane_ids.get(&uid).map(String::as_str).unwrap_or(uid.as_str());
+        if effective == pane_id {
+            return Some(uid);
+        }
+    }
+    None
 }
 
 /// Every session uid the GUI currently hosts across all windows + tabs.
