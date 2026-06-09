@@ -382,6 +382,17 @@ export component PaneView inherits Rectangle {
                                     vertical-alignment: center;
                                     horizontal-alignment: left;
                                 }
+                                // shell-type badge: a dim, smaller label right after the title
+                                // in the same row (e.g. `claude` ‹dim›pwsh›). Shown only when
+                                // the controller resolved a shell program for the pane.
+                                if pane.shell-type != "" : Text {
+                                    text: pane.shell-type;
+                                    color: Theme.subtext;
+                                    opacity: 0.6;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                }
                                 if pane.subtitle != "" : Text {
                                     text: pane.subtitle;
                                     color: Theme.subtext;

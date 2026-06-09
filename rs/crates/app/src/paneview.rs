@@ -192,6 +192,8 @@ fn pane_item(
         title: ps.title.clone(),
         subtitle: ps.subtitle.clone().unwrap_or_default(),
         ai_subtitle,
+        // The cached shell-type badge (computed once at pane creation; "" → not shown).
+        shell_type: ps.shell_label.as_str().into(),
         show_frame: ps.frame_on(show_frame),
         show_dot: ps.dot_on(show_dot),
         editing,

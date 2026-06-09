@@ -12,6 +12,10 @@ export struct PaneItem {
     // ambient-AI summary line, already truncated to the typewriter-revealed prefix by the
     // controller. Shown only when there's no manual `subtitle` and the pane isn't muted.
     ai-subtitle: string,
+    // a SHORT shell-type label (e.g. "pwsh", "cmd", "bash", "wsl") derived once at pane
+    // creation from the resolved spawn shell program; rendered dim after the title, in the
+    // same header row. "" = unknown (e.g. a re-hosted pane) → not shown.
+    shell-type: string,
     accent: color,
     // resolved per-pane chrome (the per-pane override already folded over the global pref
     // by the controller): a clean new pane is frame/dot OFF; a git-project pane is ON.

@@ -256,6 +256,11 @@ pub struct PaneState {
     /// the session's `Cwd` events. Surfaced into the control read-model's `/state` so agents
     /// (and `list_panes`) see each pane's live cwd. `None` until the shell reports one.
     pub cwd: Option<String>,
+    /// A SHORT shell-type label (e.g. "pwsh", "cmd", "bash") derived once at pane creation
+    /// from the resolved spawn shell program (see [`shell_label`]) and projected dim after
+    /// the title in the header. "" = unknown (e.g. a re-hosted pane whose original shell
+    /// isn't tracked across the detach).
+    pub shell_label: String,
 }
 
 impl PaneState {
@@ -282,6 +287,46 @@ fn is_default_label(label: &str) -> bool {
         return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
     false
+}
+
+/// Derive a SHORT shell-type label from a resolved spawn program (the shell the pane is
+/// running on, e.g. `pwsh.exe`, `C:\Windows\system32\cmd.exe`, `/bin/bash`, `wsl.exe`).
+/// Computed once at pane creation and cached on [`PaneState::shell_label`] (never per-frame),
+/// then rendered dim after the pane title. Kept app-side (mirrors core's `is_posix_shell`
+/// basename matching) so the badge needs no `core` change.
+///
+/// Maps the common shells to a canonical lowercase label (`pwsh.exe`→`pwsh`,
+/// `powershell.exe`→`powershell`, `cmd.exe`→`cmd`, `bash(.exe)`→`bash`, `wsl.exe`→`wsl`,
+/// plus `nu`/`zsh`/`fish`/`sh`/`dash`/`ash`); anything else falls back to the bare basename
+/// with a trailing `.exe` stripped. An empty/whitespace program yields "".
+fn shell_label(program: &str) -> String {
+    // basename after the last path separator (handles full paths like COMSPEC's cmd.exe).
+    let base = program.trim().rsplit(['\\', '/']).next().unwrap_or("").trim();
+    // strip a trailing ".exe" (case-insensitive) for a tidy badge. The lowercased `ends_with`
+    // keeps the byte index a valid char boundary even for a non-ASCII basename.
+    let stem = if base.to_ascii_lowercase().ends_with(".exe") {
+        &base[..base.len() - 4]
+    } else {
+        base
+    };
+    if stem.is_empty() {
+        return String::new();
+    }
+    match stem.to_ascii_lowercase().as_str() {
+        "pwsh" => "pwsh".to_string(),
+        "powershell" => "powershell".to_string(),
+        "cmd" => "cmd".to_string(),
+        "bash" => "bash".to_string(),
+        "wsl" => "wsl".to_string(),
+        "nu" => "nu".to_string(),
+        "zsh" => "zsh".to_string(),
+        "fish" => "fish".to_string(),
+        "sh" => "sh".to_string(),
+        "dash" => "dash".to_string(),
+        "ash" => "ash".to_string(),
+        // an unrecognised program → the bare basename (.exe already stripped).
+        _ => stem.to_string(),
+    }
 }
 
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
@@ -722,6 +767,8 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            // The resolved shell program → its short header badge (computed once here).
+            shell_label: shell_label(&shell_path),
         })
     }
 
@@ -902,6 +949,9 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            // A re-hosted session: its original spawn shell isn't tracked across the detach,
+            // so the badge stays hidden ("") rather than guessing.
+            shell_label: String::new(),
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -2276,6 +2326,8 @@ impl State {
             p.started = false;
             p.startup = None;
             p.shell_title = String::new();
+            // The restart re-resolves the shell → refresh the cached header badge.
+            p.shell_label = shell_label(&shell_path);
             p.surface = Image::default();
         }
         self.dirty = true;
@@ -2348,6 +2400,9 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            // A re-hosted session: its original spawn shell isn't tracked across the detach,
+            // so the badge stays hidden ("") rather than guessing.
+            shell_label: String::new(),
         };
         let auto = self.tabs[ti].layout == Layout::Auto;
         let t = &mut self.tabs[ti];
@@ -2834,6 +2889,8 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            // The resolved shell program → its short header badge (computed once here).
+            shell_label: shell_label(&shell_path),
         })
     }
 }
@@ -2974,5 +3031,61 @@ mod ctx_menu_borrow_tests {
         cell.borrow_mut().close_context();
         assert!(!cell.borrow().ctx_open());
         assert!(cell.borrow().ctx_target().is_none());
+    }
+}
+
+#[cfg(test)]
+mod shell_label_tests {
+    //! The basename→label mapping behind the pane-header shell-type badge (Task 12). Derived
+    //! app-side from the resolved spawn program, so no `core` change is needed.
+    use super::shell_label;
+
+    #[test]
+    fn maps_the_common_windows_shells() {
+        assert_eq!(shell_label("pwsh.exe"), "pwsh");
+        assert_eq!(shell_label("powershell.exe"), "powershell");
+        assert_eq!(shell_label("cmd.exe"), "cmd");
+        assert_eq!(shell_label("wsl.exe"), "wsl");
+    }
+
+    #[test]
+    fn maps_posix_shells() {
+        assert_eq!(shell_label("/bin/bash"), "bash");
+        assert_eq!(shell_label("/usr/bin/zsh"), "zsh");
+        assert_eq!(shell_label("bash"), "bash");
+        assert_eq!(shell_label("fish"), "fish");
+        assert_eq!(shell_label("/bin/sh"), "sh");
+        assert_eq!(shell_label("nu"), "nu");
+    }
+
+    #[test]
+    fn strips_a_full_path_to_the_basename() {
+        // COMSPEC is a full path; the badge uses the basename only.
+        assert_eq!(shell_label("C:\\Windows\\system32\\cmd.exe"), "cmd");
+        assert_eq!(shell_label("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "pwsh");
+        assert_eq!(shell_label("C:\\Program Files\\Git\\bin\\bash.exe"), "bash");
+    }
+
+    #[test]
+    fn is_case_insensitive_on_program_and_extension() {
+        assert_eq!(shell_label("PWSH.EXE"), "pwsh");
+        assert_eq!(shell_label("Cmd.Exe"), "cmd");
+        assert_eq!(shell_label("BASH"), "bash");
+    }
+
+    #[test]
+    fn falls_back_to_the_bare_basename_for_unknown_programs() {
+        // Unrecognised program → its basename with a trailing .exe stripped (case preserved).
+        assert_eq!(shell_label("C:\\tools\\MyShell.exe"), "MyShell");
+        assert_eq!(shell_label("/opt/elvish/elvish"), "elvish");
+        assert_eq!(shell_label("xonsh"), "xonsh");
+    }
+
+    #[test]
+    fn empty_or_whitespace_program_yields_empty() {
+        assert_eq!(shell_label(""), "");
+        assert_eq!(shell_label("   "), "");
+        // a path ending in a separator has no basename.
+        assert_eq!(shell_label("C:\\bin\\"), "");
     }
 }
