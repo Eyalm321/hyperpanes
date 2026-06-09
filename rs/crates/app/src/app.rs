@@ -208,6 +208,8 @@ impl App {
         });
 
         self.wire(&win);
+        // The running build version is constant — push it once (the General panel's "About").
+        win.app.set_pref_app_version(crate::update::CURRENT_VERSION.into());
         // Cascade additional windows so they don't land exactly on top of each other.
         if id > 0 {
             let off = 36.0 * id as f32;

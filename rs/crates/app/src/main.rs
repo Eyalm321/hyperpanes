@@ -34,6 +34,7 @@ mod sidebar;
 mod state;
 mod tetris;
 mod theme;
+mod update;
 mod window;
 
 use std::sync::Arc;
