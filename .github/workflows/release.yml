@@ -1,12 +1,11 @@
 name: Release
 
-# Build the Windows installer and publish it to a GitHub Release whenever a
-# version tag (v*) is pushed. node-pty ships N-API prebuilds, so there's no
-# native compile step (electron-builder's npmRebuild is off in the config).
+# RETIRED at the native-Rust cutover (2026-06-09): release-rust.yml now owns `v*`
+# tags and builds the native installer. This legacy Electron release is kept as
+# MANUAL-ONLY (workflow_dispatch) so a `v*` tag no longer double-builds an
+# identically-named installer. node-pty ships N-API prebuilds (no native compile).
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write # needed to create the release and upload the installer
