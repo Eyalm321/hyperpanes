@@ -104,6 +104,10 @@ pub async fn run() -> io::Result<()> {
         Err(_) => { /* unsupported platform → run standalone (no gate) */ }
     }
 
+    // The activity ticker is a separate task from `run_server` now (so the GUI host can abort it
+    // independently); the headless daemon runs it for the whole process lifetime.
+    tokio::spawn(server::run_activity_ticker(Arc::clone(&shared)));
+
     // Serve the loopback control API. (The headless daemon always serves — that is its purpose;
     // the enabled/allowInput toggles still gate input and are reflected in /health.)
     server::run_server(shared).await

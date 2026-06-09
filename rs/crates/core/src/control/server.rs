@@ -10,11 +10,14 @@
 //! `idleAlertSeconds` threshold) and forwards live `SessionEvent`s to the read-model + WS clients.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::runtime::Handle;
 
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -53,6 +56,11 @@ pub struct Shared {
     pub idle_threshold_ms: i64,
     pub control_file: PathBuf,
     state_scheduled: AtomicBool,
+    /// The runtime to spawn background tasks on (the coalescer in [`notify_state`]). Set once by
+    /// an embedder that wants spawns bound to an explicit runtime rather than the ambient
+    /// thread-local — the GUI host sets this so a `notify_state` from the UI thread can never
+    /// panic if the runtime guard is ever absent. Unset ⇒ fall back to the ambient `tokio::spawn`.
+    runtime: OnceLock<Handle>,
 }
 
 impl Shared {
@@ -78,7 +86,29 @@ impl Shared {
             idle_threshold_ms: IDLE_THRESHOLD_MS,
             control_file,
             state_scheduled: AtomicBool::new(false),
+            runtime: OnceLock::new(),
         })
+    }
+
+    /// Bind background-task spawns (the `notify_state` coalescer) to an explicit runtime handle.
+    /// Idempotent — only the first set takes effect.
+    pub fn set_runtime(&self, handle: Handle) {
+        let _ = self.runtime.set(handle);
+    }
+
+    /// Spawn a background task on the stored runtime handle if set, else the ambient runtime.
+    fn spawn_task<F>(&self, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        match self.runtime.get() {
+            Some(h) => {
+                h.spawn(fut);
+            }
+            None => {
+                tokio::spawn(fut);
+            }
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -130,7 +160,7 @@ pub fn notify_state(shared: &Arc<Shared>) {
         return;
     }
     let shared = Arc::clone(shared);
-    tokio::spawn(async move {
+    shared.clone().spawn_task(async move {
         tokio::time::sleep(Duration::from_millis(STATE_COALESCE_MS)).await;
         shared.state_scheduled.store(false, Ordering::SeqCst);
         shared.events.broadcast(&ControlEvent::State);
@@ -175,8 +205,10 @@ pub fn remove_discovery(shared: &Arc<Shared>) {
     let _ = std::fs::remove_file(&shared.control_file);
 }
 
-/// Bind loopback on an ephemeral port, mint the master token, write `control.json`, start the
-/// activity ticker, and serve until the process exits. Never returns under normal operation.
+/// Bind loopback on an ephemeral port, mint the master token, write `control.json`, and serve
+/// until the process exits. Never returns under normal operation. The activity ticker is a
+/// SEPARATE task ([`run_activity_ticker`]) the embedder spawns alongside this one, so its
+/// lifetime can be torn down independently (the GUI host aborts it on stop — see `control_host`).
 pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
@@ -185,16 +217,15 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
     shared.tokens.lock().unwrap().set_master(random_token());
     write_discovery(&shared)?;
 
-    tokio::spawn(run_activity_ticker(Arc::clone(&shared)));
-
     let app = routes::router(Arc::clone(&shared));
     axum::serve(listener, app).await
 }
 
 /// Recompute each pane's activity every tick and broadcast a scope-filtered `activity` frame on
 /// each flip of a KNOWN pane (a freshly-seen pane seeds its baseline silently — it rides the
-/// `state` ping). A pure busy⇄idle flip does NOT trigger a `state` ping (TS #13).
-async fn run_activity_ticker(shared: Arc<Shared>) {
+/// `state` ping). A pure busy⇄idle flip does NOT trigger a `state` ping (TS #13). Runs forever
+/// until its task is aborted (the GUI host holds its handle and aborts it on stop).
+pub async fn run_activity_ticker(shared: Arc<Shared>) {
     let mut interval = tokio::time::interval(Duration::from_millis(ACTIVITY_TICK_MS));
     let mut last: HashMap<String, Activity> = HashMap::new();
     loop {
