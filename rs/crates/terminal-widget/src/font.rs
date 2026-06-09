@@ -17,6 +17,7 @@
 //! snaps into the cell box instead of resizing the row.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform};
@@ -71,11 +72,22 @@ impl FontFace {
     }
 }
 
+/// Monotonic source of per-`Font` generation ids. Every `Font` constructed gets a fresh,
+/// unique id so consumers that cache by glyph (e.g. the GPU atlas) can detect a font/size
+/// reload — the new `Font` carries a different generation — and invalidate stale entries.
+static FONT_GEN: AtomicU64 = AtomicU64::new(1);
+
 pub struct Font {
     /// The fallback chain. `faces[0]` is the primary (selected) font; `1..` are fallbacks.
     faces: Vec<FontFace>,
     scale: ScaleContext,
     cache: HashMap<GlyphKey, CachedGlyph>,
+    /// Memoized `resolve(ch)` results so the fallback chain (each face parses its table
+    /// directory + charmap lookup) is walked at most once per distinct char, not per char
+    /// per frame.
+    resolve_cache: HashMap<char, (u16, u16)>,
+    /// Unique identity of this `Font` instance — see [`FONT_GEN`]. Bumps on every load.
+    generation: u64,
     px: f32,
     /// Integer cell metrics in physical px — driven entirely by the primary font.
     pub cell_w: u32,
@@ -118,6 +130,8 @@ impl Font {
             faces,
             scale: ScaleContext::new(),
             cache: HashMap::new(),
+            resolve_cache: HashMap::new(),
+            generation: FONT_GEN.fetch_add(1, Ordering::Relaxed),
             px,
             cell_w,
             cell_h,
@@ -125,18 +139,34 @@ impl Font {
         })
     }
 
+    /// This `Font`'s unique generation id. It changes whenever a new `Font` is loaded (a
+    /// font/size reload constructs a fresh one), so a renderer that caches glyphs by key can
+    /// compare against it and drop stale entries on reload. See [`crate::render::GpuRenderer`].
+    #[inline]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Walk the fallback chain and return `(font_id, gid)` for the **first** font that maps
     /// `ch`. Falls back to `(0, 0)` — the primary font's `.notdef` — so an unmapped char
     /// still draws something (and stays cached under the primary, like before).
     #[inline]
-    pub fn resolve(&self, ch: char) -> (u16, u16) {
+    pub fn resolve(&mut self, ch: char) -> (u16, u16) {
+        if let Some(&hit) = self.resolve_cache.get(&ch) {
+            return hit;
+        }
+        // Cold path: walk the chain once (each `face.font()` parses the table directory),
+        // then memoize so subsequent frames are a single HashMap lookup.
+        let mut result = (0, 0);
         for (i, face) in self.faces.iter().enumerate() {
             let gid = face.font().charmap().map(ch);
             if gid != 0 {
-                return (i as u16, gid);
+                result = (i as u16, gid);
+                break;
             }
         }
-        (0, 0)
+        self.resolve_cache.insert(ch, result);
+        result
     }
 
     pub fn rasterize(&mut self, key: GlyphKey) -> &CachedGlyph {
