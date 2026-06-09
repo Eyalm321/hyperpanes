@@ -22,7 +22,32 @@ permissions:
   contents: write # create the release and upload the installer
 
 jobs:
+  # Test gate: the installer is only built/published if the suite passes. Mirrors the
+  # per-push gate in test.yml — `needs:` can't reference a job in another workflow file,
+  # so the gate is duplicated here as a `release`-blocking job. Runs `cargo test --all`
+  # across the two test-owning workspaces (`rs` core + `rs/crates/terminal-widget`).
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace:
+          - rs
+          - rs/crates/terminal-widget
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.workspace }}
+      - name: Test
+        run: cd ${{ matrix.workspace }} && cargo test --all
+
   release:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
