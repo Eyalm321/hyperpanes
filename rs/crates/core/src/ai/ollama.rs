@@ -52,6 +52,12 @@ fn clean_line(raw: &str) -> String {
     collapsed.chars().take(MAX_SUMMARY_CHARS).collect()
 }
 
+// `Clone` is cheap: `reqwest::Client` is internally an `Arc` over a shared
+// connection pool, so a clone shares pooling rather than re-allocating. The
+// ambient-AI engine clones a client per off-loop summary job (see
+// `AiService::prepare_job`) so a slow HTTP call can run without holding the
+// engine's `&mut self`.
+#[derive(Clone)]
 pub struct OllamaClient {
     endpoint: String,
     model: String,

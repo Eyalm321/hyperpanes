@@ -20,12 +20,22 @@ use std::time::Instant;
 
 use hyperpanes_core::ai::ollama::{OllamaClient, OllamaConfig};
 use hyperpanes_core::ai::service::{
-    AiPanePublish, AiProjectRef, AiService, AiSettings, AiSettingsPatch, AiStatus, OnStatus,
-    PushMeta,
+    AiPanePublish, AiProjectRef, AiService, AiSettings, AiSettingsPatch, AiStatus, JobOutcome,
+    JobStep, OnStatus, PushMeta,
 };
 use hyperpanes_core::persistence::paths;
 
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{
+    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+};
+
+/// Capacity of the bounded UI→engine *data* tap. Each send is a full
+/// rendered-screen clone, produced only on change + debounced in `pump_ai`. If
+/// the engine stalls in a slow Ollama call these would otherwise pile up
+/// unbounded, so the tap is `try_send` drop-on-full (the next debounce tick
+/// re-feeds the latest screen anyway — latest-wins). Control messages take a
+/// separate unbounded channel so a dropped data tap never loses a Mute/Disable.
+const DATA_CHANNEL_CAP: usize = 256;
 
 /// A message from the UI thread to the ambient-AI engine thread.
 pub enum AiMsg {
@@ -65,6 +75,7 @@ pub struct MetaUpdate {
 /// skip sending when the engine is off.
 pub struct AiBridge {
     tx: UnboundedSender<AiMsg>,
+    data_tx: Sender<AiMsg>,
     meta_rx: RefCell<UnboundedReceiver<MetaUpdate>>,
     status_rx: RefCell<UnboundedReceiver<AiStatus>>,
     status: RefCell<AiStatus>,
@@ -75,6 +86,7 @@ impl AiBridge {
     /// Spawn the engine thread (default-OFF) and return its UI-side handle.
     pub fn spawn() -> AiBridge {
         let (tx, rx) = unbounded_channel::<AiMsg>();
+        let (data_tx, data_rx) = channel::<AiMsg>(DATA_CHANNEL_CAP);
         let (meta_tx, meta_rx) = unbounded_channel::<MetaUpdate>();
         let (status_tx, status_rx) = unbounded_channel::<AiStatus>();
 
@@ -89,13 +101,14 @@ impl AiBridge {
                 };
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&rt, async move {
-                    ai_loop(settings_path, memory_path, rx, meta_tx, status_tx).await;
+                    ai_loop(settings_path, memory_path, rx, data_rx, meta_tx, status_tx).await;
                 });
             })
             .ok();
 
         AiBridge {
             tx,
+            data_tx,
             meta_rx: RefCell::new(meta_rx),
             status_rx: RefCell::new(status_rx),
             status: RefCell::new(AiStatus {
@@ -121,9 +134,12 @@ impl AiBridge {
     }
 
     /// Send a live-data tap only when the engine is enabled (keeps the default-OFF path cheap).
+    /// Bounded + `try_send`: if the engine is stalled (e.g. a slow Ollama job) the tap is
+    /// dropped rather than queued unbounded — the next debounced `pump_ai` tick re-feeds the
+    /// latest screen, so dropping is latest-wins, not data loss.
     pub fn feed_data(&self, uid: &str, data: &str) {
         if self.enabled.get() {
-            let _ = self.tx.send(AiMsg::Data {
+            let _ = self.data_tx.try_send(AiMsg::Data {
                 uid: uid.to_string(),
                 data: data.to_string(),
             });
@@ -166,6 +182,7 @@ async fn ai_loop(
     settings_path: PathBuf,
     memory_path: PathBuf,
     mut rx: UnboundedReceiver<AiMsg>,
+    mut data_rx: Receiver<AiMsg>,
     meta_tx: UnboundedSender<MetaUpdate>,
     status_tx: UnboundedSender<AiStatus>,
 ) {
@@ -188,43 +205,77 @@ async fn ai_loop(
     let mut ai = AiService::new(settings_path, memory_path, client, push_meta, on_status);
     ai.init(); // default-off ⇒ a no-op until enabled in ai-settings.json
 
+    // Off-loop completion reports. The HTTP calls (summaries + reachability pings) are
+    // `spawn_local`'d onto this LocalSet so a slow/hung Ollama call (up to 12s) NEVER
+    // blocks the `select!`: incoming taps and Mute/Disable/Configure stay serviced, and a
+    // Mute that lands mid-summary takes effect at once (the stale result is just applied —
+    // or, for a now-muted pane, harmlessly dropped — when it finally lands).
+    let (done_tx, mut done_rx) = unbounded_channel::<JobOutcome>();
+    let (ping_tx, mut ping_rx) = unbounded_channel::<bool>();
+
     let start = Instant::now();
     let mut last_ms: i64 = 0;
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         tokio::select! {
             maybe = rx.recv() => match maybe {
-                Some(AiMsg::Data { uid, data }) => ai.on_data(&uid, &data),
                 Some(AiMsg::Cwd { uid, cwd, project }) => ai.on_cwd(&uid, &cwd, project),
                 Some(AiMsg::Exit { uid }) => ai.on_session_exit(&uid),
                 Some(AiMsg::PaneContext { window_id, panes }) => ai.on_pane_context(window_id, &panes),
                 Some(AiMsg::DropWindow { window_id }) => ai.drop_window(window_id),
                 Some(AiMsg::SetEnabled(on)) => {
                     ai.set_enabled(on);
-                    ai.refresh_status().await;
+                    spawn_ping(&ai, &ping_tx);
                 }
                 Some(AiMsg::Configure(patch)) => {
                     ai.configure(patch);
-                    ai.refresh_status().await;
+                    spawn_ping(&ai, &ping_tx);
                 }
+                Some(AiMsg::Data { .. }) => {} // data flows on `data_rx`; ignore here
+                None => break, // UI side dropped — shut the engine down
+            },
+            maybe = data_rx.recv() => match maybe {
+                Some(AiMsg::Data { uid, data }) => ai.on_data(&uid, &data),
+                Some(_) => {}
+                // The data and control channels share the bridge's lifetime, so a closed
+                // data channel means the UI is gone — fall through to the same shutdown.
                 None => break,
             },
+            Some(outcome) = done_rx.recv() => ai.finish_job(outcome),
+            Some(ok) = ping_rx.recv() => ai.apply_ping(ok),
             _ = ticker.tick() => {
                 let now = start.elapsed().as_millis() as i64;
                 ai.tick(now - last_ms);
                 last_ms = now;
                 while let Some(uid) = ai.next_due() {
-                    let t0 = start.elapsed().as_millis() as i64;
-                    let result = ai.run_job(&uid).await;
-                    let dt = start.elapsed().as_millis() as i64 - t0;
-                    // A job that returns Ok/Fail actually hit Ollama; Skip means it was
-                    // deduped/too-short and never called. Gated behind HYPERPANES_DEBUG.
-                    crate::dbg_log(&format!(
-                        "[ai] ollama job uid={uid} -> {result:?} in {dt}ms (t={now}ms)"
-                    ));
-                    ai.complete_job(&uid, result);
+                    match ai.prepare_job(&uid) {
+                        // Skip/dedup decided synchronously — report straight back.
+                        JobStep::Done(result) => {
+                            crate::dbg_log(&format!("[ai] job uid={uid} -> {result:?} (no call)"));
+                            ai.complete_job(&uid, result);
+                        }
+                        // Real Ollama call: run it off-loop and report via `done_rx`. The
+                        // scheduler already marked the uid in-flight, so concurrency is
+                        // honoured; `finish_job` calls `complete_job` when it lands.
+                        JobStep::Run(job) => {
+                            let done_tx = done_tx.clone();
+                            tokio::task::spawn_local(async move {
+                                let _ = done_tx.send(job.run().await);
+                            });
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/// Spawn an off-loop reachability ping (up to 3s) so enable/configure never block the
+/// control loop; the result lands on `ping_tx` and is applied via `AiService::apply_ping`.
+fn spawn_ping(ai: &AiService<OllamaClient>, ping_tx: &UnboundedSender<bool>) {
+    let client = ai.ping_client();
+    let ping_tx = ping_tx.clone();
+    tokio::task::spawn_local(async move {
+        let _ = ping_tx.send(client.ping().await);
+    });
 }

@@ -178,6 +178,49 @@ fn basename(path: &str) -> &str {
     }
 }
 
+/// What [`AiService::prepare_job`] decided for a uid: either a terminal
+/// [`JobResult`] (no network) or a runnable [`PreparedJob`].
+pub enum JobStep<S: Summarizer> {
+    /// Skip/Fail/Ok decided synchronously — hand straight to `complete_job`.
+    Done(JobResult),
+    /// Run [`PreparedJob::run`] (the Ollama call), then `finish_job` the result.
+    Run(PreparedJob<S>),
+}
+
+/// A self-contained summary job: an owned prompt plus a cloned client, so the
+/// Ollama call can run off the engine loop (e.g. under `spawn_local`) without
+/// borrowing the `AiService`. Produced by [`AiService::prepare_job`].
+pub struct PreparedJob<S: Summarizer> {
+    uid: String,
+    ctx: PaneCtx,
+    hash: String,
+    prompt: String,
+    client: S,
+}
+
+impl<S: Summarizer> PreparedJob<S> {
+    /// Run the (single) Ollama summary call, consuming the job and yielding an
+    /// opaque [`JobOutcome`] to feed back to [`AiService::finish_job`].
+    pub async fn run(self) -> JobOutcome {
+        let result = self.client.run_summary(SYSTEM_PROMPT, &self.prompt).await;
+        JobOutcome {
+            uid: self.uid,
+            ctx: self.ctx,
+            hash: self.hash,
+            result,
+        }
+    }
+}
+
+/// The result of a [`PreparedJob::run`], opaque to the driver — pass it to
+/// [`AiService::finish_job`] to apply.
+pub struct JobOutcome {
+    uid: String,
+    ctx: PaneCtx,
+    hash: String,
+    result: Result<String, String>,
+}
+
 pub struct AiService<S: Summarizer> {
     settings_path: PathBuf,
     push_meta: PushMeta,
@@ -467,25 +510,36 @@ impl<S: Summarizer> AiService<S> {
     }
 
     // ---- the job the scheduler dispatches ----
-    pub async fn run_job(&mut self, uid: &str) -> JobResult {
+
+    /// Decide synchronously what (if anything) to summarize for `uid`, WITHOUT
+    /// touching the network. Returns [`JobStep::Done`] for the skip cases
+    /// (disabled / muted / alt-screen / too-short / unchanged) — report it
+    /// straight to [`complete_job`] — or [`JobStep::Run`] carrying a
+    /// self-contained [`PreparedJob`] (an owned prompt + a cloned client) that
+    /// can run the Ollama call off the engine loop via [`PreparedJob::run`].
+    /// Apply the result with [`finish_job`].
+    pub fn prepare_job(&mut self, uid: &str) -> JobStep<S>
+    where
+        S: Clone,
+    {
         if !self.settings.enabled {
-            return JobResult::Skip;
+            return JobStep::Done(JobResult::Skip);
         }
         let ctx = match self.ctx_by_uid.get(uid) {
             Some(c) if !c.muted => c.clone(),
-            _ => return JobResult::Skip,
+            _ => return JobStep::Done(JobResult::Skip),
         };
         let snap = self.buffer.snapshot(uid);
         if snap.alt_screen {
-            return JobResult::Skip; // full-screen TUI: raw tail is redraw noise
+            return JobStep::Done(JobResult::Skip); // full-screen TUI: raw tail is redraw noise
         }
         let text = snap.text.trim();
         if text.chars().count() < 3 {
-            return JobResult::Skip;
+            return JobStep::Done(JobResult::Skip);
         }
         let hash = fingerprint(text);
         if self.last_hash.get(uid) == Some(&hash) {
-            return JobResult::Skip; // nothing new since last summary
+            return JobStep::Done(JobResult::Skip); // nothing new since last summary
         }
 
         let prior = self
@@ -495,16 +549,29 @@ impl<S: Summarizer> AiService<S> {
             .unwrap_or_default();
         let prompt = build_prompt(&ctx, &prior, &redact(&snap.text));
 
-        let line = match self.client.run_summary(SYSTEM_PROMPT, &prompt).await {
-            Ok(line) => line,
+        JobStep::Run(PreparedJob {
+            uid: uid.to_string(),
+            ctx,
+            hash,
+            prompt,
+            client: self.client.clone(),
+        })
+    }
+
+    /// Apply a finished [`PreparedJob::run`] to memory + the subtitle push,
+    /// returning the [`JobResult`] to hand to the scheduler. Does NOT call
+    /// [`complete_job`] (the in-loop driver does that); [`finish_job`] bundles
+    /// both for the live path.
+    fn apply_outcome(&mut self, outcome: &JobOutcome) -> JobResult {
+        let line = match &outcome.result {
+            Ok(line) => redact(line),
             Err(err) => {
-                self.last_error = Some(err);
+                self.last_error = Some(err.clone());
                 return JobResult::Fail;
             }
         };
-
-        let line = redact(&line);
-        self.last_hash.insert(uid.to_string(), hash);
+        let ctx = &outcome.ctx;
+        self.last_hash.insert(outcome.uid.clone(), outcome.hash.clone());
         (self.push_meta)(
             ctx.window_id,
             &ctx.pane_id,
@@ -533,15 +600,54 @@ impl<S: Summarizer> AiService<S> {
         JobResult::Ok
     }
 
+    /// Apply an off-loop job's outcome AND report it to the scheduler. The live
+    /// GUI driver calls this when a spawned [`PreparedJob::run`] lands.
+    pub fn finish_job(&mut self, outcome: JobOutcome) {
+        let result = self.apply_outcome(&outcome);
+        self.complete_job(&outcome.uid, result);
+    }
+
+    /// Run one summary job end-to-end on the current task (prepare → call →
+    /// apply). Kept for the synchronous/headless driver and the unit tests; the
+    /// GUI loop instead uses `prepare_job` + `spawn_local` + `finish_job` so a
+    /// slow Ollama call never blocks its `select!`.
+    pub async fn run_job(&mut self, uid: &str) -> JobResult
+    where
+        S: Clone,
+    {
+        match self.prepare_job(uid) {
+            JobStep::Done(result) => result,
+            JobStep::Run(job) => {
+                let outcome = job.run().await;
+                self.apply_outcome(&outcome)
+            }
+        }
+    }
+
+    /// A cheap clone of the summarizer client, for an off-loop reachability
+    /// ping (see [`apply_ping`]). Lets the GUI driver `spawn_local` the ping so
+    /// `refresh_status`'s up-to-3s await never blocks its control loop.
+    pub fn ping_client(&self) -> S
+    where
+        S: Clone,
+    {
+        self.client.clone()
+    }
+
+    /// Apply the result of an off-loop reachability ping to online state.
+    pub fn apply_ping(&mut self, online: bool) {
+        self.online = online;
+        if online {
+            self.last_error = None;
+        }
+        self.emit_status();
+    }
+
     /// Ping the server and update online state (the live layer calls this on
     /// enable / configure). Mirrors TS `refreshStatus`.
     pub async fn refresh_status(&mut self) {
         let ok = self.client.check_alive().await;
-        self.online = ok;
-        if ok {
-            self.last_error = None;
-        }
-        self.emit_status();
+        self.apply_ping(ok);
     }
 
     fn sched_config(&self) -> SchedulerConfig {
@@ -613,7 +719,11 @@ fn build_prompt(ctx: &PaneCtx, prior: &str, redacted_tail: &str) -> String {
     lines.push(String::new());
     lines.push("Recent terminal output:".to_string());
     lines.push(redacted_tail.to_string());
-    lines.join("\n")
+    // Redact the WHOLE assembled prompt before it leaves for the model: the pane
+    // label and the cwd basename are user/-repo-controlled and can carry a
+    // secret-shaped token, yet only the terminal tail was scrubbed above. redact()
+    // is idempotent, so re-scanning the already-redacted tail is a no-op.
+    redact(&lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -838,6 +948,37 @@ mod tests {
         svc.on_data("u1", "some real output here\n");
         assert_eq!(svc.run_job("u1").await, JobResult::Fail);
         assert_eq!(svc.status().last_error.as_deref(), Some("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn run_job_redacts_secrets_in_the_pane_label_and_cwd() {
+        let tp = TempPaths::new();
+        let fake = Fake::ok("doing things");
+        let calls = fake.calls.clone();
+        let (mut svc, _meta) = build(&tp, fake);
+        svc.init();
+        svc.set_enabled(true);
+        // A user-typed label and a repo path that each carry a secret-shaped token:
+        // both reach the prompt outside the terminal tail and must be scrubbed.
+        svc.on_pane_context(
+            1,
+            &[AiPanePublish {
+                pane_id: "p1".to_string(),
+                session_uid: "u1".to_string(),
+                label: "API_KEY=abc123".to_string(),
+                muted: false,
+            }],
+        );
+        svc.on_cwd("u1", "/tmp/SECRET=hunter2", None);
+        svc.on_data("u1", "some real output here\n");
+        assert_eq!(svc.run_job("u1").await, JobResult::Ok);
+
+        let c = calls.borrow();
+        let (_system, prompt) = c.last().unwrap();
+        assert!(prompt.contains("Pane label: API_KEY=[REDACTED]"), "got: {prompt}");
+        assert!(prompt.contains("Directory: SECRET=[REDACTED]"), "got: {prompt}");
+        assert!(!prompt.contains("abc123"));
+        assert!(!prompt.contains("hunter2"));
     }
 
     #[tokio::test]
