@@ -164,6 +164,10 @@ export component ContextMenu inherits Rectangle {
         x: min(max(root.menu-x, 4px), root.width - root.menu-w - 4px);
         y: min(max(root.menu-y, 4px), max(4px, root.height - root.est-h - 4px));
         width: root.menu-w;
+        // hug the rows: size to the column's content, not the parent (fixes the dead
+        // gap below the last row). The y-clamp above keeps using `est-h` so a menu near
+        // the bottom edge still flips up.
+        height: menucol.preferred-height;
         background: Theme.mantle;
         border-radius: 9px;
         border-width: 1px;
@@ -172,7 +176,7 @@ export component ContextMenu inherits Rectangle {
         drop-shadow-color: Theme.scrim;
         drop-shadow-offset-y: 14px;
 
-        VerticalLayout {
+        menucol := VerticalLayout {
             padding: 5px;
             spacing: 1px;
 
