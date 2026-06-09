@@ -184,11 +184,23 @@ export component TerminalPane inherits Rectangle {
     changed search-focus-tick => { if (root.search-open) { query.focus(); } }
 
     // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
+    //
+    // Shown at EXACTLY one device pixel per source pixel — no `image-fit: fill` fractional
+    // resampling (the blur/warp this replaces). The controller renders the surface at
+    // physical resolution (`cols*cell_w × rows*cell_h`), where `cols`/`rows` are floored from
+    // the body's device-pixel size, so the surface is almost always a hair smaller than the
+    // body in device px. Stretching that to `width: 100%` (logical) forced a sub-pixel scale
+    // that nearest-resampled to soft / unevenly-doubled rows. Pinning the Image to
+    // `source.width × source.height` *physical* pixels (`* 1phx`, auto-converted to the
+    // logical `width`/`height` via the window scale) maps the buffer 1:1 → crisp glyphs at
+    // any DPI. Any sub-cell remainder of the body shows the pane background (== terminal
+    // default bg), so it reads as ordinary empty terminal space.
     Image {
         source: root.surface;
-        width: 100%;
-        height: 100%;
-        image-fit: fill;
+        x: 0;
+        y: 0;
+        width: root.surface.width * 1phx;
+        height: root.surface.height * 1phx;
         image-rendering: pixelated;
     }
 
