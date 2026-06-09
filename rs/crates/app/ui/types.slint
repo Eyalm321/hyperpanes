@@ -128,6 +128,18 @@ export struct ProjectItem {
     worktrees: [WorktreeRow],
 }
 
+// One Claude Code session under a project in the sidebar tree — a row in the collapsible
+// "Claude history" list. `id` is the session id passed to `claude --resume <id>`; `summary`
+// is a one-line description (a `summary` transcript line, else the first user message);
+// `when` is a relative-time label ("2h ago"); `count` is the transcript message count.
+// Built app-side by `sidebar::claude_sessions_for` over `core::claude_history`.
+export struct ClaudeSessionItem {
+    id: string,
+    summary: string,
+    when: string,
+    count: int,
+}
+
 // One option in a preferences picker (font family). `active` marks the current value.
 export struct PrefOption {
     id: int,

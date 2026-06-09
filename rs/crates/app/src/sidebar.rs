@@ -220,18 +220,23 @@ thread_local! {
     /// every tick, so enumerating git on each pass would be wasteful — instead we enumerate
     /// once per project and reuse it until invalidated (a delete) or the flyout is reopened.
     static WT_CACHE: RefCell<HashMap<String, Vec<WorktreeRow>>> = RefCell::new(HashMap::new());
+    /// Per-UI-thread cache of each project's Claude session history, keyed by repo path. Same
+    /// rationale as `WT_CACHE`: scanning `~/.claude/projects` every tick would be wasteful, so
+    /// we read it once per project and reuse until the flyout is reopened.
+    static CLAUDE_CACHE: RefCell<HashMap<String, Vec<ClaudeSessionRow>>> = RefCell::new(HashMap::new());
     /// The flyout's last-seen open state, so the projection can detect the closed→open edge
     /// and refresh the cache (worktrees may have changed while the flyout was shut).
     static WT_LAST_OPEN: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// Note the flyout's current open state; on the closed→open transition, clear the cache so
+/// Note the flyout's current open state; on the closed→open transition, clear the caches so
 /// the next render re-enumerates fresh. Called from the projection each tick.
 pub fn note_flyout_open(open: bool) {
     WT_LAST_OPEN.with(|last| {
         let mut last = last.borrow_mut();
         if open && !*last {
             WT_CACHE.with(|c| c.borrow_mut().clear());
+            CLAUDE_CACHE.with(|c| c.borrow_mut().clear());
         }
         *last = open;
     });
@@ -256,6 +261,118 @@ pub fn invalidate(repo_path: &str) {
     WT_CACHE.with(|c| {
         c.borrow_mut().remove(repo_path);
     });
+}
+
+// ===== Claude Code session history =====
+//
+// The third level of the sidebar tree (under each project, alongside its worktrees): the
+// project's recent Claude Code sessions, read from `~/.claude/projects/<ENCODED_CWD>/*.jsonl`
+// by the pure `core::claude_history` reader. This layer adds only UI-presentation shaping (a
+// relative-time label + a small per-project cap) and a thread-local cache mirroring the
+// worktree cache above.
+//
+// `#[allow(dead_code)]`: these are the READY fan-in seam. `claude_sessions_for` is called by
+// the projection (paneview.rs) once `ProjectItem` gains a `sessions` field, and
+// `claude_resume_command` by the resume-session callback handler (app.rs) — both off-limits to
+// this parallel track. Until those two ~1-line hops land, the items are exercised only by the
+// unit tests below, so the binary build would otherwise flag them unused.
+
+/// How many recent sessions to surface per project in the rail (the most-recent N).
+pub const CLAUDE_HISTORY_LIMIT: usize = 8;
+
+/// One Claude session row, shaped for the sidebar: the resume id, a one-line summary, a
+/// human relative-time string ("2h ago") and the message count. Built from
+/// [`hyperpanes_core::claude_history::ClaudeSession`] with the timestamp turned into a label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeSessionRow {
+    pub id: String,
+    pub summary: String,
+    pub when: String,
+    pub count: i32,
+}
+
+#[allow(dead_code)]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// First 8 chars of a session id (the UUID head) — a fallback label when a transcript has no
+/// summary line nor a first user message.
+#[allow(dead_code)]
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// A compact relative-time label for `started_at` (epoch ms) vs `now` (epoch ms). Empty when
+/// the timestamp is unknown. Coarse buckets — minutes → hours → days → weeks → months → years.
+#[allow(dead_code)]
+fn relative_time(started_at: Option<u64>, now: u64) -> String {
+    let Some(t) = started_at else { return String::new() };
+    let secs = now.saturating_sub(t) / 1000;
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    if days < 7 {
+        return format!("{days}d ago");
+    }
+    let weeks = days / 7;
+    if weeks < 5 {
+        return format!("{weeks}w ago");
+    }
+    let months = days / 30;
+    if months < 12 {
+        return format!("{months}mo ago");
+    }
+    format!("{}y ago", days / 365)
+}
+
+/// The recent Claude sessions for `project_root`, served from the cache (read on first miss).
+/// Cheap to call every render; capped to [`CLAUDE_HISTORY_LIMIT`] newest-first rows.
+#[allow(dead_code)] // called by the projection (paneview.rs) at fan-in; see section header.
+pub fn claude_sessions_for(project_root: &str) -> Vec<ClaudeSessionRow> {
+    CLAUDE_CACHE.with(|c| {
+        if let Some(rows) = c.borrow().get(project_root) {
+            return rows.clone();
+        }
+        let now = now_ms();
+        let rows: Vec<ClaudeSessionRow> =
+            hyperpanes_core::claude_history::sessions_for_project(Path::new(project_root))
+                .into_iter()
+                .take(CLAUDE_HISTORY_LIMIT)
+                .map(|s| ClaudeSessionRow {
+                    when: relative_time(s.started_at, now),
+                    count: s.message_count.min(i32::MAX as usize) as i32,
+                    summary: if s.summary.is_empty() {
+                        format!("session {}", short_id(&s.id))
+                    } else {
+                        s.summary
+                    },
+                    id: s.id,
+                })
+                .collect();
+        c.borrow_mut().insert(project_root.to_string(), rows.clone());
+        rows
+    })
+}
+
+/// The shell command that resumes a Claude session in a fresh pane: `claude --resume <id>`.
+/// Session ids are UUIDs (hex + `-`), so no shell-quoting is required. The caller spawns this
+/// via the existing New-Pane path (`State::add_pane_opts` with `command` + the project `cwd`).
+#[allow(dead_code)] // called by the resume-session handler (app.rs) at fan-in; see header.
+pub fn claude_resume_command(session_id: &str) -> String {
+    format!("claude --resume {session_id}")
 }
 
 #[cfg(test)]
@@ -359,5 +476,46 @@ prunable
         std::fs::create_dir_all(&outside).unwrap();
         assert!(git_root_of(&outside.to_string_lossy()).is_none());
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    // ---- Claude session history shaping ----
+
+    #[test]
+    fn relative_time_buckets() {
+        let now = 1_000_000_000_000u64; // arbitrary epoch ms
+        assert_eq!(relative_time(None, now), "");
+        assert_eq!(relative_time(Some(now), now), "just now");
+        assert_eq!(relative_time(Some(now - 90_000), now), "1m ago"); // 90s
+        assert_eq!(relative_time(Some(now - 3 * 3_600_000), now), "3h ago");
+        assert_eq!(relative_time(Some(now - 2 * 86_400_000), now), "2d ago");
+        assert_eq!(relative_time(Some(now - 3 * 7 * 86_400_000), now), "3w ago");
+        // A timestamp in the future (clock skew) saturates to "just now", never underflows.
+        assert_eq!(relative_time(Some(now + 5000), now), "just now");
+    }
+
+    #[test]
+    fn resume_command_is_claude_resume() {
+        assert_eq!(
+            claude_resume_command("0517332c-4987-439d-b154-6ec67856fdb3"),
+            "claude --resume 0517332c-4987-439d-b154-6ec67856fdb3"
+        );
+    }
+
+    #[test]
+    fn short_id_takes_uuid_head() {
+        assert_eq!(short_id("0517332c-4987-439d"), "0517332c");
+        assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn sessions_for_missing_project_is_empty_and_caches() {
+        // A path with no encoded `~/.claude/projects` dir → empty, and a second call hits the
+        // cache (same result) without panicking.
+        let bogus = std::env::temp_dir()
+            .join(format!("hp-claude-bogus-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(claude_sessions_for(&bogus).is_empty());
+        assert!(claude_sessions_for(&bogus).is_empty());
     }
 }
