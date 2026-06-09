@@ -222,15 +222,14 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
 
 /// Build the application (hamburger) menu, anchored at window-logical `(x, y)`. The native
 /// port of the Electron `TopBar` menu: New pane · Command palette (+shortcut) · — · Layout ▸
-/// (cascading submenu, radio ✓) · — · Open/Save workspace · — · Sidebar (checkbox) ·
-/// Preferences. The Layout submenu rows come from the [`crate::theme::LAYOUT_MENU`] model the
+/// (cascading submenu, radio ✓) · — · Open/Save workspace · — · Preferences. The Layout
+/// submenu rows come from the [`crate::theme::LAYOUT_MENU`] model the
 /// resync pushes into `ctx_layouts` (with the live checkmark + the Automatic "— <resolved>"
 /// hint), exactly like the tab menu's Layout submenu.
 pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
     let mut b = Build::new();
     let cur = state.active_tab().layout;
     let palette_sc = state.keymap.label_for("palette.toggle").unwrap_or_default();
-    let sidebar_on = state.settings.show_sidebar;
 
     b.row(
         "New pane…", "", crate::theme::menu_glyph::NEW_PANE,
@@ -260,7 +259,6 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
         false, false, false, false, sub::NONE, Some(Command::SaveWorkspace),
     );
     b.sep();
-    b.row("Sidebar", "", "▥", sidebar_on, true, false, false, sub::NONE, Some(Command::ToggleSidebar));
     b.row(
         "Preferences…", "", crate::theme::menu_glyph::PREFERENCES,
         false, false, false, false, sub::NONE, Some(Command::PrefsOpen),
