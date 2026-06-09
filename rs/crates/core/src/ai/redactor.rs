@@ -5,6 +5,17 @@
 //! persisted in a summary, replacing each with the literal token `[REDACTED]`
 //! and leaving everything else intact.
 //!
+//! **Best-effort, not exhaustive.** This is keyword/shape-based: it catches
+//! `KEY=VALUE` pairs whose key *names* a secret (`SECRET`/`TOKEN`/`PASSWORD`/
+//! `API_KEY`/…), `Authorization:` headers, JWTs, AWS access-key ids, and PEM
+//! private-key blocks. A *bare* high-entropy token with no recognizable key
+//! name around it — e.g. a raw `ghp_…` GitHub token or an `xoxb-…` Slack token
+//! pasted on its own — is NOT caught (there is no high-entropy heuristic here).
+//! This is an acceptable residual risk because the only consumer is a local
+//! Ollama instance on the LAN, never a third-party/cloud endpoint; callers that
+//! need stronger guarantees must not feed it untrusted secrets. A high-entropy
+//! heuristic could be added if the threat model ever widens.
+//!
 //! Invariants (matching the TS source):
 //!  - pure and total — never panics, any string is valid.
 //!  - idempotent — `redact(redact(x)) == redact(x)`; redacting `[REDACTED]` is a no-op.
