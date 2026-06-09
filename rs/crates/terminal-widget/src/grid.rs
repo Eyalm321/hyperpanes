@@ -209,6 +209,19 @@ impl TermGrid {
         self.term.grid().display_offset()
     }
 
+    /// The cursor's row within the current viewport (display offset applied), or `None` when the
+    /// cursor is scrolled out of view. Cheap — reads the grid cursor directly, no snapshot. Used
+    /// to scope type-over-selection to the live prompt line (the cursor's own row).
+    pub fn cursor_row(&self) -> Option<usize> {
+        let grid = self.term.grid();
+        let row = grid.cursor.point.line.0 + grid.display_offset() as i32;
+        if row >= 0 && (row as usize) < self.size.rows {
+            Some(row as usize)
+        } else {
+            None
+        }
+    }
+
     /// Every grid line — scrollback history included — as `(absolute_line, text)`, top to bottom.
     /// Absolute lines are negative for scrollback and `0..rows` for the live viewport (the same
     /// numbering the snapshot/cursor use). One char per cell, blanks as spaces. Used by the

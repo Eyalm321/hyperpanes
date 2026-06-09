@@ -650,8 +650,24 @@ impl App {
             return;
         }
         if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
+            // Type-over selection (prompt-line-only, safe scope): a printable character (ordinary
+            // text, no Ctrl/Alt) typed over a drag-selection that sits entirely on the cursor's
+            // own row — the live shell input line — drops the selection highlight first, since
+            // you're replacing your own prompt input. A selection on any other row (scrollback /
+            // command output) is left intact: that text isn't in the shell's editable buffer, so
+            // we never emit speculative deletes for it (the brief's no-PTY-corruption fallback —
+            // we clear only the on-screen highlight, never edit off-row text).
+            let printable = !msg.control
+                && !msg.alt
+                && msg.text.chars().next().is_some_and(|c| {
+                    let u = c as u32;
+                    u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
+                });
             let mut st = win.state.borrow_mut();
             if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
+                if printable && ps.pane.selection_on_cursor_row() {
+                    ps.pane.selection_clear();
+                }
                 // Any key that reaches the shell snaps the viewport back to the live edge so the
                 // user sees their input echoed at the prompt even after scrolling up to read
                 // history (a no-op when already at the bottom).

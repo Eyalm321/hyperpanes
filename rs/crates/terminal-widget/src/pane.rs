@@ -430,6 +430,25 @@ impl TerminalPane {
         self.selection.map_or(false, |s| s.dragged)
     }
 
+    /// True when there's an active *dragged* selection lying entirely on the cursor's own viewport
+    /// row — i.e. over the live shell input line, the only row a terminal can safely treat as
+    /// editable text. Scopes type-over-selection to the prompt line: typing over a selection here
+    /// drops the highlight (you're replacing your own input), whereas a selection on any other row
+    /// (scrollback / command output) isn't in the shell's buffer and is left untouched, so no
+    /// speculative deletes are ever sent (no PTY corruption). False for no selection, a non-dragged
+    /// click, a multi-row span, or when the cursor is scrolled out of view.
+    pub fn selection_on_cursor_row(&self) -> bool {
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return false,
+        };
+        let (start, end) = sel.ordered();
+        if start.row != end.row {
+            return false; // a multi-row selection is never a single prompt line
+        }
+        self.grid.cursor_row() == Some(start.row)
+    }
+
     /// Highlight rectangles (logical px) for the active *dragged* selection over a surface of
     /// `surf_w`×`surf_h`. Empty for no selection or a non-dragged click — so a plain click never
     /// leaves a stray one-cell highlight.
@@ -863,6 +882,31 @@ mod tests {
         p.selection_update(55.0, 5.0, 100.0, 100.0); // 50px move → well past threshold, cell 5
         assert!(p.selection_is_drag(), "a real drag past the threshold selects");
         assert_eq!(p.selection_text().as_deref(), Some("abcdef"));
+    }
+
+    #[test]
+    fn selection_on_cursor_row_is_prompt_line_only() {
+        // 1px/cell on a 20x5 surface. Put the cursor (the "prompt") on row 2.
+        let mut p = unit_pane(20, 5);
+        p.feed("a\r\nb\r\nprompt"); // rows 0,1,2; cursor ends on row 2
+        let (w, h) = (20.0, 5.0);
+        assert!(!p.selection_on_cursor_row(), "no selection → false");
+        // A single-row drag ON the cursor row is the editable prompt line.
+        p.selection_begin(0.5, 2.5, w, h);
+        p.selection_update(5.5, 2.5, w, h);
+        assert!(p.selection_is_drag());
+        assert!(p.selection_on_cursor_row(), "selection on the cursor row is the prompt line");
+        // A drag on a different row is not the prompt line.
+        p.selection_begin(0.5, 0.5, w, h);
+        p.selection_update(3.5, 0.5, w, h);
+        assert!(!p.selection_on_cursor_row(), "an off-row selection is not the prompt line");
+        // A multi-row selection (even one touching the cursor row) is not a single prompt line.
+        p.selection_begin(0.5, 0.5, w, h);
+        p.selection_update(3.5, 2.5, w, h);
+        assert!(!p.selection_on_cursor_row(), "a multi-row selection is not a prompt line");
+        // A stationary click (not dragged) is not a selection.
+        p.selection_begin(0.5, 2.5, w, h);
+        assert!(!p.selection_on_cursor_row(), "a click is not a drag-selection");
     }
 
     #[test]
