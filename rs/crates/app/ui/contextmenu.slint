@@ -158,17 +158,36 @@ export component ContextMenu inherits Rectangle {
     // which submenu row is currently expanded (-1 = none). Reset every open (the `if` in
     // app.slint re-instantiates this component when the menu opens).
     property <int> open-sub: -1;
+    // A right-click *chain* (close this menu + reopen the one under the new cursor) keeps the
+    // SAME instance alive when one menu kind replaces another (ctx-kind stays non-zero, so the
+    // `if` in app.slint doesn't re-instantiate). The anchor is re-pushed on every (re)open, so
+    // collapse any open flyout when it moves — the fresh menu never inherits a stale expanded
+    // submenu. (The setters only fire `changed` on a real value change, so an open submenu is
+    // untouched while the cursor hovers within a stationary menu.)
+    changed menu-x => { root.open-sub = -1; }
+    changed menu-y => { root.open-sub = -1; }
+    // Sentinel "row" the click-away catcher passes to `pick()` to request the right-click chain
+    // above. app.rs reads the global cursor and reopens the matching menu. Kept in sync with
+    // `CTX_REOPEN_CHAIN_ROW` in app.rs.
+    property <int> reopen-chain-row: -987654;
     property <length> menu-w: 250px;
     property <length> est-h: root.entries.length * 30px + 12px;
     // flip flyouts to the left when the card sits in the right of the window.
     property <bool> open-left: root.menu-x > root.width * 0.6;
 
     // ---- full-window click-away catcher ----
+    // Left-click away = plain dismiss (unchanged). A RIGHT-click while a menu is open should
+    // CHAIN instead of just swallowing the event: close this menu and open the one under the
+    // new cursor in a single action. We can't add a dedicated callback (app.slint is frozen,
+    // owned by another track), so we reuse `pick()` with an out-of-range sentinel row — the
+    // same encode-on-a-frozen-callback trick app.rs uses for `open-project`. app.rs sees the
+    // sentinel, reads the global cursor, hit-tests it, and reopens the matching menu (the (x,y)
+    // ride along via the cursor, so the callback needs no params).
     away := TouchArea {
         clicked => { root.dismiss(); }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
-                root.dismiss();
+                root.pick(root.reopen-chain-row);
             }
         }
     }

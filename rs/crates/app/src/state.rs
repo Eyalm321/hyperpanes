@@ -2934,4 +2934,45 @@ mod ctx_menu_borrow_tests {
         .is_err();
         assert!(crashed, "the held-borrow pattern must still double-borrow");
     }
+
+    /// Task 7 (right-click chaining): opening a second context menu *while one is open* must
+    /// REPLACE it — `State::ctx` is a single slot, never a stack — so the net state is exactly
+    /// the new menu (kind + anchor swapped, old target gone) in one transition. This pins the
+    /// state half of `App::reopen_context_at_cursor`, and mirrors its borrow-safe shape: every
+    /// read is bound to a local and the shared borrow is dropped before the reopen mutates.
+    #[test]
+    fn right_click_chain_replaces_the_open_menu() {
+        use crate::contextmenu::CtxKind;
+        let cell = RefCell::new(fresh());
+
+        // Menu A: the tab menu for tab 0 at one anchor.
+        cell.borrow_mut().open_tab_context(0, 10.0, 20.0);
+        {
+            let st = cell.borrow();
+            let m = st.ctx.as_ref().expect("menu A should be open");
+            assert_eq!(m.kind, CtxKind::Tab);
+            assert_eq!(m.target, 0);
+            assert_eq!((m.x, m.y), (10.0, 20.0));
+        }
+
+        // The chain: a reopen reads via a local-bound borrow that is released before mutating
+        // (the #18 rule), then opens a *different* surface (the app menu) at a *new* anchor.
+        let was_open = cell.borrow().ctx_open();
+        assert!(was_open, "a menu must be open for a chain to replace it");
+        cell.borrow_mut().open_app_context(99.0, 88.0);
+
+        // Net state is exactly menu B — A was replaced, not stacked.
+        {
+            let st = cell.borrow();
+            let m = st.ctx.as_ref().expect("menu B should be open");
+            assert_eq!(m.kind, CtxKind::App);
+            assert_eq!((m.x, m.y), (99.0, 88.0));
+        }
+        assert!(cell.borrow().ctx_open());
+
+        // A right-click with no chain target (or a left-click away) is a plain dismiss.
+        cell.borrow_mut().close_context();
+        assert!(!cell.borrow().ctx_open());
+        assert!(cell.borrow().ctx_target().is_none());
+    }
 }
