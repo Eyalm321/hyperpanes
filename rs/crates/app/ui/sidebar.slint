@@ -20,7 +20,7 @@
 // self-contained — no new app-level wiring.
 
 import { Theme } from "theme.slint";
-import { ProjectItem, WorktreeRow } from "types.slint";
+import { ProjectItem, WorktreeRow, ClaudeSessionItem } from "types.slint";
 
 // "+" quick-pane glyph (two crossed bars — font-independent).
 component PlusGlyph inherits Rectangle {
@@ -226,16 +226,99 @@ component WorktreeRowView inherits Rectangle {
     }
 }
 
+// A small play/resume triangle (filled) — "resume this session in a new pane". Drawn as a
+// Path so it's font-independent, matching the Folder/Trash glyphs above.
+component ResumeGlyph inherits Path {
+    in property <color> ink;
+    width: 11px;
+    height: 11px;
+    viewbox-width: 12;
+    viewbox-height: 12;
+    fill: ink;
+    commands: "M 3 2 L 10 6 L 3 10 Z";
+}
+
+// One Claude-session row under an expanded project's "Claude history" list: a play glyph, the
+// session summary, and a dim "relative-time · N msgs" meta line. Clicking resumes the session
+// (`claude --resume <id>`) in a new pane in the project's cwd. Mirrors the worktree row idiom.
+component ClaudeSessionRowView inherits Rectangle {
+    in property <ClaudeSessionItem> session;
+    callback resume();
+    height: 34px;
+    border-radius: 5px;
+    background: sa.has-hover ? Theme.surface2 : transparent;
+
+    HorizontalLayout {
+        padding-left: 26px;     // indent to align under the project's dot, like worktree rows
+        padding-right: 6px;
+        spacing: 7px;
+
+        // play / resume glyph
+        VerticalLayout {
+            alignment: center;
+            ResumeGlyph {
+                ink: sa.has-hover ? Theme.accent : Theme.subtext;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.session.summary;
+                color: Theme.text;
+                font-size: 12px;
+                overflow: elide;
+            }
+            // meta: "2h ago  ·  42 msgs". The count is its own Text (an int auto-converts on
+            // assignment), avoiding int+string concatenation (which Slint does not do).
+            HorizontalLayout {
+                alignment: start;
+                spacing: 4px;
+                if root.session.when != "" : Text {
+                    text: root.session.when;
+                    color: Theme.subtext;
+                    font-size: 10px;
+                }
+                if root.session.when != "" && root.session.count > 0 : Text {
+                    text: "·";
+                    color: Theme.faint;
+                    font-size: 10px;
+                }
+                if root.session.count > 0 : Text {
+                    text: root.session.count;
+                    color: Theme.subtext;
+                    font-size: 10px;
+                }
+                if root.session.count > 0 : Text {
+                    text: "msgs";
+                    color: Theme.subtext;
+                    font-size: 10px;
+                }
+            }
+        }
+    }
+
+    sa := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.resume(); }
+    }
+}
+
 // One project node in the tree: a collapsible header (chevron + dot + name) plus, when
 // expanded, its worktree rows. Left-click the name opens the repo; the chevron toggles;
 // right-click pops the recolor/rename/remove menu.
 component ProjectRow inherits Rectangle {
     in property <ProjectItem> proj;
+    // This project's recent Claude Code sessions (newest-first), rendered as a collapsible
+    // "Claude history" list under the worktrees. Fed by the controller; empty hides the list.
+    in property <[ClaudeSessionItem]> sessions;
     callback open();
     callback recolor(int);
     callback rename(string);
     callback remove();
     callback request-delete(int, string);   // (worktree index within this project, path)
+    callback resume-session(string);         // resume Claude session <id> in a new pane
 
     property <bool> expanded: false;
 
@@ -344,6 +427,31 @@ component ProjectRow inherits Rectangle {
                 wt: w;
                 request-delete => { root.request-delete(j, w.path); }
             }
+
+            // ---- Claude session history (only when this project has sessions) ----
+            if root.sessions.length > 0 : VerticalLayout {
+                spacing: 1px;
+                padding-top: 4px;
+
+                HorizontalLayout {
+                    padding-left: 22px;     // nest the heading just inside the row content
+                    Text {
+                        text: "CLAUDE HISTORY";
+                        color: Theme.subtext;
+                        font-size: 9px;
+                        font-weight: 700;
+                        letter-spacing: 0.5px;
+                        height: 16px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                for s[k] in root.sessions : ClaudeSessionRowView {
+                    session: s;
+                    resume => { root.resume-session(s.id); }
+                }
+            }
         }
     }
 
@@ -365,6 +473,11 @@ export component SidebarRail inherits Rectangle {
     callback recolor-project(int, int);   // row, swatch
     callback rename-project(int, string);
     callback remove-project(int);
+    // Resume Claude session <session-id> for project row <int> in a new pane. NOTE: this is
+    // an EXISTING-style sidebar callback ready for fan-in; binding it (app.slint) + handling
+    // it (app.rs → State::add_pane_opts with the resume command + project cwd) is the only
+    // out-of-scope hop for this track. Until bound it's an inert no-op. See the project loop.
+    callback resume-session(int, string);
 
     // ---- worktree-delete confirmation popup state (sidebar-local) ----
     property <bool> wt-del-visible: false;
@@ -524,10 +637,17 @@ export component SidebarRail inherits Rectangle {
 
                     for p[i] in root.projects : ProjectRow {
                         proj: p;
+                        // FAN-IN: bind the per-project Claude sessions here once `ProjectItem`
+                        // gains a `sessions: [ClaudeSessionItem]` field and the projection
+                        // (paneview.rs) populates it from `sidebar::claude_sessions_for(path)`
+                        // — i.e. `sessions: p.sessions;`. The reader, cache, row UI and the
+                        // resume callback are all ready; this is the one cross-file hop left.
+                        // Until then it defaults empty, so the "Claude history" list is hidden.
                         open => { root.open-project(i); }
                         recolor(s) => { root.recolor-project(i, s); }
                         rename(t) => { root.rename-project(i, t); }
                         remove => { root.remove-project(i); }
+                        resume-session(id) => { root.resume-session(i, id); }
                         request-delete(j, path) => {
                             root.wt-del-proj = i;
                             root.wt-del-wt = j;
