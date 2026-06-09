@@ -23,6 +23,7 @@ mod ai;
 mod app;
 mod command;
 mod contextmenu;
+mod control_host;
 mod drag;
 mod glow;
 mod keybindings;
@@ -35,7 +36,7 @@ mod tetris;
 mod theme;
 mod window;
 
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
@@ -82,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = rt.enter();
 
     let (etx, erx) = unbounded_channel::<SessionEvent>();
-    let mgr = Rc::new(SessionManager::new(etx));
+    let mgr = Arc::new(SessionManager::new(etx));
 
     // The app owns the window registry + the shared session stream.
     let application = App::new(mgr.clone(), erx);

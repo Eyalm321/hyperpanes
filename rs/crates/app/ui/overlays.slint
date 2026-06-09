@@ -402,6 +402,10 @@ export component OverlayLayer inherits Rectangle {
     in property <string> ai-host: "";
     in property <string> ai-model: "";
     in property <string> ai-status: "";
+    // Control API (agents / MCP) — embedded loopback control server status mirror.
+    in property <bool> control-enabled: false;
+    in property <bool> control-allow-input: false;
+    in property <string> control-status: "";
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> keybindings;
     in property <bool> keybinds-overridden: false;  // any binding overridden → show "Reset all"
@@ -930,6 +934,40 @@ export component OverlayLayer inherits Rectangle {
                         }
                     }
                     Pill { label: "+"; clicked => { root.pref-action(12, 1); } }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // ---- Control API (agents / MCP): the embedded loopback control server ----
+            Text { text: "Control API (agents / MCP)"; color: Theme.faint; font-size: 11px; }
+            PrefToggle {
+                label: "Enable control API";
+                on: root.control-enabled;
+                toggled(v) => { root.pref-action(15, v ? 1 : 0); }
+            }
+            Text {
+                text: "lets the MCP / agents drive this window over a loopback HTTP+WS port (default off)";
+                color: Theme.faint;
+                font-size: 11px;
+            }
+            // Input gate + status only matter once the server is enabled.
+            if root.control-enabled : VerticalLayout {
+                spacing: 8px;
+                PrefToggle {
+                    label: "Allow input (send keystrokes)";
+                    on: root.control-allow-input;
+                    toggled(v) => { root.pref-action(16, v ? 1 : 0); }
+                }
+                Text {
+                    text: "without this, agents can read panes + run commands but cannot type into them";
+                    color: Theme.faint;
+                    font-size: 11px;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Status:"; color: Theme.faint; font-size: 11px; vertical-alignment: center; }
+                    Text { text: root.control-status; color: Theme.subtext; font-size: 11px; vertical-alignment: center; }
                 }
             }
 

@@ -84,6 +84,10 @@ export component AppWindow inherits Window {
     in property <string> pref-ai-host: "";
     in property <string> pref-ai-model: "";
     in property <string> pref-ai-status: "";
+    // Control API (agents / MCP) — mirrored from the control-server host (default off)
+    in property <bool> pref-control-enabled: false;
+    in property <bool> pref-control-allow-input: false;
+    in property <string> pref-control-status: "";
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-keybinds-overridden: false;
@@ -379,6 +383,9 @@ export component AppWindow inherits Window {
             ai-host: root.pref-ai-host;
             ai-model: root.pref-ai-model;
             ai-status: root.pref-ai-status;
+            control-enabled: root.pref-control-enabled;
+            control-allow-input: root.pref-control-allow-input;
+            control-status: root.pref-control-status;
             keybindings: root.pref-keybindings;
             keybinds-overridden: root.pref-keybinds-overridden;
             kb-conflict: root.pref-kb-conflict;

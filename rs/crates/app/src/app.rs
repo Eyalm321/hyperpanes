@@ -18,6 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyperpanes_core::layout::presets::DividerKind;
@@ -79,7 +80,7 @@ pub struct Window {
 
 /// The app: the window registry + the shared session engine + the shared event stream.
 pub struct App {
-    pub mgr: Rc<SessionManager>,
+    pub mgr: Arc<SessionManager>,
     windows: RefCell<Vec<Rc<Window>>>,
     erx: RefCell<UnboundedReceiver<SessionEvent>>,
     next_id: Cell<usize>,
@@ -114,6 +115,10 @@ pub struct App {
     /// hash fed to the engine and when, so we feed only on change and at most every
     /// [`AI_FEED_INTERVAL`].
     ai_feed: RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>>,
+    /// The embedded control HTTP+WS server host (default-OFF): publishes the live windows→
+    /// tabs→panes tree into `core::control`'s read-model + applies inbound `/command`s to the
+    /// GUI in-process, so the MCP / agent orchestration drives this process like Electron.
+    pub control: crate::control_host::ControlHost,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -126,7 +131,8 @@ const AI_FEED_INTERVAL: Duration = Duration::from_millis(400);
 const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 
 impl App {
-    pub fn new(mgr: Rc<SessionManager>, erx: UnboundedReceiver<SessionEvent>) -> Rc<Self> {
+    pub fn new(mgr: Arc<SessionManager>, erx: UnboundedReceiver<SessionEvent>) -> Rc<Self> {
+        let control = crate::control_host::ControlHost::new(&mgr);
         Rc::new(App {
             mgr,
             windows: RefCell::new(Vec::new()),
@@ -143,6 +149,7 @@ impl App {
             ai: crate::ai::AiBridge::spawn(),
             ai_ctx_sig: RefCell::new(std::collections::HashMap::new()),
             ai_feed: RefCell::new(std::collections::HashMap::new()),
+            control,
         })
     }
 
@@ -274,11 +281,29 @@ impl App {
             w.app.set_win_maximized(window::is_maximized(w.hwnd.get()));
         }
 
-        // 2. Drain the ONE shared event channel, routing each event to its window.
+        // 2. Drain the ONE shared event channel, routing each event to its window. Each event
+        //    is teed to the control server (live `/events` WS frames + model cwd/exit) before
+        //    the GUI consumes it — a cheap no-op when the server is stopped.
         {
             let mut rx = self.erx.borrow_mut();
             while let Ok(ev) = rx.try_recv() {
+                self.control.tee_event(&ev);
                 self.route_event(&windows, ev);
+            }
+        }
+
+        // 2c. Control plane: reconcile any inbound `/command` structural change into the live
+        //     GUI (on this UI thread), then republish the live tree into the read-model so
+        //     `/state` / `list_panes` reflect the GUI. No-op when the server is stopped.
+        self.control.sync(&windows, &self.mgr);
+        // Mirror the control-server status into every window's Preferences props.
+        {
+            let (enabled, allow_input, port) = self.control.status();
+            let status: slint::SharedString = control_status_line(enabled, allow_input, port).into();
+            for w in &windows {
+                w.app.set_pref_control_enabled(enabled);
+                w.app.set_pref_control_allow_input(allow_input);
+                w.app.set_pref_control_status(status.clone());
             }
         }
 
@@ -386,6 +411,8 @@ impl App {
                         // Resolve clickable paths relative to this pane's live directory.
                         if let Some((ti, pi)) = st.find_pane(&uid) {
                             st.tabs[ti].panes[pi].pane.set_cwd(Some(cwd.clone()));
+                            // Mirror it for the control read-model's `/state` cwd field.
+                            st.tabs[ti].panes[pi].cwd = Some(cwd.clone());
                         }
                         // Refresh the remembered-projects list AND tint THIS pane if its cwd is
                         // inside a git repo (project color + frame/dot on + project-name label).
@@ -1565,6 +1592,16 @@ impl App {
                     app.ai.send(crate::ai::AiMsg::SetEnabled(arg != 0));
                     return;
                 }
+                // Control API (agents / MCP) toggles — start/stop the embedded server live,
+                // and flip its input gate. Both persist via `persistence::control_settings`.
+                if kind == 15 {
+                    app.control.set_enabled(arg != 0, &app.mgr);
+                    return;
+                }
+                if kind == 16 {
+                    app.control.set_allow_input(arg != 0);
+                    return;
+                }
                 let setting = match kind {
                     1 => crate::state::Setting::FontDelta(arg),
                     2 => crate::state::Setting::ShowFrame(arg != 0),
@@ -1741,6 +1778,19 @@ fn apply_ai_status_props(app: &AppWindow, st: &hyperpanes_core::ai::service::AiS
         "Enabled · connecting…".to_string()
     };
     app.set_pref_ai_status(line.into());
+}
+
+/// The human-readable Control-API status line for the Preferences section: off, or running
+/// with its loopback port + whether input is allowed.
+fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> String {
+    if !enabled {
+        return "Off".to_string();
+    }
+    let input = if allow_input { "input allowed" } else { "input blocked" };
+    match port {
+        Some(p) => format!("Running · http://127.0.0.1:{p} · {input}"),
+        None => format!("Starting… · {input}"),
+    }
 }
 
 /// Copy `text` to the Windows clipboard via the built-in `clip` utility (no extra crate /
