@@ -129,11 +129,12 @@ function wtVersion() {
 
 export const TERMINALS = [
   {
-    // The NATIVE Rust app (the rewrite). The GUI binary ignores CLI argv and has no
-    // run-a-command flag, so — like the config-only terminals — it is launched bare and reports
-    // IDLE memory/CPU of a fresh instance (one default-shell pane). Throughput/startup-in-pane
-    // need command injection the native GUI v0.0.1 does not yet wire (only core + the headless
-    // daemon parse argv), so those suites are n/a for native. Idle memory is the headline.
+    // The NATIVE Rust app (the rewrite). The GUI now wires CLI launch (argv → resolve_cli_workspace
+    // → load_workspace), so it is DRIVEN like the other terminals: a bench wrapper is seeded into a
+    // pane via `--shell cmd.exe -c <wrapper>`, giving real throughput + startup numbers. Memory is
+    // still sampled IDLE-only (memoryIdleOnly) — a fresh instance with one default-shell pane, which
+    // is the clean apples-to-apples figure and avoids the "last pane exits → window closes → app
+    // quits" race a driven memory sample would hit. Every launch uses an isolated %APPDATA%.
     id: 'hyperpanes',
     name: 'hyperpanes (native)',
     wingetId: null,
@@ -141,17 +142,26 @@ export const TERMINALS = [
     searchDirs: [],
     versionArgs: null,
     fixedVersion: nativeVersion,
-    driven: false,
+    driven: true,
     memoryIdleOnly: true,
     procMatch: ['hyperpanes.exe'],
-    suites: ['memory'],
+    suites: DRIVEN_SUITES,
     resolveExe: resolveNativeExe,
-    // Launch the native exe bare with an ISOLATED %APPDATA% so it starts as a clean fresh
-    // instance (no restored session/prefs; data dir keys on %APPDATA%). `temp` is cleaned up by
-    // the caller after sampling.
-    launch() {
+    // Driven form: CLI-seed a pane that runs the bench wrapper via cmd.exe (mirrors the retired
+    // Electron `--shell cmd.exe -c <wrapper> …` form the GUI now parses). Bare form (wrapperPath
+    // null — idle memory/CPU, or `--idle-bare`): one default-shell pane, no command. Either way an
+    // ISOLATED %APPDATA% gives a clean fresh instance; `temp` is cleaned up by the caller.
+    launch({ wrapperPath, cwd = REPO_ROOT, label = 'bench' } = {}) {
       const dataDir = makeTempDataDir('hpbench-native');
-      return { exe: this.resolveExe(), args: [], env: { APPDATA: dataDir }, temp: [dataDir + '\\'] };
+      const env = { APPDATA: dataDir };
+      const temp = [dataDir + '\\'];
+      if (!wrapperPath) return { exe: this.resolveExe(), args: [], env, temp };
+      return {
+        exe: this.resolveExe(),
+        args: ['--shell', 'cmd.exe', '-c', wrapperPath, '--name', label, '--cwd', cwd],
+        env,
+        temp
+      };
     },
     // True iff a native build exists (release preferred, debug fallback).
     isAvailable() {

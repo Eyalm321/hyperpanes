@@ -43,12 +43,12 @@ async function throughputRun(term, kase, bytes, timeoutMs) {
   const id = uid('thr');
   const out = join(RESULTS_DIR, `${id}.json`);
   const wrapper = writeCmdWrapper(id, join(WORKLOADS, 'throughput.mjs'), ['--case', kase, '--out', out, '--bytes', String(bytes)]);
-  const { exe, args } = term.launch({ wrapperPath: wrapper, cwd: REPO_ROOT, label: 'bench' });
-  const child = spawnTerminal(exe, args);
+  const { exe, args, env, temp } = term.launch({ wrapperPath: wrapper, cwd: REPO_ROOT, label: 'bench' });
+  const child = spawnTerminal(exe, args, { env });
   let result = null;
   if (await waitForFile(out, timeoutMs)) result = await readJsonSafe(out);
   await killTreeAndWait(child.pid);
-  cleanup([wrapper, out]);
+  cleanup([wrapper, out, ...(temp || [])]);
   return result && result.mbPerSec != null ? result.mbPerSec : null;
 }
 
@@ -73,16 +73,16 @@ async function startupRun(term, timeoutMs) {
   const probeArgs = ['--out', out];
   if (term.id === 'hyperpanes') probeArgs.push('--hold'); // no auto-exit
   const wrapper = writeCmdWrapper(id, join(WORKLOADS, 'startup-probe.mjs'), probeArgs);
-  const { exe, args } = term.launch({ wrapperPath: wrapper, cwd: REPO_ROOT, label: 'bench' });
+  const { exe, args, env, temp } = term.launch({ wrapperPath: wrapper, cwd: REPO_ROOT, label: 'bench' });
   const t0 = Date.now();
-  const child = spawnTerminal(exe, args);
+  const child = spawnTerminal(exe, args, { env });
   let delta = null;
   if (await waitForFile(out, timeoutMs)) {
     const res = await readJsonSafe(out);
     if (res && res.probeStart != null) delta = res.probeStart - t0;
   }
   await killTreeAndWait(child.pid);
-  cleanup([wrapper, out]);
+  cleanup([wrapper, out, ...(temp || [])]);
   return delta;
 }
 
