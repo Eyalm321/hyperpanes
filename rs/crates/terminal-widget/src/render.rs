@@ -309,6 +309,9 @@ pub struct GpuRenderer {
     target: Option<wgpu::Texture>,
     tw: u32,
     th: u32,
+    /// Last successfully-imported frame, returned as a fallback if a later texture import
+    /// fails (transient device-lost / RDP transition) so the UI thread never panics.
+    last_image: Option<Image>,
 }
 
 impl GpuRenderer {
@@ -530,6 +533,7 @@ impl GpuRenderer {
             target: None,
             tw: 0,
             th: 0,
+            last_image: None,
         }
     }
 
@@ -811,8 +815,22 @@ impl PaneRenderer for GpuRenderer {
     fn render(&mut self, grid: &GridSnapshot, font: &mut Font, opts: &RenderOpts) -> Image {
         self.render_to_texture(grid, font, opts);
         // Import the freshly-rendered texture as a Slint Image (shared device → zero copy).
+        // A transient failure (device-lost / RDP transition) must NOT panic the UI thread:
+        // fall back to the last good frame, or a blank Image if we have none yet. The
+        // controller can additionally swap to the SoftwareRenderer on persistent failure.
         let target = self.target.as_ref().unwrap();
-        Image::try_from(target.clone()).expect("wgpu texture import into slint failed")
+        match Image::try_from(target.clone()) {
+            Ok(img) => {
+                self.last_image = Some(img.clone());
+                img
+            }
+            Err(_) => {
+                eprintln!(
+                    "[gpu] wgpu texture import into slint failed; using fallback frame"
+                );
+                self.last_image.clone().unwrap_or_default()
+            }
+        }
     }
 }
 
