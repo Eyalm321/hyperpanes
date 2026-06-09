@@ -101,10 +101,22 @@ export struct PaletteItem {
     subtitle: string,
 }
 
-// One git-project row in the sidebar panel.
+// One git worktree under a project in the sidebar tree. `branch` is the short label
+// (branch name, or "(detached …)" / "(bare)"); `is-main` marks the main checkout, whose
+// trash affordance is shown disabled (git refuses `worktree remove` on it).
+export struct WorktreeRow {
+    path: string,
+    branch: string,
+    is-main: bool,
+}
+
+// One git-project row in the sidebar panel — now the top level of a two-level tree: the
+// project header plus its enumerated `worktrees` (populated by the controller only while
+// the flyout is open). Expand/collapse is local UI state in the row itself.
 export struct ProjectItem {
     name: string,
     color: color,
+    worktrees: [WorktreeRow],
 }
 
 // One option in a preferences picker (font family). `active` marks the current value.

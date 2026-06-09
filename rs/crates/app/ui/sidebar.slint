@@ -5,15 +5,20 @@
 //   │📁│  `show-sidebar` (and hidden in fullscreen) up in app.slint.
 //   └──┘
 //   ＋  quick-pane: opens a default pane.
-//   📁  projects: a count badge + a flyout (opens LEFTWARD, over the panes) listing the
-//       remembered git projects. Click a row → open it in a pane (cd'd into the repo);
-//       right-click → recolor / rename / remove.
+//   📁  projects: a count badge + a flyout (opens LEFTWARD, over the panes). The flyout is
+//       a TWO-LEVEL TREE: project rows (chevron ▸/▾ + color dot + name) → expand to show
+//       that project's git worktrees, each with a trash icon. Trash → an in-sidebar
+//       Cancel/Confirm popup (Esc=cancel / Enter=confirm). Project rows also: left-click the
+//       name opens the repo in a pane; right-click → recolor / rename / remove (from history).
 //
-// All state is owned by the Rust controller; this is projection + callbacks that each map
-// to a `Command`.
+// All project/worktree data is computed by the Rust controller and pushed via `projects`
+// (each `ProjectItem` carries its `worktrees`). Expand/collapse is local UI state per row.
+// The worktree-delete request travels back through the existing `open-project(int)` callback
+// with an out-of-range encoded index (DELETE_BASE + proj*STRIDE + wt) so the sidebar stays
+// self-contained — no new app-level wiring.
 
 import { Theme } from "theme.slint";
-import { ProjectItem } from "types.slint";
+import { ProjectItem, WorktreeRow } from "types.slint";
 
 // "+" quick-pane glyph (two crossed bars — font-independent).
 component PlusGlyph inherits Rectangle {
@@ -35,6 +40,20 @@ component FolderGlyph inherits Path {
     stroke-width: 1.5px;
     fill: transparent;
     commands: "M 2.5 14 L 2.5 5 L 7 5 L 8.6 6.8 L 15.5 6.8 L 15.5 14 Z";
+}
+
+// A trash-can glyph (stroked): lid + handle + can body. Font-independent.
+component TrashGlyph inherits Path {
+    in property <color> ink;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 14;
+    viewbox-height: 14;
+    stroke: ink;
+    stroke-width: 1.3px;
+    fill: transparent;
+    // lid line, handle, then the can body with two inner streaks.
+    commands: "M 2 3.5 L 12 3.5 M 5.3 3.5 L 5.6 2 L 8.4 2 L 8.7 3.5 M 3.2 3.5 L 3.9 12.5 L 10.1 12.5 L 10.8 3.5 M 5.7 5.6 L 5.9 10.4 M 8.3 5.6 L 8.1 10.4";
 }
 
 // One recolor swatch in the project context menu.
@@ -139,48 +158,176 @@ component ProjectMenu inherits PopupWindow {
     }
 }
 
-// One project row in the flyout: a colored dot + name; left-click opens, right-click
-// pops the recolor/rename/remove menu.
+// One worktree row under an expanded project: branch label + path (dim), with a trash icon
+// on the right. The main checkout's trash is disabled (git refuses `worktree remove` on it).
+component WorktreeRowView inherits Rectangle {
+    in property <WorktreeRow> wt;
+    callback request-delete();
+    height: 36px;
+    border-radius: 5px;
+    background: rowa.has-hover ? Theme.surface2 : transparent;
+
+    // row-wide hover (purely visual); sits behind the trash button.
+    rowa := TouchArea { mouse-cursor: default; }
+
+    HorizontalLayout {
+        padding-left: 26px;     // indent under the project's dot
+        padding-right: 4px;
+        spacing: 6px;
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.wt.branch + (root.wt.is-main ? "  ·  main" : "");
+                color: Theme.text;
+                font-size: 12px;
+                overflow: elide;
+            }
+            Text {
+                text: root.wt.path;
+                color: Theme.subtext;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        // trash button
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 6px;
+                background: (!root.wt.is-main && tta.has-hover) ? Theme.danger : transparent;
+                TrashGlyph {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    ink: root.wt.is-main ? Theme.faint : (tta.has-hover ? #ffffff : Theme.subtext);
+                }
+                tta := TouchArea {
+                    mouse-cursor: root.wt.is-main ? not-allowed : pointer;
+                    clicked => { if (!root.wt.is-main) { root.request-delete(); } }
+                }
+            }
+        }
+    }
+}
+
+// One project node in the tree: a collapsible header (chevron + dot + name) plus, when
+// expanded, its worktree rows. Left-click the name opens the repo; the chevron toggles;
+// right-click pops the recolor/rename/remove menu.
 component ProjectRow inherits Rectangle {
     in property <ProjectItem> proj;
     callback open();
     callback recolor(int);
     callback rename(string);
     callback remove();
+    callback request-delete(int, string);   // (worktree index within this project, path)
 
-    height: 30px;
-    border-radius: 5px;
-    background: ta.has-hover ? Theme.surface2 : transparent;
+    property <bool> expanded: false;
 
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 8px;
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 10px;
-                height: 10px;
-                border-radius: 5px;
-                background: root.proj.color;
+    VerticalLayout {
+        spacing: 1px;
+
+        // ---- header ----
+        Rectangle {
+            height: 30px;
+            border-radius: 5px;
+            background: ta.has-hover ? Theme.surface2 : transparent;
+
+            // full-row click target (open / right-click menu); declared FIRST so the
+            // chevron's own TouchArea sits on top of it.
+            ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.open(); }
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                        menu.show();
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 2px;
+                padding-right: 8px;
+                spacing: 4px;
+
+                // chevron (toggles expand/collapse)
+                Rectangle {
+                    width: 20px;
+                    Text {
+                        text: root.expanded ? "▾" : "▸";
+                        color: cta.has-hover ? Theme.text : Theme.subtext;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    cta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.expanded = !root.expanded; }
+                    }
+                }
+
+                // color dot
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: root.proj.color;
+                    }
+                }
+
+                // name
+                Text {
+                    text: root.proj.name;
+                    color: Theme.text;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                // worktree count chip
+                if root.proj.worktrees.length > 1 : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 18px;
+                        height: 15px;
+                        border-radius: 7px;
+                        background: Theme.surface2;
+                        Text {
+                            text: root.proj.worktrees.length;
+                            color: Theme.subtext;
+                            font-size: 9px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
             }
         }
-        Text {
-            text: root.proj.name;
-            color: Theme.text;
-            font-size: 13px;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-            overflow: elide;
-        }
-    }
 
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.open(); }
-        pointer-event(e) => {
-            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
-                menu.show();
+        // ---- worktrees (when expanded) ----
+        if root.expanded : VerticalLayout {
+            spacing: 1px;
+            padding-bottom: 3px;
+
+            if root.proj.worktrees.length == 0 : Text {
+                text: "No worktrees found.";
+                color: Theme.subtext;
+                font-size: 11px;
+                horizontal-alignment: left;
+                height: 22px;
+                vertical-alignment: center;
+            }
+
+            for w[j] in root.proj.worktrees : WorktreeRowView {
+                wt: w;
+                request-delete => { root.request-delete(j, w.path); }
             }
         }
     }
@@ -203,6 +350,16 @@ export component SidebarRail inherits Rectangle {
     callback recolor-project(int, int);   // row, swatch
     callback rename-project(int, string);
     callback remove-project(int);
+
+    // ---- worktree-delete confirmation popup state (sidebar-local) ----
+    property <bool> wt-del-visible: false;
+    property <int> wt-del-proj;
+    property <int> wt-del-wt;
+    property <string> wt-del-name;     // worktree path, shown in the warning
+
+    // Encoding for the worktree-delete signal smuggled through `open-project` (see header).
+    property <int> DELETE-BASE: 1000000;
+    property <int> DELETE-STRIDE: 1000;
 
     width: 44px;
     background: Theme.mantle;
@@ -277,10 +434,10 @@ export component SidebarRail inherits Rectangle {
 
     // ===== projects flyout (opens LEFTWARD, over the pane area) =====
     if root.projects-open : Rectangle {
-        x: -236px;                  // 224 wide + a 12px gap, to the left of the 44px rail
+        x: -296px;                  // 284 wide + a 12px gap, to the left of the 44px rail
         y: 6px;
-        width: 224px;
-        height: min(root.height - 12px, 56px + root.projects.length * 32px);
+        width: 284px;
+        height: min(root.height - 12px, 480px);
         background: Theme.surface;
         border-radius: 8px;
         border-width: 1px;
@@ -295,7 +452,7 @@ export component SidebarRail inherits Rectangle {
 
         VerticalLayout {
             padding: 8px;
-            spacing: 2px;
+            spacing: 4px;
 
             Text {
                 text: "PROJECTS";
@@ -308,18 +465,160 @@ export component SidebarRail inherits Rectangle {
             }
 
             if root.projects.length == 0 : Text {
-                text: "Projects you cd into show up here, each with its own color.";
+                text: "Projects you cd into show up here. Expand one to manage its git worktrees.";
                 color: Theme.subtext;
                 font-size: 12px;
                 wrap: word-wrap;
             }
 
-            for p[i] in root.projects : ProjectRow {
-                proj: p;
-                open => { root.open-project(i); }
-                recolor(s) => { root.recolor-project(i, s); }
-                rename(t) => { root.rename-project(i, t); }
-                remove => { root.remove-project(i); }
+            // scrollable tree (projects + their expanded worktrees)
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: treebody.preferred-height;
+                    treebody := VerticalLayout {
+                    alignment: start;
+                    spacing: 2px;
+
+                    for p[i] in root.projects : ProjectRow {
+                        proj: p;
+                        open => { root.open-project(i); }
+                        recolor(s) => { root.recolor-project(i, s); }
+                        rename(t) => { root.rename-project(i, t); }
+                        remove => { root.remove-project(i); }
+                        request-delete(j, path) => {
+                            root.wt-del-proj = i;
+                            root.wt-del-wt = j;
+                            root.wt-del-name = path;
+                            root.wt-del-visible = true;
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== worktree-delete confirmation popup (sidebar-local overlay) =====
+    // Rendered at the rail root so it isn't clipped by the flyout; covers the pane area to
+    // the left with a scrim and a centered card. A FocusScope grabs focus on appear so
+    // Esc=Cancel / Enter=Confirm work without any app-level key wiring.
+    if root.wt-del-visible : Rectangle {
+        // span far to the left over the panes (the rail is at the window's right edge).
+        x: -2000px;
+        width: 2044px;
+        y: 0;
+        height: root.height;
+
+        // scrim — also swallows clicks outside the card (no dismissal on outside click;
+        // use Cancel/Esc so a misclick can't silently delete).
+        Rectangle {
+            background: #0b0c12cc;
+            TouchArea {}
+        }
+
+        // the card
+        Rectangle {
+            width: 340px;
+            height: 168px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.mantle;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 40px;
+            drop-shadow-color: Theme.scrim;
+            drop-shadow-offset-y: 12px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                Text {
+                    text: "Remove worktree?";
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "This deletes the working directory:\n" + root.wt-del-name;
+                    color: Theme.subtext;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    // Cancel
+                    Rectangle {
+                        width: 90px;
+                        height: 32px;
+                        border-radius: 7px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        background: ca.has-hover ? Theme.surface2 : transparent;
+                        Text {
+                            text: "Cancel";
+                            color: Theme.text;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        ca := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.wt-del-visible = false; }
+                        }
+                    }
+
+                    // Confirm (danger)
+                    Rectangle {
+                        width: 110px;
+                        height: 32px;
+                        border-radius: 7px;
+                        background: cfa.has-hover ? #ff5b60 : Theme.danger;
+                        Text {
+                            text: "Remove";
+                            color: #ffffff;
+                            font-size: 12px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        cfa := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                                root.wt-del-visible = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // key handling: grabs focus when the popup appears (the `if` recreates this on
+            // each show, so `init` re-fires), traps Esc → cancel / Enter → confirm.
+            fs := FocusScope {
+                init => { fs.focus(); }
+                key-pressed(e) => {
+                    if (e.text == Key.Escape) {
+                        root.wt-del-visible = false;
+                        return EventResult.accept;
+                    }
+                    if (e.text == Key.Return) {
+                        root.open-project(root.DELETE-BASE + root.wt-del-proj * root.DELETE-STRIDE + root.wt-del-wt);
+                        root.wt-del-visible = false;
+                        return EventResult.accept;
+                    }
+                    return EventResult.reject;
+                }
             }
         }
     }

@@ -1547,7 +1547,41 @@ impl App {
         }
         cb_i32!(on_palette_nav, Command::PaletteNav);
         cb_usize!(on_palette_pick, Command::PaletteSelect);
-        cb_usize!(on_open_project, Command::OpenProject);
+        // `open-project` is overloaded by the sidebar worktree tree: a normal index opens
+        // the project in a pane, while an out-of-range encoded index means "remove worktree
+        // (proj, wt)" — letting the worktree feature ride the existing frozen callback
+        // surface (app.slint isn't touched). DELETE_BASE/STRIDE mirror sidebar.slint.
+        {
+            const DELETE_BASE: i64 = 1_000_000;
+            const DELETE_STRIDE: i64 = 1_000;
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_open_project(move |code| {
+                let Some(w) = app.window_by_id(id) else { return };
+                let code = code as i64;
+                if code < DELETE_BASE {
+                    app.run_command(&w, Command::OpenProject(code as usize));
+                    return;
+                }
+                let proj = ((code - DELETE_BASE) / DELETE_STRIDE) as usize;
+                let wt = ((code - DELETE_BASE) % DELETE_STRIDE) as usize;
+                // Resolve the repo + worktree paths (read-only borrow, dropped before spawn).
+                let target = {
+                    let st = w.state.borrow();
+                    st.projects.get(proj).map(|p| {
+                        let path = crate::sidebar::worktrees_for(&p.path)
+                            .get(wt)
+                            .map(|x| x.path.clone());
+                        (p.path.clone(), path)
+                    })
+                };
+                let Some((repo, Some(wt_path))) = target else { return };
+                match crate::sidebar::remove_worktree(&repo, &wt_path) {
+                    Ok(()) => crate::sidebar::invalidate(&repo),
+                    Err(e) => crate::dbg_log(&format!("worktree remove failed for {wt_path}: {e}")),
+                }
+            });
+        }
         cb_usize!(on_remove_project, Command::RemoveProject);
         {
             let app = app.clone();
