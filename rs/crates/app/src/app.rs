@@ -118,7 +118,9 @@ pub struct App {
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
 /// scheduler's settle window is shorter, so a quiet gap between feeds lets it summarise.
-const AI_FEED_INTERVAL: Duration = Duration::from_millis(1200);
+/// Kept brisk so the subtitle tracks a live agent/chat pane; the real refresh floor is the
+/// model's per-call latency, not this.
+const AI_FEED_INTERVAL: Duration = Duration::from_millis(400);
 
 /// How long a pane drag must rest over a tab before it springs open (Chrome/Finder).
 const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);

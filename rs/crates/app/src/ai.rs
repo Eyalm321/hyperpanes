@@ -190,7 +190,7 @@ async fn ai_loop(
 
     let start = Instant::now();
     let mut last_ms: i64 = 0;
-    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         tokio::select! {
             maybe = rx.recv() => match maybe {
@@ -214,7 +214,14 @@ async fn ai_loop(
                 ai.tick(now - last_ms);
                 last_ms = now;
                 while let Some(uid) = ai.next_due() {
+                    let t0 = start.elapsed().as_millis() as i64;
                     let result = ai.run_job(&uid).await;
+                    let dt = start.elapsed().as_millis() as i64 - t0;
+                    // A job that returns Ok/Fail actually hit Ollama; Skip means it was
+                    // deduped/too-short and never called. Gated behind HYPERPANES_DEBUG.
+                    crate::dbg_log(&format!(
+                        "[ai] ollama job uid={uid} -> {result:?} in {dt}ms (t={now}ms)"
+                    ));
                     ai.complete_job(&uid, result);
                 }
             }
