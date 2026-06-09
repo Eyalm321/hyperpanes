@@ -117,9 +117,10 @@ impl PaneRenderer for SoftwareRenderer {
 
                 // Glyph.
                 if cell.ch != ' ' && cell.ch != '\0' {
-                    let gid = font.glyph_id(cell.ch);
+                    let (font_id, gid) = font.resolve(cell.ch);
                     let g = font
                         .rasterize(GlyphKey {
+                            font_id,
                             gid,
                             bold: cell.bold,
                             italic: cell.italic,
@@ -604,8 +605,9 @@ impl GpuRenderer {
                 }
 
                 if cell.ch != ' ' && cell.ch != '\0' {
-                    let gid = font.glyph_id(cell.ch);
+                    let (font_id, gid) = font.resolve(cell.ch);
                     let key = GlyphKey {
+                        font_id,
                         gid,
                         bold: cell.bold,
                         italic: cell.italic,
