@@ -5,8 +5,10 @@
 //   │📁│  `show-sidebar` (and hidden in fullscreen) up in app.slint.
 //   └──┘
 //   ＋  quick-pane: opens a default pane.
-//   📁  projects: a count badge + a flyout (opens LEFTWARD, over the panes). The flyout is
-//       a TWO-LEVEL TREE: project rows (chevron ▸/▾ + color dot + name) → expand to show
+//   📁  projects: a count badge + an IN-RAIL expansion. Clicking widens the whole rail
+//       (the width binding lives in app.slint) to reveal a projects section to the LEFT of
+//       the icon column — in-place, NOT a floating overlay. The section is a TWO-LEVEL
+//       TREE: project rows (chevron ▸/▾ + color dot + name) → expand to show
 //       that project's git worktrees, each with a trash icon. Trash → an in-sidebar
 //       Cancel/Confirm popup (Esc=cancel / Enter=confirm). Project rows also: left-click the
 //       name opens the repo in a pane; right-click → recolor / rename / remove (from history).
@@ -99,7 +101,10 @@ component ProjectMenu inherits PopupWindow {
 
             Text { text: "Change Color"; color: Theme.subtext; font-size: 10px; font-weight: 700; }
             HorizontalLayout {
-                spacing: 5px;
+                // tight, cohesive swatch group, left-aligned to match the menu's other rows
+                // (the default `stretch` would spread the fixed-width swatches apart).
+                spacing: 3px;
+                alignment: start;
                 Swatch { hue: #e5484d; picked => { root.recolor(0); root.close(); } }
                 Swatch { hue: #f5a623; picked => { root.recolor(1); root.close(); } }
                 Swatch { hue: #30a46c; picked => { root.recolor(2); root.close(); } }
@@ -265,8 +270,11 @@ component ProjectRow inherits Rectangle {
                     width: 20px;
                     Text {
                         text: root.expanded ? "▾" : "▸";
-                        color: cta.has-hover ? Theme.text : Theme.subtext;
-                        font-size: 11px;
+                        // visible by default (was a dim 11px Theme.subtext): bright, larger,
+                        // bold; the accent on hover makes the toggle target obvious.
+                        color: cta.has-hover ? Theme.accent : Theme.text;
+                        font-size: 13px;
+                        font-weight: 700;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -385,15 +393,22 @@ export component SidebarRail inherits Rectangle {
         return root.projects[root.wt-del-proj].worktrees[root.wt-del-wt].path == root.wt-del-name;
     }
 
-    width: 44px;
+    // Width is driven by the single rail-width binding in app.slint (44px collapsed →
+    // ~280px when `projects-open`); the pane area shrinks to match. Internal layout reads
+    // `root.width` so the icon column anchors to the right edge and the projects section
+    // fills the space to its left.
     background: Theme.mantle;
+
+    // The fixed-width icon column on the RIGHT edge. The projects section (when open)
+    // occupies everything to the left of this.
+    property <length> rail-icons-w: 44px;
 
     // left hairline against the pane area
     Rectangle { x: 0; width: 1px; height: 100%; background: Theme.border; }
 
     // ＋ quick-pane
     plus-btn := Rectangle {
-        x: 6px;
+        x: root.width - root.rail-icons-w + 6px;   // anchored to the rail's right edge
         y: 6px;
         width: 32px;
         height: 32px;
@@ -421,7 +436,7 @@ export component SidebarRail inherits Rectangle {
 
     // 📁 projects + count badge
     folder-btn := Rectangle {
-        x: 6px;
+        x: root.width - root.rail-icons-w + 6px;   // anchored to the rail's right edge
         y: 42px;
         width: 32px;
         height: 32px;
@@ -456,23 +471,22 @@ export component SidebarRail inherits Rectangle {
         }
     }
 
-    // ===== projects flyout (opens LEFTWARD, over the pane area) =====
+    // ===== projects section (IN-RAIL — fills the widened rail to the LEFT of the icons) =====
+    // The rail's width (in app.slint) grows when `projects-open`, and this section fills
+    // everything left of the fixed icon column. No scrim / shadow / float — it's part of
+    // the rail, so the pane area to its left simply shrinks.
     if root.projects-open : Rectangle {
-        x: -296px;                  // 284 wide + a 12px gap, to the left of the 44px rail
-        y: 6px;
-        width: 284px;
-        height: min(root.height - 12px, 480px);
-        background: Theme.surface;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Theme.border;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: Theme.scrim;
-        drop-shadow-offset-x: -6px;
-        drop-shadow-offset-y: 8px;
+        x: 0;
+        y: 0;
+        width: root.width - root.rail-icons-w;
+        height: root.height;
+        background: Theme.mantle;
         clip: true;
-        // eat stray clicks so they don't fall through to a pane behind the flyout
+        // eat stray clicks so they don't fall through to a pane behind the section
         TouchArea {}
+
+        // divider hairline separating the projects section from the icon column
+        Rectangle { x: parent.width - 1px; width: 1px; height: 100%; background: Theme.border; }
 
         VerticalLayout {
             padding: 8px;
@@ -532,9 +546,11 @@ export component SidebarRail inherits Rectangle {
     // the left with a scrim and a centered card. A FocusScope grabs focus on appear so
     // Esc=Cancel / Enter=Confirm work without any app-level key wiring.
     if root.wt-del-visible : Rectangle {
-        // span far to the left over the panes (the rail is at the window's right edge).
+        // span far to the left over the panes AND across the full (possibly widened) rail
+        // so the scrim covers the open projects section too (the rail is at the window's
+        // right edge).
         x: -2000px;
-        width: 2044px;
+        width: root.width + 2000px;
         y: 0;
         height: root.height;
 
