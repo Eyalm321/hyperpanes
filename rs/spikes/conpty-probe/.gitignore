@@ -1,0 +1,3 @@
+# Downloaded Microsoft.Windows.Console.ConPTY redistributable (binaries; re-fetch with:
+# Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Windows.Console.ConPTY/1.24.260512001)
+/redist/

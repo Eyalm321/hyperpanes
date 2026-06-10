@@ -13,8 +13,10 @@
 //! sideloaded pair (or not) to A/B the in-box vs redistributable conhost.
 //!
 //! Usage:
-//!   conpty-probe <path-to-throughput.mjs> [case] [bytesMB] [cols] [rows]
+//!   conpty-probe <path-to-throughput.mjs> [case] [bytesMB] [cols] [rows] [cols2] [rows2]
 //! Defaults: case=scrolling-region bytesMB=4 cols=120 rows=30
+//! If cols2/rows2 are given, the pty is resized to that size ~500ms after spawn
+//! (mimicking how a real app spawns at a default grid then resizes to the pane).
 
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +36,13 @@ fn main() {
     let bytes_mb: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cols: u16 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(120);
     let rows: u16 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30);
+    let resize_to: Option<(u16, u16)> = match (
+        args.get(6).and_then(|s| s.parse().ok()),
+        args.get(7).and_then(|s| s.parse().ok()),
+    ) {
+        (Some(c), Some(r)) => Some((c, r)),
+        _ => None,
+    };
 
     // Report which conpty.dll / OpenConsole.exe sit next to us (what load_conpty picks).
     if let Ok(exe) = std::env::current_exe() {
@@ -83,17 +92,31 @@ fn main() {
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().expect("reader");
+    let mut writer = pair.master.take_writer().expect("writer");
     let total_read = Arc::new(AtomicU64::new(0));
     let tr = Arc::clone(&total_read);
 
     let start = Instant::now();
     let reader_handle = thread::spawn(move || {
         let mut buf = [0u8; 65536];
+        let mut answered = false;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     tr.fetch_add(n as u64, Ordering::Relaxed);
+                    // ConPTY (INHERIT_CURSOR) queries the terminal's cursor position
+                    // (ESC[6n) and emits NOTHING until it gets a reply. A real terminal
+                    // answers automatically; a raw byte-counting client must answer too,
+                    // or the probe sits at 0 bytes forever (this was the "headless
+                    // limitation" — it has nothing to do with console windows).
+                    if !answered && buf[..n].windows(4).any(|w| w == b"\x1b[6n") {
+                        use std::io::Write;
+                        let _ = writer.write_all(b"\x1b[1;1R");
+                        let _ = writer.flush();
+                        answered = true;
+                        eprintln!("[probe] answered ConPTY cursor-position query (ESC[6n -> ESC[1;1R])");
+                    }
                 }
                 Err(_) => break,
             }
@@ -118,11 +141,24 @@ fn main() {
         });
     }
 
+    // Optional mid-run resize: real apps spawn at a default grid then resize to the
+    // pane; this tests whether ResizePseudoConsole re-triggers the repaint path.
+    if let Some((c2, r2)) = resize_to {
+        thread::sleep(std::time::Duration::from_millis(500));
+        match pair.master.resize(PtySize { rows: r2, cols: c2, pixel_width: 0, pixel_height: 0 }) {
+            Ok(()) => eprintln!("[probe] resized pty {cols}x{rows} -> {c2}x{r2} at t=0.5s"),
+            Err(e) => eprintln!("[probe] resize FAILED: {e}"),
+        }
+    }
+
     let status = child.wait().expect("wait");
     let elapsed = start.elapsed();
-    // Give the reader a moment to drain the tail then stop waiting on it.
-    let _ = reader_handle.join();
+    // Drain the tail, then close the pty (drop → ClosePseudoConsole) BEFORE joining:
+    // conhost keeps the output pipe open until the pseudoconsole is closed, so
+    // joining first deadlocks waiting for an EOF that never comes.
+    thread::sleep(std::time::Duration::from_millis(750));
     drop(pair.master);
+    let _ = reader_handle.join();
 
     let secs = elapsed.as_secs_f64();
     let read = total_read.load(Ordering::Relaxed);

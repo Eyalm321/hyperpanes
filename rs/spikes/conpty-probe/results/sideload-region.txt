@@ -1,0 +1,10 @@
+---- conpty-probe result ----
+case                : scrolling-region
+grid                : 120x30
+node exit           : true
+wall time           : 3.521 s
+payload (node wrote): 8.00 MB
+master  (we read)   : 8.00 MB
+node INPUT rate     : 2.27 MB/s   <- what the bench calls 'MB/s'
+master OUTPUT rate  : 2.27 MB/s
+INFLATION factor    : 1.0x   (master bytes / payload bytes)

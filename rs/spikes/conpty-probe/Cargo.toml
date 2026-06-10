@@ -10,6 +10,12 @@ publish = false
 [dependencies]
 portable-pty = "0.9"
 
+# A/B experiment: locally patched portable-pty that passes
+# PSEUDOCONSOLE_PASSTHROUGH_MODE (0x8) when PORTABLE_PTY_CONPTY_PASSTHROUGH is
+# set. Comment this block out to build against the unpatched crates.io version.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }
+
 [[bin]]
 name = "conpty-probe"
 path = "src/main.rs"

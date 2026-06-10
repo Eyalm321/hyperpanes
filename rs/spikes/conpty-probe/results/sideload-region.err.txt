@@ -1,0 +1,9 @@
+[probe] exe dir: C:\hyperpanes\rs\spikes\conpty-probe\target\release
+[probe] sideloaded conpty.dll present: true | OpenConsole.exe present: true
+[probe] case=scrolling-region payloadMB=8 grid=120x30 — spawning node…
+[probe] node: C:\nvm4w\nodejs\node.exe
+[probe] answered ConPTY cursor-position query (ESC[6n -> ESC[1;1R])
+[probe] t=1.0s master_read=0.00 MB (0.00 MB/s)  inflation~0.0x
+[probe] t=2.0s master_read=0.00 MB (0.00 MB/s)  inflation~0.0x
+[probe] t=3.0s master_read=0.00 MB (0.00 MB/s)  inflation~0.0x
+[probe] t=4.1s master_read=8.00 MB (1.97 MB/s)  inflation~1.0x

@@ -18,16 +18,18 @@
 //! Run it explicitly with:
 //! `cargo test --manifest-path rs/Cargo.toml -p hyperpanes-core session::pty -- --ignored --nocapture`
 //!
-//! ### Environment note (verified 2026-06-07)
-//! On a sandboxed / non-interactive Windows session (e.g. a headless service host),
-//! ConPTY hands back its initial cursor-position query (`ESC [ 6 n`) but the child's
-//! scraped screen output never flows — a bare `portable-pty` example reproduces this
-//! identically, so it is a property of the host's pseudo-console, NOT this code. The
-//! smoke tests are written to pass on a real interactive Windows desktop (and on a
-//! POSIX host); they are `#[ignore]`d so CI/default `cargo test` stays green and never
-//! depends on a live pseudo-console. The session engine's own logic is covered
-//! deterministically by the `session_manager` pipeline + mock-pty tests, which need no
-//! pty at all.
+//! ### Environment note (verified 2026-06-07; root-caused 2026-06-09)
+//! ConPTY (spawned with `PSUEDOCONSOLE_INHERIT_CURSOR`, as portable-pty does) sends an
+//! initial cursor-position query (`ESC [ 6 n`) to the master and emits NOTHING until
+//! the terminal replies with a cursor position report (`ESC [ row ; col R`). A real
+//! terminal answers automatically, which is why panes work; a raw test harness that
+//! only reads will wait forever — in any session, interactive or not (this was
+//! misdiagnosed as a headless-session property). A harness that answers the query
+//! streams fine even in a sandboxed session — see `rs/spikes/conpty-probe`, which does
+//! exactly that (and note: drop the master BEFORE joining a reader thread, or the
+//! reader never sees EOF). The `#[ignore]`d smoke tests could be made headless-capable
+//! the same way. The session engine's own logic is covered deterministically by the
+//! `session_manager` pipeline + mock-pty tests, which need no pty at all.
 
 use std::io::{self, Read, Write};
 use std::sync::Mutex;

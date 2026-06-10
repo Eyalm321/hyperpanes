@@ -1,0 +1,24 @@
+[probe] exe dir: C:\hyperpanes\rs\spikes\conpty-probe\target\release
+[probe] sideloaded conpty.dll present: true | OpenConsole.exe present: true
+[probe] case=scrolling-region payloadMB=2 grid=120x30 — spawning node…
+[probe] node: C:\nvm4w\nodejs\node.exe
+[probe] answered ConPTY cursor-position query (ESC[6n -> ESC[1;1R])
+[probe] t=1.0s master_read=0.00 MB (0.00 MB/s)  inflation~0.0x
+[probe] t=2.0s master_read=0.00 MB (0.00 MB/s)  inflation~0.0x
+[probe] t=3.0s master_read=0.00 MB (0.00 MB/s)  inflation~0.0x
+[probe] t=4.0s master_read=1.41 MB (0.35 MB/s)  inflation~0.7x
+[probe] t=5.0s master_read=2.07 MB (0.41 MB/s)  inflation~1.0x
+[probe] t=6.0s master_read=2.07 MB (0.34 MB/s)  inflation~1.0x
+[probe] t=7.0s master_read=2.07 MB (0.30 MB/s)  inflation~1.0x
+[probe] t=8.0s master_read=2.07 MB (0.26 MB/s)  inflation~1.0x
+[probe] t=9.0s master_read=2.07 MB (0.23 MB/s)  inflation~1.0x
+---- conpty-probe result ----
+case                : scrolling-region
+grid                : 120x30
+node exit           : true
+wall time           : 8.379 s
+payload (node wrote): 2.00 MB
+master  (we read)   : 2.07 MB
+node INPUT rate     : 0.24 MB/s   <- what the bench calls 'MB/s'
+master OUTPUT rate  : 0.25 MB/s
+INFLATION factor    : 1.0x   (master bytes / payload bytes)

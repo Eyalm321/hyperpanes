@@ -1,5 +1,11 @@
 # ConPTY scroll-region throughput investigation
 
+> **⚠ 2026-06-09 addendum at the bottom partially corrects this doc.** The standalone probe now
+> works headless (the old "0 bytes" limitation was the INHERIT_CURSOR `ESC[6n` handshake, not a
+> missing console window), the 0x8 passthrough flag is now **measured** a no-op (not inferred),
+> and — important correction — the sideloaded 1.24 host does **NOT** repaint the scroll region
+> (1.0× inflation); what it doesn't fix is end-to-end delivery pacing. See §Addendum.
+
 **Question:** hyperpanes' `scrolling-region` (DECSTBM) terminal throughput is ~0.4 MB/s vs
 Windows Terminal's ~33 MB/s (~80×). Is it fixable, how, and at what cost?
 
@@ -192,3 +198,77 @@ A fork buys nothing here. High effort, ~0 gain on the metric. **Rejected.**
 - [wezterm#7774 — bundle the redistributable ConPTY pair](https://github.com/wezterm/wezterm/issues/7774)
 - [microsoft/terminal discussion#17608 — distributing conhost fixes / ConPTY NuGet](https://github.com/microsoft/terminal/discussions/17608)
 - `Microsoft.Windows.Console.ConPTY` NuGet (latest stable 1.24.260512001)
+
+---
+
+## Addendum 2026-06-09 — standalone probe verification (corrects parts of the above)
+
+The probe was made to work headless, the 0x8 flag was actually tested via a locally patched
+portable-pty, and the in-box vs 1.24 comparison was re-run at the probe level with the host
+identity proven. Three findings **correct** earlier sections; the headline (in-box conhost is
+the bottleneck and it is not app-fixable) stands.
+
+### A. The "headless probe reads 0 bytes" limitation is SOLVED — it was the `ESC[6n` handshake
+portable-pty passes `PSUEDOCONSOLE_INHERIT_CURSOR`, so the pseudoconsole host starts by sending
+a cursor-position query (`ESC[6n`) to the *master* and **emits nothing until the terminal
+replies**. A real terminal answers automatically; a raw byte-counting client never does, so the
+probe sat at 0 bytes forever — in *any* session. It had nothing to do with console windows or
+interactivity (a minimized real-console run also read 0 bytes; the host process
+`conhost.exe --headless --inheritcursor` was alive the whole time). The probe now replies
+`ESC[1;1R` when it sees the query and **runs fine in a fully sandboxed agent session**. The
+same handshake explains `pty.rs`'s environment note (the ignored smoke tests could answer the
+query and run headless). A second probe bug was fixed while here: it joined the reader thread
+before dropping the master, deadlocking on an EOF that only arrives after `ClosePseudoConsole`.
+
+### B. The 0x8 passthrough flag is now MEASURED a no-op (Option A upgraded from inference)
+We vendored portable-pty 0.9.0 into the spike (`vendor/portable-pty`, wired via
+`[patch.crates-io]`) and made it OR in `PSEUDOCONSOLE_PASSTHROUGH_MODE` (0x8) when
+`PORTABLE_PTY_CONPTY_PASSTHROUGH` is set. Result: byte-identical behavior with and without the
+flag on **both** hosts (in-box: 40.72 MB master / 20.4× either way; 1.24: 8.00 MB / 1.0× either
+way). The flag does nothing; the fork question is settled empirically.
+
+### C. CORRECTION — the 1.24 host does NOT repaint the scroll region; its problem is pacing
+§1/§3-Option-B's "the newest ConPTY does NOT fix the DECSTBM repaint" conflated two things.
+Probe-level truth (host identity proven mid-run: child is `OpenConsole.exe 1.24.2605.12001`):
+
+| host (probe, 2026-06-09) | case | grid | child-side MB/s | master bytes | inflation |
+| --- | --- | --- | ---: | ---: | ---: |
+| in-box conhost 26100 | region `1;20r` | 120×30 | 1.20 | 40.72 MB (2 MB in) | **20.4×** |
+| in-box | region `1;20r` | 120×40 | 0.72 | 80.27 MB (2 MB in) | **40.1×** |
+| in-box | region `1;20r`, grid 10 rows (invalid → ignored) | 120×10 | 7.60 | 2.00 MB | 1.0× |
+| in-box | no region | 120×30 | 6.19 | 2.00 MB | 1.0× |
+| in-box | region + 0x8 | 120×30 | 1.22 | 40.72 MB | 20.4× |
+| sideloaded 1.24 | region | 120×30 | 2.27* | 8.00 MB (8 MB in) | **1.0×** |
+| sideloaded 1.24 | no region | 120×30 | 2.46* | 8.00 MB | 1.0× |
+| sideloaded 1.24 | region + 0x8 | 120×30 | 2.33* | 8.00 MB | 1.0× |
+| sideloaded 1.24 | region + mid-run resize 80×24→120×30 | — | 2.32* | 8.00 MB | 1.0× |
+
+\* 1.24 rates are not backpressure-meaningful: the 1.24 host **buffers the raw VT unboundedly
+and defers flushing while the child streams** — a phased workload proved bytes arrive when the
+child *pauses* (flush-on-idle), so under sustained output the consumer sees nothing until the
+stream lulls. That, not repaint inflation, is the 1.24-era pathology, and it is consistent with
+the GUI bench measuring no end-to-end win from the sideload (§3 Option B's 0.2→0.3 MB/s result
+stands; its *explanation* — "repaint not fixed" — was wrong).
+
+### D. The unified model (reconciles probe and app numbers exactly)
+In-box conhost generates repaint VT at a roughly constant **~25–29 MB/s** ceiling; the child is
+backpressured to `ceiling ÷ inflation`, and inflation ≈ rows repainted per scrolled line:
+- 120×30 → 20.4× → 24.5/20.4 = **1.20 MB/s** (measured 1.20)
+- 120×40 → 40.1× → 29.05/40.1 = **0.72 MB/s** (measured 0.72)
+- app pane (Track H) → ~70× → 28/70 = **0.4 MB/s** (measured 0.4)
+
+This also *strengthens* Option C (shrink the pty grid): inflation tracked total grid rows in the
+40-row run, so keeping panes' pty rows minimal directly raises the child's MB/s.
+
+### E. Upstream-facing conclusions (for the microsoft/terminal#7019 contribution)
+1. The default in-box conhost — what every ConPTY app gets without sideloading — still has the
+   #7019 pathology on Win11 26100, freshly measured, with a clean headless repro (inflation ≈
+   rows repainted; negative control: invalid region → 1.0×).
+2. Do **not** claim "1.24 still repaints" — it doesn't (1.0× measured). The accurate asks are
+   (a) service the fix into the in-box host, and (b) the 1.24 host's deferred flush-on-idle
+   under sustained output deserves its own look.
+3. 0x8 is measured irrelevant on both hosts; no portable-pty change is warranted (the local
+   vendored patch exists only to prove this).
+
+Probe runs live in `rs/spikes/conpty-probe/results/`; the phased workload is
+`rs/spikes/conpty-probe/phases.mjs`.
