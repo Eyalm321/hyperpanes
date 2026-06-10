@@ -32,10 +32,10 @@
 //! `session_manager` pipeline + mock-pty tests, which need no pty at all.
 
 use std::io::{self, Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use super::spawn::EnvMap;
 
@@ -73,10 +73,11 @@ pub trait Pty: Send + Sync {
     fn kill(&self) -> io::Result<()>;
 }
 
-/// `portable-pty` (conpty) implementation of [`Pty`].
+/// `portable-pty` (conpty) implementation of [`Pty`]. The writer is `Arc`-shared with
+/// the reader thread, which answers ConPTY's startup cursor query (see [`spawn_pty`]).
 struct PortablePty {
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
 }
 
@@ -98,6 +99,19 @@ impl Pty for PortablePty {
     fn kill(&self) -> io::Result<()> {
         self.killer.lock().unwrap().kill()
     }
+}
+
+/// Length of the longest suffix of `data` that is a strict prefix of one of the conpty
+/// startup queries (`ESC[6n` / `ESC[c`) — bytes the handshake scanner must carry to the
+/// next read so a query split across chunk boundaries is still matched.
+fn query_prefix_suffix_len(data: &[u8]) -> usize {
+    for keep in (1..=3usize.min(data.len())).rev() {
+        let tail = &data[data.len() - keep..];
+        if b"\x1b[6n".starts_with(tail) || b"\x1b[c".starts_with(tail) {
+            return keep;
+        }
+    }
+    0
 }
 
 /// Spawn a pty running `spec`, delivering output and exit via `on_event`. The returned
@@ -129,53 +143,136 @@ pub fn spawn_pty(
         cmd.env(k, v);
     }
 
-    // ⚠ On Windows this CreateProcessW-into-ConPTY can block ~1s for SOME shells (pwsh 7
-    // measured 1.0-1.1s every time; cmd/powershell5/node are 8-65ms; raw CreateProcessW
-    // of pwsh without a pseudoconsole is ~5ms warm). Callers that care about latency
-    // must not run spawn on a UI/startup-critical thread — the app spawns panes on a
-    // worker thread for exactly this reason.
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    // A killer cloned out before the child moves into the reader thread, so kill()
-    // can signal independently of the thread blocked in `wait()`.
-    let killer = child.clone_killer();
-
     let mut reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| io::Error::other(e.to_string()))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+        pair.master
+            .take_writer()
+            .map_err(|e| io::Error::other(e.to_string()))?,
+    ));
 
-    // Reader thread: drain output, then reap the child for its exit code. Dropping
-    // `pair.slave` here (it's not moved in) closes the slave handle so the reader sees
-    // EOF when the child exits.
-    drop(pair.slave);
+    // The reader thread starts BEFORE the child is spawned, and answers ConPTY's startup
+    // cursor query inline. With `PSUEDOCONSOLE_INHERIT_CURSOR` (portable-pty's hardcoded
+    // flags), the pseudoconsole host asks the terminal for the cursor position (`ESC[6n`)
+    // and stalls the whole console session — including, for some shells, the parent's
+    // `CreateProcessW` (pwsh 7: 1.0–1.1s, its handshake timeout) and the child's first
+    // instruction (cmd: ran only at ~1.1s after launch) — until a reply arrives. The GUI
+    // widget does answer DSR queries, but only once the render pump is alive, which is
+    // hundreds of ms after spawn (and at startup the window doesn't even exist yet). So
+    // the FIRST `ESC[6n` is answered right here with `ESC[1;1R` and STRIPPED from the
+    // stream (the widget must not see it, or its late duplicate reply would reach the
+    // shell as stray input). Windows-only: on POSIX there is no host handshake, and an
+    // early `ESC[6n` is a real child query the widget must answer with the true cursor.
+    // Later queries pass through untouched. The child handle arrives over a channel once
+    // spawned; the thread reaps it for the exit code at EOF.
+    let (child_tx, child_rx) = std::sync::mpsc::channel::<Box<dyn Child + Send + Sync>>();
+    let handshake_writer = Arc::clone(&writer);
     thread::Builder::new()
         .name("hp-pty-reader".into())
         .spawn(move || {
             let mut buf = [0u8; 65536];
+            // Startup queries the host gates on: DSR (`ESC[6n`, cursor position) and DA1
+            // (`ESC[c`, device attributes). The 1.24 redistributable host asks BOTH and
+            // stalls the console session ~1.1s per unanswered query (its timeout); in-box
+            // conhost asks only DSR. Answers are written here, the query bytes are
+            // STRIPPED (so the GUI widget can't send a late duplicate reply that would
+            // reach the shell as stray input), and everything else forwards immediately —
+            // only a ≤3-byte possible-query-prefix is carried across chunk boundaries.
+            // Scanning stops once both are answered or after the first 512 bytes (the
+            // handshake is always at the very front of the stream).
+            let mut want_dsr = cfg!(windows);
+            let mut want_da = cfg!(windows);
+            let mut scanned: usize = 0;
+            let mut carry: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF — slave closed
-                    Ok(n) => on_event(PtyEvent::Data(buf[..n].to_vec())),
+                    Ok(0) => break, // EOF — pseudoconsole closed
+                    Ok(n) => {
+                        if want_dsr || want_da {
+                            let mut data = std::mem::take(&mut carry);
+                            data.extend_from_slice(&buf[..n]);
+                            if want_dsr {
+                                if let Some(pos) =
+                                    data.windows(4).position(|w| w == b"\x1b[6n")
+                                {
+                                    if let Ok(mut w) = handshake_writer.lock() {
+                                        let _ = w.write_all(b"\x1b[1;1R");
+                                        let _ = w.flush();
+                                    }
+                                    want_dsr = false;
+                                    data.drain(pos..pos + 4);
+                                }
+                            }
+                            if want_da {
+                                if let Some(pos) =
+                                    data.windows(3).position(|w| w == b"\x1b[c")
+                                {
+                                    if let Ok(mut w) = handshake_writer.lock() {
+                                        // VT102 device attributes — the same class of
+                                        // answer the GUI grid gives to later DA queries.
+                                        let _ = w.write_all(b"\x1b[?6c");
+                                        let _ = w.flush();
+                                    }
+                                    want_da = false;
+                                    data.drain(pos..pos + 3);
+                                }
+                            }
+                            scanned += data.len();
+                            if scanned > 512 {
+                                want_dsr = false;
+                                want_da = false;
+                            } else if want_dsr || want_da {
+                                // Hold back a trailing run that could be the start of a
+                                // query split across reads (a suffix of "\x1b[6n"/"\x1b[c").
+                                let keep = query_prefix_suffix_len(&data);
+                                if keep > 0 {
+                                    carry = data.split_off(data.len() - keep);
+                                }
+                            }
+                            if !data.is_empty() {
+                                on_event(PtyEvent::Data(data));
+                            }
+                            continue;
+                        }
+                        on_event(PtyEvent::Data(buf[..n].to_vec()));
+                    }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
             }
-            let code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
-            on_event(PtyEvent::Exit(code));
+            if !carry.is_empty() {
+                on_event(PtyEvent::Data(std::mem::take(&mut carry)));
+            }
+            // `recv` fails only if spawn_command failed (sender dropped) — no child, no Exit.
+            if let Ok(mut child) = child_rx.recv() {
+                let code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
+                on_event(PtyEvent::Exit(code));
+            }
         })
         .map_err(|e| io::Error::other(e.to_string()))?;
 
+    // With the handshake answered concurrently by the reader thread, this no longer
+    // stalls for shells that wait on the console connection during process creation.
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // A killer cloned out before the child moves to the reader thread, so kill()
+    // can signal independently of the thread blocked in `wait()`.
+    let mut child = child;
+    let killer = child.clone_killer();
+    let _ = child_tx.send(child);
+
+    // Dropping `pair.slave` closes the slave handle so the reader sees EOF when the
+    // child exits.
+    drop(pair.slave);
+
     Ok(Box::new(PortablePty {
         master: Mutex::new(pair.master),
-        writer: Mutex::new(writer),
+        writer,
         killer: Mutex::new(killer),
     }))
 }

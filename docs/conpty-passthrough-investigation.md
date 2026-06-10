@@ -317,12 +317,40 @@ entire cost is `CreateProcessW` into the pseudoconsole for **pwsh 7 specifically
 | node.exe | 65 ms |
 | pwsh 7 raw CreateProcessW, NO pseudoconsole (warm) | 2–6 ms |
 
-The stall needs both pwsh 7 AND the pseudoconsole attribute; host version doesn't matter
-(reproduced on the bundled 1.24). Root cause inside Windows/pwsh is unidentified (candidate for
-its own upstream report). **Fix shipped:** `State::spawn_session_async` moves `mgr.create` to a
+~~The stall needs both pwsh 7 AND the pseudoconsole attribute; host version doesn't matter.~~
+**Corrected in §H — the per-shell attribution was wrong; the gate is the HOST's unanswered
+startup queries** (every measurement above ran with the bundled 1.24 pair deployed). The async
+spawn fix here remains correct and shipped: `State::spawn_session_async` moves `mgr.create` to a
 worker thread for all pane creation (seed, splits, restores — restores now spawn in parallel),
 with a `spawn_done` queue drained by `App::tick` that re-applies geometry (a resize during the
 spawn window would otherwise be silently lost) and kills sessions whose pane closed mid-spawn.
-Result: window-ready 1789→545 ms (profile), bench startup **2121→1219 ms**; splits no longer
-freeze the UI for ~1s when the default shell is pwsh. Remaining startup gap to WT is wgpu device
-init (~520 ms) + the post-window first-pump path.
+Result at this stage: window-ready 1789→545 ms (profile), bench startup 2121→1219 ms.
+
+### H. 2026-06-10 — the real spawn gate: the host's startup queries must be ANSWERED (startup 142 ms, beats WT)
+Wire-dumping the master stream killed §G's pwsh theory. On attach, the pseudoconsole host sends
+startup queries to the terminal and **stalls the console session ~1.1 s per unanswered query**
+(its timeout) — stalling some shells inside `CreateProcessW` (pwsh 7's console-heavy init) and
+others at their first console call (cmd ran its first instruction at ~1.2 s):
+
+- in-box conhost asks `ESC[6n` (DSR, INHERIT_CURSOR's cursor query) — the same query that froze
+  the headless probe (§A);
+- **OpenConsole 1.24 asks `ESC[6n` AND `ESC[c` (DA1, device attributes)**, then `ESC[?1004h` +
+  `ESC[?9001h`. Answering only the DSR moves nothing: the host ACKs it (`ESC[1;1H`) and then
+  sits on the unanswered DA1 until t≈1.17 s.
+
+The GUI widget does answer DSR/DA (`take_replies`) but only once the render pump feeds it —
+hundreds of ms after spawn, and at startup the window doesn't exist yet. Eliminated empirically
+along the way: exe PATH search (full-path pwsh identical), the custom env block (inheriting
+changed nothing), and RESIZE_QUIRK (an immediate post-spawn resize changed nothing).
+
+**Fix (core, `session/pty.rs`):** the pty reader thread now starts BEFORE `spawn_command` and
+answers the handshake inline — `ESC[6n` → `ESC[1;1R`, `ESC[c` → `ESC[?6c` — stripping the query
+bytes so the widget can't send a late duplicate reply that would reach the shell as stray input.
+Scanning is bounded (first 512 bytes, ≤3-byte cross-chunk carry, Windows-only) so child output
+is never delayed and a child's own later queries still reach the widget for true-cursor answers.
+
+**Measured (child-runs-at, app launch → first child instruction):** bundled 1.24 host
+1231→**78 ms**; in-box 86 ms. Bench startup (3-run): hyperpanes **142 ms** vs WT 313 vs
+Alacritty 517 — from 2121 ms two days of fixes ago, and now the fastest of the three. pwsh's
+`CreateProcessW` no longer stalls (same handshake gate). The window itself appears at ~540 ms
+(wgpu device init — the only remaining startup block); the shell is already live behind it.
