@@ -413,6 +413,20 @@ impl App {
                     found = true;
                     break;
                 }
+                // A session can also be ALIVE without a laid-out pane: parked as a reminder
+                // (Track F) or on the reopenable closed-tab stack. Neither has a grid to
+                // re-apply, but killing it as "closed mid-spawn" would silently dead-shell
+                // the pane when it's later restored/reopened (hit live by parking a pane
+                // within ~1s of its spawn).
+                if st.reminders.iter().any(|r| r.pane.uid == uid)
+                    || st
+                        .closed_tabs
+                        .iter()
+                        .any(|t| t.panes.iter().any(|p| p.uid == uid))
+                {
+                    found = true;
+                    break;
+                }
             }
             if !found {
                 self.mgr.kill(&uid);
@@ -801,6 +815,22 @@ impl App {
                                 dispatch(st, Command::NewPane, &self.mgr);
                                 dispatch(st, Command::NewPane, &self.mgr);
                                 dispatch(st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
+                            }
+                            // Track F smoke/screenshot scaffold: a second pane parked as a
+                            // reminder due in ~10s (debug-only fast offset so the fired/
+                            // overdue state is observable), with the bell list open.
+                            "reminders" => {
+                                dispatch(st, Command::NewPane, &self.mgr);
+                                dispatch(
+                                    st,
+                                    Command::RemindPane(0, crate::state::ReminderOffset::Min15),
+                                    &self.mgr,
+                                );
+                                if let Some(r) = st.reminders.last_mut() {
+                                    r.due_ms = crate::glow::now_epoch_ms() + 10_000;
+                                    r.due_label = "in 10s".into();
+                                }
+                                dispatch(st, Command::ToggleReminders, &self.mgr);
                             }
                             // taskbar + its right-click pane menu (inTaskbar variant: Show + no Maximize).
                             "taskbarmenu" => {
