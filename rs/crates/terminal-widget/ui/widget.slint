@@ -115,10 +115,11 @@ export component TerminalPane inherits Rectangle {
     // Indicator scale relative to the 14px base font (1.0 at default zoom).
     property <float> ind-scale: root.term-font-px / 14px;
 
-    // Whether Ctrl/Cmd is currently held — tracked from the focused pane's key stream (Slint's
-    // TouchArea `moved` carries no modifiers, so a hover can't read them directly). Drives the
-    // link tooltip's hint, which emphasizes "Ctrl+click to copy" while Ctrl is down. Reset on
-    // focus loss so a Ctrl-held-then-blur can't leave it stuck on.
+    // Whether Ctrl/Cmd is currently held — synced from every move pointer-event's modifier
+    // state (so it works even when this pane isn't focused) plus the focused pane's key stream
+    // (which covers a Ctrl press while the mouse is stationary). Drives the link tooltip's
+    // hint, which emphasizes "Ctrl+click to copy" while Ctrl is down. Reset on focus loss so
+    // a Ctrl-held-then-blur can't leave it stuck on.
     property <bool> ctrl-held: false;
 
     // --- in-pane search (Ctrl+F): the box anchored top-right + the match highlights ---
@@ -220,18 +221,24 @@ export component TerminalPane inherits Rectangle {
     // I-beam, since the surface is selectable text.
     ta := TouchArea {
         mouse-cursor: root.link-visible ? pointer : text;
-        moved => {
-            // While the button is held, a move is a selection drag; otherwise it's a hover.
-            if (self.pressed) {
-                root.selection-update(self.mouse-x, self.mouse-y);
-            } else {
-                root.link-moved(self.mouse-x, self.mouse-y);
-            }
-        }
         changed has-hover => {
             if (!self.has-hover) { root.link-exited(); }
         }
         pointer-event(e) => {
+            if (e.kind == PointerEventKind.move) {
+                // Hover tracking MUST ride the move pointer-events: TouchArea's `moved`
+                // callback only fires while the mouse is grabbed (a button held), so a bare
+                // hover never reaches it — routing the link hit-test through `moved` left the
+                // pointer cursor / underline / tooltip dead in the live app.
+                // Move events also carry the live modifier state, which keys can't provide
+                // when this pane isn't focused — sync the Ctrl-hover hint from it.
+                root.ctrl-held = e.modifiers.control || e.modifiers.meta;
+                if (self.pressed) {
+                    root.selection-update(self.mouse-x, self.mouse-y);
+                } else {
+                    root.link-moved(self.mouse-x, self.mouse-y);
+                }
+            }
             if (e.kind == PointerEventKind.down) {
                 // ANY mouse-down focuses the pane (the frozen `focus-requested` contract).
                 root.focus-requested();
