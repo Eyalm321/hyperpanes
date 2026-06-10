@@ -304,6 +304,23 @@ deployed next to the exe by `rs/crates/app/build.rs` (dev) and by `rs/packaging/
 fingerprint: scrolling-region 11.2 MB/s single-run — impossible on the in-box host, so the
 bundled pair demonstrably loads with zero configuration.
 
+### ⚠ §G–§H are a SEPARATE bug from #7019 — do not conflate them
+This investigation surfaced **two independent ConPTY problems**. They share a transport (ConPTY)
+and nothing else:
+
+1. **Scroll-region repaint throughput (#7019 — §1 through §F).** The in-box conhost repaints the
+   whole DECSTBM region on every scrolled line (~20–40× write amplification), crippling *streaming
+   output*. **Fixed in OpenConsole 1.24** (1.0× inflation, measured) — just not serviced into the
+   in-box host. Our app-side fix: bundle the 1.24 redistributable pair (§F).
+2. **Startup-query stall (§G–§H, below).** On attach the ConPTY host emits startup queries
+   (`ESC[6n`, `ESC[c`) and stalls ~1.1 s per *unanswered* query before the shell's first
+   instruction runs. This is a **launch-latency** bug, not a throughput one — and crucially
+   **1.24 does NOT fix it; it makes it slightly worse** (1.24 asks *two* queries, in-box asks one).
+   Our fix lives in *our* core: answer the handshake inline before spawn (§H), 2121 → 142 ms.
+
+So: 1.24 fixes #7019 for us but is irrelevant-to-harmful for startup; the startup win was entirely
+on our side. Sections §G/§H are about #2 only.
+
 ### G. 2026-06-10 — startup: CreateProcessW of pwsh-into-ConPTY blocks ~1s (fixed by async spawn)
 Profiling the 2121 ms bench startup with `HYPERPANES_PERFLOG` + temporary core timings found the
 first pane's `mgr.create` blocking the startup path for **1.0–1.1 s, every launch** — and the
