@@ -119,6 +119,20 @@ export struct WorktreeRow {
     prunable: bool,
 }
 
+// One Claude Code session under a project in the sidebar tree — a row in the collapsible
+// "Claude history" list. `id` is the session id passed to `claude --resume <id>`; `summary`
+// is a one-line description (a `summary` transcript line, else the first user message);
+// `when` is a relative-time label ("2h ago"); `count` is the transcript message count.
+// Built app-side by `sidebar::claude_sessions_for` over `core::claude_history`.
+// Declared before `ProjectItem` because that struct references it (Slint resolves struct
+// types top-to-bottom within a file — no forward references).
+export struct ClaudeSessionItem {
+    id: string,
+    summary: string,
+    when: string,
+    count: int,
+}
+
 // One git-project row in the sidebar panel — now the top level of a two-level tree: the
 // project header plus its enumerated `worktrees` (populated by the controller only while
 // the flyout is open). Expand/collapse is local UI state in the row itself.
@@ -126,18 +140,9 @@ export struct ProjectItem {
     name: string,
     color: color,
     worktrees: [WorktreeRow],
-}
-
-// One Claude Code session under a project in the sidebar tree — a row in the collapsible
-// "Claude history" list. `id` is the session id passed to `claude --resume <id>`; `summary`
-// is a one-line description (a `summary` transcript line, else the first user message);
-// `when` is a relative-time label ("2h ago"); `count` is the transcript message count.
-// Built app-side by `sidebar::claude_sessions_for` over `core::claude_history`.
-export struct ClaudeSessionItem {
-    id: string,
-    summary: string,
-    when: string,
-    count: int,
+    // This project's recent Claude Code sessions (newest-first), populated by the projection
+    // (paneview.rs) from `sidebar::claude_sessions_for`. Empty hides the "Claude history" list.
+    sessions: [ClaudeSessionItem],
 }
 
 // One option in a preferences picker (font family). `active` marks the current value.
