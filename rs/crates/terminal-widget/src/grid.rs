@@ -358,6 +358,13 @@ impl TermGrid {
                     fg = default_bg;
                 }
             }
+            // Faint/dim (SGR 2): blend the glyph colour ~55% toward the cell's effective
+            // background. PSReadLine's inline prediction is the headline user of this.
+            // Applied after INVERSE so dim acts on the colours actually drawn.
+            if flags.contains(Flags::DIM) {
+                let towards = if bg[3] > 0 { bg } else { default_bg };
+                fg = dim_blend(fg, towards);
+            }
             let rc = RenderCell {
                 ch: cell.c,
                 fg,
@@ -391,6 +398,19 @@ impl TermGrid {
             default_fg,
         }
     }
+}
+
+/// SGR 2 (faint/dim) colour: blend `fg` 55% toward `bg` — the common terminal approach
+/// (a heavier blend than 50% so dim text reads clearly quieter than normal text while
+/// staying legible). Alpha is kept opaque; only the hue moves toward the background.
+#[inline]
+fn dim_blend(fg: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
+    const KEEP_NUM: u32 = 45; // keep 45% of fg → 55% toward bg
+    const DEN: u32 = 100;
+    let mix = |f: u8, b: u8| -> u8 {
+        ((f as u32 * KEEP_NUM + b as u32 * (DEN - KEEP_NUM)) / DEN) as u8
+    };
+    [mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2]), 0xff]
 }
 
 /// Tokyo-Night-ish default 16 + the standard xterm 256-colour cube/grayscale.
@@ -587,6 +607,93 @@ mod tests {
         assert_eq!(col0_chars(&g), vec!['b', 'c', ' ', 'd', 'e', 'f']);
         // The scrolled-out 'a' went into scrollback (history grew, viewport still pinned).
         assert!(g.display_offset() == 0);
+    }
+
+    // ---- SGR attribute → RenderCell style mapping (feedback #7: PSReadLine predictions) ----
+
+    #[test]
+    fn sgr_bold_and_italic_set_style_flags() {
+        let mut g = TermGrid::new(20, 4);
+        g.feed(b"\x1b[1mB\x1b[0m\x1b[3mI\x1b[0m\x1b[1;3mZ\x1b[0m");
+        let snap = g.snapshot();
+        assert!(snap.cell(0, 0).bold && !snap.cell(0, 0).italic);
+        assert!(snap.cell(1, 0).italic && !snap.cell(1, 0).bold);
+        assert!(snap.cell(2, 0).bold && snap.cell(2, 0).italic, "SGR 1;3 sets both");
+    }
+
+    #[test]
+    fn sgr_dim_blends_fg_toward_background() {
+        // SGR 2 over the (transparent) default bg: the glyph colour must move toward the
+        // default background — strictly darker than normal text on this dark theme, but
+        // not equal to the bg (still legible).
+        let mut g = TermGrid::new(20, 4);
+        g.feed(b"N \x1b[2mD\x1b[0m");
+        let snap = g.snapshot();
+        let normal = snap.cell(0, 0).fg;
+        let dim = snap.cell(2, 0).fg;
+        assert_eq!(snap.cell(2, 0).ch, 'D');
+        assert_ne!(dim, normal, "dim must change the drawn colour");
+        for i in 0..3 {
+            assert!(
+                dim[i] < normal[i] && dim[i] > snap.default_bg[i],
+                "dim channel {i} must sit between bg and fg (bg={} dim={} fg={})",
+                snap.default_bg[i], dim[i], normal[i]
+            );
+        }
+        // Exactly the documented 45/55 blend.
+        let expect = dim_blend(normal, snap.default_bg);
+        assert_eq!(dim, expect);
+    }
+
+    #[test]
+    fn sgr_dim_blends_toward_explicit_cell_bg() {
+        // Dim over an explicit (non-default) background blends toward THAT bg, not the
+        // pane default. SGR 44 = blue bg, SGR 2 = dim.
+        let mut g = TermGrid::new(20, 4);
+        g.feed(b"\x1b[44;2mX\x1b[0m");
+        let snap = g.snapshot();
+        let c = snap.cell(0, 0);
+        assert!(c.bg[3] > 0, "explicit bg must be opaque");
+        assert_eq!(c.fg, dim_blend(snap.default_fg, c.bg));
+    }
+
+    #[test]
+    fn sgr_dim_and_bold_combine() {
+        // SGR 1;2 — alacritty tracks DIM and BOLD independently; both must survive into
+        // the cell (bold face, dimmed colour).
+        let mut g = TermGrid::new(20, 4);
+        g.feed(b"\x1b[1;2mY\x1b[0m");
+        let snap = g.snapshot();
+        let c = snap.cell(0, 0);
+        assert!(c.bold, "bold flag survives alongside dim");
+        assert_eq!(c.fg, dim_blend(snap.default_fg, snap.default_bg));
+    }
+
+    #[test]
+    fn indexed_256_and_truecolor_foregrounds_resolve() {
+        // PSReadLine's default prediction colour is an indexed dim gray (e.g. 238);
+        // truecolor must pass through verbatim.
+        let mut g = TermGrid::new(20, 4);
+        g.feed(b"\x1b[38;5;238mA\x1b[0m\x1b[38;2;10;200;30mB\x1b[0m");
+        let snap = g.snapshot();
+        // Index 238 is on the grayscale ramp: 8 + (238-232)*10 = 68.
+        assert_eq!(snap.cell(0, 0).fg, [68, 68, 68, 0xff]);
+        assert_eq!(snap.cell(1, 0).fg, [10, 200, 30, 0xff]);
+    }
+
+    #[test]
+    fn psreadline_prediction_style_dim_italic_256gray() {
+        // The exact shape PSReadLine emits for inline predictions: faint + italic + a dim
+        // 256-colour gray, ended with SGR 0.
+        let mut g = TermGrid::new(40, 4);
+        g.feed(b"\x1b[2;3;38;5;238mGet-ChildItem\x1b[0m");
+        let snap = g.snapshot();
+        let c = snap.cell(0, 0);
+        assert_eq!(c.ch, 'G');
+        assert!(c.italic, "prediction renders italic");
+        assert!(!c.bold);
+        let gray = [68u8, 68, 68, 0xff]; // index 238
+        assert_eq!(c.fg, dim_blend(gray, snap.default_bg), "dim applied on top of the 256-colour gray");
     }
 
     #[test]
