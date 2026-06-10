@@ -19,9 +19,10 @@ pub fn resolve_launch_workspace(argv: &[String], cwd: &str) -> Option<WorkspaceF
 }
 
 /// Resolve ONLY an explicitly-requested launch workspace from `argv` — an inline `-c …` flag
-/// set or a positional `.json` — WITHOUT the last-session fallback. The native GUI bootstrap
-/// uses this so a plain `hyperpanes` launch (no args) stays an empty shell pane rather than
-/// silently restoring a saved session. Relative cwds resolve against `cwd`.
+/// set or a positional `.json` — WITHOUT the last-session fallback. The headless core
+/// bootstrap uses this (argv-only); the native GUI uses [`resolve_launch_workspace`] so a
+/// plain relaunch restores the last session (#14 — the GUI writes `last-workspace.json`
+/// when its final window closes). Relative cwds resolve against `cwd`.
 pub fn resolve_cli_workspace(argv: &[String], cwd: &str) -> Option<WorkspaceFile> {
     let parsed = parse_cli(argv);
     if let Some(ws) = parsed.workspace {

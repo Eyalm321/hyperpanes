@@ -53,6 +53,22 @@ const TOPBAR_H: f32 = 32.0;
 /// `paneview.slint`. Used to show the open-hand cursor only over the handle, not the body.
 const HEADER_BAND: f32 = 26.0;
 
+/// Write the final window's live workspace snapshot to `last-workspace.json` — the "last
+/// session" a bare relaunch restores via core's `resolve_launch_workspace` fallback (#14:
+/// this is what carries per-pane zoom, layout, focus and cwds across a plain relaunch).
+/// Best-effort: a failed write must never block quit.
+fn persist_last_session(file: &hyperpanes_core::workspace::model::WorkspaceFile) {
+    use hyperpanes_core::persistence::paths;
+    match serde_json::to_string_pretty(file) {
+        Ok(json) => {
+            if let Err(e) = paths::write_atomic(&paths::last_workspace_json(), json.as_bytes()) {
+                crate::dbg_log(&format!("last-session save failed: {e}"));
+            }
+        }
+        Err(e) => crate::dbg_log(&format!("last-session serialize failed: {e}")),
+    }
+}
+
 /// Sentinel "row" the context-menu click-away catcher hands to `ctx-pick` to request a
 /// right-click *chain* (Task 7): close the open menu and reopen the one under the new cursor
 /// in a single action. `app.slint` is owned by another track and can't gain a dedicated
@@ -510,11 +526,17 @@ impl App {
             }
         }
 
-        // 4. Reap windows that asked to close; quit when the last one goes.
+        // 4. Reap windows that asked to close; quit when the last one goes. Each closing
+        //    window is snapshotted BEFORE its sessions die; the snapshot is only written to
+        //    `last-workspace.json` when it was the final window — so a bare relaunch restores
+        //    the last session (tabs, layout, focus, per-pane zoom — #14) via core's
+        //    `resolve_launch_workspace` fallback.
         if windows.iter().any(|w| w.closing.get()) {
             let mut survivors = Vec::new();
+            let mut last_session = None;
             for w in self.windows.borrow().iter() {
                 if w.closing.get() {
+                    last_session = Some(w.state.borrow().to_session_file());
                     // Tell the AI engine to forget this window's panes, and drop its context sig.
                     self.ai.send(crate::ai::AiMsg::DropWindow { window_id: w.id as i64 });
                     self.ai_ctx_sig.borrow_mut().remove(&w.id);
@@ -529,6 +551,9 @@ impl App {
             }
             *self.windows.borrow_mut() = survivors;
             if self.windows.borrow().is_empty() {
+                if let Some(file) = last_session {
+                    persist_last_session(&file);
+                }
                 let _ = slint::quit_event_loop();
             }
         }

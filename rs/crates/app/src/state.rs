@@ -2864,6 +2864,55 @@ impl State {
         }
     }
 
+    /// Snapshot **every tab** into the persistable file shape — the relaunch-restore
+    /// ("last session") variant of [`Self::to_workspace_file`]. One `GroupSpec` per tab
+    /// (layout + split state + focus/zoom) so a plain relaunch rebuilds the whole window,
+    /// not just the active tab. Two deliberate differences from the save-dialog snapshot:
+    ///   * `color` is recorded only for a PINNED accent (project tint / manual recolor) —
+    ///     a clean slot-coloured pane restores clean instead of becoming a tinted
+    ///     project pane (specs with a color pin their accent on load);
+    ///   * each pane's live `cwd` (shell-integration tracked) is recorded so the
+    ///     restored shell reopens where it was.
+    /// Per-pane zoom (#14): exactly like the workspace path, a pane whose terminal font
+    /// differs from the base size records `font_size`, so zoom survives a plain relaunch.
+    pub fn to_session_file(&self) -> WorkspaceFile {
+        let base = self.settings.font_px.round() as u32;
+        let groups: Vec<GroupSpec> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let panes: Vec<PaneSpec> = t
+                    .panes
+                    .iter()
+                    .map(|p| {
+                        let px = p.font_px.round() as u32;
+                        PaneSpec {
+                            label: Some(p.title.to_string()),
+                            color: p.pinned_accent.map(color_hex),
+                            cwd: p.cwd.clone(),
+                            font_size: (px != base).then_some(px),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                GroupSpec {
+                    title: Some(t.title.to_string()),
+                    layout: Some(theme::layout_name(t.layout).to_string()),
+                    panes,
+                    sizes: Some(t.sizes.clone()),
+                    main_fraction: Some(t.main_fraction),
+                    focused: Some(t.focused as u32),
+                    zoomed: t.zoomed.map(|z| z as u32),
+                }
+            })
+            .collect();
+        WorkspaceFile {
+            groups: Some(groups),
+            active: Some(self.active as u32),
+            ..Default::default()
+        }
+    }
+
     /// "Save workspace…": pick a destination via the native save dialog and write the active
     /// tab's serialized workspace there (versioned `.hyperpanes` container by default; the
     /// reader keeps accepting legacy bare `.json`). No-op if the dialog is cancelled.
@@ -2913,11 +2962,18 @@ impl State {
             return;
         };
         let first_new = self.tabs.len();
+        let saved_active = win.active;
         for g in win.groups {
             self.append_tab_from_group(mgr, g);
         }
         if self.tabs.len() > first_new {
-            self.active = first_new;
+            // Land on the file's saved active tab (clamped to what actually spawned) so a
+            // session restore comes back where it was; absent → the first appended tab.
+            let added = self.tabs.len() - first_new;
+            self.active = first_new
+                + saved_active
+                    .map(|a| (a as usize).min(added - 1))
+                    .unwrap_or(0);
             self.editing_tab = -1;
             self.dirty = true;
         }
@@ -3340,6 +3396,74 @@ mod spawn_cells_tests {
             p.applied = (0, 0);
         }
         assert_eq!(st.spawn_cells(), (2, 1));
+    }
+}
+
+#[cfg(test)]
+mod session_file_tests {
+    //! The relaunch-restore snapshot (#14): `to_session_file` must record every tab with
+    //! its layout/split/focus state and carry per-pane zoom exactly like the workspace
+    //! path (`font_size` only when off the base size).
+    use super::*;
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+
+    fn det(uid: &str, font_px: f32) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px,
+        }
+    }
+
+    #[test]
+    fn zoomed_pane_records_font_size_base_pane_omits_it() {
+        let mut st = fresh();
+        let m = mgr();
+        assert_eq!(st.settings.font_px, prefs::DEFAULT_FONT_PX);
+        st.adopt_pane(&m, det("zoomed", 20.0));
+        st.adopt_pane(&m, det("base", prefs::DEFAULT_FONT_PX));
+        let file = st.to_session_file();
+        let groups = file.groups.expect("one group per tab");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].panes[0].font_size, Some(20), "zoomed pane carries its px");
+        assert_eq!(groups[0].panes[1].font_size, None, "base pane omits font_size");
+    }
+
+    #[test]
+    fn snapshot_records_split_state_focus_cwd_and_active_tab() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a", 14.0));
+        st.adopt_pane(&m, det("b", 14.0));
+        {
+            let t = st.active_tab_mut();
+            t.focused = 1;
+            t.zoomed = Some(1);
+            t.panes[0].cwd = Some("C:/work".into());
+        }
+        let file = st.to_session_file();
+        assert_eq!(file.active, Some(0));
+        let g = &file.groups.unwrap()[0];
+        assert_eq!(g.focused, Some(1));
+        assert_eq!(g.zoomed, Some(1));
+        assert_eq!(g.panes[0].cwd.as_deref(), Some("C:/work"));
+        assert_eq!(g.panes[1].cwd, None);
+        assert_eq!(g.sizes.as_ref().map(|s| s.len()), Some(2));
+        assert!(g.layout.is_some());
+        // An unpinned (slot-coloured) pane restores clean — no color recorded.
+        assert_eq!(g.panes[0].color, None);
     }
 }
 
