@@ -20,7 +20,7 @@
 // self-contained — no new app-level wiring.
 
 import { Theme } from "theme.slint";
-import { ProjectItem, WorktreeRow, ClaudeSessionItem, HistoryUi } from "types.slint";
+import { ProjectItem, WorktreeRow, ClaudeSessionItem, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 
 // "+" quick-pane glyph (two crossed bars — font-independent).
 component PlusGlyph inherits Rectangle {
@@ -599,6 +599,67 @@ component ProjectRow inherits Rectangle {
     }
 }
 
+// ===== reminder panes (Track F) =====
+// One parked pane in the bell's reminder list: color dot + title + due label, with a
+// resume arrow on hover. Clicking anywhere re-docks the pane into the active tab and
+// clears the reminder. An overdue (fired) row gets an accent ring + accent due text.
+component ReminderRowView inherits Rectangle {
+    in property <ReminderItem> rem;
+    callback restore();
+    height: 40px;
+    border-radius: 5px;
+    background: ra.has-hover ? Theme.surface2 : (root.rem.overdue ? Theme.surface : transparent);
+    border-width: root.rem.overdue ? 1px : 0px;
+    border-color: Theme.accent;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 7px;
+
+        // pane tint dot (project color / accent)
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.rem.tint;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.rem.title;
+                color: Theme.text;
+                font-size: 12px;
+                overflow: elide;
+            }
+            Text {
+                text: (root.rem.overdue ? "overdue · " : "due ") + root.rem.due;
+                color: root.rem.overdue ? Theme.accent : Theme.subtext;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        // restore affordance (the same play/resume glyph idiom as the Claude rows)
+        VerticalLayout {
+            alignment: center;
+            ResumeGlyph {
+                ink: ra.has-hover ? Theme.accent : Theme.subtext;
+            }
+        }
+    }
+
+    ra := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.restore(); }
+    }
+}
+
 export component SidebarRail inherits Rectangle {
     in property <[ProjectItem]> projects;
     in property <bool> projects-open: false;
@@ -717,6 +778,114 @@ export component SidebarRail inherits Rectangle {
         fa := TouchArea {
             mouse-cursor: pointer;
             clicked => { root.toggle-projects(); }
+        }
+    }
+
+    // ===== reminder panes (Track F): 🔔 bell + count badge + floating list panel =====
+    // Data + callbacks ride the RemindersAdapter global (see types.slint), so this section
+    // is fully self-contained — no new app.slint component wiring.
+    bell-btn := Rectangle {
+        x: root.width - root.rail-icons-w + 6px;   // anchored to the rail's right edge
+        y: 78px;                                    // below the 📁 projects button
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
+        background: (RemindersAdapter.open || ba.has-hover) ? Theme.surface2 : transparent;
+        Text {
+            text: "\u{E7ED}";                       // Segoe MDL2 "Ringer" (bell)
+            font-family: "Segoe MDL2 Assets";
+            font-size: 15px;
+            color: RemindersAdapter.alert ? Theme.accent
+                 : RemindersAdapter.open ? Theme.accent
+                 : (ba.has-hover ? Theme.text : Theme.subtext);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        // count badge — accent normally, danger once any reminder has fired.
+        if RemindersAdapter.rows.length > 0 : Rectangle {
+            x: parent.width - self.width - 1px;
+            y: 1px;
+            width: 15px;
+            height: 14px;
+            border-radius: 7px;
+            background: RemindersAdapter.alert ? Theme.danger : Theme.accent;
+            Text {
+                text: RemindersAdapter.rows.length;
+                color: #11111b;
+                font-size: 9px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        ba := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { RemindersAdapter.toggle(); }
+        }
+    }
+
+    // The reminder list: a floating panel anchored at the bell, overlaying the pane area to
+    // the LEFT of the rail (negative x — the same overflow idiom as the worktree-delete
+    // popup), so it needs no rail-width change in app.slint.
+    if RemindersAdapter.open : Rectangle {
+        x: -268px;
+        y: 78px;
+        width: 260px;
+        height: RemindersAdapter.rows.length == 0
+            ? 116px
+            : min(44px + RemindersAdapter.rows.length * 42px, root.height - 86px);
+        background: Theme.mantle;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 30px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 10px;
+        clip: true;
+        // eat stray clicks so they don't fall through to the pane behind the panel
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+
+            Text {
+                text: "REMINDERS";
+                color: Theme.subtext;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+                height: 18px;
+                vertical-alignment: center;
+            }
+
+            if RemindersAdapter.rows.length == 0 : Text {
+                text: "No parked panes. Right-click a pane header and pick a \"Remind…\" time to park it here.";
+                color: Theme.subtext;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                Flickable {
+                    width: 100%;
+                    height: 100%;
+                    viewport-width: self.width;
+                    viewport-height: rembody.preferred-height;
+                    rembody := VerticalLayout {
+                        alignment: start;
+                        spacing: 2px;
+                        for r[i] in RemindersAdapter.rows : ReminderRowView {
+                            rem: r;
+                            restore => { RemindersAdapter.restore(r.uid); }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -10,7 +10,7 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
@@ -19,7 +19,10 @@ import { ContextMenu } from "contextmenu.slint";
 import { KeyMsg, HiRect } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
-export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg, HiRect, HistoryUi }
+// ReminderItem/RemindersAdapter (Track F): the reminder-pane bridge global — re-exported
+// here only so the Rust controller can reach it via `global::<RemindersAdapter>()`; all its
+// UI lives in sidebar.slint.
+export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg, HiRect, HistoryUi, ReminderItem, RemindersAdapter }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";

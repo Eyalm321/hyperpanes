@@ -189,6 +189,24 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
     b.item("Select All", Command::SelectAllPane(idx));
     b.item("Clear", Command::ClearPane(idx));
     b.sep();
+    // ---- Track F: "Remind at…" — park the pane (session alive) until the chosen time.
+    // Plain rows rather than a custom submenu (the menu component is owned by another
+    // track); disabled when this is the only pane of the only tab (parking it would empty
+    // the window). Offsets resolve against the LOCAL clock at click time.
+    {
+        let cant_park = state.tabs.len() <= 1 && n < 2;
+        use crate::state::ReminderOffset as Off;
+        for (label, off) in [
+            ("Remind in 15 min", Off::Min15),
+            ("Remind in 1 hour", Off::Hour1),
+            ("Remind in 3 hours", Off::Hour3),
+            ("Remind tomorrow 9 AM", Off::Tomorrow9),
+        ] {
+            b.row(label, "", "", false, false, cant_park, false, sub::NONE,
+                Some(Command::RemindPane(idx, off)));
+        }
+    }
+    b.sep();
     b.row("Move to New Tab", "", "", false, false, n < 2, false, sub::NONE, Some(Command::MovePaneToNewTab(idx)));
     if others {
         b.row("Move to Tab", "", "", false, false, false, false, sub::MOVE_TO_TAB, None);
