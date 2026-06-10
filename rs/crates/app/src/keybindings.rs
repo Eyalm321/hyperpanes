@@ -197,7 +197,8 @@ pub const CATEGORY_ORDER: [&str; 4] = ["General", "Tabs", "Panes", "Zoom"];
 /// The default keymap — an exact port of the renderer's `BINDING_DEFS`
 /// (`src/renderer/keybindings.ts`): same ids, labels, categories and default chords. Order
 /// is the display order within each category. (The non-rebindable "Focus pane by number →
-/// Alt 1…9" documentation row is rendered by the editor, not a binding here.)
+/// Alt 1…9" documentation row is rendered by the editor, not a binding here.) Native-only
+/// addition: `pane.paste` (Ctrl+V → app-side paste, #9) has no renderer counterpart.
 pub fn default_bindings() -> Vec<Binding> {
     use KeyTok::*;
     let b = |id, ctrl, alt, shift, key, category, label, command| Binding {
@@ -223,6 +224,9 @@ pub fn default_bindings() -> Vec<Binding> {
         b("pane.toggleZoom", false, true, false, Char('z'), "Panes", "Zoom / unzoom pane", Command::ToggleZoom),
         b("pane.toggleFullscreen", false, false, false, F11, "Panes", "Fullscreen pane", Command::ToggleFullscreen),
         b("pane.search", true, false, false, Char('f'), "Panes", "Search in pane", Command::SearchFocused),
+        // Ctrl+V pastes via the app (fresh OS-clipboard read + bracketed paste), matching
+        // Windows Terminal. Unbind it to forward a literal 0x16 to the shell instead (#9).
+        b("pane.paste", true, false, false, Char('v'), "Panes", "Paste", Command::PasteFocused),
         // Zoom (font)
         b("zoom.in", true, false, false, Char('='), "Zoom", "Zoom in (font)", Command::FontZoom(1)),
         b("zoom.out", true, false, false, Char('-'), "Zoom", "Zoom out (font)", Command::FontZoom(-1)),
@@ -230,7 +234,7 @@ pub fn default_bindings() -> Vec<Binding> {
     ]
 }
 
-/// The default keymap built once and reused. [`default_bindings`] allocates a `Vec` of 15
+/// The default keymap built once and reused. [`default_bindings`] allocates a `Vec` of 16
 /// owned `Command`s; the key router consults this table on **every** key event
 /// ([`Keymap::match_chord`]) and the menus on every render ([`Keymap::label_for`]), so caching
 /// it behind a [`OnceLock`] avoids rebuilding the whole table each time.
@@ -625,6 +629,21 @@ mod tests {
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
         assert!(palette.overridden);
         assert_eq!(palette.parts, vec!["Ctrl", "J"]);
+    }
+
+    #[test]
+    fn ctrl_v_pastes_into_focused_pane() {
+        // The #9 fix: Ctrl+V is an app chord (fresh OS-clipboard read) by default…
+        let km = empty_keymap();
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('v')),
+            Some(Command::PasteFocused)
+        ));
+        // …and explicitly unbinding it restores the literal-0x16 passthrough (no match →
+        // on_key falls through to encode_key, which forwards the control char to the pty).
+        let mut km = empty_keymap();
+        km.overrides.insert("pane.paste".into(), None);
+        assert!(km.match_chord(true, false, false, KeyTok::Char('v')).is_none());
     }
 
     #[test]

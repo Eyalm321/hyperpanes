@@ -361,8 +361,9 @@ export component PaneView inherits Rectangle {
                             }
                         }
                         // ---- editable label + secondary line (subtitle / shell title) ----
-                        // Double-click to rename (mirrors the Electron EditableLabel); the
-                        // label press does NOT start a drag (you drag from the empty header).
+                        // Double-click to rename (mirrors the Electron EditableLabel); a
+                        // left-press here ALSO arms the pane drag (see lta below), so the
+                        // whole header except the buttons is a drag handle.
                         Rectangle {
                             horizontal-stretch: 1;
                             clip: true;
@@ -421,11 +422,21 @@ export component PaneView inherits Rectangle {
                                 }
                             }
                             // single-click focuses; double-click opens the inline editor.
+                            // A child TouchArea swallows pointer events in Slint, and this one
+                            // covers most of the header (the label stretches), so it must
+                            // DELEGATE a left-press to the same pane-grab as the header
+                            // TouchArea behind it — otherwise drag-to-rearrange only works in
+                            // the slivers outside the label (#5). Arming is movement-gated by
+                            // the drag pump, so click-to-focus and double-click-to-rename
+                            // still resolve normally.
                             lta := TouchArea {
                                 enabled: !pane.editing;
                                 clicked => { root.focus-pane(idx); tp.focus(); }
                                 double-clicked => { root.begin-rename-pane(idx); }
                                 pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                        root.pane-grab(idx);
+                                    }
                                     if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
                                         root.pane-context(idx, self.absolute-position.x + self.mouse-x,
                                                                self.absolute-position.y + self.mouse-y);

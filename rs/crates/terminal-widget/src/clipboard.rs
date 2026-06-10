@@ -3,7 +3,9 @@
 //! `Terminal.tsx`.
 //!
 //! `arboard`'s `Clipboard` holds a live platform connection, so we keep one open for the
-//! pane's lifetime (re-opening per copy is slow and, on X11, loses ownership). Every call is
+//! pane's lifetime (re-opening per copy is slow and, on X11, loses ownership). On Windows the
+//! handle is a unit value: arboard opens the OS clipboard *per operation* (with retries), so a
+//! kept handle can never serve a stale read — verified against arboard 3.6.1 for #9. Every call is
 //! best-effort: clipboard access can transiently fail (another app holding it, a headless
 //! session), and — exactly like the Electron `.catch(() => {})` — we never want that to take
 //! the pane down. Failures degrade to "nothing happened".
