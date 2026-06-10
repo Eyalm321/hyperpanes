@@ -129,6 +129,8 @@ pub struct NewPaneOpts {
     /// Explicit frame/dot. `None` = the default (tinted when `accent` is pinned, else off).
     pub show_frame: Option<bool>,
     pub show_dot: Option<bool>,
+    /// Per-pane env overrides layered over the fresh spawn base (#27 linked terminal).
+    pub env: Option<hyperpanes_core::session::spawn::EnvMap>,
 }
 
 /// The in-dialog draft of the **appearance** settings. While Preferences is open these edit
@@ -258,6 +260,9 @@ pub struct PaneState {
     /// the session's `Cwd` events. Surfaced into the control read-model's `/state` so agents
     /// (and `list_panes`) see each pane's live cwd. `None` until the shell reports one.
     pub cwd: Option<String>,
+    /// The env overrides this pane was spawned with (`None` = none), kept so "Open Linked
+    /// Terminal" / "Refresh Env" can re-spawn with the same per-pane context (#27/#28).
+    pub env: Option<hyperpanes_core::session::spawn::EnvMap>,
     /// A SHORT shell-type label (e.g. "pwsh", "cmd", "bash") derived once at pane creation
     /// from the resolved spawn shell program (see [`shell_label`]) and projected dim after
     /// the title in the header. "" = unknown (e.g. a re-hosted pane whose original shell
@@ -777,6 +782,7 @@ impl State {
             cwd,
             shell,
             command,
+            env: opts.env.clone(),
             integration,
             ..Default::default()
         });
@@ -828,6 +834,7 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            env: opts.env,
             // The resolved shell program → its short header badge (computed once here).
             shell_label: shell_label(&shell_path),
         })
@@ -864,6 +871,24 @@ impl State {
         t.focused = idx;
         t.zoomed = None;
         self.dirty = true;
+    }
+
+    /// "Open Linked Terminal" (#27): spawn a new pane sharing pane `idx`'s context — its live
+    /// cwd and its per-pane env overrides — so the user can act/authenticate by hand with the
+    /// same environment the source pane has. The link is visual too: the new pane inherits the
+    /// source's pinned accent (when it has one).
+    pub fn open_linked_terminal(&mut self, idx: usize, mgr: &SessionManager) {
+        let Some(src) = self.active_tab().panes.get(idx) else {
+            return;
+        };
+        let opts = NewPaneOpts {
+            label: Some(format!("{} (linked)", src.title)),
+            cwd: src.cwd.clone(),
+            env: src.env.clone(),
+            accent: src.pinned_accent,
+            ..Default::default()
+        };
+        self.add_pane_opts(mgr, opts);
     }
 
     /// Close pane `idx` in the active tab (see [`Self::close_pane_in`]).
@@ -1010,6 +1035,7 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            env: None,
             // A re-hosted session: its original spawn shell isn't tracked across the detach,
             // so the badge stays hidden ("") rather than guessing.
             shell_label: String::new(),
@@ -2343,9 +2369,34 @@ impl State {
     }
 
     /// Restart pane `idx`'s shell: spawn a fresh session, swap it into the pane slot (resetting
-    /// the grid), and kill the old session. The cwd resets to the default (we don't track a
-    /// per-pane cwd), otherwise chrome (title / color / frame) is preserved.
+    /// the grid), and kill the old session. The cwd resets to the default and any per-pane env
+    /// overrides are dropped, otherwise chrome (title / color / frame) is preserved.
     pub fn restart_pane(&mut self, idx: usize, mgr: &SessionManager) {
+        self.restart_pane_with(idx, mgr, None, None);
+    }
+
+    /// "Refresh Env" (#28): restart pane `idx`'s shell in place but KEEP its live cwd and its
+    /// env overrides. The spawn path resolves a fresh registry-backed environment on every
+    /// spawn (core `session::env::fresh_env`), so a restart IS the refresh — this variant just
+    /// avoids also losing where the user was and what the pane had layered on top.
+    pub fn refresh_env_pane(&mut self, idx: usize, mgr: &SessionManager) {
+        let (cwd, env) = match self.active_tab().panes.get(idx) {
+            Some(p) => (p.cwd.clone(), p.env.clone()),
+            None => return,
+        };
+        self.restart_pane_with(idx, mgr, cwd, env);
+    }
+
+    /// Shared respawn core of [`Self::restart_pane`] / [`Self::refresh_env_pane`]: spawn a
+    /// replacement session (optionally pinning a cwd + env overrides), swap it into the pane
+    /// slot, and kill the old session.
+    fn restart_pane_with(
+        &mut self,
+        idx: usize,
+        mgr: &SessionManager,
+        cwd: Option<String>,
+        env: Option<hyperpanes_core::session::spawn::EnvMap>,
+    ) {
         let (cols, rows) = match self.active_tab().panes.get(idx) {
             Some(p) => p.applied,
             None => return,
@@ -2370,8 +2421,9 @@ impl State {
             cols: Some(cols),
             rows: Some(rows),
             pane_id: Some(uid.clone()),
-            cwd: None,
+            cwd,
             shell,
+            env: env.clone(),
             integration,
             ..Default::default()
         }) {
@@ -2392,6 +2444,8 @@ impl State {
             // The restart re-resolves the shell → refresh the cached header badge.
             p.shell_label = shell_label(&shell_path);
             p.surface = Image::default();
+            // Plain restart drops the overrides (env: None); refresh re-applies them.
+            p.env = env;
         }
         self.dirty = true;
     }
@@ -2463,6 +2517,7 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            env: None,
             // A re-hosted session: its original spawn shell isn't tracked across the detach,
             // so the badge stays hidden ("") rather than guessing.
             shell_label: String::new(),
@@ -2963,6 +3018,7 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
+            env: None,
             // The resolved shell program → its short header badge (computed once here).
             shell_label: shell_label(&shell_path),
         })

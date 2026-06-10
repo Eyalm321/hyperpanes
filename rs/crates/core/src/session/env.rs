@@ -361,6 +361,19 @@ mod tests {
         assert_eq!(get(&env, "PATH"), Some("C:\\me\\bin"));
     }
 
+    // Live smoke for the #28 user intent: a user var set AFTER this process started
+    // (so it's absent from the process env) must reach a fresh spawn base. Run manually:
+    //   [Environment]::SetEnvironmentVariable('HP_TEST','1','User')
+    //   cargo test -p hyperpanes-core fresh_env_sees_post_launch_user_var -- --ignored
+    //   [Environment]::SetEnvironmentVariable('HP_TEST',$null,'User')
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the HP_TEST user env var to be set out-of-process first"]
+    fn fresh_env_sees_post_launch_user_var() {
+        assert!(std::env::var("HP_TEST").is_err(), "HP_TEST leaked into the process env");
+        assert_eq!(get(&fresh_env(), "HP_TEST"), Some("1"));
+    }
+
     // Live smoke: the real registry read produces a usable base (Windows only).
     #[cfg(windows)]
     #[test]
