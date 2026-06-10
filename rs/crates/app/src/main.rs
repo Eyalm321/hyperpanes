@@ -219,14 +219,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The app owns the window registry + the shared session stream.
     let application = App::new(mgr.clone(), erx);
 
-    // Wire CLI launch: `hyperpanes -c "<cmd>" --shell … --cwd … --name …` (or a positional
-    // workspace `.json`) seeds the first window from that spec; a bare launch stays an empty
-    // shell pane (no last-session restore — that fallback is intentionally GUI-excluded).
+    // Wire the launch seed: `hyperpanes -c "<cmd>" --shell … --cwd … --name …` (or a
+    // positional workspace `.json`) seeds the first window from that spec; a bare launch
+    // falls back to the LAST SESSION (`last-workspace.json`, written when the final window
+    // closes — see `app::persist_last_session`), so tabs/layout/per-pane zoom survive a
+    // plain relaunch (#14). A first-ever launch (no last-session file) stays an empty
+    // shell pane.
     let argv: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let seed = match hyperpanes_core::workspace::launch::resolve_cli_workspace(&argv, &cwd) {
+    let seed = match hyperpanes_core::workspace::launch::resolve_launch_workspace(&argv, &cwd) {
         Some(file) => PendingSeed::Workspace(Box::new(file)),
         None => PendingSeed::EmptyTab,
     };

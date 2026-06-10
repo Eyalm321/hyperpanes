@@ -321,4 +321,61 @@ mod tests {
         assert_eq!(s.font_px, 18.0);
         assert!(s.show_frame); // defaulted
     }
+
+    // ---- serde round-trip + default-tolerance (#15) ----
+
+    /// A `Settings` with every field moved off its default, so a round-trip that
+    /// silently drops a field can't hide behind a default value.
+    fn non_default_settings() -> Settings {
+        Settings {
+            font_family: "C:/Fonts/Custom.ttf".into(),
+            frame_palette: 2,
+            terminal_theme: 1,
+            default_shell: "cmd".into(),
+            font_px: 18.0,
+            show_frame: false,
+            show_dot: false,
+            clickable_paths: false,
+            editor_command: "code -g {path}:{line}".into(),
+            scrollback: 9000,
+            show_sidebar: false,
+            idle_alert: false,
+            idle_effect: "pulse".into(),
+            idle_alert_seconds: 120,
+            auto_update: true,
+        }
+    }
+
+    #[test]
+    fn settings_round_trip_is_lossless() {
+        let s = non_default_settings();
+        let json = serde_json::to_string_pretty(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s, "every field must survive serialize → deserialize");
+        // The persisted blob speaks camelCase (the renderer-compatible dialect).
+        assert!(json.contains("\"fontFamily\""));
+        assert!(json.contains("\"idleAlertSeconds\""));
+    }
+
+    #[test]
+    fn unknown_keys_in_the_blob_are_tolerated() {
+        // Forward-tolerance: a blob written by a NEWER build (extra keys) must still
+        // load — known fields are taken, unknown ones ignored, missing ones defaulted.
+        let s: Settings = serde_json::from_str(
+            r#"{ "fontPx": 20.0, "someFutureSetting": { "x": 1 }, "another": [1,2] }"#,
+        )
+        .expect("unknown keys must not be fatal");
+        assert_eq!(s.font_px, 20.0);
+        assert_eq!(s.idle_effect, "firefly"); // defaulted
+    }
+
+    #[test]
+    fn empty_and_corrupt_blobs_fall_back_to_defaults() {
+        // `{}` → all defaults (the load() contract for a first run)…
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s, Settings::default());
+        // …and outright corruption fails to parse (load() then returns defaults).
+        assert!(serde_json::from_str::<Settings>("not json").is_err());
+        assert!(serde_json::from_str::<Settings>("{\"fontPx\": \"big\"}").is_err());
+    }
 }
