@@ -45,7 +45,8 @@ pub const CTX_CUSTOM_REMIND_BASE: usize = 1_000_000;
 pub struct CtxEntry {
     pub label: SharedString,
     pub shortcut: SharedString,
-    pub glyph: SharedString,
+    /// Drawn-icon kind (see [`crate::theme::menu_icon`]); `0` = no icon.
+    pub icon: i32,
     /// `-1` separator · `0` item · `2`/`3`/`4` a submenu (see [`sub`]).
     pub kind: i32,
     pub checked: bool,
@@ -59,7 +60,7 @@ impl CtxEntry {
         CtxEntry {
             label: SharedString::new(),
             shortcut: SharedString::new(),
-            glyph: SharedString::new(),
+            icon: 0,
             kind: -1,
             checked: false,
             show_check: false,
@@ -92,7 +93,7 @@ impl Build {
     }
     /// A plain action row.
     fn item(&mut self, label: &str, cmd: Command) -> &mut Self {
-        self.row(label, "", "", false, false, false, false, sub::NONE, Some(cmd))
+        self.row(label, "", 0, false, false, false, false, sub::NONE, Some(cmd))
     }
     /// A row carrying every optional flag.
     #[allow(clippy::too_many_arguments)]
@@ -100,7 +101,7 @@ impl Build {
         &mut self,
         label: &str,
         shortcut: &str,
-        glyph: &str,
+        icon: i32,
         checked: bool,
         show_check: bool,
         disabled: bool,
@@ -111,7 +112,7 @@ impl Build {
         self.entries.push(CtxEntry {
             label: label.into(),
             shortcut: shortcut.into(),
-            glyph: glyph.into(),
+            icon,
             kind,
             checked,
             show_check,
@@ -176,29 +177,29 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
 
     b.item("New Pane…", Command::OpenNewPane);
     b.item("Rename…", Command::BeginRenamePane(idx as i32));
-    b.row("Change Color", "", "", false, false, false, false, sub::COLOR, None);
-    b.row("Show Frame", "", "", frame_on, true, false, false, sub::NONE, Some(Command::SetPaneFrame(idx, !frame_on)));
-    b.row("Show Dot", "", "", dot_on, true, false, false, sub::NONE, Some(Command::SetPaneDot(idx, !dot_on)));
-    b.row("Mute AI Summary", "", "", muted, true, false, false, sub::NONE, Some(Command::ToggleMuteAi(idx)));
+    b.row("Change Color", "", 0,false, false, false, false, sub::COLOR, None);
+    b.row("Show Frame", "", 0,frame_on, true, false, false, sub::NONE, Some(Command::SetPaneFrame(idx, !frame_on)));
+    b.row("Show Dot", "", 0,dot_on, true, false, false, sub::NONE, Some(Command::SetPaneDot(idx, !dot_on)));
+    b.row("Mute AI Summary", "", 0,muted, true, false, false, sub::NONE, Some(Command::ToggleMuteAi(idx)));
     b.sep();
     // Maximize is meaningless on the taskbar's single surface, so it's dropped there.
     if !in_taskbar {
         b.row(
             if zoomed { "Restore" } else { "Maximize" },
-            &zoom_sc, "", false, false, false, false, sub::NONE, Some(Command::ZoomPane(idx)),
+            &zoom_sc, 0, false, false, false, false, sub::NONE, Some(Command::ZoomPane(idx)),
         );
     }
     b.row(
         if fullscreen { "Exit Fullscreen" } else { "Fullscreen" },
-        &full_sc, "", false, false, false, false, sub::NONE, Some(Command::FullscreenPane(idx)),
+        &full_sc, 0, false, false, false, false, sub::NONE, Some(Command::FullscreenPane(idx)),
     );
     // The widget's in-pane search is Ctrl+F (not an app keybinding), shown literally.
-    b.row("Search…", "Ctrl+F", "", false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
+    b.row("Search…", "Ctrl+F", 0, false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
     b.item("Restart", Command::RestartPane(idx));
     b.item("Refresh Env", Command::RefreshEnvPane(idx));
     b.item("Open Folder", Command::RevealPaneCwd(idx));
     b.sep();
-    b.row("Copy", "", "", false, false, !has_sel, false, sub::NONE, Some(Command::CopyPane(idx)));
+    b.row("Copy", "", 0,false, false, !has_sel, false, sub::NONE, Some(Command::CopyPane(idx)));
     b.item("Paste", Command::PastePane(idx));
     b.item("Select All", Command::SelectAllPane(idx));
     b.item("Clear", Command::ClearPane(idx));
@@ -208,14 +209,14 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
     // Disabled when this is the only pane of the only tab (parking it would empty the
     // window). Offsets resolve against the LOCAL clock at click time.
     let cant_park = state.tabs.len() <= 1 && n < 2;
-    b.row("Reminder", "", "", false, false, cant_park, false, sub::REMINDER, None);
+    b.row("Reminder", "", 0,false, false, cant_park, false, sub::REMINDER, None);
     b.sep();
-    b.row("Move to New Tab", "", "", false, false, n < 2, false, sub::NONE, Some(Command::MovePaneToNewTab(idx)));
+    b.row("Move to New Tab", "", 0,false, false, n < 2, false, sub::NONE, Some(Command::MovePaneToNewTab(idx)));
     if others {
-        b.row("Move to Tab", "", "", false, false, false, false, sub::MOVE_TO_TAB, None);
+        b.row("Move to Tab", "", 0,false, false, false, false, sub::MOVE_TO_TAB, None);
     }
     b.sep();
-    b.row("Close Pane", "", "", false, false, false, true, sub::NONE, Some(Command::ClosePane(idx)));
+    b.row("Close Pane", "", 0,false, false, false, true, sub::NONE, Some(Command::ClosePane(idx)));
 
     // The Reminder flyout's quick offsets, in hidden slots past the visible rows (the
     // Slint flyout dispatches `pick(entries.length + j)` — order must match its rows).
@@ -238,17 +239,17 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
 
     let new_sc = state.keymap.label_for("tab.new").unwrap_or_default();
 
-    b.row("New Tab", &new_sc, "", false, false, false, false, sub::NONE, Some(Command::NewTab));
+    b.row("New Tab", &new_sc, 0, false, false, false, false, sub::NONE, Some(Command::NewTab));
     b.item("Rename…", Command::BeginRename(idx as i32));
     b.item("Duplicate Tab", Command::DuplicateTab(idx));
-    b.row("Move to New Window", "", "", false, false, only, false, sub::NONE, Some(Command::MoveTabToNewWindow(idx)));
+    b.row("Move to New Window", "", 0,false, false, only, false, sub::NONE, Some(Command::MoveTabToNewWindow(idx)));
     b.sep();
     b.item("Close Tab", Command::CloseTab(idx));
-    b.row("Close Other Tabs", "", "", false, false, only, false, sub::NONE, Some(Command::CloseOtherTabs(idx)));
-    b.row("Close Tabs to the Right", "", "", false, false, is_last, false, sub::NONE, Some(Command::CloseTabsToRight(idx)));
-    b.row("Reopen Closed Tab", "", "", false, false, no_closed, false, sub::NONE, Some(Command::ReopenClosedTab));
+    b.row("Close Other Tabs", "", 0,false, false, only, false, sub::NONE, Some(Command::CloseOtherTabs(idx)));
+    b.row("Close Tabs to the Right", "", 0,false, false, is_last, false, sub::NONE, Some(Command::CloseTabsToRight(idx)));
+    b.row("Reopen Closed Tab", "", 0,false, false, no_closed, false, sub::NONE, Some(Command::ReopenClosedTab));
     b.sep();
-    b.row("Layout", "", "", false, false, false, false, sub::LAYOUT, None);
+    b.row("Layout", "", 0,false, false, false, false, sub::LAYOUT, None);
 
     b.finish(CtxKind::Tab, idx, x, y)
 }
@@ -265,35 +266,35 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
     let palette_sc = state.keymap.label_for("palette.toggle").unwrap_or_default();
 
     b.row(
-        "New pane…", "", crate::theme::menu_glyph::NEW_PANE,
+        "New pane…", "", crate::theme::menu_icon::NEW_PANE,
         false, false, false, false, sub::NONE, Some(Command::OpenNewPane),
     );
     b.row(
-        "Command palette", &palette_sc, crate::theme::menu_glyph::COMMAND_PALETTE,
+        "Command palette", &palette_sc, crate::theme::menu_icon::COMMAND_PALETTE,
         false, false, false, false, sub::NONE, Some(Command::PaletteOpen),
     );
     b.sep();
-    // Layout submenu header: glyph + label of the CURRENT layout (the submenu lists Automatic
-    // + the 5 presets with the radio ✓ on the current). The current label sits in the shortcut
-    // slot (mirrors Electron's "{current.label} ▸").
+    // Layout submenu header: drawn icon + label of the CURRENT layout (the submenu lists
+    // Automatic + the 5 presets with the radio ✓ on the current). The current label sits in
+    // the shortcut slot (mirrors Electron's "{current.label} ▸").
     b.row(
         "Layout",
         crate::theme::layout_label(cur),
-        crate::theme::layout_icon(cur),
+        crate::theme::layout_icon_kind(cur),
         false, false, false, false, sub::LAYOUT, None,
     );
     b.sep();
     b.row(
-        "Open workspace…", "", crate::theme::menu_glyph::OPEN_WORKSPACE,
+        "Open workspace…", "", crate::theme::menu_icon::OPEN_WORKSPACE,
         false, false, false, false, sub::NONE, Some(Command::OpenWorkspace),
     );
     b.row(
-        "Save workspace…", "", crate::theme::menu_glyph::SAVE_WORKSPACE,
+        "Save workspace…", "", crate::theme::menu_icon::SAVE_WORKSPACE,
         false, false, false, false, sub::NONE, Some(Command::SaveWorkspace),
     );
     b.sep();
     b.row(
-        "Preferences…", "", crate::theme::menu_glyph::PREFERENCES,
+        "Preferences…", "", crate::theme::menu_icon::PREFERENCES,
         false, false, false, false, sub::NONE, Some(Command::PrefsOpen),
     );
 

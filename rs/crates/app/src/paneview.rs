@@ -373,7 +373,6 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .map(|l| LayoutOption {
             id: theme::layout_id(*l),
             label: theme::layout_label(*l).into(),
-            glyph: theme::layout_icon(*l).into(),
             active: *l == cur,
             hint: SharedString::new(),
         })
@@ -409,7 +408,6 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     sync_model(&ui.dividers, divs);
 
     // scalars
-    app.set_layout_glyph(theme::layout_glyph(cur).into());
     app.set_editing_tab(state.editing_tab);
     app.set_zoomed(state.active_tab().zoomed.is_some());
     app.set_fullscreen(state.fullscreen);
@@ -744,7 +742,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             .map(|e| MenuEntry {
                 label: e.label.clone(),
                 shortcut: e.shortcut.clone(),
-                glyph: e.glyph.clone(),
+                icon: e.icon,
                 kind: e.kind,
                 checked: e.checked,
                 show_check: e.show_check,
@@ -813,7 +811,6 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                     .map(|l| LayoutOption {
                         id: theme::layout_id(*l),
                         label: theme::layout_label(*l).into(),
-                        glyph: theme::layout_icon(*l).into(),
                         active: *l == cur,
                         hint: SharedString::new(),
                     })
@@ -834,7 +831,6 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                     .map(|l| LayoutOption {
                         id: theme::layout_id(*l),
                         label: theme::layout_label(*l).into(),
-                        glyph: theme::layout_icon(*l).into(),
                         active: *l == cur,
                         hint: if *l == Layout::Auto {
                             format!("— {}", theme::layout_name(auto_resolved)).into()

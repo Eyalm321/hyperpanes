@@ -20,7 +20,131 @@ export global ReminderCustom {
     pure callback parse-minutes(string) -> int;
 }
 
-// One menu row: glyph · label · shortcut · trailing (✓ / ▸). Honors disabled + danger.
+// ===== drawn menu icons =====
+// Every leading icon is vector geometry keyed by MenuEntry.icon — NOT a font glyph. The
+// previous Segoe MDL2 Assets codepoints (\u{E710}…) and geometric chars (▤▥▦⊞▧) rendered
+// as hollow boxes whenever the resolved font lacked them (the recurring Slint-on-Windows
+// failure df73005 / the wave3x bell fixed by drawing geometry). Kinds mirror
+// theme::menu_icon + theme::layout_icon_kind in Rust:
+//   1 new-pane (+) · 2 command-palette (>_) · 3 open-folder · 4 save · 5 preferences
+//   10..15 layout minis: auto · single · columns · rows · grid · main-stack
+
+// A "+" (two crossed bars), the New-pane action icon.
+component IconPlus inherits Rectangle {
+    in property <color> ink;
+    width: 14px;
+    height: 14px;
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.5px; height: 11px; border-radius: 1px; background: ink; }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.5px; width: 11px; border-radius: 1px; background: ink; }
+}
+
+// A ">_" prompt, the Command-palette action icon.
+component IconPrompt inherits Rectangle {
+    in property <color> ink;
+    width: 14px;
+    height: 14px;
+    Path {
+        width: 100%; height: 100%;
+        viewbox-width: 14; viewbox-height: 14;
+        stroke: ink; stroke-width: 1.5px; fill: transparent;
+        commands: "M 2 3.5 L 6.5 7 L 2 10.5";
+    }
+    Rectangle { x: 8px; y: 11px; width: 5px; height: 1.5px; border-radius: 1px; background: ink; }
+}
+
+// A folder silhouette (stroked) — same path as the sidebar's FolderGlyph.
+component IconFolder inherits Path {
+    in property <color> ink;
+    width: 15px;
+    height: 15px;
+    viewbox-width: 18;
+    viewbox-height: 18;
+    stroke: ink;
+    stroke-width: 1.5px;
+    fill: transparent;
+    commands: "M 2.5 14 L 2.5 5 L 7 5 L 8.6 6.8 L 15.5 6.8 L 15.5 14 Z";
+}
+
+// A floppy-disk (save): clipped-corner body + label slot + shutter.
+component IconSave inherits Path {
+    in property <color> ink;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 14;
+    viewbox-height: 14;
+    stroke: ink;
+    stroke-width: 1.3px;
+    fill: transparent;
+    commands: "M 2 2 L 9.8 2 L 12 4.2 L 12 12 L 2 12 Z M 4.2 2 L 4.2 5 L 9 5 L 9 2 M 4 12 L 4 8.2 L 10 8.2 L 10 12";
+}
+
+// Preference sliders (three bars with offset knobs) — the Settings action icon.
+component IconSliders inherits Rectangle {
+    in property <color> ink;
+    width: 14px;
+    height: 14px;
+    Rectangle { y: 2px;    width: 100%; height: 1.4px; border-radius: 1px; background: ink; }
+    Rectangle { y: 6.3px;  width: 100%; height: 1.4px; border-radius: 1px; background: ink; }
+    Rectangle { y: 10.6px; width: 100%; height: 1.4px; border-radius: 1px; background: ink; }
+    Rectangle { x: 3px;  y: 0.6px; width: 4px; height: 4px; border-radius: 2px; background: ink; }
+    Rectangle { x: 8px;  y: 4.9px; width: 4px; height: 4px; border-radius: 2px; background: ink; }
+    Rectangle { x: 4.5px; y: 9.2px; width: 4px; height: 4px; border-radius: 2px; background: ink; }
+}
+
+// A layout mini: an outlined frame whose inner dividers evoke the preset (the drawn
+// replacement for the ⊞ □ ▥ ▤ ▦ ▧ chars). `which` = MenuEntry.icon - 10 (the layout id):
+// 0 auto (2×2 cross) · 1 single (empty) · 2 columns (2 vertical) · 3 rows (2 horizontal) ·
+// 4 grid (3×3 lattice) · 5 main-stack (main pane + split stack).
+component IconLayout inherits Rectangle {
+    in property <color> ink;
+    in property <int> which;
+    width: 14px;
+    height: 14px;
+    Rectangle {
+        x: 0.5px; y: 1.5px;
+        width: 13px; height: 11px;
+        border-width: 1.2px;
+        border-color: ink;
+        border-radius: 2px;
+        background: transparent;
+        property <length> inner-x: 1.2px;
+        property <length> inner-w: self.width - 2.4px;
+        property <length> inner-y: 1.2px;
+        property <length> inner-h: self.height - 2.4px;
+        // auto: a centered 2×2 cross
+        if root.which == 0 : Rectangle { x: (parent.width - 1.2px) / 2; y: parent.inner-y; width: 1.2px; height: parent.inner-h; background: ink; }
+        if root.which == 0 : Rectangle { x: parent.inner-x; y: (parent.height - 1.2px) / 2; width: parent.inner-w; height: 1.2px; background: ink; }
+        // columns: two vertical dividers
+        if root.which == 2 : Rectangle { x: parent.width * 0.333; y: parent.inner-y; width: 1.2px; height: parent.inner-h; background: ink; }
+        if root.which == 2 : Rectangle { x: parent.width * 0.667; y: parent.inner-y; width: 1.2px; height: parent.inner-h; background: ink; }
+        // rows: two horizontal dividers
+        if root.which == 3 : Rectangle { x: parent.inner-x; y: parent.height * 0.333; width: parent.inner-w; height: 1.2px; background: ink; }
+        if root.which == 3 : Rectangle { x: parent.inner-x; y: parent.height * 0.667; width: parent.inner-w; height: 1.2px; background: ink; }
+        // grid: a 3×3 lattice
+        if root.which == 4 : Rectangle { x: parent.width * 0.333; y: parent.inner-y; width: 1.2px; height: parent.inner-h; background: ink; }
+        if root.which == 4 : Rectangle { x: parent.width * 0.667; y: parent.inner-y; width: 1.2px; height: parent.inner-h; background: ink; }
+        if root.which == 4 : Rectangle { x: parent.inner-x; y: parent.height * 0.333; width: parent.inner-w; height: 1.2px; background: ink; }
+        if root.which == 4 : Rectangle { x: parent.inner-x; y: parent.height * 0.667; width: parent.inner-w; height: 1.2px; background: ink; }
+        // main-stack: a main pane left, a 2-way stack right
+        if root.which == 5 : Rectangle { x: parent.width * 0.55; y: parent.inner-y; width: 1.2px; height: parent.inner-h; background: ink; }
+        if root.which == 5 : Rectangle { x: parent.width * 0.55; y: (parent.height - 1.2px) / 2; width: parent.width * 0.45 - 1.2px; height: 1.2px; background: ink; }
+    }
+}
+
+// The icon dispatcher: one slot, geometry picked by kind (0 renders nothing).
+component MenuIcon inherits Rectangle {
+    in property <int> kind;
+    in property <color> ink;
+    width: 15px;
+    if root.kind == 1 : IconPlus    { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink; }
+    if root.kind == 2 : IconPrompt  { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink; }
+    if root.kind == 3 : IconFolder  { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink; }
+    if root.kind == 4 : IconSave    { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink; }
+    if root.kind == 5 : IconSliders { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink; }
+    if root.kind >= 10 : IconLayout { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink; which: root.kind - 10; }
+}
+
+// One menu row: icon · label · shortcut · trailing (✓ / ›). Honors disabled + danger.
 component CtxRow inherits Rectangle {
     in property <MenuEntry> e;
     in property <bool> has-sub;
@@ -29,16 +153,6 @@ component CtxRow inherits Rectangle {
     callback clicked();
     // Fires on hover enter/leave (true/false) so the menu can open a submenu on hover.
     callback hover-changed(bool);
-    // The hamburger menu's action icons are Segoe MDL2 Assets glyphs in the Unicode
-    // Private-Use Area, which render *only* in the icon font; the geometric layout glyphs
-    // (▤▥▦…) render in any UI font. Mirror theme::menu_glyph so the row picks the font per
-    // glyph (an empty family = the default UI font).
-    property <bool> mdl2-glyph:
-           e.glyph == "\u{E710}"   // New pane (Add)
-        || e.glyph == "\u{E756}"   // Command palette (CommandPrompt)
-        || e.glyph == "\u{ED25}"   // Open workspace (OpenFolderHorizontal)
-        || e.glyph == "\u{E74E}"   // Save workspace (Save)
-        || e.glyph == "\u{E713}";  // Preferences (Setting)
     height: 30px;
     border-radius: 6px;
     background: e.disabled ? transparent
@@ -51,14 +165,11 @@ component CtxRow inherits Rectangle {
         padding-right: 11px;
         spacing: 8px;
 
-        // optional leading glyph (hamburger action icon / layout submenu header)
-        Text {
-            text: e.glyph;
-            visible: e.glyph != "";
-            font-family: root.mdl2-glyph ? "Segoe MDL2 Assets" : "";
-            color: e.disabled ? Theme.faint : Theme.subtext;
-            font-size: 12px;
-            vertical-alignment: center;
+        // optional leading icon (hamburger action icon / layout submenu rows) — drawn
+        // geometry keyed by e.icon (see MenuIcon above), never a font glyph.
+        if e.icon != 0 : MenuIcon {
+            kind: e.icon;
+            ink: e.disabled ? Theme.faint : Theme.subtext;
         }
         Text {
             text: e.label;
@@ -76,12 +187,31 @@ component CtxRow inherits Rectangle {
             font-size: 11px;
             vertical-alignment: center;
         }
-        // trailing: a ✓ for a checked toggle, a › for a submenu
-        Text {
-            text: root.has-sub ? "›" : ((e.show-check && e.checked) ? "✓" : "");
-            color: root.has-sub ? Theme.subtext : Theme.accent;
-            font-size: root.has-sub ? 16px : 12px;
-            vertical-alignment: center;
+        // trailing: a drawn ✓ for a checked toggle, a › for a submenu (the ✓ is vector
+        // geometry — the default UI font lacks the glyph, same as overlays' Check)
+        Rectangle {
+            width: (root.has-sub || (e.show-check && e.checked)) ? 12px : 0px;
+            if root.has-sub : Text {
+                text: "›";
+                color: Theme.subtext;
+                font-size: 16px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            if !root.has-sub && e.show-check && e.checked : Path {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: 11px;
+                height: 9px;
+                viewbox-width: 12;
+                viewbox-height: 10;
+                stroke: Theme.accent;
+                stroke-width: 1.6px;
+                fill: transparent;
+                commands: "M 1 5.5 L 4.5 9 L 11 1";
+            }
         }
     }
 
@@ -112,12 +242,18 @@ component CtxToggle inherits Rectangle {
             border-width: 1px;
             border-color: root.on ? Theme.accent : Theme.border;
             background: root.on ? Theme.accent : transparent;
-            Text {
-                text: root.on ? "✓" : "";
-                color: #11111b;
-                font-size: 11px;
+            // drawn ✓ (the default UI font lacks the glyph)
+            if root.on : Path {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
+                width: 9px;
+                height: 7px;
+                viewbox-width: 12;
+                viewbox-height: 10;
+                stroke: #11111b;
+                stroke-width: 2px;
+                fill: transparent;
+                commands: "M 1 5.5 L 4.5 9 L 11 1";
             }
         }
         Text {
@@ -311,7 +447,7 @@ export component ContextMenu inherits Rectangle {
                         padding: 5px;
                         spacing: 1px;
                         for tb in root.tabs : CtxRow {
-                            e: { label: tb.label, shortcut: "", glyph: "", kind: 0, checked: false, show-check: false, disabled: false, danger: false };
+                            e: { label: tb.label, shortcut: "", icon: 0, kind: 0, checked: false, show-check: false, disabled: false, danger: false };
                             clicked => { root.move-tab(tb.idx); }
                         }
                     }
@@ -334,7 +470,7 @@ export component ContextMenu inherits Rectangle {
                         // PAST the visible rows (see pane_menu's b.extra) — row order here
                         // must match that append order.
                         for off[j] in ["In 15 min", "In 1 hour", "In 3 hours", "Tomorrow 9 AM"] : CtxRow {
-                            e: { label: off, shortcut: "", glyph: "", kind: 0, checked: false, show-check: false, disabled: false, danger: false };
+                            e: { label: off, shortcut: "", icon: 0, kind: 0, checked: false, show-check: false, disabled: false, danger: false };
                             clicked => { root.pick(root.entries.length + j); }
                         }
                         Rectangle {
@@ -385,7 +521,7 @@ export component ContextMenu inherits Rectangle {
                     }
                 }
 
-                // ---- Layout flyout (glyph · label · "— resolved" hint · radio ✓) ----
+                // ---- Layout flyout (drawn icon · label · "— resolved" hint · radio ✓) ----
                 if entry.kind == 4 && root.open-sub == i : Flyout {
                     x: root.open-left ? -self.width + 2px : parent.width - 2px;
                     y: -4px;
@@ -395,7 +531,7 @@ export component ContextMenu inherits Rectangle {
                         padding: 5px;
                         spacing: 1px;
                         for lo in root.layouts : CtxRow {
-                            e: { label: lo.label, shortcut: lo.hint, glyph: lo.glyph, kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
+                            e: { label: lo.label, shortcut: lo.hint, icon: 10 + lo.id, kind: 0, checked: lo.active, show-check: true, disabled: false, danger: false };
                             clicked => { root.set-layout(lo.id); }
                         }
                     }
