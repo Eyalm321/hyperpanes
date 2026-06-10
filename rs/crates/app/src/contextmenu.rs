@@ -180,6 +180,7 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
     // The widget's in-pane search is Ctrl+F (not an app keybinding), shown literally.
     b.row("Search…", "Ctrl+F", "", false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
     b.item("Restart", Command::RestartPane(idx));
+    b.item("Open Folder", Command::RevealPaneCwd(idx));
     b.sep();
     b.row("Copy", "", "", false, false, !has_sel, false, sub::NONE, Some(Command::CopyPane(idx)));
     b.item("Paste", Command::PastePane(idx));

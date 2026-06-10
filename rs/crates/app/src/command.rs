@@ -72,6 +72,8 @@ pub enum Command {
     FullscreenPane(usize),
     /// Restart pane `0`'s shell (kills + respawns its session in place).
     RestartPane(usize),
+    /// Open pane `0`'s current working directory in the OS file explorer (#23).
+    RevealPaneCwd(usize),
     /// Open the in-pane search box on pane `0`.
     SearchPane(usize),
     /// Open the in-pane search box on the focused pane (the Ctrl+F keybinding).
@@ -272,6 +274,15 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             return Effect::SetFullscreen(on);
         }
         Command::RestartPane(i) => state.restart_pane(i, mgr),
+        Command::RevealPaneCwd(i) => {
+            // Open the pane's live cwd (reported by shell integration) in the OS file explorer.
+            if let Some(cwd) = state.active_tab().panes.get(i).and_then(|p| p.cwd.clone()) {
+                #[cfg(windows)]
+                let _ = std::process::Command::new("explorer").arg(&cwd).spawn();
+                #[cfg(not(windows))]
+                let _ = std::process::Command::new("xdg-open").arg(&cwd).spawn();
+            }
+        }
         Command::SearchPane(i) => state.open_search(i),
         Command::SearchFocused => {
             let f = state.active_tab().focused;
