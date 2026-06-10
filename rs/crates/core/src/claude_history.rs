@@ -20,6 +20,7 @@
 //! only a bounded *prefix* of each file to recover a one-line summary — it never fully parses
 //! a large transcript.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -29,6 +30,13 @@ const SUMMARY_MAX: usize = 160;
 /// How many leading JSONL records we JSON-parse looking for a summary / first user message.
 /// Bounded so a huge transcript is never fully parsed just to label it.
 const SUMMARY_SCAN_LINES: usize = 60;
+/// Cap on the searchable full text extracted per session (bytes of message text kept).
+/// Keeps memory sane on huge transcripts — search sees the conversation's first ~32 KB.
+const FULL_TEXT_MAX: usize = 32 * 1024;
+/// How many leading JSONL records are JSON-parsed for full-text extraction. Records past
+/// this are only counted, never parsed — a second bound (besides [`FULL_TEXT_MAX`]) so a
+/// transcript that is mostly tool traffic (little message text per record) stays cheap.
+const FULL_TEXT_SCAN_LINES: usize = 2000;
 
 /// Which agent harness a history entry comes from. Claude Code is the only source today;
 /// the enum exists so UI-facing rows carry a generic `source` label instead of hard-wiring
@@ -69,18 +77,30 @@ pub struct ClaudeSession {
     pub first_user: String,
     /// Number of JSONL records (line count) — a cheap proxy for transcript length.
     pub message_count: usize,
+    /// Searchable full text of the conversation: the text of user AND assistant messages
+    /// (in order, space-joined), **lowercased** at extraction so substring search never
+    /// re-lowers it, and capped at [`FULL_TEXT_MAX`] bytes / [`FULL_TEXT_SCAN_LINES`]
+    /// records so a huge transcript stays bounded. Used by [`session_matches`] as the
+    /// slow path when the summary / opening prompt didn't match.
+    pub full_text: String,
 }
 
 /// Does `session` match the (case-insensitive, substring) search `query`? An empty/blank
-/// query matches everything. Matches against the summary AND the first user message — the
-/// latter so a transcript whose summary record replaced the opening prompt is still found
-/// by what the user remembers typing.
+/// query matches everything. Fast path: the summary and the first user message (cheap,
+/// always present). Slow path: the cached [`ClaudeSession::full_text`] — the bounded
+/// extract of the whole conversation's user+assistant text — so search reaches *inside*
+/// a transcript, not just its label.
 pub fn session_matches(session: &ClaudeSession, query: &str) -> bool {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return true;
     }
-    session.summary.to_lowercase().contains(&q) || session.first_user.to_lowercase().contains(&q)
+    if session.summary.to_lowercase().contains(&q) || session.first_user.to_lowercase().contains(&q)
+    {
+        return true;
+    }
+    // full_text is stored lowercased, so this is a plain substring scan.
+    session.full_text.contains(&q)
 }
 
 /// Filter `sessions` down to those matching `query` (see [`session_matches`]), preserving
@@ -138,32 +158,46 @@ pub fn sessions_in_dir(session_dir: &Path) -> Vec<ClaudeSession> {
     };
     let mut out: Vec<ClaudeSession> = Vec::new();
     for entry in entries.flatten() {
-        let path = entry.path();
-        // Only `*.jsonl` transcripts; skip subdirs and any sidecar files.
-        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
-            continue;
+        if let Some(s) = read_session_file(&entry.path()) {
+            out.push(s);
         }
-        let Some(id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        let started_at = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        let (summary, first_user, message_count) = summarize_file(&path);
-        out.push(ClaudeSession {
-            id,
-            source: HistorySource::Claude,
-            started_at,
-            summary,
-            first_user,
-            message_count,
-        });
     }
     sort_newest_first(&mut out);
     out
+}
+
+/// Read one `*.jsonl` transcript into a [`ClaudeSession`] (id from the filename stem,
+/// `started_at` from the file mtime, summary/first-user/full-text from a bounded parse).
+/// `None` for non-`.jsonl` paths or a stem-less filename — the per-file seam shared by
+/// [`sessions_in_dir`] and the incremental [`SessionCache`].
+pub fn read_session_file(path: &Path) -> Option<ClaudeSession> {
+    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
+        return None;
+    }
+    let id = path.file_stem().map(|s| s.to_string_lossy().into_owned())?;
+    let started_at = file_fingerprint(path).map(|(mtime, _)| mtime);
+    let (summary, first_user, full_text, message_count) = summarize_file(path);
+    Some(ClaudeSession {
+        id,
+        source: HistorySource::Claude,
+        started_at,
+        summary,
+        first_user,
+        message_count,
+        full_text,
+    })
+}
+
+/// `(mtime epoch ms, size bytes)` for `path`, or `None` when stat fails. The change
+/// fingerprint the [`SessionCache`] keys re-scans on.
+fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
+    let m = fs::metadata(path).ok()?;
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)?;
+    Some((mtime, m.len()))
 }
 
 /// Order sessions newest-first by `started_at`, breaking ties by id (descending) so the
@@ -172,45 +206,59 @@ fn sort_newest_first(v: &mut [ClaudeSession]) {
     v.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| b.id.cmp(&a.id)));
 }
 
-/// Read `path` once: count every record (cheaply) and, within the first
-/// [`SUMMARY_SCAN_LINES`] records, recover a summary (preferring a `summary`-type record,
-/// else the first `user` message's text) AND the first user message itself (kept for
-/// search). Returns `(summary, first_user, line_count)`.
-fn summarize_file(path: &Path) -> (String, String, usize) {
+/// Read `path` once: count every record (cheaply) and, within a bounded prefix, recover
+/// (a) a summary — preferring a `summary`-type record, else the first `user` message's
+/// text — scanned over the first [`SUMMARY_SCAN_LINES`] records; (b) the first user
+/// message itself (kept for search); and (c) the lowercased full-conversation text of
+/// user + assistant messages, capped at [`FULL_TEXT_MAX`] bytes and
+/// [`FULL_TEXT_SCAN_LINES`] records. Records past both bounds are counted blind, never
+/// JSON-parsed. Returns `(summary, first_user, full_text, line_count)`.
+fn summarize_file(path: &Path) -> (String, String, String, usize) {
     use std::io::{BufRead, BufReader};
     let Ok(file) = fs::File::open(path) else {
-        return (String::new(), String::new(), 0);
+        return (String::new(), String::new(), String::new(), 0);
     };
     let reader = BufReader::new(file);
     let mut count = 0usize;
     let mut summary: Option<String> = None;
     let mut first_user: Option<String> = None;
+    let mut full = String::new();
 
     for (i, line) in reader.lines().enumerate() {
         let Ok(line) = line else { break };
         count += 1;
-        // Only the bounded prefix is JSON-parsed; the rest is counted blind. Keep scanning
-        // until BOTH the summary and the first user message are in hand (the first user
-        // message feeds search even when a summary record wins the summary slot).
-        if i >= SUMMARY_SCAN_LINES || (summary.is_some() && first_user.is_some()) {
+        let summary_done = i >= SUMMARY_SCAN_LINES || (summary.is_some() && first_user.is_some());
+        let full_done = i >= FULL_TEXT_SCAN_LINES || full.len() >= FULL_TEXT_MAX;
+        // Only the bounded prefix is JSON-parsed; the rest is counted blind.
+        if summary_done && full_done {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
         match v.get("type").and_then(|t| t.as_str()) {
-            Some("summary") => {
+            Some("summary") if !summary_done => {
                 if let Some(s) = v.get("summary").and_then(|s| s.as_str()) {
                     if !s.trim().is_empty() {
                         summary = Some(clean_summary(s));
                     }
                 }
             }
-            Some("user") if first_user.is_none() => {
-                if let Some(text) = user_text(&v) {
+            Some("user") => {
+                if let Some(text) = message_text(&v) {
                     if !text.trim().is_empty() {
-                        first_user = Some(clean_summary(&text));
+                        if first_user.is_none() && !summary_done {
+                            first_user = Some(clean_summary(&text));
+                        }
+                        if !full_done {
+                            push_full_text(&mut full, &text);
+                        }
                     }
+                }
+            }
+            Some("assistant") if !full_done => {
+                if let Some(text) = message_text(&v) {
+                    push_full_text(&mut full, &text);
                 }
             }
             _ => {}
@@ -218,24 +266,57 @@ fn summarize_file(path: &Path) -> (String, String, usize) {
     }
 
     let first_user = first_user.unwrap_or_default();
-    (summary.unwrap_or_else(|| first_user.clone()), first_user, count)
+    (summary.unwrap_or_else(|| first_user.clone()), first_user, full, count)
 }
 
-/// Pull the user-visible text out of a `user`-type record's `message.content`, which is either
-/// a plain string or an array of content blocks (the first `{"type":"text"}` block wins).
-/// Returns `None` for tool-result-only messages with no text.
-fn user_text(v: &serde_json::Value) -> Option<String> {
+/// Append one message's text to the accumulated full-text extract: whitespace-collapsed,
+/// lowercased (search is case-insensitive and never re-lowers the stored text), space-
+/// separated from the previous message, and truncated (char-boundary safe) once the
+/// [`FULL_TEXT_MAX`] cap is reached.
+fn push_full_text(full: &mut String, text: &str) {
+    if full.len() >= FULL_TEXT_MAX {
+        return;
+    }
+    let remaining = FULL_TEXT_MAX - full.len();
+    if !full.is_empty() {
+        full.push(' ');
+    }
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    if collapsed.len() <= remaining {
+        full.push_str(&collapsed);
+    } else {
+        // Cut at the last char boundary at or below the byte budget.
+        let mut cut = remaining;
+        while cut > 0 && !collapsed.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        full.push_str(&collapsed[..cut]);
+    }
+}
+
+/// Pull the human-visible text out of a `user`/`assistant` record's `message.content`,
+/// which is either a plain string or an array of content blocks (all `{"type":"text"}`
+/// blocks, space-joined — tool_use / tool_result blocks are skipped). Returns `None` for
+/// tool-traffic-only messages with no text.
+fn message_text(v: &serde_json::Value) -> Option<String> {
     let content = v.get("message")?.get("content")?;
     if let Some(s) = content.as_str() {
         return Some(s.to_string());
     }
     if let Some(arr) = content.as_array() {
+        let mut out = String::new();
         for block in arr {
             if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                 if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                    return Some(t.to_string());
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(t);
                 }
             }
+        }
+        if !out.is_empty() {
+            return Some(out);
         }
     }
     None
@@ -256,6 +337,88 @@ fn truncate_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+// ===== incremental, fingerprint-keyed session cache =====
+
+/// An incremental cache over one or more session directories: each transcript is keyed by
+/// its `(mtime, size)` fingerprint and re-parsed **only** when that fingerprint changes
+/// (or the file is new). Deleted files drop out on the next scan. Designed to live on a
+/// long-running background scanner thread, so repeated "refresh this project" requests
+/// cost one `read_dir` + a stat per file — not a re-parse of every transcript.
+#[derive(Default)]
+pub struct SessionCache {
+    files: HashMap<PathBuf, CachedFile>,
+    /// How many files the most recent [`SessionCache::scan_dir`] actually (re-)parsed —
+    /// observable cache effectiveness, used by tests to prove unchanged files are reused.
+    last_scan_parsed: usize,
+}
+
+struct CachedFile {
+    mtime_ms: u64,
+    size: u64,
+    session: ClaudeSession,
+}
+
+impl SessionCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Files (re-)parsed by the most recent [`scan_dir`](Self::scan_dir) call.
+    pub fn last_scan_parsed(&self) -> usize {
+        self.last_scan_parsed
+    }
+
+    /// Scan `project_root`'s sessions through the real `~/.claude/projects` (the
+    /// non-test entry point; see [`scan_dir`](Self::scan_dir) for the seam).
+    pub fn scan_project(&mut self, project_root: &Path) -> Vec<ClaudeSession> {
+        let Some(root) = claude_projects_root() else {
+            return Vec::new();
+        };
+        self.scan_dir(&root.join(encode_project_dir(project_root)))
+    }
+
+    /// List `session_dir`, re-parsing only new/changed transcripts (by mtime+size) and
+    /// reusing cached [`ClaudeSession`]s for the rest; entries whose file vanished are
+    /// dropped. Returns the directory's sessions newest-first. A missing/unreadable
+    /// directory yields an empty list (and evicts that directory's cached files).
+    pub fn scan_dir(&mut self, session_dir: &Path) -> Vec<ClaudeSession> {
+        self.last_scan_parsed = 0;
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut out: Vec<ClaudeSession> = Vec::new();
+        if let Ok(entries) = fs::read_dir(session_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
+                    continue;
+                }
+                let fp = file_fingerprint(&path);
+                let fresh = match (self.files.get(&path), fp) {
+                    (Some(c), Some((mtime, size))) => c.mtime_ms == mtime && c.size == size,
+                    _ => false,
+                };
+                if !fresh {
+                    let Some(session) = read_session_file(&path) else {
+                        continue;
+                    };
+                    self.last_scan_parsed += 1;
+                    let (mtime_ms, size) = fp.unwrap_or((0, 0));
+                    self.files.insert(path.clone(), CachedFile { mtime_ms, size, session });
+                }
+                if let Some(c) = self.files.get(&path) {
+                    out.push(c.session.clone());
+                    seen.push(path);
+                }
+            }
+        }
+        // Evict cached entries under `session_dir` whose file no longer exists.
+        let seen: std::collections::HashSet<&PathBuf> = seen.iter().collect();
+        self.files
+            .retain(|p, _| !p.starts_with(session_dir) || seen.contains(p));
+        sort_newest_first(&mut out);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -403,6 +566,7 @@ mod tests {
             summary: summary.into(),
             first_user: first_user.into(),
             message_count: 0,
+            full_text: String::new(),
         }
     }
 
@@ -458,6 +622,121 @@ mod tests {
         ];
         let ids: Vec<String> = filter_sessions(&v, "alpha").into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["first", "third"]);
+    }
+
+    // ---- full-conversation search (#1) ----
+
+    /// A transcript: opening prompt, then an assistant answer, then a later user message —
+    /// only the opening prompt is in summary/first_user; the rest only in full_text.
+    fn write_convo(dir: &Path, name: &str) {
+        std::fs::write(
+            dir.join(name),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fix the sidebar\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The RefCell reborrow was the culprit\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"x\",\"input\":{}}]}}\n\
+             {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"secret-tool-output\"},{\"type\":\"text\",\"text\":\"now add Zanzibar telemetry\"}]}}\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn full_text_match_hits_inside_the_conversation() {
+        let dir = temp_dir("fulltext");
+        write_convo(&dir, "s.jsonl");
+        let sessions = sessions_in_dir(&dir);
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+
+        // Fast path still works (summary / opening prompt).
+        assert!(session_matches(s, "sidebar"));
+        // Assistant text, mid-conversation — only reachable via full_text (#1).
+        assert!(session_matches(s, "RefCell REBORROW"), "assistant text should match");
+        // A later user message, past the first one.
+        assert!(session_matches(s, "zanzibar"), "later user text should match");
+        // Miss: not in the conversation at all.
+        assert!(!session_matches(s, "kubernetes"), "absent term must not match");
+        // Tool traffic (tool_result content) is NOT searchable text.
+        assert!(!session_matches(s, "secret-tool-output"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_text_is_capped() {
+        let dir = temp_dir("fullcap");
+        // One huge user message, far past the cap.
+        let big = format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n",
+            "word ".repeat(FULL_TEXT_MAX / 2)
+        );
+        std::fs::write(dir.join("big.jsonl"), big).unwrap();
+        let sessions = sessions_in_dir(&dir);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].full_text.len() <= FULL_TEXT_MAX);
+        assert!(sessions[0].full_text.starts_with("word word"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- SessionCache: fingerprint-keyed incremental re-scan (#6) ----
+
+    #[test]
+    fn cache_reuses_unchanged_files_and_reparses_on_change() {
+        let dir = temp_dir("cache");
+        write_convo(&dir, "a.jsonl");
+        std::fs::write(
+            dir.join("b.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+        )
+        .unwrap();
+
+        let mut cache = SessionCache::new();
+        let first = cache.scan_dir(&dir);
+        assert_eq!(first.len(), 2);
+        assert_eq!(cache.last_scan_parsed(), 2, "cold scan parses everything");
+
+        // Unchanged: a re-scan parses nothing and returns the same rows.
+        let second = cache.scan_dir(&dir);
+        assert_eq!(second, first);
+        assert_eq!(cache.last_scan_parsed(), 0, "warm scan must reuse the cache");
+
+        // Touch one file: append a record AND bump its mtime well past the original
+        // (size + mtime both move — either alone must invalidate, jointly they must).
+        let b = dir.join("b.jsonl");
+        let mut content = std::fs::read_to_string(&b).unwrap();
+        content.push_str("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"again\"}}\n");
+        std::fs::write(&b, content).unwrap();
+        let f = std::fs::File::options().write(true).open(&b).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+        drop(f);
+
+        let third = cache.scan_dir(&dir);
+        assert_eq!(cache.last_scan_parsed(), 1, "only the changed file re-parses");
+        let b_row = third.iter().find(|s| s.id == "b").unwrap();
+        assert_eq!(b_row.message_count, 2, "the re-parse saw the appended record");
+        assert!(session_matches(b_row, "again"), "new text is searchable after the bump");
+
+        // mtime bump alone (same size, same content) also invalidates.
+        let a = dir.join("a.jsonl");
+        let f = std::fs::File::options().write(true).open(&a).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
+        drop(f);
+        cache.scan_dir(&dir);
+        assert_eq!(cache.last_scan_parsed(), 1, "an mtime-only bump re-parses that file");
+
+        // Deleting a file drops it from the next scan.
+        std::fs::remove_file(&b).unwrap();
+        let after_delete = cache.scan_dir(&dir);
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete[0].id, "a");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_missing_dir_is_empty() {
+        let mut cache = SessionCache::new();
+        let missing = std::env::temp_dir().join(format!("hp-claude-cm-{}", uuid::Uuid::new_v4()));
+        assert!(cache.scan_dir(&missing).is_empty());
+        assert_eq!(cache.last_scan_parsed(), 0);
     }
 
     #[test]

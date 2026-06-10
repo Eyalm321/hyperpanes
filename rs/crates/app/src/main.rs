@@ -26,6 +26,7 @@ mod contextmenu;
 mod control_host;
 mod drag;
 mod glow;
+mod history_scan;
 mod keybindings;
 mod palette;
 mod paneview;
