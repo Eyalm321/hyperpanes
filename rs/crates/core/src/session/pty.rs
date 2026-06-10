@@ -129,6 +129,11 @@ pub fn spawn_pty(
         cmd.env(k, v);
     }
 
+    // ⚠ On Windows this CreateProcessW-into-ConPTY can block ~1s for SOME shells (pwsh 7
+    // measured 1.0-1.1s every time; cmd/powershell5/node are 8-65ms; raw CreateProcessW
+    // of pwsh without a pseudoconsole is ~5ms warm). Callers that care about latency
+    // must not run spawn on a UI/startup-critical thread — the app spawns panes on a
+    // worker thread for exactly this reason.
     let mut child = pair
         .slave
         .spawn_command(cmd)

@@ -238,14 +238,16 @@ impl App {
         // scale); `State::new` flags `font_reload`, so a scale-1 placeholder is fine.
         let mut state = State::new(theme::load_font(1.0));
 
-        // #2 startup: seed the first pane (spawn the pty → shell) BEFORE the heavy
-        // `AppWindow::new` (wgpu device init), so the shell's process startup overlaps GPU
-        // realize instead of running after it + a multi-tick wait to learn the pane area.
-        // `make_pane` fixes the pty at 80×24, so seeding needs no area; the first render pump
-        // relayouts it. Window 0 only — re-host/tear-off windows are also seeded here.
+        // #2 startup: seed the first pane BEFORE the heavy `AppWindow::new` (wgpu device
+        // init). The pty spawn itself runs on a worker thread (`spawn_session_async` —
+        // pwsh-into-ConPTY blocks ~1s, which used to serialize with GPU init here), so
+        // seeding costs ~1ms and the shell starts up fully overlapped with the window
+        // realize. Seeding needs no area; the first render pump relayouts the pane and the
+        // spawn-done drain reconciles the pty size. Window 0 only — re-host/tear-off
+        // windows are also seeded here.
         crate::perf::mark("spawn_window: seeding first pane");
         self.apply_seed(&mut state, seed);
-        crate::perf::mark("spawn_window: first pane seeded (pty spawned)");
+        crate::perf::mark("spawn_window: first pane seeded (pty spawn queued)");
 
         let aw = match AppWindow::new() {
             Ok(a) => a,
@@ -384,6 +386,32 @@ impl App {
             if w.last_maximized.get() != Some(maxd) {
                 w.last_maximized.set(Some(maxd));
                 w.app.set_win_maximized(maxd);
+            }
+        }
+
+        // 1b. Async pane spawns that just completed (see `State::spawn_session_async`):
+        //    force a geometry re-apply — the pump may have resized the pane while its
+        //    session didn't exist yet (a resize on a missing uid is a silent no-op), so
+        //    `applied = (0,0)` makes the next `place()` resend cols/rows to the now-live
+        //    pty. A uid whose pane is GONE (closed mid-spawn) is killed instead, so the
+        //    orphaned shell doesn't leak.
+        let done: Vec<String> = {
+            let mut q = crate::state::spawn_done().lock().unwrap();
+            std::mem::take(&mut *q)
+        };
+        for uid in done {
+            let mut found = false;
+            for w in &windows {
+                let mut st = w.state.borrow_mut();
+                if let Some((ti, pi)) = st.find_pane(&uid) {
+                    st.tabs[ti].panes[pi].applied = (0, 0);
+                    st.dirty = true;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                self.mgr.kill(&uid);
             }
         }
 

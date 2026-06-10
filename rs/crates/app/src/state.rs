@@ -297,6 +297,16 @@ fn is_default_label(label: &str) -> bool {
 /// then rendered dim after the pane title. Kept app-side (mirrors core's `is_posix_shell`
 /// basename matching) so the badge needs no `core` change.
 ///
+/// Uids whose ASYNC pty spawn just completed (see [`State::spawn_session_async`]).
+/// `App::tick` drains this each tick: it forces a geometry re-apply for the pane (the
+/// pump may have resized it while the session didn't exist yet — a resize on a missing
+/// uid is a silent no-op, so without the re-apply the pty would stay at its spawn size),
+/// and kills the session if the pane was closed mid-spawn.
+pub fn spawn_done() -> &'static std::sync::Mutex<Vec<String>> {
+    static Q: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    Q.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
 /// Maps the common shells to a canonical lowercase label (`pwsh.exe`→`pwsh`,
 /// `powershell.exe`→`powershell`, `cmd.exe`→`cmd`, `bash(.exe)`→`bash`, `wsl.exe`→`wsl`,
 /// plus `nu`/`zsh`/`fish`/`sh`/`dash`/`ash`); anything else falls back to the bare basename
@@ -667,6 +677,37 @@ impl State {
         None
     }
 
+    /// Spawn the pane's pty session on a worker thread. On Windows, CreateProcessW into a
+    /// ConPTY blocks ~1s for some shells (pwsh 7 measured 1.0–1.1s EVERY spawn; see
+    /// docs/conpty-passthrough-investigation.md) — running it inline froze startup and
+    /// every split/new-pane/restore for that long. The pane's grid is built immediately
+    /// and output starts flowing whenever the shell is ready (exactly how other terminals
+    /// behave: window first, prompt when the shell is up). Completion is reported via
+    /// [`spawn_done`], which `App::tick` drains to (a) force a geometry re-apply — the
+    /// pump may have resized the pane while its session didn't exist, and a resize on a
+    /// missing uid is a silent no-op — and (b) kill the session if its pane was closed
+    /// mid-spawn (otherwise it would leak). A spawn error just logs: the pane shows a
+    /// dead shell, and a restart re-tries.
+    fn spawn_session_async(mgr: &SessionManager, opts: SpawnOptions) {
+        let mgr = mgr.clone();
+        let uid = opts.uid.clone();
+        // Captured on the UI thread (inside the app's tokio runtime guard); the worker
+        // re-enters it so `create`'s tokio::spawn of the driver task has a runtime.
+        let rt = tokio::runtime::Handle::current();
+        let res = std::thread::Builder::new()
+            .name("hp-pane-spawn".into())
+            .spawn(move || {
+                let _guard = rt.enter();
+                if let Err(e) = mgr.create(opts) {
+                    eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
+                }
+                spawn_done().lock().unwrap().push(uid);
+            });
+        if let Err(e) = res {
+            eprintln!("[hyperpanes] failed to start spawn thread: {e}");
+        }
+    }
+
     /// Best-known cell size for spawning a NEW pane's pty (ConPTY Option C: keep the grid at
     /// the pane's actual visible cells, never larger — conhost's scroll repaint cost is
     /// proportional to rows, and every `ResizePseudoConsole` triggers a full-grid re-render
@@ -701,7 +742,7 @@ impl State {
         let accent = opts.accent;
         // A command to run instead of an interactive shell ("" → interactive).
         let command = opts.command.filter(|c| !c.is_empty());
-        // Shell: an explicit token from the dialog is used verbatim; otherwise honour the
+        // Shell: an explicit pick from the dialog is used verbatim; otherwise honour the
         // default-shell preference ("" = prefer pwsh when available, else core's default).
         let shell = match opts.shell {
             Some(s) if !s.is_empty() => Some(s),
@@ -728,7 +769,7 @@ impl State {
             })
         }).flatten();
         let (cols, rows) = self.spawn_cells();
-        if let Err(e) = mgr.create(SpawnOptions {
+        Self::spawn_session_async(mgr, SpawnOptions {
             uid: uid.clone(),
             cols: Some(cols),
             rows: Some(rows),
@@ -738,10 +779,7 @@ impl State {
             command,
             integration,
             ..Default::default()
-        }) {
-            eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
-            return None;
-        }
+        });
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
@@ -2868,7 +2906,7 @@ impl State {
             env: si.env.into_iter().collect(),
         });
         let (cols, rows) = self.spawn_cells();
-        if let Err(e) = mgr.create(SpawnOptions {
+        Self::spawn_session_async(mgr, SpawnOptions {
             uid: uid.clone(),
             cols: Some(cols),
             rows: Some(rows),
@@ -2879,10 +2917,7 @@ impl State {
             args: spec.args.clone(),
             integration,
             ..Default::default()
-        }) {
-            eprintln!("[hyperpanes] failed to spawn {uid}: {e}");
-            return None;
-        }
+        });
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));

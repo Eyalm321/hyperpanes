@@ -303,3 +303,26 @@ deployed next to the exe by `rs/crates/app/build.rs` (dev) and by `rs/packaging/
 ($INSTDIR, alongside the previously-unpackaged shell-integration scripts). Stock-build
 fingerprint: scrolling-region 11.2 MB/s single-run — impossible on the in-box host, so the
 bundled pair demonstrably loads with zero configuration.
+
+### G. 2026-06-10 — startup: CreateProcessW of pwsh-into-ConPTY blocks ~1s (fixed by async spawn)
+Profiling the 2121 ms bench startup with `HYPERPANES_PERFLOG` + temporary core timings found the
+first pane's `mgr.create` blocking the startup path for **1.0–1.1 s, every launch** — and the
+entire cost is `CreateProcessW` into the pseudoconsole for **pwsh 7 specifically**:
+
+| child spawned into the ConPTY | `spawn_command` |
+| --- | ---: |
+| pwsh 7 (token or full path — not a PATH-search issue) | **1.04–1.13 s** |
+| powershell.exe 5.1 | 17 ms |
+| cmd.exe | 8 ms |
+| node.exe | 65 ms |
+| pwsh 7 raw CreateProcessW, NO pseudoconsole (warm) | 2–6 ms |
+
+The stall needs both pwsh 7 AND the pseudoconsole attribute; host version doesn't matter
+(reproduced on the bundled 1.24). Root cause inside Windows/pwsh is unidentified (candidate for
+its own upstream report). **Fix shipped:** `State::spawn_session_async` moves `mgr.create` to a
+worker thread for all pane creation (seed, splits, restores — restores now spawn in parallel),
+with a `spawn_done` queue drained by `App::tick` that re-applies geometry (a resize during the
+spawn window would otherwise be silently lost) and kills sessions whose pane closed mid-spawn.
+Result: window-ready 1789→545 ms (profile), bench startup **2121→1219 ms**; splits no longer
+freeze the UI for ~1s when the default shell is pwsh. Remaining startup gap to WT is wgpu device
+init (~520 ms) + the post-window first-pump path.

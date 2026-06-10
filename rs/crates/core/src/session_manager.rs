@@ -154,7 +154,11 @@ struct Session {
     shared: Arc<Shared>,
 }
 
-/// Owns every live pty session, keyed by uid. Cheap to clone-share via `Arc`.
+/// Owns every live pty session, keyed by uid. Cheap to clone-share via `Arc` — and
+/// `Clone` itself shares the same session map + event sender (a handle, not a copy),
+/// so spawn work can move onto a worker thread (`Spawn` on Windows ConPTY can block
+/// ~1s for some shells — see `docs/conpty-passthrough-investigation.md`).
+#[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     events: UnboundedSender<SessionEvent>,
