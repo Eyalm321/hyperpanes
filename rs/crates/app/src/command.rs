@@ -88,6 +88,12 @@ pub enum Command {
     CopyPane(usize),
     /// Paste the clipboard into pane `0`'s session.
     PastePane(usize),
+    /// Paste the clipboard into the focused pane's session (the Ctrl+V keybinding). Reads
+    /// the OS clipboard fresh app-side (arboard, with open retries) instead of forwarding a
+    /// raw 0x16 for the shell to resolve — PSReadLine's own clipboard read has no retry and
+    /// can come up empty/stale right after an external copy (#9). Unbinding `pane.paste`
+    /// in Preferences restores the literal-0x16 passthrough for shells that want it.
+    PasteFocused,
     /// Select all of pane `0`'s viewport.
     SelectAllPane(usize),
     /// Clear pane `0`'s screen + scrollback.
@@ -306,6 +312,10 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         Command::CopyPane(i) => state.copy_pane(i),
         Command::PastePane(i) => state.paste_pane(i, mgr),
+        Command::PasteFocused => {
+            let f = state.active_tab().focused;
+            state.paste_pane(f, mgr);
+        }
         Command::SelectAllPane(i) => state.select_all_pane(i),
         Command::ClearPane(i) => state.clear_pane(i),
         // ---- reminder panes ----
