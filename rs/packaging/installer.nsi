@@ -39,6 +39,11 @@ Unicode true
 !ifndef OUTFILE
   !define OUTFILE "Hyperpanes-${VERSION}-setup.exe"
 !endif
+; Repo `resources/` dir (conpty redistributable pair + shell-integration scripts).
+; build-installer.ps1 passes it absolute; the default resolves relative to this .nsi.
+!ifndef RESOURCES
+  !define RESOURCES "..\..\resources"
+!endif
 
 Name "${PRODUCT_NAME}"
 OutFile "${OUTFILE}"
@@ -87,6 +92,19 @@ Section "Install"
   ; the icon to be embedded in the bare .exe (that needs a build.rs/winres change).
   File "/oname=icon.ico" "${ICON}"
 
+  ; Bundled ConPTY redistributable pair (resources/conpty/README.md): portable-pty
+  ; prefers a conpty.dll next to the exe; the 1.24 host removes the in-box conhost's
+  ; scroll-region/passthrough bottlenecks (6-44x measured). MUST ship as a matched pair.
+  File "${RESOURCES}\conpty\conpty.dll"
+  File "${RESOURCES}\conpty\OpenConsole.exe"
+
+  ; Shell-integration init scripts (cwd OSC -> project tint / clickable paths). The app
+  ; resolves exe_dir\resources\shell-integration; build.rs deploys the same for dev.
+  SetOutPath "$INSTDIR\resources\shell-integration"
+  File "${RESOURCES}\shell-integration\hp-init.ps1"
+  File "${RESOURCES}\shell-integration\hp-init.sh"
+  SetOutPath "$INSTDIR"
+
   CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}.lnk" "$INSTDIR\${MAIN_BINARY}" "" "$INSTDIR\icon.ico" 0
   CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk"    "$INSTDIR\${MAIN_BINARY}" "" "$INSTDIR\icon.ico" 0
 
@@ -119,6 +137,12 @@ Section "Uninstall"
 
   Delete "$INSTDIR\${MAIN_BINARY}"
   Delete "$INSTDIR\icon.ico"
+  Delete "$INSTDIR\conpty.dll"
+  Delete "$INSTDIR\OpenConsole.exe"
+  Delete "$INSTDIR\resources\shell-integration\hp-init.ps1"
+  Delete "$INSTDIR\resources\shell-integration\hp-init.sh"
+  RMDir  "$INSTDIR\resources\shell-integration"
+  RMDir  "$INSTDIR\resources"
   Delete "$INSTDIR\Uninstall ${PRODUCT_NAME}.exe"
   RMDir  "$INSTDIR"
 

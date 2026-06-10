@@ -297,3 +297,9 @@ packaging, matched-pair update story like WezTerm) — it turns the weakest colu
 beats Windows Terminal on dense/scrolling/unicode and lifts scroll-region 44×. Remaining gaps to
 WT after sideload: alt-screen (29 vs 53) and scroll-region (17.6 vs 26) — now app-side
 render-pipeline territory, no longer host-bound.
+
+**SHIPPED 2026-06-09:** pair vendored at `resources/conpty/` (README has the update story),
+deployed next to the exe by `rs/crates/app/build.rs` (dev) and by `rs/packaging/installer.nsi`
+($INSTDIR, alongside the previously-unpackaged shell-integration scripts). Stock-build
+fingerprint: scrolling-region 11.2 MB/s single-run — impossible on the in-box host, so the
+bundled pair demonstrably loads with zero configuration.

@@ -15,15 +15,27 @@ fn main() {
     // release. Without these, pwsh never emits its OSC-7 cwd → the git-project tint
     // can't fire. Best-effort: a copy failure must never fail the build.
     let scripts = manifest.join("../../../resources/shell-integration");
+    // Also deploy the bundled ConPTY redistributable pair (resources/conpty/README.md)
+    // NEXT TO the binary: portable-pty's `load_conpty()` prefers a sideloaded
+    // `conpty.dll` beside the exe, and that host removes the in-box conhost's
+    // scroll-region repaint + passthrough bottlenecks (measured 6-44× throughput,
+    // docs/conpty-passthrough-investigation.md §F). Must stay a matched pair.
+    let conpty = manifest.join("../../../resources/conpty");
     if let Ok(out_dir) = std::env::var("OUT_DIR") {
         // OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out → profile dir is 3 up.
         if let Some(profile) = Path::new(&out_dir).ancestors().nth(3) {
             let dst = profile.join("resources").join("shell-integration");
             let _ = copy_dir(&scripts, &dst);
+            for f in ["conpty.dll", "OpenConsole.exe"] {
+                let _ = std::fs::copy(conpty.join(f), profile.join(f));
+            }
         }
     }
     for f in ["hp-init.ps1", "hp-init.sh"] {
         println!("cargo:rerun-if-changed={}", scripts.join(f).display());
+    }
+    for f in ["conpty.dll", "OpenConsole.exe"] {
+        println!("cargo:rerun-if-changed={}", conpty.join(f).display());
     }
 
     let mut libs: HashMap<String, PathBuf> = HashMap::new();

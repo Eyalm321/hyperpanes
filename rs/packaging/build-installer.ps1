@@ -100,11 +100,16 @@ $OutFile = Join-Path $DistDir "Hyperpanes-$Version-setup.exe"
 if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
 
 Write-Host "==> makensis -> $OutFile" -ForegroundColor Cyan
+$ResourcesDir = Join-Path $RepoRoot 'resources'
+foreach ($f in @('conpty\conpty.dll', 'conpty\OpenConsole.exe', 'shell-integration\hp-init.ps1', 'shell-integration\hp-init.sh')) {
+  if (-not (Test-Path (Join-Path $ResourcesDir $f))) { throw "Missing packaged resource: resources\$f" }
+}
 & $makensis `
     "/DVERSION=$Version" `
     "/DAPP_EXE=$ExePath" `
     "/DICON=$IconIco" `
     "/DOUTFILE=$OutFile" `
+    "/DRESOURCES=$ResourcesDir" `
     $Nsi
 if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
 if (-not (Test-Path $OutFile)) { throw "Installer was not produced: $OutFile" }
