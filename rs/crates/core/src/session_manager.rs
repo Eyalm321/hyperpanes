@@ -329,7 +329,10 @@ fn build_spec(opts: &SpawnOptions) -> PtySpec {
         }
     }
 
-    let process_env: EnvMap = std::env::vars().collect();
+    // FRESH base env per spawn (#28): registry-resolved on Windows so PATH/user-var
+    // changes made after app launch reach new panes — not the process env frozen at
+    // startup. See `session::env`.
+    let process_env: EnvMap = crate::session::env::fresh_env();
     let env = build_env(&EnvInputs {
         process_env: &process_env,
         opts_env: opts.env.as_ref(),

@@ -1461,6 +1461,7 @@ impl App {
                         accent: Some(color),
                         show_frame: Some(frame),
                         show_dot: Some(dot),
+                        env: None,
                     };
                     app.run_command(&w, Command::SubmitNewPane(opts));
                 }
@@ -2022,6 +2023,7 @@ impl App {
                     accent: Some(crate::state::parse_hex(&color)),
                     show_frame: None,
                     show_dot: None,
+                    env: None,
                 };
                 app.run_command(&w, Command::SubmitNewPane(opts));
             });
