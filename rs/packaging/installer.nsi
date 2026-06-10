@@ -26,6 +26,10 @@ Unicode true
 !define MAIN_BINARY  "hyperpanes.exe"
 !define UNINST_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
+; .hyperpanes workspace file association (per-user: HKCU\Software\Classes == per-user HKCR)
+!define WS_EXT    ".hyperpanes"
+!define WS_PROGID "Hyperpanes.Workspace"
+
 ; ----- Build-time inputs -----------------------------------------------------
 !ifndef VERSION
   !define VERSION "0.0.0"
@@ -125,6 +129,15 @@ Section "Install"
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" "$0"
 
+  ; .hyperpanes file association: double-clicking a workspace opens it in the app
+  ; ("%1" arrives as argv[1] and flows through the CLI's positional-path capture).
+  WriteRegStr HKCU "Software\Classes\${WS_EXT}"    "" "${WS_PROGID}"
+  WriteRegStr HKCU "Software\Classes\${WS_PROGID}" "" "Hyperpanes Workspace"
+  WriteRegStr HKCU "Software\Classes\${WS_PROGID}\DefaultIcon"        "" "$INSTDIR\icon.ico,0"
+  WriteRegStr HKCU "Software\Classes\${WS_PROGID}\shell\open\command" "" '"$INSTDIR\${MAIN_BINARY}" "%1"'
+  ; Tell the shell the association table changed so the icon/verb apply immediately.
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'  ; SHCNE_ASSOCCHANGED
+
   Call AddToUserPath
 SectionEnd
 
@@ -145,6 +158,15 @@ Section "Uninstall"
   RMDir  "$INSTDIR\resources"
   Delete "$INSTDIR\Uninstall ${PRODUCT_NAME}.exe"
   RMDir  "$INSTDIR"
+
+  ; Mirror the .hyperpanes association cleanup (leave the extension key alone if
+  ; another app has since claimed it).
+  DeleteRegKey   HKCU "Software\Classes\${WS_PROGID}"
+  ReadRegStr $0 HKCU "Software\Classes\${WS_EXT}" ""
+  StrCmp $0 "${WS_PROGID}" 0 +2
+    DeleteRegValue HKCU "Software\Classes\${WS_EXT}" ""
+  DeleteRegKey /ifempty HKCU "Software\Classes\${WS_EXT}"
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'
 
   DeleteRegKey HKCU "${UNINST_KEY}"
   DeleteRegKey HKCU "Software\${PRODUCT_NAME}"

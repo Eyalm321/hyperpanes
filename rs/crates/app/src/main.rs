@@ -220,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let application = App::new(mgr.clone(), erx);
 
     // Wire CLI launch: `hyperpanes -c "<cmd>" --shell … --cwd … --name …` (or a positional
-    // workspace `.json`) seeds the first window from that spec; a bare launch stays an empty
+    // workspace `.hyperpanes`/`.json`) seeds the first window from that spec; a bare launch stays an empty
     // shell pane (no last-session restore — that fallback is intentionally GUI-excluded).
     let argv: Vec<String> = std::env::args().collect();
     let cwd = std::env::current_dir()
