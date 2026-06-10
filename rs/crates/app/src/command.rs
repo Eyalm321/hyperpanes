@@ -103,6 +103,8 @@ pub enum Command {
     ToggleReminders,
     /// Re-dock the parked pane with session uid `0` into the active tab + clear its reminder.
     RestoreReminder(String),
+    /// Hide the fired-reminder alert toast for session uid `0` (the reminder + bell badge stay).
+    DismissReminderToast(String),
     /// Move pane `0` into a brand-new tab (disabled when its tab has <2 panes).
     MovePaneToNewTab(usize),
     /// Move pane `0` into existing tab `1`.
@@ -318,6 +320,7 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::RemindPane(i, off) => state.remind_pane(i, off),
         Command::ToggleReminders => state.toggle_reminders(),
         Command::RestoreReminder(uid) => state.restore_reminder(&uid, mgr),
+        Command::DismissReminderToast(uid) => state.dismiss_reminder_toast(&uid),
         Command::MovePaneToNewTab(i) => state.move_pane_to_new_tab(i, mgr),
         Command::MovePaneToTab(i, t) => state.move_pane_to_tab(i, t, mgr),
         // ---- tab context-menu actions ----
