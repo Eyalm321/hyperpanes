@@ -808,10 +808,24 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     }
 }
 
+/// What one [`pump`] pass did, surfaced to the app's adaptive idle cadence (#3) + perf log
+/// (#1). `rendered` is the number of pane surfaces repainted (for throughput accounting);
+/// `active` is whether the pass did work that warrants staying at the FAST cadence.
+pub struct PumpResult {
+    pub rendered: usize,
+    pub active: bool,
+}
+
 /// One UI-thread render tick for a **single window**: resync if dirty, blink the
 /// cursor, render dirty visible panes, refresh the HUD. Session output is drained
 /// centrally (see [`crate::app::App::tick`]) and fed into panes before this runs, so the
 /// pump no longer touches the event channel — that's what lets one engine feed N windows.
+///
+/// Returns a [`PumpResult`]: how many panes repainted, and whether anything *active* happened
+/// (streamed content repainted, a glow/toast/typewriter animation advanced, or the prefs
+/// preview is animating). A bare cursor-blink repaint is deliberately NOT "active", so an
+/// otherwise-idle window lets the pump settle to the slow cadence (the blink still toggles
+/// fine at the ~31 Hz idle rate).
 pub fn pump(
     app: &AppWindow,
     state: &mut State,
@@ -819,7 +833,7 @@ pub fn pump(
     area: (f32, f32),
     scale: f32,
     mgr: &SessionManager,
-) {
+) -> PumpResult {
     // ---- expire a held-Esc once auto-repeat stops (no key-release event) ----
     state.tick_esc();
 
@@ -845,12 +859,17 @@ pub fn pump(
     }
     state.last_scale = scale;
 
+    // Whether this pass warrants staying at the fast cadence (#3). A structural resync, a
+    // content repaint, an animation step, or the live prefs preview all count; a bare cursor
+    // blink does not (handled in the per-pane loop below).
+    let mut active = false;
+
     // ---- resync models when state changed ----
     if state.dirty {
         resync(state, app, ui, area, scale, mgr);
         state.dirty = false;
+        active = true;
     }
-
 
     // ---- cursor blink (~530 ms) ----
     let blink_changed = if state.last_blink.elapsed() >= Duration::from_millis(530) {
@@ -868,7 +887,8 @@ pub fn pump(
     // Caret blinks in sync with the panes' cursor.
     if state.overlay == Overlay::Prefs {
         // Advance the ambient Tetris animation, then re-render the preview (no caret — it's
-        // an animation, not a prompt).
+        // an animation, not a prompt). The preview animates continuously, so keep fast cadence.
+        active = true;
         state.animate_preview_tetris();
         if let Some(img) = state.render_preview(scale, false) {
             app.set_pref_preview_surface(img);
@@ -893,11 +913,11 @@ pub fn pump(
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
     let editing_pane = state.editing_pane;
-    let active = state.active;
-    let focused = state.tabs[active].focused;
-    let tab = &mut state.tabs[active];
+    let active_idx = state.active;
+    let focused = state.tabs[active_idx].focused;
+    let tab = &mut state.tabs[active_idx];
     let n = tab.panes.len();
-    let mut rendered = false;
+    let mut rendered = 0usize;
     for i in 0..n {
         let ps = &mut tab.panes[i];
         // Advance this pane's idle glow every tick. A pane is "idle" once it's been
@@ -948,9 +968,19 @@ pub fn pump(
         // typewriter-only change just re-pushes the (unchanged) surface with the new line.
         if pane_dirty || focus_blink {
             ps.surface = ps.pane.render(&mut ps.font, &opts);
-            rendered = true;
+            rendered += 1;
+            // Real content (terminal output / cursor move) keeps the fast cadence; a bare
+            // cursor-blink flip (focus_blink with no pane_dirty) does NOT — it must stay
+            // possible to settle to the idle cadence while a pane just blinks.
+            if pane_dirty {
+                active = true;
+            }
         } else if !glow_changed && !toast_changed && !ai_changed {
             continue;
+        }
+        // An advancing glow/toast/typewriter animation also warrants the fast cadence.
+        if glow_changed || toast_changed || ai_changed {
+            active = true;
         }
         if i < ui.panes.row_count() {
             ui.panes.set_row_data(
@@ -959,7 +989,7 @@ pub fn pump(
             );
         }
     }
-    if rendered {
+    if rendered > 0 {
         state.frames += 1;
     }
 
@@ -979,4 +1009,6 @@ pub fn pump(
         state.frames = 0;
         state.last_hud = Instant::now();
     }
+
+    PumpResult { rendered, active }
 }
