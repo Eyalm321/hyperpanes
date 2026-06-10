@@ -272,3 +272,28 @@ This also *strengthens* Option C (shrink the pty grid): inflation tracked total 
 
 Probe runs live in `rs/spikes/conpty-probe/results/`; the phased workload is
 `rs/spikes/conpty-probe/phases.mjs`.
+
+### F. 2026-06-09 (late) — GUI bench A/B REVERSES Option B's verdict: the sideload is a huge win
+A clean same-binary A/B through the real GUI bench (release build incl. Option C + the lazy
+screen mirror, 3 runs, only delta = `conpty.dll`+`OpenConsole.exe` 1.24.260512001 next to the
+exe), label `sideload124-2026-06-09` in `bench/results/`:
+
+| case (MB/s) | in-box | sideloaded 1.24 | gain | WT 1.24 same night |
+| --- | ---: | ---: | ---: | ---: |
+| dense | 5.9 | **98.6** | 16.7× | 56.5 |
+| scrolling | 7.9 | **65.5** | 8.3× | 63.9 |
+| unicode | 8.5 | **58.9** | 6.9× | 47.0 |
+| cursor-motion | 14.4 | **33.1** | 2.3× | 35.6 |
+| scrolling-region | 0.4 | **17.6** | 44× | 26.0 |
+| alt-screen | 22.4 | 29.2 | 1.3× | 53.2 |
+
+17.6 MB/s on scroll-region is impossible on the in-box host (ceiling ≈ 28 ÷ rows ≈ 0.4), so the
+1.24 host demonstrably carried the run. **Option B's "tested, no meaningful win" (0.2→0.3 MB/s)
+does not reproduce on tonight's build** — that measurement predated the lazy-screen-mirror fix
+(Option D) and Option C, and whatever else confounded it, the modern A/B is unambiguous. The
+probe-observed flush-on-idle (§C) evidently does not bite a real GUI consumer.
+**New recommendation: SHIP the redistributable pair** (deploy next to the exe in build +
+packaging, matched-pair update story like WezTerm) — it turns the weakest column into one that
+beats Windows Terminal on dense/scrolling/unicode and lifts scroll-region 44×. Remaining gaps to
+WT after sideload: alt-screen (29 vs 53) and scroll-region (17.6 vs 26) — now app-side
+render-pipeline territory, no longer host-bound.
