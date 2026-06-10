@@ -334,8 +334,9 @@ export component AppWindow inherits Window {
             // `!fullscreenPaneId && showSidebar && <Sidebar/>`).
             if root.show-sidebar && !root.fullscreen : SidebarRail {
                 // single rail-width binding: a slim icon rail, widened in-place when the
-                // projects section is open (the PaneView sibling shrinks to match).
-                width: root.sidebar-open ? 280px : 44px;
+                // projects OR reminders section is open (the PaneView sibling shrinks to
+                // match; the two sections are mutually exclusive — see sidebar.slint).
+                width: (root.sidebar-open || RemindersAdapter.open) ? 280px : 44px;
                 projects: root.projects;
                 projects-open: root.sidebar-open;
                 new-pane => { root.new-pane(); }
