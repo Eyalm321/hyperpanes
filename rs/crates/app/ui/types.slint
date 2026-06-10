@@ -192,7 +192,8 @@ export struct ReminderItem {
 export global RemindersAdapter {
     // Parked panes, oldest-first (the order they were parked).
     in property <[ReminderItem]> rows;
-    // Whether the bell's list panel is expanded.
+    // Whether the bell's in-rail REMINDERS section is expanded (widens the rail, like
+    // the projects section — see app.slint's rail-width binding).
     in property <bool> open;
     // True while any reminder has fired and not been restored (bell badge/accent).
     in property <bool> alert;
