@@ -15,14 +15,15 @@ import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
 import { SidebarRail } from "sidebar.slint";
-import { ContextMenu } from "contextmenu.slint";
+import { ContextMenu, ReminderCustom } from "contextmenu.slint";
 import { KeyMsg, HiRect } from "@widgets";
 
 // Re-export the row structs so the Rust side (slint::include_modules!) can build them.
 // ReminderItem/RemindersAdapter (Track F): the reminder-pane bridge global — re-exported
 // here only so the Rust controller can reach it via `global::<RemindersAdapter>()`; all its
-// UI lives in sidebar.slint.
-export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg, HiRect, HistoryUi, ReminderItem, RemindersAdapter }
+// UI lives in sidebar.slint. ReminderCustom likewise (the pane menu's custom-duration
+// parser bridge; UI in contextmenu.slint).
+export { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, KeybindingItem, MenuEntry, CtxTab, KeyMsg, HiRect, HistoryUi, ReminderItem, RemindersAdapter, ReminderCustom }
 
 export component AppWindow inherits Window {
     title: "hyperpanes";
