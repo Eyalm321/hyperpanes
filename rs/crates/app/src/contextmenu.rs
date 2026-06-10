@@ -196,7 +196,6 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
     b.row("Search…", "Ctrl+F", "", false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
     b.item("Restart", Command::RestartPane(idx));
     b.item("Refresh Env", Command::RefreshEnvPane(idx));
-    b.item("Open Linked Terminal", Command::OpenLinkedTerminal(idx));
     b.item("Open Folder", Command::RevealPaneCwd(idx));
     b.sep();
     b.row("Copy", "", "", false, false, !has_sel, false, sub::NONE, Some(Command::CopyPane(idx)));

@@ -35,7 +35,7 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use hyperpanes_core::app::VERSION;
-use hyperpanes_core::control::readmodel::{PaneInfo, PaneStatus, ReadModel, TabInfo, WindowInfo};
+use hyperpanes_core::control::readmodel::{PaneInfo, PaneStatus, TabInfo, WindowInfo};
 use hyperpanes_core::control::server::{self, notify_state, Shared};
 use hyperpanes_core::persistence::{control_settings, paths};
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};

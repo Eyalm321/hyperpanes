@@ -908,24 +908,6 @@ impl State {
         self.dirty = true;
     }
 
-    /// "Open Linked Terminal" (#27): spawn a new pane sharing pane `idx`'s context — its live
-    /// cwd and its per-pane env overrides — so the user can act/authenticate by hand with the
-    /// same environment the source pane has. The link is visual too: the new pane inherits the
-    /// source's pinned accent (when it has one).
-    pub fn open_linked_terminal(&mut self, idx: usize, mgr: &SessionManager) {
-        let Some(src) = self.active_tab().panes.get(idx) else {
-            return;
-        };
-        let opts = NewPaneOpts {
-            label: Some(format!("{} (linked)", src.title)),
-            cwd: src.cwd.clone(),
-            env: src.env.clone(),
-            accent: src.pinned_accent,
-            ..Default::default()
-        };
-        self.add_pane_opts(mgr, opts);
-    }
-
     /// Close pane `idx` in the active tab (see [`Self::close_pane_in`]).
     pub fn close_pane(&mut self, idx: usize, mgr: &SessionManager) -> bool {
         self.close_pane_in(self.active, idx, mgr)

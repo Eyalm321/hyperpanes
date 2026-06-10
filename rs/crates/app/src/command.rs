@@ -75,9 +75,6 @@ pub enum Command {
     /// Re-resolve a FRESH (registry-backed) environment and restart pane `0`'s shell in
     /// place, keeping its live cwd + env overrides (#28; the pane menu's "Refresh Env").
     RefreshEnvPane(usize),
-    /// Spawn a new pane with the same cwd + env overrides as pane `0` (#27; the pane
-    /// menu's "Open Linked Terminal" — act/authenticate with the source pane's context).
-    OpenLinkedTerminal(usize),
     /// Open pane `0`'s current working directory in the OS file explorer (#23).
     RevealPaneCwd(usize),
     /// Open the in-pane search box on pane `0`.
@@ -295,7 +292,6 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         Command::RestartPane(i) => state.restart_pane(i, mgr),
         Command::RefreshEnvPane(i) => state.refresh_env_pane(i, mgr),
-        Command::OpenLinkedTerminal(i) => state.open_linked_terminal(i, mgr),
         Command::RevealPaneCwd(i) => {
             // Open the pane's live cwd (reported by shell integration) in the OS file explorer.
             if let Some(cwd) = state.active_tab().panes.get(i).and_then(|p| p.cwd.clone()) {
