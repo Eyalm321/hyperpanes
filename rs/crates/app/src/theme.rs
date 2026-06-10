@@ -234,8 +234,7 @@ pub fn layout_name(l: Layout) -> &'static str {
 /// fixed by drawing geometry. Each kind selects a vector-drawn icon in the `MenuIcon`
 /// component (`ui/contextmenu.slint`); keep the two lists in lock-step.
 pub mod menu_icon {
-    /// No leading icon.
-    pub const NONE: i32 = 0;
+    // (0 = no leading icon — rows pass a literal 0 rather than a const.)
     /// New pane — a drawn "+".
     pub const NEW_PANE: i32 = 1;
     /// Command palette — a drawn ">_" prompt.
