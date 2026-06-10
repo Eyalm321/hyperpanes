@@ -1966,6 +1966,34 @@ impl App {
                 }
             });
         }
+        // Resume a Claude session in a new pane: spawn `claude --resume <id>` cd'd into the
+        // project's repo, tinted with the project color. Resolve the repo path + color under a
+        // read-only borrow that's dropped before dispatch (borrow rule #18: never hold a
+        // `state.borrow()` across `run_command`).
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_resume_session(move |proj_idx, sid| {
+                let Some(w) = app.window_by_id(id) else { return };
+                let target = {
+                    let st = w.state.borrow();
+                    st.projects
+                        .get(proj_idx as usize)
+                        .map(|p| (p.path.clone(), p.color.clone()))
+                };
+                let Some((cwd, color)) = target else { return };
+                let opts = NewPaneOpts {
+                    label: Some("claude".to_string()),
+                    cwd: Some(cwd),
+                    command: Some(crate::sidebar::claude_resume_command(&sid)),
+                    shell: None,
+                    accent: Some(crate::state::parse_hex(&color)),
+                    show_frame: None,
+                    show_dot: None,
+                };
+                app.run_command(&w, Command::SubmitNewPane(opts));
+            });
+        }
         {
             let app = app.clone();
             let id = win.id;

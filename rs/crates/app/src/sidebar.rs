@@ -271,11 +271,9 @@ pub fn invalidate(repo_path: &str) {
 // relative-time label + a small per-project cap) and a thread-local cache mirroring the
 // worktree cache above.
 //
-// `#[allow(dead_code)]`: these are the READY fan-in seam. `claude_sessions_for` is called by
-// the projection (paneview.rs) once `ProjectItem` gains a `sessions` field, and
-// `claude_resume_command` by the resume-session callback handler (app.rs) — both off-limits to
-// this parallel track. Until those two ~1-line hops land, the items are exercised only by the
-// unit tests below, so the binary build would otherwise flag them unused.
+// Wired in (Track 19b fan-in): `claude_sessions_for` is called by the projection (paneview.rs)
+// to fill each `ProjectItem.sessions`, and `claude_resume_command` by the resume-session
+// callback handler (app.rs), which spawns `claude --resume <id>` in the project's cwd.
 
 /// How many recent sessions to surface per project in the rail (the most-recent N).
 pub const CLAUDE_HISTORY_LIMIT: usize = 8;
@@ -291,7 +289,6 @@ pub struct ClaudeSessionRow {
     pub count: i32,
 }
 
-#[allow(dead_code)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -301,14 +298,12 @@ fn now_ms() -> u64 {
 
 /// First 8 chars of a session id (the UUID head) — a fallback label when a transcript has no
 /// summary line nor a first user message.
-#[allow(dead_code)]
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
 /// A compact relative-time label for `started_at` (epoch ms) vs `now` (epoch ms). Empty when
 /// the timestamp is unknown. Coarse buckets — minutes → hours → days → weeks → months → years.
-#[allow(dead_code)]
 fn relative_time(started_at: Option<u64>, now: u64) -> String {
     let Some(t) = started_at else { return String::new() };
     let secs = now.saturating_sub(t) / 1000;
@@ -340,7 +335,6 @@ fn relative_time(started_at: Option<u64>, now: u64) -> String {
 
 /// The recent Claude sessions for `project_root`, served from the cache (read on first miss).
 /// Cheap to call every render; capped to [`CLAUDE_HISTORY_LIMIT`] newest-first rows.
-#[allow(dead_code)] // called by the projection (paneview.rs) at fan-in; see section header.
 pub fn claude_sessions_for(project_root: &str) -> Vec<ClaudeSessionRow> {
     CLAUDE_CACHE.with(|c| {
         if let Some(rows) = c.borrow().get(project_root) {
@@ -370,7 +364,6 @@ pub fn claude_sessions_for(project_root: &str) -> Vec<ClaudeSessionRow> {
 /// The shell command that resumes a Claude session in a fresh pane: `claude --resume <id>`.
 /// Session ids are UUIDs (hex + `-`), so no shell-quoting is required. The caller spawns this
 /// via the existing New-Pane path (`State::add_pane_opts` with `command` + the project `cwd`).
-#[allow(dead_code)] // called by the resume-session handler (app.rs) at fan-in; see header.
 pub fn claude_resume_command(session_id: &str) -> String {
     format!("claude --resume {session_id}")
 }

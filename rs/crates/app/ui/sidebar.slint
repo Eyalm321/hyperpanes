@@ -637,12 +637,9 @@ export component SidebarRail inherits Rectangle {
 
                     for p[i] in root.projects : ProjectRow {
                         proj: p;
-                        // FAN-IN: bind the per-project Claude sessions here once `ProjectItem`
-                        // gains a `sessions: [ClaudeSessionItem]` field and the projection
-                        // (paneview.rs) populates it from `sidebar::claude_sessions_for(path)`
-                        // — i.e. `sessions: p.sessions;`. The reader, cache, row UI and the
-                        // resume callback are all ready; this is the one cross-file hop left.
-                        // Until then it defaults empty, so the "Claude history" list is hidden.
+                        // Per-project Claude sessions: populated by the projection (paneview.rs)
+                        // from `sidebar::claude_sessions_for(path)`. Empty hides the list.
+                        sessions: p.sessions;
                         open => { root.open-project(i); }
                         recolor(s) => { root.recolor-project(i, s); }
                         rename(t) => { root.rename-project(i, t); }

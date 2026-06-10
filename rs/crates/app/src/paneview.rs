@@ -20,8 +20,8 @@ use crate::contextmenu::CtxKind;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
-    AppWindow, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem, LayoutOption,
-    MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem, WorktreeRow,
+    AppWindow, ClaudeSessionItem, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem,
+    LayoutOption, MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem, WorktreeRow,
 };
 use crate::prefs;
 
@@ -71,6 +71,10 @@ pub struct Ui {
     /// per-tick rebuild would recreate the worktree rows every frame, dropping in-flight
     /// clicks on the trash icons. Pruned to the live project set each resync.
     pub wt_models: RefCell<HashMap<String, Rc<VecModel<WorktreeRow>>>>,
+    /// Per-project Claude-session models, keyed by repo path — the same stable-identity reuse
+    /// as `wt_models` (the resume-row repeater must not be rebuilt each frame, or an in-flight
+    /// click on a session row would be dropped). Pruned to the live project set each resync.
+    pub claude_models: RefCell<HashMap<String, Rc<VecModel<ClaudeSessionItem>>>>,
 }
 
 impl Ui {
@@ -96,6 +100,7 @@ impl Ui {
             ctx_tabs: Rc::new(VecModel::default()),
             ctx_layouts: Rc::new(VecModel::default()),
             wt_models: RefCell::new(HashMap::new()),
+            claude_models: RefCell::new(HashMap::new()),
         })
     }
 
@@ -662,6 +667,21 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             } else {
                 Vec::new()
             };
+            // This project's recent Claude sessions — read (cached) only while the flyout is
+            // open, mirroring the worktree gate (no point scanning ~/.claude for a hidden panel).
+            let sessions: Vec<ClaudeSessionItem> = if sidebar_open {
+                crate::sidebar::claude_sessions_for(&proj.path)
+                    .into_iter()
+                    .map(|s| ClaudeSessionItem {
+                        id: s.id.into(),
+                        summary: s.summary.into(),
+                        when: s.when.into(),
+                        count: s.count,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // Reuse this project's worktree model (stable identity) and update its contents
             // in place, so the inner repeater isn't rebuilt every frame (see `wt_models`).
             let model = ui
@@ -671,14 +691,28 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                 .or_insert_with(|| Rc::new(VecModel::default()))
                 .clone();
             sync_model(&model, rows);
-            ProjectItem { name, color, worktrees: ModelRc::from(model) }
+            // Same stable-identity reuse for the session rows (see `claude_models`).
+            let cmodel = ui
+                .claude_models
+                .borrow_mut()
+                .entry(proj.path.clone())
+                .or_insert_with(|| Rc::new(VecModel::default()))
+                .clone();
+            sync_model(&cmodel, sessions);
+            ProjectItem {
+                name,
+                color,
+                worktrees: ModelRc::from(model),
+                sessions: ModelRc::from(cmodel),
+            }
         })
         .collect();
-    // Drop cached worktree models for projects no longer present.
+    // Drop cached worktree + session models for projects no longer present.
     {
         let live: std::collections::HashSet<&str> =
             state.projects.iter().map(|p| p.path.as_str()).collect();
         ui.wt_models.borrow_mut().retain(|k, _| live.contains(k.as_str()));
+        ui.claude_models.borrow_mut().retain(|k, _| live.contains(k.as_str()));
     }
     sync_model(&ui.projects, projects);
 

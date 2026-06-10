@@ -216,6 +216,7 @@ export component AppWindow inherits Window {
     callback recolor-project(int, int);   // row, swatch
     callback rename-project(int, string);
     callback remove-project(int);
+    callback resume-session(int, string); // resume Claude session <id> for project <idx> in a new pane
     // top-bar menu → overlays
     callback open-palette();
     callback open-prefs();
@@ -340,6 +341,7 @@ export component AppWindow inherits Window {
                 recolor-project(i, s) => { root.recolor-project(i, s); }
                 rename-project(i, t) => { root.rename-project(i, t); }
                 remove-project(i) => { root.remove-project(i); }
+                resume-session(i, id) => { root.resume-session(i, id); }
             }
         }
     }
