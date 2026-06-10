@@ -1,0 +1,15 @@
+[package]
+name = "conpty-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone (own workspace) so it never drags into the core/app builds.
+[workspace]
+
+[dependencies]
+portable-pty = "0.9"
+
+[[bin]]
+name = "conpty-probe"
+path = "src/main.rs"

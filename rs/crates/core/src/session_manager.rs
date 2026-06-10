@@ -102,6 +102,16 @@ pub struct SpawnOptions {
 struct Shared {
     replay: Mutex<Replay>,
     screen: Mutex<Screen>,
+    /// Output flushed since the screen mirror was last brought up to date, buffered
+    /// for a LAZY `Screen::advance`. The screen is the headless VTE mirror that only
+    /// feeds `mode:"screen"` control reads (and the `awaitingInput` heuristic) — which
+    /// are infrequent and on-demand. Parsing the full pty stream into it on EVERY flush
+    /// (as the eager design did) double-parses the same bytes the GUI grid already
+    /// parses, pure wasted CPU when no control client is reading the screen. Instead we
+    /// stash flushed bytes here and drain them into `screen` only when a screen read
+    /// actually happens (`sync_screen`). Correctness is identical — the screen is brought
+    /// fully current at read time — but the hot path does zero VTE work for the mirror.
+    screen_pending: Mutex<Vec<u8>>,
     /// Monotonic count of ALL output UTF-16 code units ever flushed (the `since`
     /// cursor basis). Never decreases.
     output_bytes: AtomicU64,
@@ -109,6 +119,24 @@ struct Shared {
     last_output_at: AtomicU64,
     /// Set by a manual kill so the natural-exit `Exit` event is suppressed.
     killed: AtomicBool,
+}
+
+impl Shared {
+    /// Drain any buffered output into the screen mirror so a subsequent `screen.render()`
+    /// reflects all flushed bytes. Cheap no-op when nothing is pending. Called on the
+    /// read path (lazy) instead of on every flush (eager) — see `screen_pending`.
+    fn sync_screen(&self) {
+        // Take the pending buffer under its own lock first to minimize contention with
+        // the driver thread's appends, then parse it into the screen.
+        let pending = {
+            let mut p = self.screen_pending.lock().unwrap();
+            if p.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *p)
+        };
+        self.screen.lock().unwrap().advance(&pending);
+    }
 }
 
 /// A sink the pty reader thread calls with each [`PtyEvent`]. `Arc`-wrapped so the
@@ -161,6 +189,7 @@ impl SessionManager {
         let shared = Arc::new(Shared {
             replay: Mutex::new(Replay::new()),
             screen: Mutex::new(Screen::new(spec.cols, spec.rows)),
+            screen_pending: Mutex::new(Vec::new()),
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
             killed: AtomicBool::new(false),
@@ -213,9 +242,13 @@ impl SessionManager {
     }
 
     /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
+    /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`).
     pub fn render_screen(&self, uid: &str) -> Option<String> {
         let map = self.sessions.lock().unwrap();
-        map.get(uid).map(|s| s.shared.screen.lock().unwrap().render())
+        map.get(uid).map(|s| {
+            s.shared.sync_screen();
+            s.shared.screen.lock().unwrap().render()
+        })
     }
 
     /// Write input to the pane's pty.
@@ -233,6 +266,10 @@ impl SessionManager {
         let map = self.sessions.lock().unwrap();
         if let Some(s) = map.get(uid) {
             let _ = s.pty.resize(cols, rows);
+            // Apply any buffered output to the screen BEFORE reflowing, so the resize
+            // reflows the real content rather than reflowing an empty grid and then
+            // advancing post-resize (which would wrap at the new width inconsistently).
+            s.shared.sync_screen();
             s.shared.screen.lock().unwrap().resize(cols, rows);
         }
     }
@@ -446,11 +483,16 @@ impl SessionPipeline {
         out
     }
 
-    // Apply a flushed batch: grow replay + screen, bump the cursor/stamp, emit Data.
+    // Apply a flushed batch: grow replay, BUFFER for the lazy screen mirror, bump the
+    // cursor/stamp, emit Data. The screen is NOT parsed here — its bytes are stashed in
+    // `screen_pending` and parsed on demand by `Shared::sync_screen` at read time. This
+    // removes the per-flush second VTE parse (the GUI grid already parses the same bytes
+    // via `SessionEvent::Data`), which was pure wasted CPU when no control client reads
+    // the screen. See `Shared::screen_pending`.
     fn flush_into(&mut self, data: String, now_epoch_ms: u64, out: &mut Vec<SessionEvent>) {
         let n = data.encode_utf16().count() as u64;
         self.shared.replay.lock().unwrap().append(&data);
-        self.shared.screen.lock().unwrap().advance(data.as_bytes());
+        self.shared.screen_pending.lock().unwrap().extend_from_slice(data.as_bytes());
         self.shared.output_bytes.fetch_add(n, Ordering::Relaxed);
         self.shared.last_output_at.store(now_epoch_ms, Ordering::Relaxed);
         out.push(SessionEvent::Data { uid: self.uid.clone(), data });
@@ -502,6 +544,7 @@ mod tests {
         Arc::new(Shared {
             replay: Mutex::new(Replay::new()),
             screen: Mutex::new(Screen::new(80, 24)),
+            screen_pending: Mutex::new(Vec::new()),
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
             killed: AtomicBool::new(false),
@@ -721,6 +764,32 @@ mod tests {
         // Cwd fires immediately (pre-batch), before any Data flush.
         assert_eq!(recv(&mut rx).await, Some(SessionEvent::Cwd { uid: "u1".into(), cwd: "C:\\work".into() }));
         let _ = mgr;
+    }
+
+    #[test]
+    fn lazy_screen_reflects_buffered_output_on_sync() {
+        // flush_into buffers for the screen instead of parsing eagerly; sync_screen must
+        // bring the mirror fully current so a read sees everything flushed so far.
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        p.on_data("hello world", 0, 100);
+        p.on_timer(120); // flush → buffered, screen NOT yet advanced
+        assert_eq!(sh.screen.lock().unwrap().render(), "", "screen is lazy: empty before sync");
+        sh.sync_screen();
+        assert_eq!(sh.screen.lock().unwrap().render(), "hello world");
+        // A second sync with nothing pending is a no-op and leaves the screen intact.
+        sh.sync_screen();
+        assert_eq!(sh.screen.lock().unwrap().render(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn manager_render_screen_syncs_pending_output() {
+        let (mgr, mut rx, sink) = make_session("u1");
+        sink(PtyEvent::Data(b"abc\r\ndef".to_vec()));
+        // Wait for the Data flush so the bytes are buffered for the screen.
+        assert!(matches!(recv(&mut rx).await, Some(SessionEvent::Data { .. })));
+        // render_screen must lazily sync the buffered output before serializing.
+        assert_eq!(mgr.render_screen("u1").as_deref(), Some("abc\ndef"));
     }
 
     #[tokio::test]
