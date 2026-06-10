@@ -114,6 +114,8 @@ export component AppWindow inherits Window {
     in property <int> np-default-idx;
     in property <[color]> np-swatches;
     in property <[PrefOption]> np-shells;
+    // ---- Add Project dialog (overlay kind 4) ----
+    in property <string> ap-error: "";   // inline validation error ("" = none)
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
@@ -221,6 +223,8 @@ export component AppWindow inherits Window {
     callback rename-project(int, string);
     callback remove-project(int);
     callback resume-session(int, string); // resume Claude session <id> for project <idx> in a new pane
+    callback open-add-project();          // the ＋ on the PROJECTS header → open the dialog
+    callback submit-add-project(string);  // Add-Project dialog submit (directory path)
     // top-bar menu → overlays
     callback open-palette();
     callback open-prefs();
@@ -347,6 +351,7 @@ export component AppWindow inherits Window {
                 rename-project(i, t) => { root.rename-project(i, t); }
                 remove-project(i) => { root.remove-project(i); }
                 resume-session(i, id) => { root.resume-session(i, id); }
+                add-project => { root.open-add-project(); }
             }
         }
     }
@@ -425,6 +430,8 @@ export component AppWindow inherits Window {
             new-pane-create(l, c, fr, dt, cmd, cwd, sh) => {
                 root.submit-new-pane(l, c, fr, dt, cmd, cwd, sh);
             }
+            ap-error: root.ap-error;
+            add-project-submit(p) => { root.submit-add-project(p); }
             palette-query(q) => { root.palette-query(q); }
             palette-nav(d) => { root.palette-nav(d); }
             palette-activate => { root.palette-activate(); }

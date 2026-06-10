@@ -430,8 +430,14 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         Overlay::Palette => 1,
         Overlay::Prefs => 2,
         Overlay::NewPane => 3,
+        Overlay::AddProject => 4,
     };
     app.set_overlay_kind(kind);
+
+    // Add-Project dialog: mirror the inline validation error (`""` = none). The dialog is
+    // re-instantiated each time `kind` becomes 4, but the error must update live while it
+    // stays open (a failed submit keeps the overlay mounted).
+    app.set_ap_error(state.add_project_error.as_str().into());
 
     // New Pane dialog seeds: the default swatch index (next palette-rotation slot), the
     // palette swatches, and the shell-picker options (id 0 = "Use default shell"). The dialog

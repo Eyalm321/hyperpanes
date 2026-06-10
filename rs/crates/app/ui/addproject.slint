@@ -1,0 +1,141 @@
+// The "Add project" dialog — opened from the ＋ on the sidebar's PROJECTS header.
+//
+// A centred modal card (the same overlay-panel pattern as the New Pane dialog in
+// newpane.slint, mounted by overlays.slint when `kind == 4`): a single text input for a
+// directory path + Add/Cancel. Validation happens Rust-side (`State::submit_add_project`);
+// a bad path keeps the dialog open and surfaces the inline `error` line. Enter submits,
+// Esc closes. The form is local state, reset every open via re-instantiation.
+
+import { Theme } from "theme.slint";
+
+// A single-line text input with a placeholder, in a bordered field — mirrors
+// newpane.slint's `NpInput` (kept local so this file stays self-contained).
+component ApInput inherits Rectangle {
+    in property <string> placeholder;
+    out property <string> text <=> ti.text;
+    callback submit();
+    callback escape();
+    height: 34px;
+    border-radius: 7px;
+    background: Theme.bg;
+    border-width: 1px;
+    border-color: ti.has-focus ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        ti := TextInput {
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            single-line: true;
+            init => { ti.focus(); }
+            key-pressed(e) => {
+                if (e.text == Key.Return) { root.submit(); return EventResult.accept; }
+                if (e.text == Key.Escape) { root.escape(); return EventResult.accept; }
+                return EventResult.reject;
+            }
+        }
+    }
+    Text {
+        x: 10px;
+        text: root.placeholder;
+        color: Theme.faint;
+        font-size: 13px;
+        vertical-alignment: center;
+        visible: ti.text == "";
+    }
+}
+
+// A small footer button (Cancel / Add project) — mirrors newpane.slint's `NpButton`.
+component ApButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+    height: 32px;
+    min-width: 84px;
+    border-radius: 7px;
+    background: root.primary ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface);
+    border-width: 1px;
+    border-color: root.primary ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.label;
+            color: root.primary ? #11111b : Theme.text;
+            font-size: 13px;
+            font-weight: root.primary ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component AddProjectDialog inherits Rectangle {
+    // The Rust-side validation error (`""` = none) — shown inline under the input. Updates
+    // live while the dialog stays open (a failed submit keeps the overlay mounted).
+    in property <string> error: "";
+    callback submit(string);   // the typed directory path
+    callback cancel();
+
+    // eat scrim clicks behind the card
+    TouchArea {}
+
+    card := Rectangle {
+        width: 460px;
+        x: (parent.width - self.width) / 2;
+        y: max(60px, (parent.height - self.height) / 2);
+        height: body.preferred-height;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        TouchArea {} // keep clicks on the card from dismissing
+
+        body := VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: "Add project";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 700;
+            }
+
+            VerticalLayout {
+                spacing: 5px;
+                Text { text: "Directory"; color: Theme.faint; font-size: 11px; }
+                path-input := ApInput {
+                    placeholder: "C:\\path\\to\\project";
+                    submit => { root.submit(path-input.text); }
+                    escape => { root.cancel(); }
+                }
+                Text {
+                    text: "any folder works — it doesn't have to be a git repo";
+                    color: Theme.faint;
+                    font-size: 11px;
+                }
+            }
+
+            if root.error != "" : Text {
+                text: root.error;
+                color: Theme.danger;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                ApButton { label: "Cancel"; clicked => { root.cancel(); } }
+                ApButton { label: "Add project"; primary: true; clicked => { root.submit(path-input.text); } }
+            }
+        }
+    }
+}
