@@ -863,6 +863,9 @@ impl App {
             // a click faster than one tick still resolves its release.
             ds.armed = drag::left_button_down();
             *self.drag.borrow_mut() = Some(ds);
+            // Snap the pump to the fast cadence so the drag tracks immediately even when the
+            // pane was idle (the adaptive idle pump otherwise lags the grab by up to a tick).
+            self.wake();
         }
     }
 
@@ -881,6 +884,7 @@ impl App {
         );
         ds.armed = drag::left_button_down();
         *self.drag.borrow_mut() = Some(ds);
+        self.wake();
     }
 
     /// Drive an in-flight drag from the global cursor: promote past the threshold, follow

@@ -381,6 +381,10 @@ export component PaneView inherits Rectangle {
                                     font-weight: 600;
                                     vertical-alignment: center;
                                     horizontal-alignment: left;
+                                    // Elide a long title (e.g. an auto-title that defaulted to a
+                                    // huge command) so it can't blow up the header min-width and
+                                    // push the buttons off / cover the drag strip.
+                                    overflow: elide;
                                 }
                                 // shell-type badge: a dim, smaller label right after the title
                                 // in the same row (e.g. `claude` ‹dim›pwsh›). Shown only when
@@ -392,6 +396,7 @@ export component PaneView inherits Rectangle {
                                     font-size: 9px;
                                     vertical-alignment: center;
                                     horizontal-alignment: left;
+                                    overflow: elide;
                                 }
                                 if pane.subtitle != "" : Text {
                                     text: pane.subtitle;
