@@ -42,7 +42,7 @@ pub mod ui {
 pub use font::Font;
 pub use grid::{GridSnapshot, RenderCell, TermGrid, TermSize};
 pub use keys::encode_key;
-pub use links::{extract_path_candidates, PathCandidate};
+pub use links::{extract_path_candidates, extract_url_candidates, PathCandidate, UrlCandidate};
 pub use pane::{cells_for_px, LinkAction, LinkHit, TerminalPane};
 pub use render::{GpuRenderer, PaneRenderer, RenderOpts, SoftwareRenderer};
 pub use selection::{Cell as SelectionCell, Selection};

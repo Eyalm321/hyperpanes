@@ -1,4 +1,4 @@
-//! Path-token extraction for clickable terminal links — a 1:1 port of
+//! Path- and URL-token extraction for clickable terminal links — the path half is a 1:1 port of
 //! `src/renderer/components/pathLinks.ts`.
 //!
 //! Detects file-path tokens in a single rendered terminal row so the pane can turn them into
@@ -6,6 +6,10 @@
 //! see [`crate::pane`]). Pure + unit-tested; the on-disk verification, cwd resolution and
 //! open/copy actions live in `core::paths` and the pane's link layer that consumes these
 //! candidates.
+//!
+//! Also detects `http://`/`https://` URLs ([`extract_url_candidates`]) — same click UX as paths
+//! (plain click opens, Ctrl-click copies), but with no on-disk verification step: a
+//! well-formed URL linkifies as-is and opens in the default browser.
 //!
 //! Shape rule (decided): a candidate must contain a path separator OR end in a file extension.
 //! Bare words like `build`/`src`/`test` never linkify even when a matching file exists — that
@@ -220,6 +224,117 @@ pub fn extract_path_candidates(line: &str) -> Vec<PathCandidate> {
     out
 }
 
+/// A detected `http://`/`https://` URL and the column range it occupies on the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlCandidate {
+    /// The URL with any trailing sentence punctuation / unbalanced closers stripped.
+    pub url: String,
+    /// Inclusive start column into the source row (for the link's underline range).
+    pub start: usize,
+    /// Exclusive end column into the source row.
+    pub end: usize,
+}
+
+/// Characters that terminate a URL run. Whitespace plus delimiters that never appear raw in a
+/// URL: quotes/backticks and angle brackets (`<https://…>` autolink wrapping).
+fn url_stop(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>')
+}
+
+/// If `chars[i..]` starts with `http://` or `https://` (scheme case-insensitive), return the
+/// scheme length in chars; else `None`.
+fn url_scheme_len(chars: &[char], i: usize) -> Option<usize> {
+    let mut j = i;
+    for want in ['h', 't', 't', 'p'] {
+        if chars.get(j).map(|c| c.to_ascii_lowercase()) != Some(want) {
+            return None;
+        }
+        j += 1;
+    }
+    if chars.get(j).map(|c| c.to_ascii_lowercase()) == Some('s') {
+        j += 1;
+    }
+    for want in [':', '/', '/'] {
+        if chars.get(j) != Some(&want) {
+            return None;
+        }
+        j += 1;
+    }
+    Some(j - i)
+}
+
+/// Extract every `http://`/`https://` URL from one rendered terminal row.
+///
+/// Boundary rules: a URL starts at a scheme not preceded by a scheme-ish char (so `xhttp://`
+/// doesn't fire mid-word) and runs to whitespace/quote/angle-bracket. Trailing sentence
+/// punctuation (`.`, `,`, `;`, `:`, `!`, `?`) is stripped, and trailing `)`/`]`/`}` only when
+/// unbalanced within the URL — so `(https://a.com)` drops the paren but a Wikipedia-style
+/// `…/Foo_(bar)` keeps it. No on-disk/network verification: shape alone linkifies.
+pub fn extract_url_candidates(line: &str) -> Vec<UrlCandidate> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let Some(slen) = url_scheme_len(&chars, i) else {
+            i += 1;
+            continue;
+        };
+        // Left boundary: the scheme must not continue a word (`xhttp://`) or a longer scheme
+        // (`shttp`, `foo+http`, `web.http`).
+        if i > 0 {
+            let prev = chars[i - 1];
+            if prev.is_ascii_alphanumeric() || matches!(prev, '+' | '-' | '.') {
+                i += slen;
+                continue;
+            }
+        }
+        let start = i;
+        let body = start + slen; // first char after `scheme://`
+        let mut e = body;
+        while e < n && !url_stop(chars[e]) {
+            e += 1;
+        }
+        // Strip trailing punctuation; closers only when unbalanced inside the URL.
+        loop {
+            if e <= body {
+                break;
+            }
+            let last = chars[e - 1];
+            let strip = match last {
+                '.' | ',' | ';' | ':' | '!' | '?' => true,
+                ')' | ']' | '}' => {
+                    let open = match last {
+                        ')' => '(',
+                        ']' => '[',
+                        _ => '{',
+                    };
+                    let opens = chars[body..e - 1].iter().filter(|&&c| c == open).count();
+                    let closes = chars[body..e - 1].iter().filter(|&&c| c == last).count();
+                    closes >= opens // this closer has no matching opener → wrapping punctuation
+                }
+                _ => false,
+            };
+            if !strip {
+                break;
+            }
+            e -= 1;
+        }
+        // A bare scheme (`http://` then nothing, or only stripped punctuation) is not a URL.
+        if e > body {
+            out.push(UrlCandidate {
+                url: chars[start..e].iter().collect(),
+                start,
+                end: e,
+            });
+            i = e;
+        } else {
+            i = body;
+        }
+    }
+    out
+}
+
 /// Map a 0-based index into a (wrap-joined) logical line to a 1-based xterm-style cell.
 /// Assumes one column per character — exact for ASCII paths. Kept for parity with the TS
 /// `cellFromIndex` (the in-crate hit-tester works per single row, so it doesn't need the wrap
@@ -337,6 +452,96 @@ mod tests {
         assert_eq!(only("./scripts/run.sh")[0].path, "./scripts/run.sh");
         assert_eq!(only("../shared/x.ts")[0].path, "../shared/x.ts");
         assert_eq!(only("~/notes/todo.md")[0].path, "~/notes/todo.md");
+    }
+
+    // ---- extractUrlCandidates ----
+    fn urls(line: &str) -> Vec<String> {
+        extract_url_candidates(line).into_iter().map(|c| c.url).collect()
+    }
+    /// The substring of `line` covered by URL candidate `c`'s [start, end) column range.
+    fn url_slice(line: &str, c: &UrlCandidate) -> String {
+        line.chars().skip(c.start).take(c.end - c.start).collect()
+    }
+
+    #[test]
+    fn finds_a_url_and_underlines_exactly_it() {
+        let line = "docs at https://example.com/guide and more";
+        let c = extract_url_candidates(line);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].url, "https://example.com/guide");
+        assert_eq!(url_slice(line, &c[0]), "https://example.com/guide");
+    }
+
+    #[test]
+    fn finds_http_and_https_case_insensitively() {
+        assert_eq!(urls("http://a.com"), vec!["http://a.com"]);
+        assert_eq!(urls("HTTPS://A.COM/x"), vec!["HTTPS://A.COM/x"]);
+        assert_eq!(urls("Http://mixed.example"), vec!["Http://mixed.example"]);
+    }
+
+    #[test]
+    fn strips_trailing_sentence_punctuation_from_urls() {
+        assert_eq!(urls("see https://a.com/x."), vec!["https://a.com/x"]);
+        assert_eq!(urls("see https://a.com/x, then"), vec!["https://a.com/x"]);
+        assert_eq!(urls("https://a.com/x;"), vec!["https://a.com/x"]);
+        assert_eq!(urls("really? https://a.com/x?!"), vec!["https://a.com/x"]);
+        assert_eq!(urls("at https://a.com:"), vec!["https://a.com"]);
+    }
+
+    #[test]
+    fn strips_wrapping_parens_but_keeps_balanced_ones() {
+        assert_eq!(urls("(https://a.com/x)"), vec!["https://a.com/x"]);
+        assert_eq!(urls("[https://a.com/x]"), vec!["https://a.com/x"]);
+        // A balanced paren inside the URL path is part of it (Wikipedia-style).
+        assert_eq!(
+            urls("https://en.wikipedia.org/wiki/Rust_(programming_language)"),
+            vec!["https://en.wikipedia.org/wiki/Rust_(programming_language)"]
+        );
+        // …but a wrapping paren after a balanced pair still drops.
+        assert_eq!(urls("(https://a.com/x_(y))"), vec!["https://a.com/x_(y)"]);
+        assert_eq!(urls("(https://a.com/x)."), vec!["https://a.com/x"]);
+    }
+
+    #[test]
+    fn keeps_query_strings_fragments_and_ports() {
+        assert_eq!(
+            urls("https://a.com/search?q=rust&page=2#results"),
+            vec!["https://a.com/search?q=rust&page=2#results"]
+        );
+        assert_eq!(urls("http://localhost:3000/api"), vec!["http://localhost:3000/api"]);
+        // The trailing slash is part of the URL, not punctuation.
+        assert_eq!(urls("https://a.com/dir/"), vec!["https://a.com/dir/"]);
+    }
+
+    #[test]
+    fn url_must_start_at_a_word_boundary() {
+        assert_eq!(urls("xhttp://nope.com").len(), 0);
+        assert_eq!(urls("shttps://nope.com").len(), 0);
+        assert_eq!(urls("web.http://nope.com").len(), 0);
+        // …but punctuation/quote boundaries are fine.
+        assert_eq!(urls("<https://a.com>"), vec!["https://a.com"]);
+        assert_eq!(urls("\"https://a.com\""), vec!["https://a.com"]);
+        assert_eq!(urls("url=https://a.com").len(), 1);
+    }
+
+    #[test]
+    fn bare_scheme_is_not_a_url() {
+        assert_eq!(urls("http://").len(), 0);
+        assert_eq!(urls("https:// and nothing").len(), 0);
+        assert_eq!(urls("http://.").len(), 0);
+    }
+
+    #[test]
+    fn finds_multiple_urls_on_one_line() {
+        assert_eq!(
+            urls("see https://a.com and http://b.org/x."),
+            vec!["https://a.com", "http://b.org/x"]
+        );
+    }
+
+    #[test]
+    fn ftp_and_other_schemes_do_not_linkify() {
+        assert_eq!(urls("ftp://a.com file://x mailto:a@b.c").len(), 0);
     }
 
     // ---- cellFromIndex ----

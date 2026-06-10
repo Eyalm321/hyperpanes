@@ -23,7 +23,7 @@
 use crate::clipboard::Clipboard;
 use crate::font::Font;
 use crate::grid::TermGrid;
-use crate::links::extract_path_candidates;
+use crate::links::{extract_path_candidates, extract_url_candidates, UrlCandidate};
 use crate::render::{PaneRenderer, RenderOpts};
 use crate::search::{self, Match};
 use crate::selection::{self, Selection};
@@ -79,30 +79,74 @@ pub struct TerminalPane {
     search_index: Option<usize>,
 }
 
-/// A resolved, on-disk-verified link under the cursor: where to draw the hover underline (in the
-/// pane's *logical* pixel space) plus the absolute target. Returned by [`TerminalPane::link_at`].
+/// A link under the cursor — an on-disk-verified path or an http/https URL: where to draw the
+/// hover underline (in the pane's *logical* pixel space) plus the target. Returned by
+/// [`TerminalPane::link_at`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkHit {
     /// Underline rect in logical px within the pane surface.
     pub x: f32,
     pub y: f32,
     pub w: f32,
-    /// Absolute, verified path the link points at.
+    /// Absolute, verified path the link points at — or the URL itself when [`is_url`](Self::is_url).
     pub abs_path: String,
     pub line: Option<u32>,
     pub col: Option<u32>,
-    /// Tooltip label (`abs_path` with any `:line[:col]` suffix appended).
+    /// Tooltip label (`abs_path` with any `:line[:col]` suffix appended; the URL verbatim).
     pub tip: String,
+    /// `true` for an http/https URL (opens in the default browser, never disk-verified).
+    pub is_url: bool,
 }
 
 /// The outcome of activating (clicking) a link. Mirrors the Electron split: a plain click opens
-/// (editor / OS default), Ctrl/Cmd-click copies the absolute path.
+/// (editor / OS default / browser for URLs), Ctrl/Cmd-click copies the target.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkAction {
-    /// Ctrl/Cmd-click — the caller should copy this absolute path to the clipboard.
+    /// Ctrl/Cmd-click — the caller should copy this absolute path (or URL) to the clipboard.
     Copy(String),
-    /// Plain click — the file/dir was opened (the result carries blocked/err detail).
+    /// Plain click — the file/dir/URL was opened (the result carries blocked/err detail).
     Opened(OpenResult),
+}
+
+/// Open an http/https URL in the default browser, detached. Same launch mechanism as
+/// `core::paths`' `os_open` (`cmd /C start "" <target>` on Windows, `open`/`xdg-open` elsewhere),
+/// but the URL is passed pre-quoted via `raw_arg` so cmd metacharacters in query strings
+/// (`?a=1&b=2`) can't split the command — the extractor guarantees a URL never contains `"`.
+fn open_url(url: &str) -> OpenResult {
+    use std::process::{Command, Stdio};
+    #[cfg(windows)]
+    let spawn = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000; // don't flash a console (see core's NoWindow)
+        Command::new("cmd")
+            .raw_arg("/C")
+            .raw_arg("start")
+            .raw_arg("\"\"") // window-title arg, so the quoted URL isn't consumed as the title
+            .raw_arg(format!("\"{url}\""))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let spawn = Command::new("open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawn = Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawn {
+        Ok(_) => OpenResult { ok: true, blocked: false, error: None },
+        Err(e) => OpenResult { ok: false, blocked: false, error: Some(e.to_string()) },
+    }
 }
 
 impl TerminalPane {
@@ -288,11 +332,45 @@ impl TerminalPane {
         Some((resolved, cand.start, cand.end, row, cell_w, cell_h))
     }
 
+    /// Find an http/https URL under the (logical-px) point, returning the candidate, its row,
+    /// and the cell metrics. URLs linkify on shape alone — no disk/network verification (so no
+    /// cache either; extraction per hover is cheap, same as the path re-extract in `link_at`).
+    fn url_under(&self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<(UrlCandidate, usize, f32, f32)> {
+        let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let col = (x / cell_w) as usize;
+        let row = (y / cell_h) as usize;
+        if col >= cols || row >= rows {
+            return None;
+        }
+        let snap = self.grid.snapshot();
+        let text = Self::row_text(&snap, row);
+        let cand = extract_url_candidates(&text)
+            .into_iter()
+            .find(|c| col >= c.start && col < c.end)?;
+        Some((cand, row, cell_w, cell_h))
+    }
+
     /// Hit-test a (logical-px) hover point against the rendered grid. Returns the underline rect +
-    /// target when the point is over a path that exists on disk, else `None`. The candidate's
-    /// `:line[:col]` is carried through (and shown in the tooltip), but only the resolved path is
-    /// verified — mirroring the Electron link provider.
+    /// target when the point is over an http/https URL or a path that exists on disk, else `None`.
+    /// The candidate's `:line[:col]` is carried through (and shown in the tooltip), but only the
+    /// resolved path is verified — mirroring the Electron link provider. URLs win when a token is
+    /// both (a URL is path-shaped but never disk-verifies anyway).
     pub fn link_at(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<LinkHit> {
+        if let Some((cand, row, cell_w, cell_h)) = self.url_under(x, y, surf_w, surf_h) {
+            return Some(LinkHit {
+                x: cand.start as f32 * cell_w,
+                y: (row as f32 + 1.0) * cell_h - 1.0, // a hairline along the cell's baseline
+                w: (cand.end - cand.start) as f32 * cell_w,
+                tip: cand.url.clone(),
+                abs_path: cand.url,
+                line: None,
+                col: None,
+                is_url: true,
+            });
+        }
         let (r, start, end, row, cell_w, cell_h) = self.locate(x, y, surf_w, surf_h)?;
         // Recover the candidate's line/col by re-extracting (cheap; same row). The resolved
         // record only carries the path, so pull location off the candidate that covered the cell.
@@ -316,6 +394,7 @@ impl TerminalPane {
             line,
             col,
             tip,
+            is_url: false,
         })
     }
 
@@ -344,7 +423,11 @@ impl TerminalPane {
         if ctrl {
             return Some(LinkAction::Copy(hit.abs_path));
         }
-        let res = paths::open_resolved_path(&hit.abs_path, hit.line, hit.col, editor_command);
+        let res = if hit.is_url {
+            open_url(&hit.abs_path)
+        } else {
+            paths::open_resolved_path(&hit.abs_path, hit.line, hit.col, editor_command)
+        };
         Some(LinkAction::Opened(res))
     }
 
@@ -841,6 +924,54 @@ mod tests {
             Some(LinkAction::Copy(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_at_hits_a_url_without_disk_verification() {
+        let mut p = unit_pane(40, 3);
+        // No cwd set, nothing on disk — a URL must still linkify on shape alone.
+        p.feed("go https://a.com/x?q=1 now"); // "go " = cols 0..3, URL = cols 3..22
+        let (w, h) = (40.0, 3.0); // 1px per cell
+
+        let hit = p.link_at(10.5, 0.5, w, h).expect("hover over the URL should hit");
+        assert!(hit.is_url);
+        assert_eq!(hit.abs_path, "https://a.com/x?q=1");
+        assert_eq!(hit.tip, "https://a.com/x?q=1");
+        assert_eq!((hit.line, hit.col), (None, None));
+        // Underline spans exactly the URL's columns (3..22) at 1px/col.
+        assert_eq!(hit.x, 3.0);
+        assert_eq!(hit.w, 19.0);
+
+        // Over the bare word "go" → nothing; past the URL → nothing.
+        assert!(p.link_at(1.5, 0.5, w, h).is_none());
+        assert!(p.link_at(30.5, 0.5, w, h).is_none());
+    }
+
+    #[test]
+    fn ctrl_click_copies_the_url() {
+        let mut p = unit_pane(30, 2);
+        p.feed("https://a.com/x"); // cols 0..15
+        match p.activate_link(5.5, 0.5, 30.0, 2.0, true, "") {
+            Some(LinkAction::Copy(url)) => assert_eq!(url, "https://a.com/x"),
+            other => panic!("ctrl+click on a URL should copy it, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_drag_selection_suppresses_url_activation_too() {
+        // Same one-release rule as paths: a drag-select release must not also open/copy the URL.
+        let mut p = unit_pane(30, 2);
+        p.feed("https://a.com/x");
+        p.selection_begin(0.5, 0.5, 30.0, 2.0);
+        p.selection_update(8.5, 0.5, 30.0, 2.0); // 8px move > DRAG_THRESHOLD_PX
+        assert!(p.selection_is_drag());
+        assert!(p.activate_link(5.5, 0.5, 30.0, 2.0, false, "").is_none());
+        assert!(p.activate_link(5.5, 0.5, 30.0, 2.0, true, "").is_none());
+        p.selection_clear();
+        assert!(matches!(
+            p.activate_link(5.5, 0.5, 30.0, 2.0, true, ""),
+            Some(LinkAction::Copy(_))
+        ));
     }
 
     #[test]
