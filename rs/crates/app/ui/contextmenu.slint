@@ -11,6 +11,15 @@
 import { Theme } from "theme.slint";
 import { MenuEntry, CtxTab, LayoutOption } from "types.slint";
 
+// The Reminder flyout's Custom-duration bridge: a PURE parser implemented in Rust (app.rs
+// wires it to contextmenu::parse_custom_minutes_now). Returns minutes-from-now (>= 1) or
+// -1 when the text doesn't parse. A global (not a ContextMenu callback) so the Rust side
+// reaches it without new wiring through app.slint's component tree — the RemindersAdapter
+// precedent (it does need re-exporting from app.slint to be visible to Rust codegen).
+export global ReminderCustom {
+    pure callback parse-minutes(string) -> int;
+}
+
 // One menu row: glyph · label · shortcut · trailing (✓ / ▸). Honors disabled + danger.
 component CtxRow inherits Rectangle {
     in property <MenuEntry> e;
@@ -304,6 +313,74 @@ export component ContextMenu inherits Rectangle {
                         for tb in root.tabs : CtxRow {
                             e: { label: tb.label, shortcut: "", glyph: "", kind: 0, checked: false, show-check: false, disabled: false, danger: false };
                             clicked => { root.move-tab(tb.idx); }
+                        }
+                    }
+                }
+
+                // ---- Reminder flyout (quick offsets + an inline Custom duration) ----
+                if entry.kind == 5 && root.open-sub == i : Flyout {
+                    x: root.open-left ? -self.width + 2px : parent.width - 2px;
+                    y: -4px;
+                    width: 208px;
+                    height: vbox-remind.preferred-height;
+                    // pick(custom-remind-base + minutes) smuggles the Custom minutes
+                    // through the frozen pick(int) channel — kept in sync with
+                    // CTX_CUSTOM_REMIND_BASE in contextmenu.rs.
+                    property <int> custom-remind-base: 1000000;
+                    vbox-remind := VerticalLayout {
+                        padding: 5px;
+                        spacing: 1px;
+                        // The quick offsets dispatch through hidden command slots appended
+                        // PAST the visible rows (see pane_menu's b.extra) — row order here
+                        // must match that append order.
+                        for off[j] in ["In 15 min", "In 1 hour", "In 3 hours", "Tomorrow 9 AM"] : CtxRow {
+                            e: { label: off, shortcut: "", glyph: "", kind: 0, checked: false, show-check: false, disabled: false, danger: false };
+                            clicked => { root.pick(root.entries.length + j); }
+                        }
+                        Rectangle {
+                            height: 9px;
+                            Rectangle { y: 4px; height: 1px; background: Theme.border; }
+                        }
+                        // Custom…: type a duration (45 · 90m · 1h30 · 14:30), Enter parks.
+                        // Validity is re-checked per keystroke via the Rust parser; the
+                        // border tints accent (good) / danger (won't submit).
+                        crow := Rectangle {
+                            property <int> parsed: -1;
+                            height: 30px;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: ci.text == "" ? Theme.border
+                                        : crow.parsed > 0 ? Theme.accent : Theme.danger;
+                            HorizontalLayout {
+                                padding-left: 9px;
+                                padding-right: 9px;
+                                Rectangle {
+                                    clip: true;
+                                    if ci.text == "" : Text {
+                                        text: "Custom: 45 · 1h30 · 14:30";
+                                        width: 100%;
+                                        height: 100%;
+                                        color: Theme.faint;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                    ci := TextInput {
+                                        width: 100%;
+                                        height: 100%;
+                                        color: Theme.text;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        single-line: true;
+                                        init => { self.focus(); }
+                                        edited => { crow.parsed = ReminderCustom.parse-minutes(self.text); }
+                                        accepted => {
+                                            if (crow.parsed > 0) {
+                                                root.pick(custom-remind-base + crow.parsed);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

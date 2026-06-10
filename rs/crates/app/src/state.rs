@@ -510,13 +510,15 @@ pub struct Reminder {
     pub fired: bool,
 }
 
-/// The pane menu's quick reminder offsets (v1: no custom time picker).
+/// The pane menu's reminder offsets — the four quick picks plus the flyout's Custom input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderOffset {
     Min15,
     Hour1,
     Hour3,
     Tomorrow9,
+    /// Minutes from now (1..=1440), parsed by `contextmenu::parse_custom_duration`.
+    Custom(u32),
 }
 
 /// What the key router should do with an Escape press.
@@ -2259,10 +2261,21 @@ impl State {
         self.ctx.is_some()
     }
 
-    /// The command bound to top-level context row `row`, if any (separators / submenu headers
-    /// have none).
+    /// The command bound to context row `row`, if any (separators / submenu headers have
+    /// none). Rows past the visible entries are the Reminder flyout's hidden quick-offset
+    /// slots; rows at/above [`crate::contextmenu::CTX_CUSTOM_REMIND_BASE`] are not indices
+    /// at all — the flyout's Custom input encodes its Rust-parsed minutes through the
+    /// frozen `pick(int)` channel as `BASE + minutes` (pane menus only).
     pub fn ctx_command(&self, row: usize) -> Option<Command> {
-        self.ctx.as_ref().and_then(|c| c.commands.get(row).cloned().flatten())
+        self.ctx.as_ref().and_then(|c| {
+            if row >= crate::contextmenu::CTX_CUSTOM_REMIND_BASE {
+                let minutes = (row - crate::contextmenu::CTX_CUSTOM_REMIND_BASE) as u32;
+                return (c.kind == crate::contextmenu::CtxKind::Pane
+                    && (1..=1440).contains(&minutes))
+                .then(|| Command::RemindPane(c.target, ReminderOffset::Custom(minutes)));
+            }
+            c.commands.get(row).cloned().flatten()
+        })
     }
 
     /// The open menu's target index (pane idx for a pane menu, tab idx for a tab menu).
@@ -3222,12 +3235,12 @@ impl State {
 
 /// Seconds since LOCAL midnight (Windows wall clock — what "tomorrow 9am" means to the user).
 #[cfg(windows)]
-fn local_secs_since_midnight() -> u64 {
+pub(crate) fn local_secs_since_midnight() -> u64 {
     let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     st.wHour as u64 * 3600 + st.wMinute as u64 * 60 + st.wSecond as u64
 }
 #[cfg(not(windows))]
-fn local_secs_since_midnight() -> u64 {
+pub(crate) fn local_secs_since_midnight() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -3249,6 +3262,7 @@ fn due_for(since_mid: u64, offset: ReminderOffset) -> (u64, String) {
         ReminderOffset::Hour1 => 3_600,
         ReminderOffset::Hour3 => 3 * 3_600,
         ReminderOffset::Tomorrow9 => (DAY - since_mid) + 9 * 3_600,
+        ReminderOffset::Custom(minutes) => minutes as u64 * 60,
     };
     let due = since_mid + delay_secs;
     let (hh, mm) = ((due % DAY) / 3_600, (due % 3_600) / 60);
@@ -3778,5 +3792,8 @@ mod reminder_tests {
         // tomorrow 9am from 18:00 → 15h delay, labelled tomorrow.
         let (d, l) = due_for(18 * 3600, ReminderOffset::Tomorrow9);
         assert_eq!((d, l.as_str()), (15 * 3_600_000, "tomorrow 09:00"));
+        // a Custom 90 min from 23:00 rolls over midnight too.
+        let (d, l) = due_for(23 * 3600, ReminderOffset::Custom(90));
+        assert_eq!((d, l.as_str()), (90 * 60_000, "tomorrow 00:30"));
     }
 }

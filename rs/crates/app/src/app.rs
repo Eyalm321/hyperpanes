@@ -2000,6 +2000,14 @@ impl App {
                     }
                 });
         }
+        // The Reminder flyout's Custom-duration parser — a PURE bridge (no state access,
+        // no borrows): the inline input validates per keystroke and, on Enter, encodes the
+        // minutes through the frozen `pick(int)` channel (decoded in `State::ctx_command`).
+        win.app
+            .global::<crate::ReminderCustom>()
+            .on_parse_minutes(|s| {
+                crate::contextmenu::parse_custom_minutes_now(&s).map_or(-1, |m| m as i32)
+            });
 
         // Wave-2 overlays
         cb0!(on_open_palette, Command::PaletteOpen);
