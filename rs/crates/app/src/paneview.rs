@@ -896,6 +896,14 @@ pub fn pump(
         }
     }
 
+    // ---- fold in finished background sidebar scans (#6) ----
+    // Worktree enumerations + Claude session scans run on the `history_scan` thread; the
+    // projection only ever reads the sidebar caches. When a finished scan lands, dirty the
+    // state so the resync below re-projects the flyout with the fresh rows.
+    if crate::history_scan::drain() {
+        state.dirty = true;
+    }
+
     // ---- expire a held-Esc once auto-repeat stops (no key-release event) ----
     state.tick_esc();
 

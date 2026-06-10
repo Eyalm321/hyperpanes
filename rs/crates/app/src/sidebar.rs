@@ -180,7 +180,8 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
 
 /// Run `git worktree list --porcelain` in `repo_path` and parse the result. Any failure
 /// (no git, not a repo) yields an empty list — the project simply shows no worktrees.
-fn enumerate_worktrees(repo_path: &str) -> Vec<WorktreeRow> {
+/// Runs on the background scanner thread (`history_scan`), never the UI thread.
+pub(crate) fn enumerate_worktrees(repo_path: &str) -> Vec<WorktreeRow> {
     let Ok(out) = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
@@ -217,15 +218,18 @@ pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), Strin
 }
 
 thread_local! {
-    /// Per-UI-thread cache of each project's worktree list, keyed by repo path. Render runs
-    /// every tick, so enumerating git on each pass would be wasteful — instead we enumerate
-    /// once per project and reuse it until invalidated (a delete) or the flyout is reopened.
+    /// Per-UI-thread cache of each project's worktree list, keyed by repo path. Filled
+    /// exclusively by the background scanner (`history_scan`) — a cache miss requests a
+    /// scan and renders empty until the result lands. KEPT across flyout open/close; a
+    /// reopen requests a background refresh instead of clearing (#6), so the panel shows
+    /// the previous rows instantly and updates when the fresh enumeration arrives.
     static WT_CACHE: RefCell<HashMap<String, Vec<WorktreeRow>>> = RefCell::new(HashMap::new());
     /// Per-UI-thread cache of each project's Claude session history (the raw core sessions,
-    /// UNCAPPED and unfiltered), keyed by repo path. Same rationale as `WT_CACHE`: scanning
-    /// `~/.claude/projects` every tick would be wasteful, so we read it once per project and
-    /// reuse until the flyout is reopened. Raw sessions (not shaped rows) so the search
-    /// filter can match against `first_user` too and reach past the display cap.
+    /// UNCAPPED and unfiltered), keyed by repo path. Same lifecycle as `WT_CACHE`: filled
+    /// by the background scanner (whose per-project `SessionCache` re-parses only
+    /// mtime/size-changed transcripts), kept across open/close, refreshed on reopen. Raw
+    /// sessions (not shaped rows) so the search filter can match against `first_user` and
+    /// the full-conversation text too, and reach past the display cap.
     static CLAUDE_CACHE: RefCell<HashMap<String, Vec<claude_history::ClaudeSession>>> = RefCell::new(HashMap::new());
     /// Per-UI-thread, per-project history-UI state: the selected Worktrees|History segment
     /// (0/1) and the current search query. Keyed by repo path. Deliberately NOT cleared on
@@ -239,37 +243,61 @@ thread_local! {
     static WT_LAST_OPEN: RefCell<bool> = const { RefCell::new(false) };
 }
 
-/// Note the flyout's current open state; on the closed→open transition, clear the caches so
-/// the next render re-enumerates fresh. Called from the projection each tick.
+/// Note the flyout's current open state; on the closed→open transition, request a
+/// background refresh of every cached project (worktrees and sessions may have changed
+/// while the flyout was shut). The caches are NOT cleared — the panel renders the
+/// previous rows instantly and updates when the fresh scans land (#6). Called from the
+/// projection each tick.
 pub fn note_flyout_open(open: bool) {
     WT_LAST_OPEN.with(|last| {
         let mut last = last.borrow_mut();
         if open && !*last {
-            WT_CACHE.with(|c| c.borrow_mut().clear());
-            CLAUDE_CACHE.with(|c| c.borrow_mut().clear());
+            WT_CACHE.with(|c| {
+                for repo in c.borrow().keys() {
+                    crate::history_scan::request_worktrees(repo);
+                }
+            });
+            CLAUDE_CACHE.with(|c| {
+                for root in c.borrow().keys() {
+                    crate::history_scan::request_sessions(root);
+                }
+            });
         }
         *last = open;
     });
 }
 
-/// The worktrees of the repo at `repo_path`, served from the cache (enumerated on first
-/// miss). Cheap to call every render.
+/// The worktrees of the repo at `repo_path`, served from the cache. A miss requests a
+/// background enumeration and returns empty — the rows appear when the scan lands (the
+/// pump drains it and dirties the state). Never blocks; cheap to call every render.
 pub fn worktrees_for(repo_path: &str) -> Vec<WorktreeRow> {
     WT_CACHE.with(|c| {
         if let Some(rows) = c.borrow().get(repo_path) {
             return rows.clone();
         }
-        let rows = enumerate_worktrees(repo_path);
-        c.borrow_mut().insert(repo_path.to_string(), rows.clone());
-        rows
+        crate::history_scan::request_worktrees(repo_path);
+        Vec::new()
     })
 }
 
-/// Drop `repo_path`'s cached worktrees so the next render re-enumerates (used after a
-/// successful removal so the tree reflects the change immediately).
+/// Request a background re-enumeration of `repo_path`'s worktrees (used after a
+/// successful removal). The cached rows stay up until the fresh scan lands, so the tree
+/// never blanks — the removed row disappears a tick later.
 pub fn invalidate(repo_path: &str) {
+    crate::history_scan::request_worktrees(repo_path);
+}
+
+/// Store a finished background worktree enumeration (called from `history_scan::drain`).
+pub fn apply_worktrees(repo_path: &str, rows: Vec<WorktreeRow>) {
     WT_CACHE.with(|c| {
-        c.borrow_mut().remove(repo_path);
+        c.borrow_mut().insert(repo_path.to_string(), rows);
+    });
+}
+
+/// Store a finished background session scan (called from `history_scan::drain`).
+pub fn apply_sessions(project_root: &str, sessions: Vec<claude_history::ClaudeSession>) {
+    CLAUDE_CACHE.with(|c| {
+        c.borrow_mut().insert(project_root.to_string(), sessions);
     });
 }
 
@@ -346,16 +374,16 @@ fn relative_time(started_at: Option<u64>, now: u64) -> String {
     format!("{}y ago", days / 365)
 }
 
-/// The raw (uncapped, unfiltered) sessions for `project_root`, served from the cache —
-/// read from disk on first miss, then reused until the flyout reopens.
+/// The raw (uncapped, unfiltered) sessions for `project_root`, served from the cache. A
+/// miss requests a background scan and returns empty — the rows appear when the scan
+/// lands. Never touches the disk on the UI thread.
 fn claude_sessions_cached(project_root: &str) -> Vec<claude_history::ClaudeSession> {
     CLAUDE_CACHE.with(|c| {
         if let Some(sessions) = c.borrow().get(project_root) {
             return sessions.clone();
         }
-        let sessions = claude_history::sessions_for_project(Path::new(project_root));
-        c.borrow_mut().insert(project_root.to_string(), sessions.clone());
-        sessions
+        crate::history_scan::request_sessions(project_root);
+        Vec::new()
     })
 }
 
