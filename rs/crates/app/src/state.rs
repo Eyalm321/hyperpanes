@@ -667,6 +667,27 @@ impl State {
         None
     }
 
+    /// Best-known cell size for spawning a NEW pane's pty (ConPTY Option C: keep the grid at
+    /// the pane's actual visible cells, never larger — conhost's scroll repaint cost is
+    /// proportional to rows, and every `ResizePseudoConsole` triggers a full-grid re-render
+    /// on the in-box host, so spawning close to the final size skips one of those plus the
+    /// 80-col prompt rewrap). The focused pane's laid-out size is the best predictor of a
+    /// sibling's tile (exact for `restart_pane`, ≤1 pump tick off after a split re-tiles);
+    /// before any layout exists (eager first-pane seed, workspace restore into a fresh
+    /// window) there is nothing to predict from, so fall back to the classic 80×24 — rows
+    /// only ever grow from there, and the first render pump corrects it.
+    fn spawn_cells(&self) -> (u16, u16) {
+        let tab = self.active_tab();
+        match tab.panes.get(tab.focused.min(tab.panes.len().saturating_sub(1))) {
+            // `applied` starts as the spawn default and only becomes meaningful once the
+            // pump has laid the pane out (rect set) — don't propagate a pre-layout value.
+            Some(p) if p.rect.2 > 0.0 => {
+                ((p.applied.0.clamp(2, 500)) as u16, (p.applied.1.clamp(1, 300)) as u16)
+            }
+            _ => (80, 24),
+        }
+    }
+
     fn make_pane(
         &mut self,
         mgr: &SessionManager,
@@ -706,7 +727,7 @@ impl State {
                 env: si.env.into_iter().collect(),
             })
         }).flatten();
-        let (cols, rows) = (80u16, 24u16);
+        let (cols, rows) = self.spawn_cells();
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
             cols: Some(cols),
@@ -2846,7 +2867,7 @@ impl State {
             args: si.args,
             env: si.env.into_iter().collect(),
         });
-        let (cols, rows) = (80u16, 24u16);
+        let (cols, rows) = self.spawn_cells();
         if let Err(e) = mgr.create(SpawnOptions {
             uid: uid.clone(),
             cols: Some(cols),
@@ -3049,6 +3070,85 @@ mod ctx_menu_borrow_tests {
         cell.borrow_mut().close_context();
         assert!(!cell.borrow().ctx_open());
         assert!(cell.borrow().ctx_target().is_none());
+    }
+}
+
+#[cfg(test)]
+mod spawn_cells_tests {
+    //! Option C of the ConPTY scroll-region investigation (docs/conpty-passthrough-
+    //! investigation.md): conhost's repaint cost is proportional to pty rows, so a NEW
+    //! pane spawns at the best-known visible cell size — the focused sibling's laid-out
+    //! grid — and only falls back to 80×24 when no layout exists yet (eager first-pane
+    //! seed, workspace restore into a fresh window).
+    use super::*;
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    fn det(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: "t".into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+        }
+    }
+
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+
+    /// No panes at all (the eager first-pane seed): fall back to 80×24.
+    #[test]
+    fn empty_tab_falls_back_to_default() {
+        let st = fresh();
+        assert_eq!(st.spawn_cells(), (80, 24));
+    }
+
+    /// A pane exists but was never laid out (rect still zero — e.g. mid workspace
+    /// restore): its `applied` is the spawn default, not a real size — keep the fallback.
+    #[test]
+    fn unlaid_out_pane_keeps_the_fallback() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        assert_eq!(st.active_tab().panes[0].rect.2, 0.0);
+        assert_eq!(st.spawn_cells(), (80, 24));
+    }
+
+    /// Once the pump has laid the focused pane out, a sibling spawn inherits its grid —
+    /// the pty starts at (about) the cells it will actually show instead of 80×24,
+    /// skipping a ResizePseudoConsole (a full-grid re-render on the in-box conhost).
+    #[test]
+    fn laid_out_focused_pane_sizes_the_spawn() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        {
+            let p = &mut st.active_tab_mut().panes[0];
+            p.rect = (0.0, 0.0, 800.0, 600.0); // pump-placed
+            p.applied = (132, 41); // pump-applied cells
+        }
+        assert_eq!(st.spawn_cells(), (132, 41));
+    }
+
+    /// Degenerate applied sizes are clamped to pty-sane bounds.
+    #[test]
+    fn applied_size_is_clamped() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        {
+            let p = &mut st.active_tab_mut().panes[0];
+            p.rect = (0.0, 0.0, 8.0, 6.0);
+            p.applied = (0, 0);
+        }
+        assert_eq!(st.spawn_cells(), (2, 1));
     }
 }
 
