@@ -54,6 +54,8 @@ rfd = { version = "0.15", default-features = false }
 # avoid two `windows` crate versions in the graph (which breaks wgpu-hal's d3d12 backend).
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # GetLocalTime — reminder panes need the LOCAL wall clock ("tomorrow 9am", due labels).
+    "Win32_System_SystemInformation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",

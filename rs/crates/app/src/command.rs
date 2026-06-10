@@ -11,7 +11,7 @@ use hyperpanes_core::layout::navigate::Direction;
 use hyperpanes_core::layout::presets::{DividerKind, Layout};
 use hyperpanes_core::session_manager::SessionManager;
 
-use crate::state::{DetachedPane, DetachedTab, NewPaneOpts, Setting, State};
+use crate::state::{DetachedPane, DetachedTab, NewPaneOpts, ReminderOffset, Setting, State};
 use crate::theme;
 
 /// An action against the workspace. Construct these from any input source.
@@ -86,6 +86,14 @@ pub enum Command {
     SelectAllPane(usize),
     /// Clear pane `0`'s screen + scrollback.
     ClearPane(usize),
+    // ---- reminder panes (Track F) ----
+    /// Park pane `0` until quick-offset `1` from now: it leaves the layout but its session
+    /// stays alive; it lives in the sidebar bell list until restored.
+    RemindPane(usize, ReminderOffset),
+    /// Toggle the sidebar bell's reminder-list panel.
+    ToggleReminders,
+    /// Re-dock the parked pane with session uid `0` into the active tab + clear its reminder.
+    RestoreReminder(String),
     /// Move pane `0` into a brand-new tab (disabled when its tab has <2 panes).
     MovePaneToNewTab(usize),
     /// Move pane `0` into existing tab `1`.
@@ -292,6 +300,10 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::PastePane(i) => state.paste_pane(i, mgr),
         Command::SelectAllPane(i) => state.select_all_pane(i),
         Command::ClearPane(i) => state.clear_pane(i),
+        // ---- reminder panes ----
+        Command::RemindPane(i, off) => state.remind_pane(i, off),
+        Command::ToggleReminders => state.toggle_reminders(),
+        Command::RestoreReminder(uid) => state.restore_reminder(&uid, mgr),
         Command::MovePaneToNewTab(i) => state.move_pane_to_new_tab(i, mgr),
         Command::MovePaneToTab(i, t) => state.move_pane_to_tab(i, t, mgr),
         // ---- tab context-menu actions ----

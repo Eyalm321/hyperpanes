@@ -108,6 +108,9 @@ pub struct Window {
     /// Last `(phase, status, progress)` pushed to the self-update Preferences props (same
     /// idle-render guard — the updater snapshot is polled every tick but only written on change).
     pub last_update: RefCell<Option<(i32, slint::SharedString, f32)>>,
+    /// Signature of the last reminder rows/open/fired set pushed into the `RemindersAdapter`
+    /// global (Track F) — the same idle-render guard: an unchanged list writes nothing.
+    pub last_reminders: Cell<Option<u64>>,
 }
 
 /// The app: the window registry + the shared session engine + the shared event stream.
@@ -275,6 +278,7 @@ impl App {
             last_maximized: Cell::new(None),
             last_control: RefCell::new(None),
             last_update: RefCell::new(None),
+            last_reminders: Cell::new(None),
         });
 
         self.wire(&win);
@@ -472,6 +476,11 @@ impl App {
         // 2b. Ambient-AI: apply produced subtitles, (re)publish each window's pane context,
         //     and mirror the engine status into the Preferences props.
         self.pump_ai(&windows);
+
+        // 2e. Reminder panes (Track F): mark due reminders fired, then mirror each window's
+        //     rows + bell state into the `RemindersAdapter` global (signature-gated, so an
+        //     unchanged list costs nothing at either tick cadence).
+        self.pump_reminders(&windows);
 
         // 3. Render each window from its own state. Aggregate per-window activity so the
         //    adaptive cadence (#3) can tell a busy frame (streaming output / animation) from a
@@ -697,6 +706,67 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Reminder-pane pump (Track F, UI thread): fire any due reminder (the tick half of the
+    /// adaptive-tick pattern — marking an entry `fired` sets `dirty`, which counts as work
+    /// and keeps the highlight responsive), then mirror each window's reminder list into its
+    /// `RemindersAdapter` global. The push is gated by a signature over (open, uid, fired)
+    /// — labels/tints are fixed at park time — because Slint property writes dirty the
+    /// render tree unconditionally (the same idle-render guard as the maximized flag).
+    fn pump_reminders(&self, windows: &[Rc<Window>]) {
+        let now_ms = crate::glow::now_epoch_ms();
+        for w in windows {
+            let _ = w.state.borrow_mut().tick_reminders(now_ms);
+            // Read the signature + projection out of a scoped borrow, dropped before any
+            // Slint write (the #18 borrow rule, defensively — setters don't re-enter).
+            let (sig, open) = {
+                let st = w.state.borrow();
+                let mut h: u64 = 0xcbf29ce484222325;
+                let mut mix = |bytes: &[u8]| {
+                    for b in bytes {
+                        h ^= *b as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                };
+                mix(if st.reminders_open { b"\x01" } else { b"\x00" });
+                for r in &st.reminders {
+                    mix(r.pane.uid.as_bytes());
+                    mix(if r.fired { b"\x01" } else { b"\x00" });
+                    mix(b"\x1e");
+                }
+                (h, st.reminders_open)
+            };
+            if w.last_reminders.get() == Some(sig) {
+                continue;
+            }
+            w.last_reminders.set(Some(sig));
+            let (rows, alert) = {
+                let st = w.state.borrow();
+                let palette = st.settings.frame_palette;
+                let alert = st.reminders.iter().any(|r| r.fired);
+                let rows: Vec<crate::ReminderItem> = st
+                    .reminders
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| crate::ReminderItem {
+                        uid: r.pane.uid.as_str().into(),
+                        title: r.pane.title.clone(),
+                        tint: r
+                            .pane
+                            .pinned_accent
+                            .unwrap_or_else(|| theme::accent_for(i, palette)),
+                        due: r.due_label.clone(),
+                        overdue: r.fired,
+                    })
+                    .collect();
+                (rows, alert)
+            };
+            let g = w.app.global::<crate::RemindersAdapter>();
+            g.set_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
+            g.set_open(open);
+            g.set_alert(alert);
         }
     }
 
@@ -1849,6 +1919,32 @@ impl App {
             });
         }
 
+        // ---- reminder panes (Track F): the RemindersAdapter global's callbacks ----
+        // The bell + list live in sidebar.slint and talk through the global, so wiring is
+        // here rather than on AppWindow callbacks. Per-window like everything else.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app
+                .global::<crate::RemindersAdapter>()
+                .on_toggle(move || {
+                    if let Some(w) = app.window_by_id(id) {
+                        app.run_command(&w, Command::ToggleReminders);
+                    }
+                });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app
+                .global::<crate::RemindersAdapter>()
+                .on_restore(move |uid| {
+                    if let Some(w) = app.window_by_id(id) {
+                        app.run_command(&w, Command::RestoreReminder(uid.to_string()));
+                    }
+                });
+        }
+
         // Wave-2 overlays
         cb0!(on_open_palette, Command::PaletteOpen);
         cb0!(on_open_prefs, Command::PrefsOpen);
@@ -2240,10 +2336,13 @@ impl App {
 }
 
 /// Find the window currently hosting session `uid` (each `uid` lives in one window).
+/// "Hosting" includes a pane PARKED as a reminder (Track F) — its session events must
+/// still reach the owning window (notably `Exit`, which drops the reminder); a `Data`
+/// event for a parked pane is then a harmless no-op (no laid-out pane to feed).
 fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window>> {
     windows
         .iter()
-        .find(|w| w.state.borrow_mut().find_pane(uid).is_some())
+        .find(|w| w.state.borrow_mut().hosts_session(uid))
 }
 
 /// Cheap FNV-1a hash of a string — used to detect when a pane's rendered screen text

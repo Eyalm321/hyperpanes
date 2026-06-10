@@ -145,6 +145,37 @@ export struct ProjectItem {
     sessions: [ClaudeSessionItem],
 }
 
+// ===== reminder panes (Track F) =====
+
+// One parked pane in the sidebar bell's reminder list. `uid` is the pane's session uid
+// (the restore key — index-free, so a row click can't race a list change); `tint` is the
+// pane's project/accent color; `due` is the human due label ("14:32" / "tomorrow 09:00");
+// `overdue` flips once the reminder fires (drives the row + bell highlight).
+export struct ReminderItem {
+    uid: string,
+    title: string,
+    tint: color,
+    due: string,
+    overdue: bool,
+}
+
+// The reminder-pane bridge between the Rust controller and the sidebar rail. A GLOBAL
+// (not AppWindow props) so the feature stays self-contained in sidebar.slint/types.slint:
+// the controller pushes `rows`/`open`/`alert` and subscribes to the callbacks via
+// `app.global::<RemindersAdapter>()` — no new wiring through app.slint's component tree.
+export global RemindersAdapter {
+    // Parked panes, oldest-first (the order they were parked).
+    in property <[ReminderItem]> rows;
+    // Whether the bell's list panel is expanded.
+    in property <bool> open;
+    // True while any reminder has fired and not been restored (bell badge/accent).
+    in property <bool> alert;
+    // Bell icon clicked → toggle the list panel.
+    callback toggle();
+    // A list row clicked → re-dock that pane into the active tab + clear the reminder.
+    callback restore(string);
+}
+
 // One option in a preferences picker (font family). `active` marks the current value.
 export struct PrefOption {
     id: int,

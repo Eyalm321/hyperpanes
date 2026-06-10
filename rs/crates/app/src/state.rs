@@ -481,6 +481,37 @@ pub struct State {
     /// Most-recently-closed tabs (sessions kept alive centrally) for "Reopen Closed Tab",
     /// newest last. Capped — evicted entries' sessions are killed.
     pub closed_tabs: Vec<DetachedTab>,
+    // ---- reminder panes (Track F) ----
+    /// Panes parked "until a chosen time": removed from the layout but their sessions stay
+    /// alive centrally (the same detach machinery as `closed_tabs`). The app tick marks
+    /// entries `fired` when due; clicking a bell-list row re-docks the pane into the active
+    /// tab and removes its entry. NOT persisted — sessions don't survive a relaunch, so
+    /// reminders die with them (matching the session lifecycle).
+    pub reminders: Vec<Reminder>,
+    /// Whether the sidebar bell's reminder-list panel is expanded.
+    pub reminders_open: bool,
+}
+
+/// A pane parked by "Remind at…" — the detached pane (its session alive centrally) plus
+/// when it's due back. `fired` flips once the due time passes (set by the app tick) and
+/// drives the bell/list highlight; v1 never auto-restores.
+#[derive(Debug, Clone)]
+pub struct Reminder {
+    pub pane: DetachedPane,
+    /// Due time in UNIX-epoch ms (compared against `glow::now_epoch_ms` by the tick).
+    pub due_ms: u64,
+    /// Human due label computed at set time from the LOCAL clock ("14:32" / "tomorrow 09:00").
+    pub due_label: SharedString,
+    pub fired: bool,
+}
+
+/// The pane menu's quick reminder offsets (v1: no custom time picker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderOffset {
+    Min15,
+    Hour1,
+    Hour3,
+    Tomorrow9,
 }
 
 /// What the key router should do with an Escape press.
@@ -547,6 +578,8 @@ impl State {
             esc_fired: false,
             ctx: None,
             closed_tabs: Vec::new(),
+            reminders: Vec::new(),
+            reminders_open: false,
         };
         let tab = s.fresh_tab();
         s.tabs.push(tab);
@@ -1142,6 +1175,8 @@ impl State {
                     .iter()
                     .flat_map(|t| t.panes.iter().map(|p| p.uid.clone())),
             )
+            // Parked reminder panes also keep their sessions alive — kill them on close too.
+            .chain(self.reminders.iter().map(|r| r.pane.uid.clone()))
             .collect()
     }
 
@@ -1150,8 +1185,23 @@ impl State {
     pub fn pane_exited(&mut self, uid: &str, mgr: &SessionManager) -> bool {
         match self.find_pane(uid) {
             Some((ti, pi)) => self.close_pane_in(ti, pi, mgr),
-            None => true,
+            None => {
+                // A PARKED (reminder) pane's shell exited on its own — its session is gone,
+                // so drop the reminder rather than leave a dead row in the bell list.
+                if let Some(i) = self.reminders.iter().position(|r| r.pane.uid == uid) {
+                    self.reminders.remove(i);
+                    self.dirty = true;
+                }
+                true
+            }
         }
+    }
+
+    /// Whether this window hosts session `uid` anywhere — laid out in a tab OR parked as a
+    /// reminder. Used by the app's event routing so a parked pane's events still reach the
+    /// window that owns it (e.g. its shell exiting drops the reminder).
+    pub fn hosts_session(&mut self, uid: &str) -> bool {
+        self.find_pane(uid).is_some() || self.reminders.iter().any(|r| r.pane.uid == uid)
     }
 
     pub fn focus_pane(&mut self, idx: usize) {
@@ -2969,6 +3019,110 @@ impl State {
     }
 }
 
+/// Track F: reminder panes — park a live pane until a chosen time. Its own `impl` block so
+/// the feature reads as one unit. Parking reuses the detach machinery (the session stays
+/// alive centrally, exactly like `closed_tabs`); restoring reuses `adopt_pane` (replay-primed
+/// re-dock into the ACTIVE tab). All methods follow the mutate→set-dirty seam.
+impl State {
+    /// Park active-tab pane `idx` until `offset` from now: remove it from the layout WITHOUT
+    /// killing its session and push a [`Reminder`]. Gated when it's the only pane of the only
+    /// tab (parking it would empty the window). The bell list is where it lives meanwhile.
+    pub fn remind_pane(&mut self, idx: usize, offset: ReminderOffset) {
+        if self.tabs.len() <= 1 && self.active_tab().panes.len() < 2 {
+            return;
+        }
+        let Some(dp) = self.detach_pane_idx(idx) else {
+            return;
+        };
+        let (delay_ms, due_label) = reminder_due(offset);
+        self.reminders.push(Reminder {
+            pane: dp,
+            due_ms: crate::glow::now_epoch_ms() + delay_ms,
+            due_label: due_label.into(),
+            fired: false,
+        });
+        self.dirty = true;
+    }
+
+    /// Toggle the bell's reminder-list panel (collapses the projects flyout — one rail
+    /// panel at a time, mirroring how the flyouts behave).
+    pub fn toggle_reminders(&mut self) {
+        self.reminders_open = !self.reminders_open;
+        if self.reminders_open {
+            self.sidebar_open = false;
+        }
+        self.dirty = true;
+    }
+
+    /// Mark any reminder whose due time has passed as `fired` (the bell/list highlight).
+    /// Called by the app tick with the current epoch ms; returns whether anything changed.
+    pub fn tick_reminders(&mut self, now_ms: u64) -> bool {
+        let mut changed = false;
+        for r in &mut self.reminders {
+            if !r.fired && now_ms >= r.due_ms {
+                r.fired = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    /// A bell-list row was clicked: re-dock the parked pane into the ACTIVE tab's layout
+    /// (replay-primed, focused — the standard `adopt_pane` path) and clear its reminder.
+    /// Keyed by session uid so a row click can't race a concurrent list change.
+    pub fn restore_reminder(&mut self, uid: &str, mgr: &SessionManager) {
+        let Some(i) = self.reminders.iter().position(|r| r.pane.uid == uid) else {
+            return;
+        };
+        let r = self.reminders.remove(i);
+        self.reminders_open = false;
+        self.adopt_pane(mgr, r.pane); // focuses the pane + sets dirty
+    }
+}
+
+/// Seconds since LOCAL midnight (Windows wall clock — what "tomorrow 9am" means to the user).
+#[cfg(windows)]
+fn local_secs_since_midnight() -> u64 {
+    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    st.wHour as u64 * 3600 + st.wMinute as u64 * 60 + st.wSecond as u64
+}
+#[cfg(not(windows))]
+fn local_secs_since_midnight() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        % 86_400
+}
+
+/// Resolve a quick offset against the local clock: `(delay from now in ms, due label)`.
+fn reminder_due(offset: ReminderOffset) -> (u64, String) {
+    due_for(local_secs_since_midnight(), offset)
+}
+
+/// Pure core of [`reminder_due`], parameterised on the local seconds-since-midnight so the
+/// label arithmetic is testable. A due time that rolls past midnight labels as "tomorrow".
+fn due_for(since_mid: u64, offset: ReminderOffset) -> (u64, String) {
+    const DAY: u64 = 86_400;
+    let delay_secs = match offset {
+        ReminderOffset::Min15 => 15 * 60,
+        ReminderOffset::Hour1 => 3_600,
+        ReminderOffset::Hour3 => 3 * 3_600,
+        ReminderOffset::Tomorrow9 => (DAY - since_mid) + 9 * 3_600,
+    };
+    let due = since_mid + delay_secs;
+    let (hh, mm) = ((due % DAY) / 3_600, (due % 3_600) / 60);
+    let label = if due >= DAY {
+        format!("tomorrow {hh:02}:{mm:02}")
+    } else {
+        format!("{hh:02}:{mm:02}")
+    };
+    (delay_secs * 1_000, label)
+}
+
 /// Format a Slint [`Color`] as `#rrggbb` (the workspace-file pane color format).
 fn color_hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
@@ -3240,5 +3394,109 @@ mod shell_label_tests {
         assert_eq!(shell_label("   "), "");
         // a path ending in a separator has no basename.
         assert_eq!(shell_label("C:\\bin\\"), "");
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    //! Track F: the reminder-pane state machine — park (detach, session alive) → fire
+    //! (tick marks due entries) → restore (re-dock into the active tab, entry cleared) —
+    //! plus the local-clock due-label arithmetic.
+    use super::*;
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    fn det(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+        }
+    }
+
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+
+    #[test]
+    fn park_fire_restore_roundtrip() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        assert_eq!(st.active_tab().panes.len(), 2);
+
+        st.remind_pane(0, ReminderOffset::Min15);
+        assert_eq!(st.active_tab().panes.len(), 1);
+        assert_eq!(st.reminders.len(), 1);
+        assert!(!st.reminders[0].fired);
+        // The parked session must still be killed when the window closes.
+        assert!(st.session_uids().iter().any(|u| u == "a"));
+
+        // Not due yet → no change; due → fired (the bell highlight), pane stays parked.
+        let due = st.reminders[0].due_ms;
+        assert!(!st.tick_reminders(due - 1));
+        assert!(st.tick_reminders(due));
+        assert!(st.reminders[0].fired);
+        assert_eq!(st.active_tab().panes.len(), 1, "v1 never auto-restores");
+
+        // Restore re-docks into the active tab (focused) and clears the entry.
+        st.restore_reminder("a", &m);
+        assert!(st.reminders.is_empty());
+        assert_eq!(st.active_tab().panes.len(), 2);
+        let f = st.active_tab().focused;
+        assert_eq!(st.active_tab().panes[f].uid, "a");
+    }
+
+    #[test]
+    fn last_pane_of_last_tab_cannot_be_parked() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("only"));
+        st.remind_pane(0, ReminderOffset::Hour1);
+        assert_eq!(st.active_tab().panes.len(), 1);
+        assert!(st.reminders.is_empty());
+    }
+
+    #[test]
+    fn parked_pane_exit_drops_its_reminder() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        st.remind_pane(0, ReminderOffset::Hour3);
+        assert!(st.hosts_session("a"));
+        // The parked shell exits on its own → the reminder dies with the session.
+        assert!(st.pane_exited("a", &m));
+        assert!(st.reminders.is_empty());
+        assert!(!st.hosts_session("a"));
+    }
+
+    #[test]
+    fn restore_by_unknown_uid_is_a_noop() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.restore_reminder("nope", &m);
+        assert_eq!(st.active_tab().panes.len(), 1);
+    }
+
+    #[test]
+    fn due_labels_roll_over_midnight() {
+        // noon + 15m → same day.
+        assert_eq!(due_for(12 * 3600, ReminderOffset::Min15), (900_000, "12:15".into()));
+        // 23:50 + 15m → tomorrow 00:05.
+        let (d, l) = due_for(23 * 3600 + 50 * 60, ReminderOffset::Min15);
+        assert_eq!((d, l.as_str()), (900_000, "tomorrow 00:05"));
+        // tomorrow 9am from 18:00 → 15h delay, labelled tomorrow.
+        let (d, l) = due_for(18 * 3600, ReminderOffset::Tomorrow9);
+        assert_eq!((d, l.as_str()), (15 * 3_600_000, "tomorrow 09:00"));
     }
 }
