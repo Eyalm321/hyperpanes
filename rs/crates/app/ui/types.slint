@@ -119,18 +119,34 @@ export struct WorktreeRow {
     prunable: bool,
 }
 
-// One Claude Code session under a project in the sidebar tree — a row in the collapsible
-// "Claude history" list. `id` is the session id passed to `claude --resume <id>`; `summary`
-// is a one-line description (a `summary` transcript line, else the first user message);
-// `when` is a relative-time label ("2h ago"); `count` is the transcript message count.
-// Built app-side by `sidebar::claude_sessions_for` over `core::claude_history`.
-// Declared before `ProjectItem` because that struct references it (Slint resolves struct
-// types top-to-bottom within a file — no forward references).
+// One agent session under a project in the sidebar tree — a row in the History segment.
+// `id` is the session id passed to the harness resume command (`claude --resume <id>` for
+// Claude); `source` is the harness label ("Claude" today — generic so other harnesses can
+// plug in); `summary` is a one-line description (a `summary` transcript line, else the
+// first user message); `when` is a relative-time label ("2h ago"); `count` is the
+// transcript message count. Built app-side by `sidebar::claude_sessions_for` over
+// `core::claude_history`. Declared before `ProjectItem` because that struct references it
+// (Slint resolves struct types top-to-bottom within a file — no forward references).
 export struct ClaudeSessionItem {
     id: string,
+    source: string,
     summary: string,
     when: string,
     count: int,
+}
+
+// UI → controller side-channel for the per-project history UI (the Worktrees|History
+// segmented bar + the history search box). Slint bumps `seq` after writing the edited
+// row's index and its full (segment, query) pair; the controller polls `seq` each pump
+// tick, folds the pair into its per-project session-state map (keyed by repo path) and
+// re-projects. Polling a global (instead of a new callback) keeps the sidebar
+// self-contained — no new app-level callback wiring, mirroring the DELETE-BASE smuggling
+// the worktree delete already uses.
+export global HistoryUi {
+    in-out property <int> seq: 0;
+    in-out property <int> proj: -1;       // project row index of the last edit
+    in-out property <int> segment: 0;     // 0 = Worktrees, 1 = History
+    in-out property <string> query: "";   // history search text
 }
 
 // One git-project row in the sidebar panel — now the top level of a two-level tree: the
@@ -140,9 +156,19 @@ export struct ProjectItem {
     name: string,
     color: color,
     worktrees: [WorktreeRow],
-    // This project's recent Claude Code sessions (newest-first), populated by the projection
-    // (paneview.rs) from `sidebar::claude_sessions_for`. Empty hides the "Claude history" list.
+    // This project's recent agent sessions (newest-first), populated by the projection
+    // (paneview.rs) from `sidebar::claude_sessions_for` — already FILTERED by `query`.
     sessions: [ClaudeSessionItem],
+    // Whether the project has ANY history at all (unfiltered) — gates the Worktrees|History
+    // segmented bar. Kept separate from `sessions.length` so a query that matches nothing
+    // doesn't collapse the bar (and the search box) out from under the user.
+    has-history: bool,
+    // The selected segment (0 = Worktrees, 1 = History) — persisted per-project for the app
+    // session by the controller (survives the flyout closing and reopening).
+    segment: int,
+    // The current history search query (persisted alongside `segment`); restores the search
+    // box text when the row is recreated.
+    query: string,
 }
 
 // One option in a preferences picker (font family). `active` marks the current value.
