@@ -20,7 +20,7 @@
 // self-contained — no new app-level wiring.
 
 import { Theme } from "theme.slint";
-import { ProjectItem, WorktreeRow, ClaudeSessionItem } from "types.slint";
+import { ProjectItem, WorktreeRow, ClaudeSessionItem, HistoryUi } from "types.slint";
 
 // "+" quick-pane glyph (two crossed bars — font-independent).
 component PlusGlyph inherits Rectangle {
@@ -226,6 +226,69 @@ component WorktreeRowView inherits Rectangle {
     }
 }
 
+// A magnifier glyph (stroked circle + handle) for the history search box. Font-independent,
+// matching the Folder/Trash glyphs above.
+component SearchGlyph inherits Path {
+    in property <color> ink;
+    width: 11px;
+    height: 11px;
+    viewbox-width: 12;
+    viewbox-height: 12;
+    stroke: ink;
+    stroke-width: 1.3px;
+    fill: transparent;
+    commands: "M 5 1.5 A 3.5 3.5 0 1 0 5 8.5 A 3.5 3.5 0 1 0 5 1.5 M 7.6 7.6 L 11 11";
+}
+
+// One segment of the flat Worktrees|History control: a pill that brightens when active.
+component Segment inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback pick();
+    horizontal-stretch: 1;
+    border-radius: 4px;
+    background: root.active ? Theme.surface2 : (ta.has-hover ? Theme.surface : transparent);
+    Text {
+        text: root.label;
+        color: root.active ? Theme.text : Theme.subtext;
+        font-size: 10px;
+        font-weight: root.active ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.pick(); }
+    }
+}
+
+// The compact Xcode-style segmented bar inside an expanded project: Worktrees | History.
+// Only rendered when the project has any history (`proj.has-history`); with none the
+// expanded body just shows the worktrees, bar-less, as before.
+component SegmentedBar inherits Rectangle {
+    in property <int> selected;
+    callback select(int);
+    height: 22px;
+    border-radius: 5px;
+    background: Theme.mantle;
+    border-width: 1px;
+    border-color: Theme.border;
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        Segment {
+            label: "Worktrees";
+            active: root.selected == 0;
+            pick => { root.select(0); }
+        }
+        Segment {
+            label: "History";
+            active: root.selected == 1;
+            pick => { root.select(1); }
+        }
+    }
+}
+
 // A small play/resume triangle (filled) — "resume this session in a new pane". Drawn as a
 // Path so it's font-independent, matching the Folder/Trash glyphs above.
 component ResumeGlyph inherits Path {
@@ -270,11 +333,22 @@ component ClaudeSessionRowView inherits Rectangle {
                 font-size: 12px;
                 overflow: elide;
             }
-            // meta: "2h ago  ·  42 msgs". The count is its own Text (an int auto-converts on
-            // assignment), avoiding int+string concatenation (which Slint does not do).
+            // meta: "Claude · 2h ago · 42 msgs". The count is its own Text (an int
+            // auto-converts on assignment), avoiding int+string concatenation (which Slint
+            // does not do). The leading source label keeps the harness generic (#26).
             HorizontalLayout {
                 alignment: start;
                 spacing: 4px;
+                if root.session.source != "" : Text {
+                    text: root.session.source;
+                    color: Theme.subtext;
+                    font-size: 10px;
+                }
+                if root.session.source != "" && root.session.when != "" : Text {
+                    text: "·";
+                    color: Theme.faint;
+                    font-size: 10px;
+                }
                 if root.session.when != "" : Text {
                     text: root.session.when;
                     color: Theme.subtext;
@@ -319,6 +393,8 @@ component ProjectRow inherits Rectangle {
     callback remove();
     callback request-delete(int, string);   // (worktree index within this project, path)
     callback resume-session(string);         // resume Claude session <id> in a new pane
+    callback segment-changed(int);           // Worktrees|History segment picked (0 / 1)
+    callback query-edited(string);           // history search text edited
 
     property <bool> expanded: false;
 
@@ -409,42 +485,102 @@ component ProjectRow inherits Rectangle {
             }
         }
 
-        // ---- worktrees (when expanded) ----
+        // ---- expanded body: [Worktrees | History] segments (bar only with history) ----
         if root.expanded : VerticalLayout {
             spacing: 1px;
             padding-bottom: 3px;
 
-            if root.proj.worktrees.length == 0 : Text {
-                text: "No worktrees found.";
-                color: Theme.subtext;
-                font-size: 11px;
-                horizontal-alignment: left;
-                height: 22px;
-                vertical-alignment: center;
+            // segmented bar — rendered only when the project has any history at all
+            // (`has-history` is the UNFILTERED gate, so an unmatched query can't collapse
+            // the bar and strand the user). Without history the body is just the worktrees.
+            if root.proj.has-history : HorizontalLayout {
+                padding-left: 22px;     // nest just inside the row content, like the rows
+                padding-right: 6px;
+                padding-bottom: 3px;
+                SegmentedBar {
+                    selected: root.proj.segment;
+                    select(s) => { root.segment-changed(s); }
+                }
             }
 
-            for w[j] in root.proj.worktrees : WorktreeRowView {
-                wt: w;
-                request-delete => { root.request-delete(j, w.path); }
-            }
-
-            // ---- Claude session history (only when this project has sessions) ----
-            if root.sessions.length > 0 : VerticalLayout {
+            // ---- Worktrees segment (also the bar-less default) ----
+            if !root.proj.has-history || root.proj.segment == 0 : VerticalLayout {
                 spacing: 1px;
-                padding-top: 4px;
 
+                if root.proj.worktrees.length == 0 : Text {
+                    text: "No worktrees found.";
+                    color: Theme.subtext;
+                    font-size: 11px;
+                    horizontal-alignment: left;
+                    height: 22px;
+                    vertical-alignment: center;
+                }
+
+                for w[j] in root.proj.worktrees : WorktreeRowView {
+                    wt: w;
+                    request-delete => { root.request-delete(j, w.path); }
+                }
+            }
+
+            // ---- History segment: search box + (filtered) session rows ----
+            if root.proj.has-history && root.proj.segment == 1 : VerticalLayout {
+                spacing: 1px;
+
+                // search input (#25): filters the sessions, case-insensitively, on the Rust
+                // side. The text is row-local while typing (restored from `proj.query` when
+                // the row is recreated); each edit travels up via `query-edited`.
                 HorizontalLayout {
-                    padding-left: 22px;     // nest the heading just inside the row content
-                    Text {
-                        text: "CLAUDE HISTORY";
-                        color: Theme.subtext;
-                        font-size: 9px;
-                        font-weight: 700;
-                        letter-spacing: 0.5px;
-                        height: 16px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+                    padding-left: 26px;
+                    padding-right: 6px;
+                    padding-bottom: 2px;
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 5px;
+                        background: Theme.mantle;
+                        border-width: 1px;
+                        border-color: qi.has-focus ? Theme.accent : Theme.border;
+                        HorizontalLayout {
+                            padding-left: 7px;
+                            padding-right: 7px;
+                            spacing: 5px;
+                            VerticalLayout {
+                                alignment: center;
+                                SearchGlyph { ink: Theme.subtext; }
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                clip: true;
+                                if qi.text == "" : Text {
+                                    x: 0;
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "Search history…";
+                                    color: Theme.faint;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                qi := TextInput {
+                                    width: 100%;
+                                    height: 100%;
+                                    color: Theme.text;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    single-line: true;
+                                    init => { self.text = root.proj.query; }
+                                    edited => { root.query-edited(self.text); }
+                                }
+                            }
+                        }
                     }
+                }
+
+                if root.sessions.length == 0 : Text {
+                    text: "No matching sessions.";
+                    color: Theme.subtext;
+                    font-size: 11px;
+                    horizontal-alignment: left;
+                    height: 22px;
+                    vertical-alignment: center;
                 }
 
                 for s[k] in root.sessions : ClaudeSessionRowView {
@@ -645,6 +781,23 @@ export component SidebarRail inherits Rectangle {
                         rename(t) => { root.rename-project(i, t); }
                         remove => { root.remove-project(i); }
                         resume-session(id) => { root.resume-session(i, id); }
+                        // History-UI edits go through the polled `HistoryUi` global (the
+                        // controller folds them into its per-project map keyed by path) —
+                        // no app-level callback needed. Each edit records the row's FULL
+                        // (segment, query) pair, so one global slot can't tear state
+                        // between two expanded projects.
+                        segment-changed(s) => {
+                            HistoryUi.proj = i;
+                            HistoryUi.segment = s;
+                            HistoryUi.query = p.query;
+                            HistoryUi.seq += 1;
+                        }
+                        query-edited(q) => {
+                            HistoryUi.proj = i;
+                            HistoryUi.segment = p.segment;
+                            HistoryUi.query = q;
+                            HistoryUi.seq += 1;
+                        }
                         request-delete(j, path) => {
                             root.wt-del-proj = i;
                             root.wt-del-wt = j;

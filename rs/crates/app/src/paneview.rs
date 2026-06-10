@@ -667,20 +667,26 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             } else {
                 Vec::new()
             };
-            // This project's recent Claude sessions — read (cached) only while the flyout is
-            // open, mirroring the worktree gate (no point scanning ~/.claude for a hidden panel).
-            let sessions: Vec<ClaudeSessionItem> = if sidebar_open {
-                crate::sidebar::claude_sessions_for(&proj.path)
+            // This project's recent agent sessions — read (cached) only while the flyout is
+            // open, mirroring the worktree gate (no point scanning ~/.claude for a hidden
+            // panel). Filtered Rust-side by the project's history search query (#25); the
+            // segment/query pair itself lives in the sidebar's per-project map, fed by the
+            // pump's `HistoryUi` poll (see `pump`).
+            let (segment, query) = crate::sidebar::history_ui_for(&proj.path);
+            let (sessions, has_history): (Vec<ClaudeSessionItem>, bool) = if sidebar_open {
+                let rows = crate::sidebar::claude_sessions_for(&proj.path, &query)
                     .into_iter()
                     .map(|s| ClaudeSessionItem {
                         id: s.id.into(),
+                        source: s.source.into(),
                         summary: s.summary.into(),
                         when: s.when.into(),
                         count: s.count,
                     })
-                    .collect()
+                    .collect();
+                (rows, crate::sidebar::claude_has_history(&proj.path))
             } else {
-                Vec::new()
+                (Vec::new(), false)
             };
             // Reuse this project's worktree model (stable identity) and update its contents
             // in place, so the inner repeater isn't rebuilt every frame (see `wt_models`).
@@ -704,6 +710,9 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
                 color,
                 worktrees: ModelRc::from(model),
                 sessions: ModelRc::from(cmodel),
+                has_history,
+                segment,
+                query: query.into(),
             }
         })
         .collect();
@@ -868,6 +877,25 @@ pub fn pump(
     scale: f32,
     mgr: &SessionManager,
 ) -> PumpResult {
+    // ---- fold in sidebar history-UI edits (#25/#26) ----
+    // The Worktrees|History segmented bar + the history search box write each edit into the
+    // `HistoryUi` global (a seq bump carrying the project row + its segment/query pair) —
+    // a polled side-channel instead of a new app-level callback. Consume it here and dirty
+    // the state so the resync below re-projects with the new filter/segment.
+    {
+        use slint::ComponentHandle as _;
+        let hist = app.global::<crate::HistoryUi>();
+        if crate::sidebar::history_seq_changed(hist.get_seq()) {
+            let proj = hist.get_proj();
+            if proj >= 0 {
+                if let Some(p) = state.projects.get(proj as usize) {
+                    crate::sidebar::set_history_ui(&p.path, hist.get_segment(), &hist.get_query());
+                    state.dirty = true;
+                }
+            }
+        }
+    }
+
     // ---- expire a held-Esc once auto-repeat stops (no key-release event) ----
     state.tick_esc();
 

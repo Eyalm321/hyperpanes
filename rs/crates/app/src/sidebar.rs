@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub use hyperpanes_core::persistence::projects::Project;
+use hyperpanes_core::claude_history;
 use hyperpanes_core::persistence::projects;
 
 /// The remembered projects, newest-first (the order the panel renders), self-healed:
@@ -220,10 +221,19 @@ thread_local! {
     /// every tick, so enumerating git on each pass would be wasteful — instead we enumerate
     /// once per project and reuse it until invalidated (a delete) or the flyout is reopened.
     static WT_CACHE: RefCell<HashMap<String, Vec<WorktreeRow>>> = RefCell::new(HashMap::new());
-    /// Per-UI-thread cache of each project's Claude session history, keyed by repo path. Same
-    /// rationale as `WT_CACHE`: scanning `~/.claude/projects` every tick would be wasteful, so
-    /// we read it once per project and reuse until the flyout is reopened.
-    static CLAUDE_CACHE: RefCell<HashMap<String, Vec<ClaudeSessionRow>>> = RefCell::new(HashMap::new());
+    /// Per-UI-thread cache of each project's Claude session history (the raw core sessions,
+    /// UNCAPPED and unfiltered), keyed by repo path. Same rationale as `WT_CACHE`: scanning
+    /// `~/.claude/projects` every tick would be wasteful, so we read it once per project and
+    /// reuse until the flyout is reopened. Raw sessions (not shaped rows) so the search
+    /// filter can match against `first_user` too and reach past the display cap.
+    static CLAUDE_CACHE: RefCell<HashMap<String, Vec<claude_history::ClaudeSession>>> = RefCell::new(HashMap::new());
+    /// Per-UI-thread, per-project history-UI state: the selected Worktrees|History segment
+    /// (0/1) and the current search query. Keyed by repo path. Deliberately NOT cleared on
+    /// flyout reopen — the selection persists for the app session (it only dies with the
+    /// process).
+    static HIST_UI: RefCell<HashMap<String, (i32, String)>> = RefCell::new(HashMap::new());
+    /// The last `HistoryUi.seq` value the pump poll consumed (the global only ever bumps).
+    static HIST_SEQ: RefCell<i32> = const { RefCell::new(0) };
     /// The flyout's last-seen open state, so the projection can detect the closed→open edge
     /// and refresh the cache (worktrees may have changed while the flyout was shut).
     static WT_LAST_OPEN: RefCell<bool> = const { RefCell::new(false) };
@@ -278,12 +288,15 @@ pub fn invalidate(repo_path: &str) {
 /// How many recent sessions to surface per project in the rail (the most-recent N).
 pub const CLAUDE_HISTORY_LIMIT: usize = 8;
 
-/// One Claude session row, shaped for the sidebar: the resume id, a one-line summary, a
-/// human relative-time string ("2h ago") and the message count. Built from
-/// [`hyperpanes_core::claude_history::ClaudeSession`] with the timestamp turned into a label.
+/// One agent session row, shaped for the sidebar: the resume id, a harness label
+/// ("Claude" — from [`claude_history::HistorySource`], so the UI never hard-wires the
+/// harness), a one-line summary, a human relative-time string ("2h ago") and the message
+/// count. Built from [`hyperpanes_core::claude_history::ClaudeSession`] with the timestamp
+/// turned into a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaudeSessionRow {
     pub id: String,
+    pub source: String,
     pub summary: String,
     pub when: String,
     pub count: i32,
@@ -333,31 +346,76 @@ fn relative_time(started_at: Option<u64>, now: u64) -> String {
     format!("{}y ago", days / 365)
 }
 
-/// The recent Claude sessions for `project_root`, served from the cache (read on first miss).
-/// Cheap to call every render; capped to [`CLAUDE_HISTORY_LIMIT`] newest-first rows.
-pub fn claude_sessions_for(project_root: &str) -> Vec<ClaudeSessionRow> {
+/// The raw (uncapped, unfiltered) sessions for `project_root`, served from the cache —
+/// read from disk on first miss, then reused until the flyout reopens.
+fn claude_sessions_cached(project_root: &str) -> Vec<claude_history::ClaudeSession> {
     CLAUDE_CACHE.with(|c| {
-        if let Some(rows) = c.borrow().get(project_root) {
-            return rows.clone();
+        if let Some(sessions) = c.borrow().get(project_root) {
+            return sessions.clone();
         }
-        let now = now_ms();
-        let rows: Vec<ClaudeSessionRow> =
-            hyperpanes_core::claude_history::sessions_for_project(Path::new(project_root))
-                .into_iter()
-                .take(CLAUDE_HISTORY_LIMIT)
-                .map(|s| ClaudeSessionRow {
-                    when: relative_time(s.started_at, now),
-                    count: s.message_count.min(i32::MAX as usize) as i32,
-                    summary: if s.summary.is_empty() {
-                        format!("session {}", short_id(&s.id))
-                    } else {
-                        s.summary
-                    },
-                    id: s.id,
-                })
-                .collect();
-        c.borrow_mut().insert(project_root.to_string(), rows.clone());
-        rows
+        let sessions = claude_history::sessions_for_project(Path::new(project_root));
+        c.borrow_mut().insert(project_root.to_string(), sessions.clone());
+        sessions
+    })
+}
+
+/// The recent agent sessions for `project_root` matching `query` (case-insensitive
+/// substring over the summary AND the opening user prompt — see
+/// [`claude_history::filter_sessions`]; empty query = everything), shaped for the sidebar.
+/// Served from the cache (read on first miss), filtered BEFORE the [`CLAUDE_HISTORY_LIMIT`]
+/// cap so a search reaches past the top-N. Cheap to call every render.
+pub fn claude_sessions_for(project_root: &str, query: &str) -> Vec<ClaudeSessionRow> {
+    let sessions = claude_sessions_cached(project_root);
+    let now = now_ms();
+    claude_history::filter_sessions(&sessions, query)
+        .into_iter()
+        .take(CLAUDE_HISTORY_LIMIT)
+        .map(|s| ClaudeSessionRow {
+            source: s.source.label().to_string(),
+            when: relative_time(s.started_at, now),
+            count: s.message_count.min(i32::MAX as usize) as i32,
+            summary: if s.summary.is_empty() {
+                format!("session {}", short_id(&s.id))
+            } else {
+                s.summary
+            },
+            id: s.id,
+        })
+        .collect()
+}
+
+/// Whether `project_root` has ANY session history at all (unfiltered) — gates the
+/// Worktrees|History segmented bar so an unmatched query can't collapse it.
+pub fn claude_has_history(project_root: &str) -> bool {
+    !claude_sessions_cached(project_root).is_empty()
+}
+
+// ---- per-project history-UI state (segmented bar + search), polled via `HistoryUi` ----
+
+/// The per-project history-UI state: `(segment, query)` — segment 0 = Worktrees,
+/// 1 = History. Defaults to `(0, "")` for a project never touched.
+pub fn history_ui_for(project_root: &str) -> (i32, String) {
+    HIST_UI.with(|m| m.borrow().get(project_root).cloned().unwrap_or((0, String::new())))
+}
+
+/// Record a history-UI edit for `project_root` (from the polled `HistoryUi` global).
+pub fn set_history_ui(project_root: &str, segment: i32, query: &str) {
+    HIST_UI.with(|m| {
+        m.borrow_mut().insert(project_root.to_string(), (segment.clamp(0, 1), query.to_string()));
+    });
+}
+
+/// Consume the `HistoryUi.seq` poll: returns `true` (and records `seq`) when it moved
+/// since the last call — i.e. the UI pushed a new segment/query edit to fold in.
+pub fn history_seq_changed(seq: i32) -> bool {
+    HIST_SEQ.with(|last| {
+        let mut last = last.borrow_mut();
+        if *last == seq {
+            false
+        } else {
+            *last = seq;
+            true
+        }
     })
 }
 
@@ -503,12 +561,37 @@ prunable
     #[test]
     fn sessions_for_missing_project_is_empty_and_caches() {
         // A path with no encoded `~/.claude/projects` dir → empty, and a second call hits the
-        // cache (same result) without panicking.
+        // cache (same result) without panicking. Also: no history → segmented bar gate off.
         let bogus = std::env::temp_dir()
             .join(format!("hp-claude-bogus-{}", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        assert!(claude_sessions_for(&bogus).is_empty());
-        assert!(claude_sessions_for(&bogus).is_empty());
+        assert!(claude_sessions_for(&bogus, "").is_empty());
+        assert!(claude_sessions_for(&bogus, "anything").is_empty());
+        assert!(!claude_has_history(&bogus));
+    }
+
+    // ---- per-project history-UI state (segment + query) ----
+
+    #[test]
+    fn history_ui_defaults_and_roundtrips() {
+        let key = format!("X:\\hist-ui-test-{}", std::process::id());
+        assert_eq!(history_ui_for(&key), (0, String::new()));
+        set_history_ui(&key, 1, "sidebar");
+        assert_eq!(history_ui_for(&key), (1, "sidebar".to_string()));
+        // Out-of-range segments are clamped to the two real segments.
+        set_history_ui(&key, 7, "");
+        assert_eq!(history_ui_for(&key).0, 1);
+        set_history_ui(&key, -3, "");
+        assert_eq!(history_ui_for(&key).0, 0);
+    }
+
+    #[test]
+    fn history_seq_consumes_each_bump_once() {
+        // Fresh thread-local in this test thread: 0 is the initial value → unchanged.
+        assert!(!history_seq_changed(0));
+        assert!(history_seq_changed(1));
+        assert!(!history_seq_changed(1));
+        assert!(history_seq_changed(2));
     }
 }
