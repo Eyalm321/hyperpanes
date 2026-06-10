@@ -2788,15 +2788,17 @@ impl State {
     }
 
     /// "Save workspace…": pick a destination via the native save dialog and write the active
-    /// tab's serialized workspace there. No-op if the dialog is cancelled.
+    /// tab's serialized workspace there (versioned `.hyperpanes` container by default; the
+    /// reader keeps accepting legacy bare `.json`). No-op if the dialog is cancelled.
     pub fn save_workspace(&mut self) {
         let file = self.to_workspace_file();
         let default_name = match &file.name {
-            Some(n) if !n.is_empty() => format!("{n}.json"),
-            _ => "workspace.json".to_string(),
+            Some(n) if !n.is_empty() => format!("{n}.hyperpanes"),
+            _ => "workspace.hyperpanes".to_string(),
         };
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Workspace", &["json"])
+            .add_filter("Hyperpanes workspace", &["hyperpanes"])
+            .add_filter("JSON workspace", &["json"])
             .set_file_name(default_name)
             .save_file()
         else {
@@ -2807,12 +2809,13 @@ impl State {
         }
     }
 
-    /// "Open workspace…": pick a `workspace.json` via the native open dialog, read + validate
-    /// it, and load its groups as new tabs (switching to the first). Non-destructive: existing
-    /// tabs/sessions are left intact. No-op if cancelled or the file has no panes.
+    /// "Open workspace…": pick a `.hyperpanes`/`.json` workspace via the native open dialog,
+    /// read + validate it, and load its groups as new tabs (switching to the first).
+    /// Non-destructive: existing tabs/sessions are left intact. No-op if cancelled or the
+    /// file has no panes.
     pub fn open_workspace(&mut self, mgr: &SessionManager) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Workspace", &["json"])
+            .add_filter("Workspace", &["hyperpanes", "json"])
             .pick_file()
         else {
             return;
