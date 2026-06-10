@@ -65,6 +65,7 @@ export component AppWindow inherits Window {
     in property <int> overlay-kind: 0;
     in property <[PaletteItem]> palette;
     in property <int> palette-sel: 0;
+    in property <string> palette-query: "";  // controller-owned query mirror (state.palette_query)
     in property <[PrefOption]> pref-families;
     in property <string> pref-font-label;
     in property <bool> pref-font-custom: false;
@@ -197,9 +198,9 @@ export component AppWindow inherits Window {
     callback min-window();
     callback max-window();
     callback close-window();
-    // Wave-2 overlay callbacks (each maps to a Command)
-    callback palette-query(string);
-    callback palette-nav(int);
+    // Wave-2 overlay callbacks (each maps to a Command). The palette's query/nav have no
+    // callbacks: while the palette is open the Rust key router drives them directly
+    // (controller-owned query — see app.rs `on_key`); only mouse pick/activate come up.
     callback palette-activate();
     callback palette-pick(int);
     callback pref-action(int, int);
@@ -381,6 +382,7 @@ export component AppWindow inherits Window {
             kind: root.overlay-kind;
             palette: root.palette;
             palette-sel: root.palette-sel;
+            query-text: root.palette-query;
             families: root.pref-families;
             font-label: root.pref-font-label;
             font-custom: root.pref-font-custom;
@@ -425,8 +427,6 @@ export component AppWindow inherits Window {
             new-pane-create(l, c, fr, dt, cmd, cwd, sh) => {
                 root.submit-new-pane(l, c, fr, dt, cmd, cwd, sh);
             }
-            palette-query(q) => { root.palette-query(q); }
-            palette-nav(d) => { root.palette-nav(d); }
             palette-activate => { root.palette-activate(); }
             palette-pick(i) => { root.palette-pick(i); }
             pref-action(k, a) => { root.pref-action(k, a); }

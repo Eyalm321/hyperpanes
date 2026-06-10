@@ -370,11 +370,15 @@ export component OverlayLayer inherits Rectangle {
     // 0 none · 1 palette · 2 prefs · 3 new-pane dialog
     in property <int> kind: 0;
 
-    // palette
+    // palette — the query is a CONTROLLER-OWNED mirror (state.palette_query): while the
+    // palette is open the app's key router feeds it (see app.rs `on_key` / main.rs
+    // `palette_key`), so no element here ever takes keyboard focus. The previous focused
+    // TextInput relied on a one-shot `init => focus()` on this freshly created overlay,
+    // which doesn't reliably land in Slint (same lesson as the in-pane search box) — typed
+    // keys leaked into the shell underneath, and dismissing could leave the keyboard dead.
     in property <[PaletteItem]> palette;
     in property <int> palette-sel: 0;
-    callback palette-query(string);
-    callback palette-nav(int);       // ±1
+    in property <string> query-text: "";
     callback palette-activate();
     callback palette-pick(int);      // hover/click row i
 
@@ -463,7 +467,8 @@ export component OverlayLayer inherits Rectangle {
             padding: 8px;
             spacing: 6px;
 
-            // query input
+            // query input — displays the controller-owned query; the app's key router
+            // edits it while the palette is open (keyboard focus never moves here).
             Rectangle {
                 height: 38px;
                 border-radius: 8px;
@@ -473,30 +478,30 @@ export component OverlayLayer inherits Rectangle {
                 HorizontalLayout {
                     padding-left: 12px;
                     padding-right: 12px;
-                    qi := TextInput {
+                    padding-top: 11px;
+                    padding-bottom: 11px;
+                    alignment: start;
+                    spacing: 2px;
+                    Text {
+                        text: root.query-text;
                         color: Theme.text;
                         font-size: 14px;
                         vertical-alignment: center;
-                        single-line: true;
-                        init => { qi.focus(); }
-                        edited => { root.palette-query(self.text); }
-                        key-pressed(e) => {
-                            if (e.text == Key.UpArrow) { root.palette-nav(-1); return EventResult.accept; }
-                            if (e.text == Key.DownArrow) { root.palette-nav(1); return EventResult.accept; }
-                            if (e.text == Key.Return) { root.palette-activate(); return EventResult.accept; }
-                            if (e.text == Key.Escape) { root.dismiss(); return EventResult.accept; }
-                            return EventResult.reject;
-                        }
+                    }
+                    // caret (steady; the query has the keyboard whenever the card is up)
+                    Rectangle {
+                        width: 1px;
+                        background: Theme.accent;
                     }
                 }
                 // placeholder
                 Text {
-                    x: 12px;
+                    x: 15px;
                     text: "Type a command…";
                     color: Theme.faint;
                     font-size: 14px;
                     vertical-alignment: center;
-                    visible: qi.text == "";
+                    visible: root.query-text == "";
                 }
             }
 

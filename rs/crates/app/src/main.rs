@@ -400,3 +400,126 @@ pub(crate) fn route_chord(keymap: &keybindings::Keymap, msg: &KeyMsg) -> Option<
     let tok = key_tok(msg)?;
     keymap.match_chord(msg.control, msg.alt, msg.shift, tok)
 }
+
+/// Translate a key event into a palette command while the palette overlay is open
+/// (`query` is the current `state.palette_query`; the key router calls this before any
+/// pty forwarding). The palette's query is **controller-owned**, not a focused Slint
+/// `TextInput`: the old input grabbed focus with a one-shot `init => focus()` on the
+/// freshly created overlay, which doesn't reliably land in Slint (the in-pane search box
+/// hit the same thing — see widget.slint), so typed keys leaked into the shell underneath
+/// and dismissing the palette could leave nothing focused (keyboard dead, Ctrl+Shift+P
+/// included, until a click). Routing the keys here keeps the terminal `FocusScope` focused
+/// the whole time, so the palette needs no focus hand-off in either direction.
+/// `None` = swallow (no key reaches the pty while the palette is open).
+pub(crate) fn palette_key(query: &str, msg: &KeyMsg) -> Option<Command> {
+    if is_key(&msg.text, Key::UpArrow) {
+        return Some(Command::PaletteNav(-1));
+    }
+    if is_key(&msg.text, Key::DownArrow) {
+        return Some(Command::PaletteNav(1));
+    }
+    if is_key(&msg.text, Key::Return) {
+        return Some(Command::PaletteActivate);
+    }
+    if is_key(&msg.text, Key::Escape) {
+        return Some(Command::CloseOverlay);
+    }
+    if is_key(&msg.text, Key::Backspace) {
+        let mut q = query.to_string();
+        q.pop();
+        return Some(Command::PaletteQuery(q));
+    }
+    // Modifier chords are not query text (Ctrl+Shift+… is handled before this; the rest
+    // are swallowed so e.g. Ctrl+V can't dump a control char into the shell).
+    if msg.control || msg.alt {
+        return None;
+    }
+    // Ordinary printable text extends the query (same printable test as `forwardable`).
+    let c = msg.text.chars().next()?;
+    let u = c as u32;
+    if u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u) {
+        return Some(Command::PaletteQuery(format!("{query}{}", msg.text)));
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(text: &str, ctrl: bool, alt: bool, shift: bool) -> KeyMsg {
+        KeyMsg { text: text.into(), control: ctrl, alt, shift }
+    }
+
+    fn keymap() -> keybindings::Keymap {
+        // No user overrides → the compiled-in defaults (Ctrl+Shift+P → palette).
+        keybindings::Keymap::default_for_tests()
+    }
+
+    // ---- Ctrl+Shift+P → palette, pinned at the ROUTER level (the full text→tok→chord
+    // path a live key event takes), for both encodings Slint can deliver the key in.
+
+    #[test]
+    fn ctrl_shift_p_opens_palette_control_char_encoding() {
+        // With Ctrl held Slint reports the control codepoint: Ctrl+(Shift+)P = U+0010.
+        let cmd = route_chord(&keymap(), &msg("\u{10}", true, false, true));
+        assert!(matches!(cmd, Some(Command::PaletteOpen)), "got {cmd:?}");
+    }
+
+    #[test]
+    fn ctrl_shift_p_opens_palette_letter_encoding() {
+        // Backends that deliver the literal letter instead: shifted = "P", plain = "p".
+        for text in ["P", "p"] {
+            let cmd = route_chord(&keymap(), &msg(text, true, false, true));
+            assert!(matches!(cmd, Some(Command::PaletteOpen)), "text {text:?} got {cmd:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_p_without_shift_is_not_the_palette() {
+        assert!(route_chord(&keymap(), &msg("\u{10}", true, false, false)).is_none());
+    }
+
+    // ---- palette_key: the app-side keyboard while the palette overlay is open ----
+
+    #[test]
+    fn palette_key_edits_query() {
+        // Printable text appends; Backspace pops (and is a no-op edit on empty).
+        assert!(matches!(
+            palette_key("la", &msg("y", false, false, false)),
+            Some(Command::PaletteQuery(q)) if q == "lay"
+        ));
+        let bs: slint::SharedString = Key::Backspace.into();
+        assert!(matches!(
+            palette_key("lay", &msg(bs.as_str(), false, false, false)),
+            Some(Command::PaletteQuery(q)) if q == "la"
+        ));
+        assert!(matches!(
+            palette_key("", &msg(bs.as_str(), false, false, false)),
+            Some(Command::PaletteQuery(q)) if q.is_empty()
+        ));
+    }
+
+    #[test]
+    fn palette_key_navigates_activates_dismisses() {
+        let up: slint::SharedString = Key::UpArrow.into();
+        let down: slint::SharedString = Key::DownArrow.into();
+        let enter: slint::SharedString = Key::Return.into();
+        let esc: slint::SharedString = Key::Escape.into();
+        assert!(matches!(palette_key("", &msg(up.as_str(), false, false, false)), Some(Command::PaletteNav(-1))));
+        assert!(matches!(palette_key("", &msg(down.as_str(), false, false, false)), Some(Command::PaletteNav(1))));
+        assert!(matches!(palette_key("", &msg(enter.as_str(), false, false, false)), Some(Command::PaletteActivate)));
+        assert!(matches!(palette_key("", &msg(esc.as_str(), false, false, false)), Some(Command::CloseOverlay)));
+    }
+
+    #[test]
+    fn palette_key_swallows_chords_and_control_chars() {
+        // Ctrl+V (control char 0x16) must not become query text — and must not reach the
+        // pty either (the caller swallows on None).
+        assert!(palette_key("q", &msg("\u{16}", true, false, false)).is_none());
+        // Alt+letter is a chord, not text.
+        assert!(palette_key("q", &msg("x", false, true, false)).is_none());
+        // Bare modifier presses carry control/private-use text — swallowed.
+        assert!(palette_key("q", &msg("\u{11}", false, false, false)).is_none());
+    }
+}
