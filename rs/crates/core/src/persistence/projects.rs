@@ -79,8 +79,10 @@ pub fn canonical_path(p: &str) -> String {
     out
 }
 
-/// Dedup key — case-insensitive on Windows (its paths ignore case).
-fn path_key(p: &str) -> String {
+/// Dedup key — case-insensitive on Windows (its paths ignore case). Public so callers
+/// matching a pane cwd's git root against a stored [`Project::path`] compare with the
+/// SAME key the store dedups by (e.g. the app's recolor-propagation).
+pub fn path_key(p: &str) -> String {
     let c = canonical_path(p);
     if is_win() {
         c.to_lowercase()

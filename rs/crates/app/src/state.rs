@@ -2021,12 +2021,34 @@ impl State {
     }
 
     /// Recolor project at flyout row `idx` to palette swatch `swatch`, persist via core,
-    /// and refresh the cache so the dot updates immediately.
+    /// and refresh the cache so the dot updates immediately. Already-open panes inside the
+    /// project are retinted too (new panes pick the color up via the cwd tint; existing ones
+    /// must not be left on the stale accent) — EXCEPT panes the user explicitly recolored
+    /// to something other than the project tint, whose pin wins (see [`Self::recolor_pane`]).
     pub fn set_project_color(&mut self, idx: usize, swatch: usize) {
         let Some(p) = self.projects.get(idx) else { return };
         let Some(color) = projects::PROJECT_COLORS.get(swatch) else { return };
+        let project_path = p.path.clone();
+        let old = parse_hex(&p.color);
+        let new = parse_hex(color);
         projects::set_project_color(&p.id, color);
         self.projects = sidebar::list();
+        // Propagate to open panes across ALL tabs: same matcher as the cwd tint
+        // (`note_pane_cwd`): pane cwd → enclosing git root → the store's path key.
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                if !pane.cwd.as_deref().is_some_and(|cwd| cwd_in_project(cwd, &project_path)) {
+                    continue;
+                }
+                if !follows_project_tint(pane.pinned_accent, old) {
+                    continue;
+                }
+                pane.accent = new;
+                pane.pinned_accent = Some(new);
+            }
+        }
+        // The same mutate→set-dirty seam every pane-chrome change uses: the pump
+        // republishes the pane models on the next tick, so the UI updates immediately.
         self.dirty = true;
     }
 
@@ -3004,6 +3026,81 @@ pub fn parse_hex(s: &str) -> Color {
         }
     }
     theme::accent_for(0, 0)
+}
+
+/// Whether a pane `cwd` belongs to the project rooted at `project_path` — the SAME matcher
+/// the cwd tint uses ([`State::note_pane_cwd`]): walk up to the enclosing git root, then
+/// compare by the projects-store dedup key (canonical path, case-insensitive on Windows).
+fn cwd_in_project(cwd: &str, project_path: &str) -> bool {
+    sidebar::git_root_of(cwd).is_some_and(|root| {
+        projects::path_key(&root.to_string_lossy()) == projects::path_key(project_path)
+    })
+}
+
+/// Whether a matching pane's accent still follows the project tint, so a project recolor
+/// may retint it. Both the cwd tint and an explicit per-pane recolor pin the accent
+/// ([`PaneState::pinned_accent`]); the two are told apart by VALUE: a pin equal to the
+/// project's previous color is the tint, anything else is a user choice and is kept
+/// (the same precedence the cwd tint itself applies — it re-pins on every cwd report,
+/// while a user pin only exists until the next report).
+fn follows_project_tint(pinned: Option<Color>, old_project_color: Color) -> bool {
+    pinned.is_none_or(|c| c == old_project_color)
+}
+
+#[cfg(test)]
+mod project_recolor_tests {
+    //! Track A (#24): propagating a project recolor to already-open panes. Pins the two
+    //! pure pieces of `set_project_color`'s pane sweep — the cwd→project matcher (shared
+    //! with the cwd tint) and the pin-respecting retint predicate.
+    use super::*;
+
+    /// A unique throwaway dir that LOOKS like a git repo (`<tmp>/<name>/.git/`), so
+    /// `git_root_of`'s `.git`-exists walk resolves it. Cleaned up by the OS temp policy.
+    fn fake_repo(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("hp_recolor_test_{}_{}", std::process::id(), name));
+        std::fs::create_dir_all(root.join(".git")).expect("create fake repo");
+        root
+    }
+
+    #[test]
+    fn matches_a_cwd_inside_the_project_repo() {
+        let repo = fake_repo("inside");
+        let sub = repo.join("src").join("deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(cwd_in_project(&sub.to_string_lossy(), &repo.to_string_lossy()));
+        // The root itself counts too.
+        assert!(cwd_in_project(&repo.to_string_lossy(), &repo.to_string_lossy()));
+    }
+
+    #[test]
+    fn rejects_a_cwd_outside_the_repo_or_in_a_sibling_repo() {
+        let repo = fake_repo("mine");
+        let other = fake_repo("other");
+        assert!(!cwd_in_project(&other.to_string_lossy(), &repo.to_string_lossy()));
+        // A non-repo cwd never matches (git_root_of walks up to nothing relevant).
+        assert!(!cwd_in_project(&std::env::temp_dir().to_string_lossy(), &repo.to_string_lossy()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn matching_is_case_insensitive_on_windows_like_the_store_key() {
+        let repo = fake_repo("case");
+        let upper = repo.to_string_lossy().to_uppercase();
+        assert!(cwd_in_project(&upper, &repo.to_string_lossy()));
+    }
+
+    #[test]
+    fn unpinned_and_tint_pinned_panes_follow_a_project_recolor_but_user_pins_win() {
+        let old = Color::from_rgb_u8(0xe5, 0x48, 0x4d);
+        let user = Color::from_rgb_u8(0x12, 0x34, 0x56);
+        // Pinned by the project tint (== old project color) → retint.
+        assert!(follows_project_tint(Some(old), old));
+        // Never pinned (e.g. a re-hosted pane) → safe to retint.
+        assert!(follows_project_tint(None, old));
+        // Explicit per-pane recolor to a custom color → kept.
+        assert!(!follows_project_tint(Some(user), old));
+    }
 }
 
 #[cfg(test)]
