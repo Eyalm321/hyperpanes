@@ -256,11 +256,22 @@ fn spawn_pane(
         .filter(|a| !a.is_empty());
     let cwd = spec.get("cwd").and_then(Value::as_str).map(str::to_string);
     let shell = spec.get("shell").and_then(Value::as_str).map(str::to_string);
+    // Reject an over-long explicit label — callers should send a short title, not a whole command
+    // line. Returning Err fails the newPane so the MCP/control surfaces the error (#21/#22).
+    const MAX_LABEL_LEN: usize = 80;
+    if let Some(l) = spec.get("label").and_then(Value::as_str) {
+        let n = l.chars().count();
+        if n > MAX_LABEL_LEN {
+            return Err(format!("label too long: {n} chars (max {MAX_LABEL_LEN})"));
+        }
+    }
     let label = spec
         .get("label")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| command.clone())
+        // No explicit label → default to the command's FIRST TOKEN (e.g. "claude"), never the whole
+        // command line (mirrors the CLI's `command.trim().split_whitespace()[0]` default).
+        .or_else(|| command.as_deref().and_then(|c| c.split_whitespace().next()).map(str::to_string))
         .unwrap_or_else(|| "shell".to_string());
     let color = spec
         .get("color")
