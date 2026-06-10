@@ -12,9 +12,89 @@
 //!     otherwise resolves cwds against the file's own directory;
 //!   * `windows_of` normalises any file into a flat window list with the schema's
 //!     precedence (`windows` → `groups` → `panes`), dropping groupless windows.
+//!
+//! The `.hyperpanes` format (docs/hyperpanes-format.md, option (b)): on-disk files are
+//! a **versioned container** `{ "format": "hyperpanes", "version": 1, "workspace": {…} }`
+//! ([`WorkspaceEnvelope`]). The reader accepts BOTH that envelope and a bare legacy
+//! `WorkspaceFile` object (treated as "version 0"); the writer always emits the
+//! versioned form. A present-but-wrong `format`, or a `version` newer than this build
+//! understands, is rejected with a clear error ([`parse_workspace_str`]). The envelope
+//! keeps the byte-identical 2-space pretty round-trip contract of the inner payload.
 
 use crate::workspace::model::{GroupSpec, PaneSpec, WindowSpec, WorkspaceFile};
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
+
+/// The magic `format` discriminator of a versioned workspace container.
+pub const ENVELOPE_FORMAT: &str = "hyperpanes";
+/// The newest envelope `version` this build reads and the version it writes.
+pub const ENVELOPE_VERSION: u32 = 1;
+
+/// The versioned on-disk container: `{ "format": "hyperpanes", "version": 1,
+/// "workspace": { … } }`. Field declaration order is the canonical file order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceEnvelope {
+    pub format: String,
+    pub version: u32,
+    pub workspace: WorkspaceFile,
+}
+
+impl WorkspaceEnvelope {
+    /// Wrap a workspace payload in the current-version envelope.
+    pub fn wrap(workspace: WorkspaceFile) -> Self {
+        Self {
+            format: ENVELOPE_FORMAT.to_string(),
+            version: ENVELOPE_VERSION,
+            workspace,
+        }
+    }
+}
+
+/// Parse workspace-file text, accepting both shapes: the versioned envelope (a top-level
+/// object with a `format` key) and the bare legacy `WorkspaceFile` ("version 0"). An
+/// envelope with the wrong `format` or a `version` this build doesn't understand is an
+/// error (a bare object is never mistaken for an envelope — the legacy schema has no
+/// `format` field).
+pub fn parse_workspace_str(raw: &str) -> Result<WorkspaceFile, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let is_envelope = value
+        .as_object()
+        .is_some_and(|obj| obj.contains_key("format"));
+    if !is_envelope {
+        // Legacy bare WorkspaceFile (version 0).
+        return serde_json::from_value(value).map_err(|e| format!("invalid workspace: {e}"));
+    }
+
+    let obj = value.as_object().unwrap();
+    match obj.get("format").and_then(|f| f.as_str()) {
+        Some(ENVELOPE_FORMAT) => {}
+        other => {
+            return Err(format!(
+                "not a hyperpanes workspace: \"format\" is {:?}, expected \"{ENVELOPE_FORMAT}\"",
+                other.unwrap_or("<non-string>")
+            ));
+        }
+    }
+    match obj.get("version").and_then(|v| v.as_u64()) {
+        Some(v) if (1..=ENVELOPE_VERSION as u64).contains(&v) => {}
+        Some(v) => {
+            return Err(format!(
+                "workspace version {v} is newer than this build understands \
+                 (max {ENVELOPE_VERSION}) — update hyperpanes to open it"
+            ));
+        }
+        None => {
+            return Err("hyperpanes workspace is missing a numeric \"version\" field".to_string());
+        }
+    }
+    let workspace = obj
+        .get("workspace")
+        .cloned()
+        .ok_or_else(|| "hyperpanes workspace is missing the \"workspace\" payload".to_string())?;
+    serde_json::from_value(workspace).map_err(|e| format!("invalid workspace payload: {e}"))
+}
 
 /// Node `path.isAbsolute` semantics for the current platform. On Windows a leading
 /// `/` or `\`, or a drive-rooted `C:\` / `C:/`, is absolute (a drive-relative `C:foo`
@@ -110,7 +190,13 @@ pub fn has_panes(file: &WorkspaceFile) -> bool {
 pub fn read_workspace<P: AsRef<Path>>(path: P) -> Option<WorkspaceFile> {
     let path = path.as_ref();
     let raw = std::fs::read_to_string(path).ok()?;
-    let file: WorkspaceFile = serde_json::from_str(&raw).ok()?;
+    let file = match parse_workspace_str(&raw) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("[hyperpanes] {}: {e}", path.display());
+            return None;
+        }
+    };
     if !has_panes(&file) {
         return None;
     }
@@ -122,10 +208,13 @@ pub fn read_workspace<P: AsRef<Path>>(path: P) -> Option<WorkspaceFile> {
     Some(resolve_cwds(&file, &base_dir))
 }
 
-/// Write a workspace file (pretty, 2-space). Returns `false` on error (mirroring the
-/// TS `writeWorkspace` boolean).
+/// Write a workspace file (pretty, 2-space) in the versioned `.hyperpanes` container
+/// form (`format`/`version`/`workspace`). Returns `false` on error (mirroring the TS
+/// `writeWorkspace` boolean). The reader stays tolerant of bare legacy files, so older
+/// `.json` workspaces keep loading even though saves are now always versioned.
 pub fn write_workspace<P: AsRef<Path>>(path: P, data: &WorkspaceFile) -> bool {
-    let Ok(json) = serde_json::to_string_pretty(data) else {
+    let envelope = WorkspaceEnvelope::wrap(data.clone());
+    let Ok(json) = serde_json::to_string_pretty(&envelope) else {
         return false;
     };
     std::fs::write(path, json).is_ok()
@@ -383,6 +472,102 @@ mod tests {
         assert!(resolved.contains("base"), "resolved cwd: {resolved}");
         // Absent stays absent.
         assert_eq!(panes[2].cwd, None);
+    }
+
+    // ---- the .hyperpanes versioned container (format/version/workspace) ----
+
+    #[test]
+    fn write_emits_versioned_envelope_and_read_round_trips() {
+        let path = temp_file("envelope");
+        let ws = WorkspaceFile {
+            name: Some("dev".into()),
+            panes: Some(vec![PaneSpec {
+                command: Some("npm run dev".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert!(write_workspace(&path, &ws));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"format\": \"hyperpanes\""), "versioned form: {raw}");
+        assert!(raw.contains("\"version\": 1"), "versioned form: {raw}");
+        assert_eq!(read_workspace(&path), Some(ws));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reads_legacy_bare_json_as_version_0() {
+        let path = temp_file("legacy");
+        std::fs::write(&path, br#"{"panes":[{"command":"old","label":"l"}]}"#).unwrap();
+        let ws = read_workspace(&path).expect("legacy bare file loads");
+        assert_eq!(ws.panes.unwrap()[0].command.as_deref(), Some("old"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_wrong_format_with_a_clear_error() {
+        let err = parse_workspace_str(r#"{"format":"notpanes","version":1,"workspace":{}}"#)
+            .unwrap_err();
+        assert!(
+            err.contains("not a hyperpanes workspace") && err.contains("notpanes"),
+            "error names the bad format: {err}"
+        );
+        // A non-string format is also a clear rejection, not a parse panic.
+        let err = parse_workspace_str(r#"{"format":7,"version":1,"workspace":{}}"#).unwrap_err();
+        assert!(err.contains("not a hyperpanes workspace"), "error: {err}");
+    }
+
+    #[test]
+    fn rejects_future_or_missing_version_with_a_clear_error() {
+        let err = parse_workspace_str(r#"{"format":"hyperpanes","version":2,"workspace":{}}"#)
+            .unwrap_err();
+        assert!(
+            err.contains("version 2") && err.contains("newer"),
+            "error explains the version gap: {err}"
+        );
+        let err = parse_workspace_str(r#"{"format":"hyperpanes","workspace":{}}"#).unwrap_err();
+        assert!(err.contains("version"), "error mentions the missing version: {err}");
+    }
+
+    #[test]
+    fn rejects_envelope_without_workspace_payload() {
+        let err = parse_workspace_str(r#"{"format":"hyperpanes","version":1}"#).unwrap_err();
+        assert!(err.contains("workspace"), "error names the missing payload: {err}");
+    }
+
+    #[test]
+    fn envelope_round_trips_byte_identically_through_pretty_printing() {
+        // The 2-space byte-identical contract re-stated for the container.
+        let json = r#"{
+  "format": "hyperpanes",
+  "version": 1,
+  "workspace": {
+    "name": "dev",
+    "panes": [
+      {
+        "command": "npm run dev"
+      }
+    ]
+  }
+}"#;
+        let parsed: WorkspaceEnvelope = serde_json::from_str(json).expect("parse");
+        let out = serde_json::to_string_pretty(&parsed).expect("serialize");
+        assert_eq!(out, json, "envelope round-trip mismatch");
+        // And the tolerant reader extracts the same inner payload.
+        assert_eq!(parse_workspace_str(json).unwrap(), parsed.workspace);
+    }
+
+    #[test]
+    fn read_rejects_invalid_envelope_files() {
+        // End-to-end: a wrong-format file on disk reads as None (with a logged error).
+        let path = temp_file("badformat");
+        std::fs::write(
+            &path,
+            br#"{"format":"other","version":1,"workspace":{"panes":[{"command":"x"}]}}"#,
+        )
+        .unwrap();
+        assert!(read_workspace(&path).is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
