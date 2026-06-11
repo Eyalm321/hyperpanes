@@ -557,17 +557,13 @@ export component PaneView inherits Rectangle {
                         scroll-requested(d) => { root.pane-scroll(idx, d); }
                         link-moved(x, y) => { root.pane-link-moved(idx, x, y); }
                         link-exited => { root.pane-link-exited(idx); }
-                        // Click anywhere in the pane body (incl. blank terminal area) focuses
-                        // it. Today the widget reports every left-down through `link-activated`
-                        // (the focus side-effect below), so clicking blank space already
-                        // focuses pane `idx`.
-                        //
-                        // FROZEN CONTRACT (lands at fan-in): the terminal-io track adds a
-                        // dedicated `focus-requested` callback to TerminalPane, fired on
-                        // mouse-down. Once it's on the widget, uncomment the line below — it's
-                        // the canonical focus wire and is robust even if `link-activated`
-                        // narrows to real links only:
-                        //   focus-requested => { root.focus-pane(idx); }
+                        // ANY mouse-down in the pane body (incl. blank terminal area) focuses
+                        // it — the widget's frozen `focus-requested` contract. Crucially this
+                        // covers a RIGHT-click too, and fires BEFORE `paste-requested` on the
+                        // same down, so a right-click paste lands in the clicked (previously
+                        // unfocused) pane (#32). `link-activated` keeps its own focus call:
+                        // it fires on left-up, harmlessly re-focusing.
+                        focus-requested => { root.focus-pane(idx); }
                         link-activated(x, y, ctrl) => {
                             root.focus-pane(idx);
                             root.pane-link-activated(idx, x, y, ctrl);
