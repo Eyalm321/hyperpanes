@@ -286,6 +286,30 @@ fn upsert_project_by_root_in(store: &Path, root: &str) -> Project {
     project
 }
 
+/// Explicitly add a directory as a project (the sidebar's "+" on the PROJECTS header).
+/// Unlike [`upsert_project_by_root_in`] a duplicate is a strict no-op: the existing entry
+/// is returned untouched (no recency bump, no rewrite). Returns `(project, added)`.
+fn add_project_explicit_in(store: &Path, dir: &str) -> (Project, bool) {
+    let path = canonical_path(dir);
+    let key = path_key(&path);
+    let mut list = load_from(store);
+    if let Some(existing) = list.iter().find(|p| path_key(&p.path) == key) {
+        return (existing.clone(), false);
+    }
+    let repo = git_repo_name(&path);
+    let base = basename(&path);
+    let project = Project {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: repo.unwrap_or_else(|| if base.is_empty() { path.clone() } else { base }),
+        color: color_for_path(&path),
+        last_opened_at: Some(now_ms()),
+        path,
+    };
+    list.push(project.clone());
+    let _ = save_to(store, &list);
+    (project, true)
+}
+
 // ---- public API over the canonical `projects.json` ----
 
 /// Newest-first by last-opened; the sidebar renders in this order.
@@ -298,6 +322,12 @@ pub fn list_projects() -> Vec<Project> {
 /// Remember a git root (or bump its recency); returns the project.
 pub fn upsert_project_by_root(root: &str) -> Project {
     upsert_project_by_root_in(&paths::projects_json(), root)
+}
+
+/// Explicitly add a directory as a project (git repo not required); duplicate adds are a
+/// strict no-op. Returns `(project, added)` — `added` is `false` for a known dir.
+pub fn add_project_explicit(dir: &str) -> (Project, bool) {
+    add_project_explicit_in(&paths::projects_json(), dir)
 }
 
 /// Set a project's color by id.
@@ -450,6 +480,42 @@ mod tests {
         let list = load_from(&store);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, first.id);
+
+        let _ = std::fs::remove_file(&store);
+        let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn explicit_add_round_trips_and_duplicate_is_a_noop() {
+        let store = unique_temp("explicit");
+        let root_dir = std::env::temp_dir().join(format!(
+            "hp-projects-explicit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let root = root_dir.to_string_lossy().into_owned();
+
+        // First add inserts with a palette default color + persists.
+        let (first, added) = add_project_explicit_in(&store, &root);
+        assert!(added);
+        assert!(PROJECT_COLORS.contains(&first.color.as_str()));
+        assert_eq!(first.path, canonical_path(&root));
+        assert_eq!(first.name, basename(&canonical_path(&root)));
+
+        // Round-trip: a fresh load sees exactly that entry.
+        let list = load_from(&store);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0], first);
+
+        // Duplicate add (even with a trailing slash) is a strict no-op: same entry back,
+        // `added` false, the stored record untouched (no recency bump).
+        let (second, added2) = add_project_explicit_in(&store, &format!("{root}\\"));
+        assert!(!added2);
+        assert_eq!(second, first);
+        let list = load_from(&store);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0], first);
 
         let _ = std::fs::remove_file(&store);
         let _ = std::fs::remove_dir_all(&root_dir);

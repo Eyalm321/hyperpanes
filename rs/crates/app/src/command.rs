@@ -181,6 +181,11 @@ pub enum Command {
     RenameProject(usize, String),
     /// Forget flyout row `0`.
     RemoveProject(usize),
+    /// Open the "Add project" dialog (the ＋ on the sidebar's PROJECTS header).
+    OpenAddProject,
+    /// Submit the Add-Project dialog with the typed directory path (validated in state;
+    /// a bad path keeps the dialog open with an inline error).
+    SubmitAddProject(String),
 }
 
 /// A side effect the controller must apply outside the state (UI/window layer). The
@@ -385,6 +390,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SetProjectColor(i, swatch) => state.set_project_color(i, swatch),
         Command::RenameProject(i, name) => state.rename_project(i, &name),
         Command::RemoveProject(i) => state.remove_project(i),
+        Command::OpenAddProject => state.open_add_project(),
+        Command::SubmitAddProject(path) => state.submit_add_project(&path),
     }
     Effect::None
 }

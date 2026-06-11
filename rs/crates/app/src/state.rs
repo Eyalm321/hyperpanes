@@ -44,6 +44,10 @@ pub enum Overlay {
     /// The "New pane" options dialog (Shift+＋ / the menus' "New pane…"). Configures a pane
     /// before it spawns; submitting routes through [`State::add_pane_opts`].
     NewPane,
+    /// The "Add project" dialog (the ＋ on the sidebar's PROJECTS header): type a directory
+    /// path to add it as a project explicitly; submitting routes through
+    /// [`State::submit_add_project`].
+    AddProject,
 }
 
 /// A session detached from its window for re-hosting in another (Wave-1 multi-window
@@ -417,6 +421,9 @@ pub struct State {
     // ---- Wave-2: overlay panels (Seam #3) ----
     /// Which overlay panel is mounted (palette / prefs / sidebar / none).
     pub overlay: Overlay,
+    /// Inline validation error shown in the Add-Project dialog (`""` = none). Set when a
+    /// submitted path doesn't exist / isn't a directory; cleared on open and on close.
+    pub add_project_error: String,
     /// Persisted appearance preferences (font, frame/dot).
     pub settings: Settings,
     /// The user's keybinding overrides — consulted (override-first) by the key router. Edited
@@ -562,6 +569,7 @@ impl State {
             last_hud: Instant::now(),
             dirty: true,
             overlay: Overlay::None,
+            add_project_error: String::new(),
             settings: prefs::load(),
             keymap: crate::keybindings::Keymap::load(),
             capturing_binding: None,
@@ -1597,6 +1605,7 @@ impl State {
             self.font_custom = false;
             self.capturing_binding = None;
             self.capture_conflict = None;
+            self.add_project_error.clear();
             self.dirty = true;
         }
     }
@@ -2141,6 +2150,35 @@ impl State {
         let Some(p) = self.projects.get(idx) else { return };
         projects::remove_project(&p.id);
         self.projects = sidebar::list();
+        self.dirty = true;
+    }
+
+    /// Open the "Add project" dialog (the ＋ on the sidebar's PROJECTS header).
+    pub fn open_add_project(&mut self) {
+        self.add_project_error.clear();
+        self.overlay = Overlay::AddProject;
+        self.dirty = true;
+    }
+
+    /// Submit the Add-Project dialog: validate the typed path (must exist and be a
+    /// directory), then add it explicitly via core (a git repo is NOT required; adding an
+    /// already-known dir is a no-op) and refresh the cached list so the flyout picks it up.
+    /// On a bad path the dialog stays open with an inline error instead of closing.
+    pub fn submit_add_project(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.add_project_error = "Enter a directory path".to_string();
+            self.dirty = true;
+            return;
+        }
+        if !std::path::Path::new(path).is_dir() {
+            self.add_project_error = "Path doesn't exist or isn't a directory".to_string();
+            self.dirty = true;
+            return;
+        }
+        let _ = projects::add_project_explicit(path);
+        self.projects = sidebar::list();
+        self.close_overlay();
         self.dirty = true;
     }
 

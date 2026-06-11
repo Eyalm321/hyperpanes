@@ -2179,6 +2179,18 @@ impl App {
             });
         }
         cb_usize!(on_remove_project, Command::RemoveProject);
+        // Add-Project dialog: the PROJECTS-header ＋ opens it; submit carries the typed path
+        // (validated in state — a bad path keeps the dialog open with an inline error).
+        cb0!(on_open_add_project, Command::OpenAddProject);
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_submit_add_project(move |path| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::SubmitAddProject(path.to_string()));
+                }
+            });
+        }
         {
             let app = app.clone();
             let id = win.id;

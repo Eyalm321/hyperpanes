@@ -703,6 +703,8 @@ export component SidebarRail inherits Rectangle {
     // it (app.rs → State::add_pane_opts with the resume command + project cwd) is the only
     // out-of-scope hop for this track. Until bound it's an inert no-op. See the project loop.
     callback resume-session(int, string);
+    // The ＋ on the PROJECTS header — opens the Add-Project dialog (overlay kind 4).
+    callback add-project();
 
     // ---- worktree-delete confirmation popup state (sidebar-local) ----
     property <bool> wt-del-visible: false;
@@ -940,14 +942,35 @@ export component SidebarRail inherits Rectangle {
             padding: 8px;
             spacing: 4px;
 
-            Text {
-                text: "PROJECTS";
-                color: Theme.subtext;
-                font-size: 10px;
-                font-weight: 700;
-                letter-spacing: 0.5px;
-                height: 18px;
-                vertical-alignment: center;
+            // header row: "PROJECTS" left, the add-project ＋ right-aligned (same drawn
+            // PlusGlyph + hover affordance as the rail's quick-pane button, scaled down).
+            HorizontalLayout {
+                spacing: 4px;
+                Text {
+                    text: "PROJECTS";
+                    color: Theme.subtext;
+                    font-size: 10px;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
+                    height: 22px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                add-proj-btn := Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 5px;
+                    background: apa.has-hover ? Theme.surface2 : transparent;
+                    PlusGlyph {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        ink: apa.has-hover ? Theme.text : Theme.subtext;
+                    }
+                    apa := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.add-project(); }
+                    }
+                }
             }
 
             if root.projects.length == 0 : Text {
