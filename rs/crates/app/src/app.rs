@@ -1010,11 +1010,22 @@ impl App {
                     // Prompt-line TYPE-OVER: a printable key over a single-row selection on the
                     // cursor's own row first ERASES the selected text (clamp-safe arrow/
                     // backspace/forward-delete bytes — see `type_over_selection`), so the
-                    // keystroke replaces it like an editor. Anywhere else (scrollback, multi-
-                    // row, alt-screen) the highlight just clears and the key goes through.
-                    if keys::is_printable(&msg.text, msg.control, msg.alt) {
+                    // keystroke replaces it like an editor; Backspace/Delete DELETE the
+                    // selection the same way, with the key itself swallowed (the erase IS the
+                    // deletion — letting it through would eat an extra character beside the
+                    // caret). Anywhere else (scrollback, multi-row, alt-screen) the highlight
+                    // just clears and the key goes through.
+                    let line_delete = !msg.control
+                        && !msg.alt
+                        && (crate::is_key(&msg.text, Key::Backspace)
+                            || crate::is_key(&msg.text, Key::Delete));
+                    if keys::is_printable(&msg.text, msg.control, msg.alt) || line_delete {
                         if let Some(erase) = ps.pane.type_over_selection() {
                             self.mgr.write(&ps.uid, &String::from_utf8_lossy(&erase));
+                            if line_delete {
+                                ps.pane.scroll_to_bottom();
+                                return;
+                            }
                         }
                     }
                     ps.pane.selection_clear();
