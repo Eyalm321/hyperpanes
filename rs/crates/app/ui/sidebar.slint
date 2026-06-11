@@ -22,13 +22,15 @@
 import { Theme } from "theme.slint";
 import { ProjectItem, WorktreeRow, ClaudeSessionItem, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 
-// "+" quick-pane glyph (two crossed bars — font-independent).
+// "+" quick-pane glyph (two crossed bars — font-independent). `bar` sets the cross size
+// (13px rail default; smaller for inline/submenu buttons like the PROJECTS-header ＋).
 component PlusGlyph inherits Rectangle {
     in property <color> ink;
-    width: 16px;
-    height: 16px;
-    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.7px; height: 13px; border-radius: 1px; background: ink; }
-    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.7px; width: 13px; border-radius: 1px; background: ink; }
+    in property <length> bar: 13px;
+    width: self.bar + 3px;
+    height: self.bar + 3px;
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.7px; height: root.bar; border-radius: 1px; background: ink; }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.7px; width: root.bar; border-radius: 1px; background: ink; }
 }
 
 // A folder silhouette (stroked).
@@ -957,13 +959,15 @@ export component SidebarRail inherits Rectangle {
                     horizontal-stretch: 1;
                 }
                 add-proj-btn := Rectangle {
-                    width: 22px;
-                    height: 22px;
-                    border-radius: 5px;
+                    width: 16px;
+                    height: 16px;
+                    y: (22px - self.height) / 2;
+                    border-radius: 4px;
                     background: apa.has-hover ? Theme.surface2 : transparent;
                     PlusGlyph {
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height) / 2;
+                        bar: 8px;
                         ink: apa.has-hover ? Theme.text : Theme.subtext;
                     }
                     apa := TouchArea {
