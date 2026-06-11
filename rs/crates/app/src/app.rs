@@ -284,6 +284,12 @@ impl App {
         crate::perf::mark("spawn_window: seeding first pane");
         self.apply_seed(&mut state, seed);
         crate::perf::mark("spawn_window: first pane seeded (pty spawn queued)");
+        crate::dbg_log(&format!(
+            "spawn_window[{id}]: seeded tabs={} active={} panes={:?}",
+            state.tabs.len(),
+            state.active,
+            state.tabs.iter().map(|t| t.panes.len()).collect::<Vec<_>>()
+        ));
 
         let aw = match AppWindow::new() {
             Ok(a) => a,
@@ -672,6 +678,7 @@ impl App {
                 self.ai_feed.borrow_mut().remove(&uid);
                 if let Some(w) = find_window(windows, &uid) {
                     let alive = w.state.borrow_mut().pane_exited(&uid, &self.mgr);
+                    crate::dbg_log(&format!("exit[{}] uid={uid} alive={alive}", w.id));
                     if !alive {
                         w.closing.set(true);
                     }
