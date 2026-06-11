@@ -72,8 +72,8 @@ windows = { version = "0.62", features = [
 # mini by track T3 — feature names track AppKit header names.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSWindow", "NSResponder", "NSView", "NSEvent", "NSCursor", "NSScreen", "NSApplication", "NSColor", "NSGraphics", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSWindow", "NSResponder", "NSView", "NSEvent", "NSCursor", "NSScreen", "NSApplication", "NSColor", "NSGraphics", "NSGraphicsContext", "NSPasteboard"] }
 
 # Unix local wall clock (`localtime_r`) for reminder due-times — epoch math is UTC and
 # would put "tomorrow 9am" off by the timezone offset.
