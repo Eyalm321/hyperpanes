@@ -50,6 +50,20 @@ pub enum Overlay {
     AddProject,
 }
 
+/// Process-global pane/session uid counter. Session uids key the SHARED [`SessionManager`]
+/// map, so they must be unique across every window — a per-`State` counter gave each
+/// window's first pane the same "pane-0" uid, and the second window's spawn clobbered the
+/// first's session (both panes then died on its exit; found live by the Wave-2 macOS
+/// hand-off smoke).
+static NEXT_PANE_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_pane_uid() -> String {
+    format!(
+        "pane-{}",
+        NEXT_PANE_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 /// A session detached from its window for re-hosting in another (Wave-1 multi-window
 /// plumbing). Carries only the session `uid` + chrome; the PTY stays alive centrally in
 /// the [`SessionManager`], so re-hosting is a replay-into-a-fresh-grid, never a restart.
@@ -406,7 +420,6 @@ pub struct State {
     pub last_scale: f32,
     pub tabs: Vec<Tab>,
     pub active: usize,
-    next_uid: usize,
     tab_seq: usize,
     pub fullscreen: bool,
     /// Index of the tab whose title is being edited inline (-1 = none).
@@ -560,7 +573,6 @@ impl State {
             last_scale: 1.0,
             tabs: Vec::new(),
             active: 0,
-            next_uid: 0,
             tab_seq: 0,
             fullscreen: false,
             editing_tab: -1,
@@ -796,8 +808,7 @@ impl State {
         idx: usize,
         opts: NewPaneOpts,
     ) -> Option<PaneState> {
-        let uid = format!("pane-{}", self.next_uid);
-        self.next_uid += 1;
+        let uid = next_pane_uid();
         let palette = self.settings.frame_palette;
         let cwd = opts.cwd.filter(|c| !c.is_empty());
         let accent = opts.accent;
@@ -2569,8 +2580,7 @@ impl State {
             None => return,
         };
         let (cols, rows) = (cols.max(2) as u16, rows.max(1) as u16);
-        let uid = format!("pane-{}", self.next_uid);
-        self.next_uid += 1;
+        let uid = next_pane_uid();
         let shell = prefs::effective_shell(&self.settings.default_shell);
         let shell_path = shell
             .clone()
@@ -3231,8 +3241,7 @@ impl State {
         idx: usize,
         spec: &PaneSpec,
     ) -> Option<PaneState> {
-        let uid = format!("pane-{}", self.next_uid);
-        self.next_uid += 1;
+        let uid = next_pane_uid();
         let palette = self.settings.frame_palette;
         let shell = spec
             .shell
