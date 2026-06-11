@@ -20,22 +20,31 @@ fn main() {
     // `conpty.dll` beside the exe, and that host removes the in-box conhost's
     // scroll-region repaint + passthrough bottlenecks (measured 6-44× throughput,
     // docs/conpty-passthrough-investigation.md §F). Must stay a matched pair.
+    //
+    // ConPTY is Windows-only: gate on the TARGET OS (not the host) so Linux/macOS
+    // builds — including cross-compiles — never look for or ship conpty.dll.
+    let target_windows =
+        std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let conpty = manifest.join("../../../resources/conpty");
     if let Ok(out_dir) = std::env::var("OUT_DIR") {
         // OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out → profile dir is 3 up.
         if let Some(profile) = Path::new(&out_dir).ancestors().nth(3) {
             let dst = profile.join("resources").join("shell-integration");
             let _ = copy_dir(&scripts, &dst);
-            for f in ["conpty.dll", "OpenConsole.exe"] {
-                let _ = std::fs::copy(conpty.join(f), profile.join(f));
+            if target_windows {
+                for f in ["conpty.dll", "OpenConsole.exe"] {
+                    let _ = std::fs::copy(conpty.join(f), profile.join(f));
+                }
             }
         }
     }
     for f in ["hp-init.ps1", "hp-init.sh"] {
         println!("cargo:rerun-if-changed={}", scripts.join(f).display());
     }
-    for f in ["conpty.dll", "OpenConsole.exe"] {
-        println!("cargo:rerun-if-changed={}", conpty.join(f).display());
+    if target_windows {
+        for f in ["conpty.dll", "OpenConsole.exe"] {
+            println!("cargo:rerun-if-changed={}", conpty.join(f).display());
+        }
     }
 
     let mut libs: HashMap<String, PathBuf> = HashMap::new();
