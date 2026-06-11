@@ -19,6 +19,7 @@
 //! live in `drag/linux.rs`.
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
 use std::sync::{Arc, OnceLock, Weak};
 use std::task::{Context, Poll, Waker};
 
