@@ -27,11 +27,20 @@ use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
 use slint::winit_030::winit::window::{CursorIcon, Fullscreen, Window as WinitWindow};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 
+/// One registered window: `raw` → the winit window it encodes, plus the desired
+/// frameless state (shared with that window's event hook, which re-asserts it — see
+/// [`make_frameless`]).
+struct Entry {
+    raw: isize,
+    win: Weak<WinitWindow>,
+    frameless: std::rc::Rc<Cell<bool>>,
+}
+
 thread_local! {
-    /// raw → the winit window it encodes. UI-thread only (every caller is). Weak so we
-    /// never extend a closed window's native lifetime; dead entries are purged on the
-    /// next `hwnd_of` (the only growth point).
-    static REGISTRY: RefCell<Vec<(isize, Weak<WinitWindow>)>> = const { RefCell::new(Vec::new()) };
+    /// UI-thread only (every caller is). Weak so we never extend a closed window's
+    /// native lifetime; dead entries are purged on the next `hwnd_of` (the only growth
+    /// point).
+    static REGISTRY: RefCell<Vec<Entry>> = const { RefCell::new(Vec::new()) };
     /// Last pointer state reported by any of our windows (see [`PointerTrack`]).
     static POINTER: Cell<PointerTrack> = const { Cell::new(PointerTrack::new()) };
     /// Whether the open-hand hover cursor is currently forced (mirrors the Win32
@@ -90,8 +99,8 @@ pub(crate) fn with_window<T>(raw: isize, f: impl FnOnce(&WinitWindow) -> T) -> O
     REGISTRY.with(|r| {
         r.borrow()
             .iter()
-            .find(|(k, _)| *k == raw)
-            .and_then(|(_, w)| w.upgrade())
+            .find(|e| e.raw == raw)
+            .and_then(|e| e.win.upgrade())
             .map(|w| f(&w))
     })
 }
@@ -100,8 +109,8 @@ pub(crate) fn with_window<T>(raw: isize, f: impl FnOnce(&WinitWindow) -> T) -> O
 /// closest Linux equivalent is applying to all our windows).
 fn for_each_window(f: impl Fn(&WinitWindow)) {
     REGISTRY.with(|r| {
-        for (_, w) in r.borrow().iter() {
-            if let Some(w) = w.upgrade() {
+        for e in r.borrow().iter() {
+            if let Some(w) = e.win.upgrade() {
                 f(&w);
             }
         }
@@ -144,35 +153,37 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
     }
     let fresh = REGISTRY.with(|r| {
         let mut r = r.borrow_mut();
-        r.retain(|(_, w)| w.strong_count() > 0); // purge closed windows
-        if r.iter().any(|(k, _)| *k == raw) {
-            false
+        r.retain(|e| e.win.strong_count() > 0); // purge closed windows
+        if r.iter().any(|e| e.raw == raw) {
+            None
         } else {
-            r.push((raw, Arc::downgrade(&w)));
-            true
+            let frameless = std::rc::Rc::new(Cell::new(false));
+            r.push(Entry { raw, win: Arc::downgrade(&w), frameless: frameless.clone() });
+            Some(frameless)
         }
     });
-    if fresh {
+    if let Some(frameless) = fresh {
         crate::dbg_log(&format!(
             "hwnd_of: realized raw={raw} wayland={}",
             WAYLAND.get().copied().unwrap_or(false)
         ));
-        // Flip the Slint WindowItem's `no-frame` ON at realize time. A bare winit
-        // `set_decorations(false)` (in `make_frameless`) is NOT durable here: the Slint
-        // adapter re-asserts `set_decorations(!no_frame)` on every window-property sync
-        // (title change etc.), which silently re-grew the title bar. Owning the property
-        // makes Slint itself maintain framelessness. (`app.slint` can't set it: the
-        // Windows build keeps decorations at the winit level and strips WS_CAPTION in
-        // its own subclass instead, so `no-frame: true` there would change its chrome.)
-        {
-            use slint::private_unstable_api::re_exports::{WindowInner, WindowItem};
-            if let Some(item) = WindowInner::from_pub(win).window_item() {
-                WindowItem::FIELD_OFFSETS.no_frame().apply_pin(item.as_pin_ref()).set(true);
-            }
-        }
-        // Feed the pointer tracker (the Wayland drag fallback) from this window's
-        // event stream. Positions are physical px, window-relative.
+        // The hook does double duty:
+        //  * feed the pointer tracker (the Wayland drag fallback) from this window's
+        //    event stream — positions are physical px, window-relative;
+        //  * keep the window frameless: the Slint adapter re-asserts
+        //    `set_decorations(!no_frame)` on every window-property sync (and the
+        //    WindowItem's `no-frame` is compile-time constant, so it can't be flipped at
+        //    runtime), which re-grows the title bar after `make_frameless`. Re-strip on
+        //    the next event whenever that happens (`is_decorated` is a cached read).
+        let hook_win = Arc::downgrade(&w);
         win.on_winit_window_event(move |_, ev| {
+            if frameless.get() {
+                if let Some(w) = hook_win.upgrade() {
+                    if w.is_decorated() {
+                        w.set_decorations(false);
+                    }
+                }
+            }
             POINTER.with(|p| {
                 let mut t = p.get();
                 match ev {
@@ -202,9 +213,15 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
 
 /// Drop the server-side decorations so the Slint top bar is the only chrome. (X11:
 /// Motif hints; Wayland: zxdg-decoration / no CSD fallback is compiled in, so the
-/// window simply turns borderless.) No subclass/hook business like Win32 — winit owns
-/// the surface and there is no non-client frame to eat.
+/// window simply turns borderless.) Also arms the per-window event hook's re-strip:
+/// Slint's property sync re-enables decorations behind our back (see `hwnd_of`), so the
+/// strip must be standing, not one-shot.
 pub fn make_frameless(raw: isize) {
+    REGISTRY.with(|r| {
+        if let Some(e) = r.borrow().iter().find(|e| e.raw == raw) {
+            e.frameless.set(true);
+        }
+    });
     with_window(raw, |w| w.set_decorations(false));
 }
 
