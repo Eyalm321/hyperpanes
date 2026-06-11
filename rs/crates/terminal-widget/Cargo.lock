@@ -2129,6 +2129,7 @@ dependencies = [
  "bytemuck",
  "etagere",
  "hyperpanes-core",
+ "i-slint-backend-testing",
  "png 0.17.16",
  "slint",
  "slint-build",
@@ -2186,6 +2187,16 @@ dependencies = [
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
  "i-slint-renderer-skia",
+]
+
+[[package]]
+name = "i-slint-backend-testing"
+version = "1.17.0"
+source = "git+https://github.com/Eyalm321/slint?rev=9dab2175b8d572296331df6cb7ff76cf7b31ce93#9dab2175b8d572296331df6cb7ff76cf7b31ce93"
+dependencies = [
+ "i-slint-common",
+ "i-slint-core",
+ "vtable",
 ]
 
 [[package]]

@@ -241,17 +241,18 @@ export component TerminalPane inherits Rectangle {
                 }
             }
             if (e.kind == PointerEventKind.down) {
-                // ANY mouse-down focuses the pane (the frozen `focus-requested` contract).
+                // ANY mouse-down focuses the pane (the frozen `focus-requested` contract) —
+                // both app-side (focus-requested) and Slint-side (fs.focus(); fs itself has
+                // focus-on-click off so it can't swallow the press).
                 root.focus-requested();
+                fs.focus();
                 if (e.button == PointerEventButton.left) {
-                    fs.focus();
                     root.selection-begin(self.mouse-x, self.mouse-y);
                 } else if (e.button == PointerEventButton.right) {
                     // Right-click pastes the clipboard into the pane — or copies an active
                     // selection, decided app-side (focus it first so any follow-up typing
                     // routes here). No native context menu in the BODY — the pane menu lives
                     // on the header right-click. Matches Windows Terminal.
-                    fs.focus();
                     root.paste-requested();
                 }
             }
@@ -352,6 +353,14 @@ export component TerminalPane inherits Rectangle {
     }
 
     fs := FocusScope {
+        // CRITICAL: a FocusScope with the default `focus-on-click: true` CONSUMES the first
+        // mouse-press whenever it doesn't already have focus (it grabs focus and returns
+        // EventAccepted) — and this scope is a later sibling of `ta`, so it hit-tests FIRST.
+        // That ate the button-DOWN of the first click into any not-yet-focused pane: the
+        // right-click paste (#32) silently no-opped, and a drag-selection's anchor press was
+        // lost. `ta` explicitly calls `fs.focus()` on every down, so click-to-focus is
+        // preserved without letting the scope swallow the press.
+        focus-on-click: false;
         key-pressed(e) => {
             // Track the live Ctrl/Cmd state so the link tooltip can switch its hint while the
             // modifier is held (the modifier flag rides every key event, incl. the bare Ctrl/Meta
