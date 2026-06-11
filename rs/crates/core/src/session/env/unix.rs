@@ -14,12 +14,18 @@
 //! are layered in last: a name the login shell also exports keeps the FRESH login
 //! value; names only the process knows pass through. Unlike the Windows registry
 //! merge this layering is case-SENSITIVE — POSIX env names are.
+//!
+//! The capture is cached for a short TTL (30s): unlike the Windows registry read a
+//! login shell is genuinely expensive (an nvm/brew-laden rc file can take seconds),
+//! and forking one per pane spawn would wreck spawn latency. A post-launch env
+//! change still reaches new panes within the TTL, which preserves the #28 intent.
 
 use super::*;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Hard cap on the login-shell capture (a hung rc file must not stall pane spawn).
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -31,10 +37,41 @@ impl FreshEnvProvider for PlatformEnv {
             .filter(|s| !s.is_empty())
             .cloned()
             .unwrap_or_else(|| "/bin/sh".to_string());
-        match login_shell_env(&shell, CAPTURE_TIMEOUT) {
+        let fresh =
+            LOGIN_ENV_CACHE.get_or_capture(&shell, || login_shell_env(&shell, CAPTURE_TIMEOUT));
+        match fresh {
             Some(fresh) => layer_process_only(fresh, process),
             None => process,
         }
+    }
+}
+
+static LOGIN_ENV_CACHE: EnvCache = EnvCache::new();
+
+/// One-slot TTL cache for the login-shell capture, keyed by the shell path (a
+/// changed `$SHELL` bypasses it). Failures are cached too — a broken shell must not
+/// cost a 3s timeout on every spawn until the TTL expires and we retry.
+struct EnvCache(Mutex<Option<(String, Instant, Option<EnvMap>)>>);
+
+impl EnvCache {
+    const TTL: Duration = Duration::from_secs(30);
+
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    fn get_or_capture(&self, shell: &str, capture: impl FnOnce() -> Option<EnvMap>) -> Option<EnvMap> {
+        // Hold the lock across the capture so concurrent spawns coalesce into ONE
+        // login shell instead of a thundering herd (capture is timeout-bounded).
+        let mut slot = self.0.lock().unwrap();
+        if let Some((cached_shell, at, env)) = &*slot {
+            if cached_shell == shell && at.elapsed() < Self::TTL {
+                return env.clone();
+            }
+        }
+        let env = capture();
+        *slot = Some((shell.to_string(), Instant::now(), env.clone()));
+        env
     }
 }
 
@@ -244,6 +281,53 @@ mod unix_tests {
         assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
         assert_eq!(env.get("LANG").map(String::as_str), Some("en_US.UTF-8"));
         assert_eq!(env.get("HYPERPANES_CONTROL_TOKEN").map(String::as_str), Some("tok"));
+    }
+
+    #[test]
+    fn cache_coalesces_repeat_captures_and_keys_on_the_shell() {
+        let cache = EnvCache::new();
+        let mut calls = 0;
+        let a = cache.get_or_capture("/bin/fake-a", || {
+            calls += 1;
+            Some(map(&[("X", "1")]))
+        });
+        assert_eq!(a, Some(map(&[("X", "1")])));
+        // Same shell within the TTL → served from the cache, no second capture.
+        let again = cache.get_or_capture("/bin/fake-a", || {
+            calls += 1;
+            Some(map(&[("X", "2")]))
+        });
+        assert_eq!(again, Some(map(&[("X", "1")])));
+        assert_eq!(calls, 1);
+        // A different shell bypasses the cached entry.
+        let b = cache.get_or_capture("/bin/fake-b", || {
+            calls += 1;
+            Some(map(&[("Y", "1")]))
+        });
+        assert_eq!(b, Some(map(&[("Y", "1")])));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn cache_remembers_failures_too() {
+        let cache = EnvCache::new();
+        let mut calls = 0;
+        assert_eq!(
+            cache.get_or_capture("/bin/broken", || {
+                calls += 1;
+                None
+            }),
+            None
+        );
+        // The failure is cached: no 3s-timeout retry on the very next spawn.
+        assert_eq!(
+            cache.get_or_capture("/bin/broken", || {
+                calls += 1;
+                None
+            }),
+            None
+        );
+        assert_eq!(calls, 1);
     }
 
     // End-to-end through the seam: a fake $SHELL drives the whole provider.
