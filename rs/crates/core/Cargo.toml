@@ -23,8 +23,16 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # persistence-cli: userData dir + ids
 directories = "5"
 uuid = { version = "1", features = ["v4"] }
+# --- Wave 2: control server (HTTP + WS) ---
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+subtle = "2"      # constant-time master-token compare (timingSafeEqual parity)
+rand = "0.8"      # 32-random-byte hex master token
+
 # platform: single-instance (named mutex + named-pipe argv handoff)
 # 0.58 -> 0.62 to unify with the app + wgpu-hal 29 (avoids two `windows` crate versions).
+# Target-gated so Linux/macOS builds never pull the Win32 bindings.
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
@@ -33,9 +41,3 @@ windows = { version = "0.62", features = [
   "Win32_Security",
   "Win32_System_IO",
 ] }
-
-# --- Wave 2: control server (HTTP + WS) ---
-axum = { version = "0.8", features = ["ws"] }
-futures-util = "0.3"
-subtle = "2"      # constant-time master-token compare (timingSafeEqual parity)
-rand = "0.8"      # 32-random-byte hex master token

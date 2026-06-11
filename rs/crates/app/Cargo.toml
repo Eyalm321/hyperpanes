@@ -52,6 +52,8 @@ rfd = { version = "0.15", default-features = false }
 # Frameless window / custom titlebar (strip WS_CAPTION + the HTCAPTION drag trick + min/max/close)
 # — lifted from spike-tearoff. Bumped 0.58 -> 0.62 to unify with wgpu-hal 29 / gpu-allocator and
 # avoid two `windows` crate versions in the graph (which breaks wgpu-hal's d3d12 backend).
+# Target-gated so Linux/macOS builds never pull the Win32 bindings.
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     # GetLocalTime — reminder panes need the LOCAL wall clock ("tomorrow 9am", due labels).
