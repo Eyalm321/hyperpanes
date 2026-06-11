@@ -33,6 +33,20 @@ component PlusGlyph inherits Rectangle {
     Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.7px; width: root.bar; border-radius: 1px; background: ink; }
 }
 
+// Material "add panel" icon (window frame + inner panel + plus) — the rail's new-pane
+// button. Filled Path straight from the Material SVG (viewBox 0 -960 960 960).
+component NewPaneGlyph inherits Path {
+    in property <color> ink;
+    width: 18px;
+    height: 18px;
+    viewbox-x: 0;
+    viewbox-y: -960;
+    viewbox-width: 960;
+    viewbox-height: 960;
+    fill: ink;
+    commands: "M160-240v-480 480Zm80-80v-200h360v200H240Zm-80 160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h640q33 0 56.5 23.5T880-720v240h-80v-240H160v480h360v80H160Zm500-320v-100H360v-60h360v160h-60Zm60 400v-120H600v-80h120v-120h80v120h120v80H800v120h-80Z";
+}
+
 // A folder silhouette (stroked).
 component FolderGlyph inherits Path {
     in property <color> ink;
@@ -757,7 +771,7 @@ export component SidebarRail inherits Rectangle {
         height: 32px;
         border-radius: 7px;
         background: pa.has-hover ? Theme.surface2 : transparent;
-        PlusGlyph {
+        NewPaneGlyph {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             ink: pa.has-hover ? Theme.text : Theme.subtext;
