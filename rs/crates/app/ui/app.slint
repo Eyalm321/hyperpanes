@@ -99,6 +99,7 @@ export component AppWindow inherits Window {
     in property <string> pref-update-status: "";
     in property <int> pref-update-phase: 0;
     in property <float> pref-update-progress: 0;
+    in property <bool> pref-update-notify-only: false;
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> pref-keybindings;
     in property <bool> pref-keybinds-overridden: false;
@@ -496,6 +497,7 @@ export component AppWindow inherits Window {
             update-status: root.pref-update-status;
             update-phase: root.pref-update-phase;
             update-progress: root.pref-update-progress;
+            update-notify-only: root.pref-update-notify-only;
             keybindings: root.pref-keybindings;
             keybinds-overridden: root.pref-keybinds-overridden;
             kb-conflict: root.pref-kb-conflict;

@@ -35,6 +35,10 @@ use crate::paneview::{self, Ui};
 use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, Overlay, State};
 use crate::{theme, window, AppWindow, KeyMsg};
 
+/// The GitHub releases page the NotifyOnly update flow (Linux/macOS) points the user at —
+/// the human URL matching `update::LATEST_RELEASE_API`'s repo.
+const RELEASES_PAGE: &str = "https://github.com/Eyalm321/hyperpanes/releases/latest";
+
 /// Fast (active) pump cadence in ms — the responsive default whenever there's work to do.
 pub const TICK_FAST_MS: u64 = 8;
 /// Idle pump cadence in ms — the pump drops to this after a stretch with no work, so the
@@ -300,6 +304,11 @@ impl App {
         self.wire(&win);
         // The running build version is constant — push it once (the General panel's "About").
         win.app.set_pref_app_version(crate::update::CURRENT_VERSION.into());
+        // NotifyOnly platforms relabel "Download update" → "View release" (opens GitHub).
+        win.app.set_pref_update_notify_only(matches!(
+            crate::update::apply_strategy(),
+            crate::update::ApplyStrategy::NotifyOnly
+        ));
         // Seed the auto-update toggle from the just-loaded settings (read-only borrow, no
         // command in flight, so the #18 borrow rule is moot here).
         win.app.set_pref_auto_update(win.state.borrow().settings.auto_update);
@@ -2338,10 +2347,27 @@ impl App {
                     return;
                 }
                 if kind == 19 {
-                    app.update.download();
+                    // NotifyOnly platforms (Linux/macOS) have no in-app installer: the
+                    // "available" action opens the GitHub releases page instead.
+                    match crate::update::apply_strategy() {
+                        crate::update::ApplyStrategy::SilentInstaller => app.update.download(),
+                        crate::update::ApplyStrategy::NotifyOnly => {
+                            if let Err(e) = hyperpanes_core::paths::os_open(RELEASES_PAGE) {
+                                app.update.set_error(format!("Couldn't open releases page: {e}"));
+                            }
+                        }
+                    }
                     return;
                 }
                 if kind == 20 {
+                    // Unreachable on NotifyOnly platforms (nothing ever downloads), but keep
+                    // the same releases-page behavior as a defensive backstop.
+                    if crate::update::apply_strategy() == crate::update::ApplyStrategy::NotifyOnly {
+                        if let Err(e) = hyperpanes_core::paths::os_open(RELEASES_PAGE) {
+                            app.update.set_error(format!("Couldn't open releases page: {e}"));
+                        }
+                        return;
+                    }
                     // Launch the staged installer silently, then quit so it can replace our
                     // files. We never overwrite the running exe in place.
                     match app.update.installer_path() {
