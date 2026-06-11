@@ -209,6 +209,19 @@ impl TermGrid {
         self.term.grid().display_offset()
     }
 
+    /// The cursor's column (0-based grid cell). Pairs with [`cursor_row`](Self::cursor_row) to
+    /// compute the type-over-selection edit sequence (how far the selection sits from the caret).
+    pub fn cursor_col(&self) -> usize {
+        self.term.grid().cursor.point.column.0
+    }
+
+    /// Whether the application has switched to the **alternate screen** (vim, htop, full-screen
+    /// TUIs). Type-over-selection must not fire there: its arrow/backspace bytes would be app
+    /// commands (vim motions), not line edits.
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+    }
+
     /// The cursor's row within the current viewport (display offset applied), or `None` when the
     /// cursor is scrolled out of view. Cheap — reads the grid cursor directly, no snapshot. Used
     /// to scope type-over-selection to the live prompt line (the cursor's own row).

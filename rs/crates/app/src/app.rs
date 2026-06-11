@@ -1007,6 +1007,16 @@ impl App {
             let mut st = win.state.borrow_mut();
             if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
                 if clears && ps.pane.selection_is_drag() {
+                    // Prompt-line TYPE-OVER: a printable key over a single-row selection on the
+                    // cursor's own row first ERASES the selected text (clamp-safe arrow/
+                    // backspace/forward-delete bytes — see `type_over_selection`), so the
+                    // keystroke replaces it like an editor. Anywhere else (scrollback, multi-
+                    // row, alt-screen) the highlight just clears and the key goes through.
+                    if keys::is_printable(&msg.text, msg.control, msg.alt) {
+                        if let Some(erase) = ps.pane.type_over_selection() {
+                            self.mgr.write(&ps.uid, &String::from_utf8_lossy(&erase));
+                        }
+                    }
                     ps.pane.selection_clear();
                 }
                 // Any key that reaches the shell snaps the viewport back to the live edge so the
