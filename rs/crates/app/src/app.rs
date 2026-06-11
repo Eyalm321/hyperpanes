@@ -1027,6 +1027,13 @@ impl App {
         // the echo renders without the idle-cadence delay (#3). Commands go through
         // `run_command` (which also wakes); this covers raw typing routed straight to the pty.
         self.wake();
+        crate::dbg_log(&format!(
+            "key raw text={:x?} ctrl={} alt={} shift={}",
+            msg.text.chars().map(|c| c as u32).collect::<Vec<_>>(),
+            msg.control,
+            msg.alt,
+            msg.shift
+        ));
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
             let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
