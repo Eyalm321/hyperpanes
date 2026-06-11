@@ -3334,7 +3334,7 @@ impl State {
     }
 }
 
-/// Seconds since LOCAL midnight (Windows wall clock — what "tomorrow 9am" means to the user).
+/// Seconds since LOCAL midnight (the wall clock — what "tomorrow 9am" means to the user).
 #[cfg(windows)]
 pub(crate) fn local_secs_since_midnight() -> u64 {
     let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
@@ -3342,11 +3342,33 @@ pub(crate) fn local_secs_since_midnight() -> u64 {
 }
 #[cfg(not(windows))]
 pub(crate) fn local_secs_since_midnight() -> u64 {
-    std::time::SystemTime::now()
+    // `localtime_r` applies the real local offset (incl. DST); the old `epoch % 86400`
+    // was UTC, which put every reminder due-time/label off by the timezone offset.
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        % 86_400
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    secs_from_hms(tm.tm_hour as u64, tm.tm_min as u64, tm.tm_sec as u64)
+}
+
+/// Pure H:M:S → seconds-since-midnight (the unix local-clock math, testable with
+/// injected values).
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn secs_from_hms(h: u64, m: u64, s: u64) -> u64 {
+    h * 3600 + m * 60 + s
+}
+
+#[cfg(test)]
+mod local_clock_tests {
+    #[test]
+    fn hms_to_secs_since_midnight() {
+        assert_eq!(super::secs_from_hms(0, 0, 0), 0);
+        assert_eq!(super::secs_from_hms(9, 0, 0), 32_400);
+        assert_eq!(super::secs_from_hms(14, 32, 5), 14 * 3600 + 32 * 60 + 5);
+        assert_eq!(super::secs_from_hms(23, 59, 59), 86_399);
+    }
 }
 
 /// Resolve a quick offset against the local clock: `(delay from now in ms, due label)`.

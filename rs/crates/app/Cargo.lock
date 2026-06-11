@@ -2108,6 +2108,7 @@ version = "0.0.5"
 dependencies = [
  "hyperpanes-core",
  "hyperpanes-terminal-widget",
+ "libc",
  "raw-window-handle",
  "reqwest",
  "rfd",

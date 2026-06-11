@@ -63,6 +63,11 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
+# Unix local wall clock (`localtime_r`) for reminder due-times — epoch math is UTC and
+# would put "tomorrow 9am" off by the timezone offset.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
 
