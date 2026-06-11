@@ -271,7 +271,8 @@ pub fn layout_label(l: Layout) -> &'static str {
     }
 }
 
-/// Load a monospace font at the given UI scale (best-available Cascadia/Consolas).
+/// Load a monospace font at the given UI scale (best-available Cascadia/Consolas on
+/// Windows; the platform default everywhere else).
 pub fn load_font(scale: f32) -> Font {
     let candidates = [
         "C:/Windows/Fonts/CascadiaMono.ttf",
@@ -281,20 +282,35 @@ pub fn load_font(scale: f32) -> Font {
     let path = candidates
         .iter()
         .find(|p| std::path::Path::new(p).exists())
-        .copied()
-        .unwrap_or("C:/Windows/Fonts/consola.ttf");
-    load_font_at(path, 14.0, scale)
+        .map(|p| p.to_string())
+        // Non-Windows (or a stripped Windows): the per-platform default resolution.
+        .unwrap_or_else(|| crate::prefs::resolve_or_default(""));
+    load_font_at(&path, 14.0, scale)
 }
 
 /// Load a monospace font from `path` at `base_px` logical points, scaled for DPI.
 /// The Wave-2 preferences feature uses this to re-load the terminal font when the user
 /// changes family/size (the new font flows through `relayout`'s cell-metric reflow).
+///
+/// A missing/unloadable `path` falls back to the platform default resolution, then the
+/// bundled OFL fonts (extracted at startup) — so font loading never panics over an
+/// uninstalled font on any OS.
 pub fn load_font_at(path: &str, base_px: f32, scale: f32) -> Font {
     let px = (base_px * scale).round().max(8.0);
-    let real = if std::path::Path::new(path).exists() {
-        path
-    } else {
-        "C:/Windows/Fonts/consola.ttf"
-    };
-    Font::from_path(real, px).expect("load monospace font")
+    if let Ok(f) = Font::from_path(path, px) {
+        return f;
+    }
+    let mut candidates = vec![crate::prefs::resolve_or_default("")];
+    let bundled = crate::prefs::bundled_font_dir();
+    for (name, _) in crate::prefs::BUNDLED_FONTS {
+        candidates.push(bundled.join(name).to_string_lossy().replace('\\', "/"));
+    }
+    for c in &candidates {
+        if let Ok(f) = Font::from_path(c, px) {
+            return f;
+        }
+    }
+    // The bundled fonts are written at startup (`prefs::init_bundled_fonts`); reaching
+    // here means even those are gone — nothing sensible left to draw with.
+    panic!("no loadable monospace font: tried {path:?}, then {candidates:?}");
 }
