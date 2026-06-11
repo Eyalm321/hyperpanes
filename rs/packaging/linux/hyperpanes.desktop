@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Hyperpanes
+GenericName=Terminal Workspace
+Comment=Tiled terminal workspace with AI-pane orchestration
+Exec=hyperpanes %F
+TryExec=hyperpanes
+Icon=hyperpanes
+Terminal=false
+Categories=System;TerminalEmulator;
+MimeType=application/x-hyperpanes;
+StartupWMClass=hyperpanes
+Keywords=terminal;panes;tiling;workspace;
