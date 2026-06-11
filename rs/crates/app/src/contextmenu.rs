@@ -193,8 +193,10 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
         if fullscreen { "Exit Fullscreen" } else { "Fullscreen" },
         &full_sc, 0, false, false, false, false, sub::NONE, Some(Command::FullscreenPane(idx)),
     );
-    // The widget's in-pane search is Ctrl+F (not an app keybinding), shown literally.
-    b.row("Search…", "Ctrl+F", 0, false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
+    // The widget's in-pane search shortcut, shown with the platform modifier label
+    // (Slint's control slot is Cmd on macOS).
+    let search_sc = format!("{}+F", crate::keybindings::CTRL_LABEL);
+    b.row("Search…", &search_sc, 0, false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
     b.item("Restart", Command::RestartPane(idx));
     b.item("Refresh Env", Command::RefreshEnvPane(idx));
     b.item("Open Folder", Command::RevealPaneCwd(idx));

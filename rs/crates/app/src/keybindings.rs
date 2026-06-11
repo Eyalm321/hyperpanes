@@ -105,6 +105,12 @@ fn is_printable(c: char) -> bool {
     u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
 }
 
+/// Display label for the chord's primary modifier. Slint remaps modifiers on macOS
+/// (control → Command, meta → Control — i_slint_core::input), so the `ctrl` chord slot
+/// IS the Command key there: show it as "Cmd" so the Preferences list matches what the
+/// user actually presses (Cmd+Shift+P opens the palette on a Mac).
+pub const CTRL_LABEL: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
 /// A modifier+key combo. `ctrl`/`alt`/`shift` must match exactly.
 #[derive(Debug, Clone, Copy)]
 pub struct Chord {
@@ -127,7 +133,7 @@ impl Chord {
     pub fn parts(&self) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         if self.ctrl {
-            parts.push("Ctrl".into());
+            parts.push(CTRL_LABEL.into());
         }
         if self.alt {
             parts.push("Alt".into());
@@ -574,12 +580,12 @@ mod tests {
     fn chord_labels_format() {
         assert_eq!(
             Chord::new(true, false, true, KeyTok::Char('p')).label(),
-            "Ctrl+Shift+P"
+            format!("{CTRL_LABEL}+Shift+P")
         );
         assert_eq!(Chord::new(false, true, false, KeyTok::Left).label(), "Alt+←");
         assert_eq!(Chord::new(false, false, false, KeyTok::F11).label(), "F11");
-        assert_eq!(Chord::new(true, false, true, KeyTok::Tab).label(), "Ctrl+Shift+Tab");
-        assert_eq!(Chord::new(true, false, false, KeyTok::Char('=')).label(), "Ctrl+=");
+        assert_eq!(Chord::new(true, false, true, KeyTok::Tab).label(), format!("{CTRL_LABEL}+Shift+Tab"));
+        assert_eq!(Chord::new(true, false, false, KeyTok::Char('=')).label(), format!("{CTRL_LABEL}+="));
     }
 
     #[test]
@@ -616,7 +622,7 @@ mod tests {
         // The palette row renders as Ctrl / Shift / P chips under General.
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
         assert_eq!(palette.category, "General");
-        assert_eq!(palette.parts, vec!["Ctrl", "Shift", "P"]);
+        assert_eq!(palette.parts, vec![CTRL_LABEL, "Shift", "P"]);
         // Rows are grouped: each category appears as one contiguous block, in CATEGORY_ORDER.
         let mut seen: Vec<&str> = Vec::new();
         for r in &rows {
