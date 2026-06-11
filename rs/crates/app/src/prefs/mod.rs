@@ -13,6 +13,23 @@
 use hyperpanes_core::persistence::paths;
 use serde::{Deserialize, Serialize};
 
+// The per-platform `PlatformDefaults` provider: the shell-picker list (`SHELL_OPTIONS`),
+// the preferred-system-shell probe (`preferred_shell`), the font directories
+// (`font_dirs`), and the always-present fallback font path (`FALLBACK_FONT`). One
+// cfg-selected module per OS; the surface is frozen in `docs/ports-seams.md`.
+#[cfg(windows)]
+#[path = "platform_windows.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+#[path = "platform_macos.rs"]
+mod platform;
+#[cfg(not(any(windows, target_os = "macos")))]
+#[path = "platform_linux.rs"]
+mod platform;
+
+pub use platform::{font_dirs, SHELL_OPTIONS};
+use platform::FALLBACK_FONT;
+
 /// The fixed font-family choices offered in the picker — a 1:1 mirror of the renderer's
 /// `FONT_OPTIONS` (label + value): the empty value is the built-in default; every other
 /// value is the font-file name resolved against the system/per-user font folders (see
@@ -30,9 +47,6 @@ pub const FONT_OPTIONS: [(&str, &str); 7] = [
     ("Fira Code", "FiraCode-Regular.ttf"),
     ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
 ];
-
-/// The fallback font path used when nothing else resolves (always present on Windows).
-const FALLBACK_FONT: &str = "C:/Windows/Fonts/consola.ttf";
 
 /// Whether `font` is a user-typed custom value (non-empty and not one of [`FONT_OPTIONS`]).
 pub fn is_custom_font(font: &str) -> bool {
@@ -56,8 +70,8 @@ pub fn font_label(font: &str) -> &str {
 /// on startup (see [`init_bundled_fonts`]); their file names match the [`FONT_OPTIONS`]
 /// values so the picker resolves them. Licenses live in `assets/fonts/*-OFL.txt`.
 pub const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
-    ("FiraCode-Regular.ttf", include_bytes!("../assets/fonts/FiraCode-Regular.ttf")),
-    ("JetBrainsMono-Regular.ttf", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
+    ("FiraCode-Regular.ttf", include_bytes!("../../assets/fonts/FiraCode-Regular.ttf")),
+    ("JetBrainsMono-Regular.ttf", include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf")),
 ];
 
 /// Where the baked-in fonts are extracted: `%APPDATA%\hyperpanes\fonts`.
@@ -80,18 +94,6 @@ pub fn init_bundled_fonts() {
     }
 }
 
-/// The directories scanned for the candidate font files: the system font folder, the per-user
-/// font folder (where user-installed fonts land on modern Windows), and the baked-in font dir
-/// (so the shipped OFL fonts always resolve even when not installed).
-fn font_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![std::path::PathBuf::from("C:/Windows/Fonts")];
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        dirs.push(std::path::Path::new(&local).join("Microsoft").join("Windows").join("Fonts"));
-    }
-    dirs.push(bundled_font_dir());
-    dirs
-}
-
 /// Resolve a candidate font-file name to an installed absolute path (forward-slashed), or
 /// `None` if it isn't present in any font directory.
 fn resolve_font(file: &str) -> Option<String> {
@@ -101,36 +103,15 @@ fn resolve_font(file: &str) -> Option<String> {
     })
 }
 
-/// The default-shell choices offered in the Terminal section: a label + the shell token
-/// passed to `SpawnOptions::shell` (empty = the system default resolved in core's spawn).
-/// The native port of the renderer's `ShellPicker` options (kept to the common Windows
-/// shells; an unlisted shell still works via the persisted string, this is just the picker).
-pub const SHELL_OPTIONS: [(&str, &str); 4] = [
-    ("System", ""),
-    ("pwsh", "pwsh"),
-    ("PowerShell", "powershell"),
-    ("cmd", "cmd"),
-];
-
 /// Resolve the shell token to spawn for a new pane. An explicit pick (`default_shell`) is
-/// used verbatim; the empty "System" default prefers **pwsh** (PowerShell 7) when it's
-/// available, falling back to the OS default that core resolves. Mirrors the renderer's
-/// "use pwsh if installed" default. Returns `None` to mean "let core pick the system shell".
+/// used verbatim; the empty "System" default asks the platform provider for its preferred
+/// shell (Windows: pwsh when installed), falling back to the OS default that core resolves.
+/// Returns `None` to mean "let core pick the system shell".
 pub fn effective_shell(default_shell: &str) -> Option<String> {
     if !default_shell.is_empty() {
         return Some(default_shell.to_string());
     }
-    pwsh_available().then(|| "pwsh".to_string())
-}
-
-/// Whether `pwsh.exe` (PowerShell 7+) resolves — its canonical install dir, then `PATH`.
-fn pwsh_available() -> bool {
-    if std::path::Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe").exists() {
-        return true;
-    }
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|d| d.join("pwsh.exe").exists()))
-        .unwrap_or(false)
+    platform::preferred_shell()
 }
 
 /// Base (un-scaled) terminal font size bounds, mirroring `useSettings`' clamps.
