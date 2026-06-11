@@ -1,12 +1,21 @@
 name: Release (Rust native)
 
-# Build the per-user Windows NSIS installer for the NATIVE Rust app and publish
-# it to a GitHub Release. This is the release for `rs/crates/app` (binary
-# `hyperpanes`), which supersedes the Electron app.
+# Build + publish the NATIVE Rust app (`rs/crates/app`, binary `hyperpanes`) for all
+# three desktop OSes and attach every artifact to ONE GitHub Release:
+#   * windows-latest → rs/packaging/build-installer.ps1      → rs/packaging/dist/*-setup.exe
+#   * ubuntu-latest  → rs/packaging/appimage.sh <version>    → rs/packaging/out/hyperpanes-<version>-x86_64.AppImage
+#   * macos-latest   → rs/packaging/macos/bundle.sh <version> → rs/packaging/out/hyperpanes-<version>.dmg
+# (script paths/argv per docs/ports-seams.md §3 — <version> arrives WITHOUT the `v`.)
 #
-# Trigger: `v*` tags (e.g. v0.1.0). NOTE: the legacy Electron release.yml also
-# fires on `v*` and emits an identically-named Hyperpanes-<ver>-setup.exe — retire
-# release.yml (archive the Electron main) before tagging, or the two collide.
+# Topology: version → test (3-OS gate) → release (created ONCE) → 3 parallel build jobs
+# that `gh release upload --clobber` into it. The single create job avoids the
+# create-vs-upload race three parallel softprops jobs would have; `--clobber` makes
+# re-runs of an individual build job idempotent.
+#
+# Trigger: `v*` tags. The legacy Electron release.yml was retired from `v*` (894a13a)
+# and then removed with the Electron tree (e9de53a) — this workflow solely owns `v*`.
+# Manual `workflow_dispatch` takes a bare semver and expects tag `v<version>` to
+# already exist (the release is created on that tag).
 on:
   push:
     tags:
@@ -14,23 +23,49 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to stamp (semver x.y.z), e.g. 0.1.0'
+        description: 'Version to stamp (semver x.y.z), e.g. 0.1.0 — tag v<version> must exist'
         required: true
         default: '0.1.0'
 
 permissions:
-  contents: write # create the release and upload the installer
+  contents: write # create the release and upload the artifacts
 
 jobs:
-  # Test gate: the installer is only built/published if the suite passes. Mirrors the
-  # per-push gate in test.yml — `needs:` can't reference a job in another workflow file,
-  # so the gate is duplicated here as a `release`-blocking job. Runs `cargo test --all`
-  # across the two test-owning workspaces (`rs` core + `rs/crates/terminal-widget`).
+  # Single source of truth for the version/tag pair used by every job below.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - name: Derive version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ github.event.inputs.version }}"
+          fi
+          if [[ -z "$v" ]]; then echo "no version derivable" >&2; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "version = $v (tag v$v)"
+
+  # Test gate: nothing is built/published unless the suite passes on every release OS.
+  # Mirrors the per-push matrix in test.yml — `needs:` can't reference a job in another
+  # workflow file, so the gate is duplicated here. Runs `cargo test --all` across the
+  # two test-owning workspaces (`rs` core + `rs/crates/terminal-widget`).
   test:
-    runs-on: windows-latest
+    name: test (${{ matrix.workspace }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
         workspace:
           - rs
           - rs/crates/terminal-widget
@@ -39,16 +74,49 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      # Same dev-package list as test.yml (Slint/femtovg + font/window stack).
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config cmake clang
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.workspace }}
+
       - name: Test
         run: cd ${{ matrix.workspace }} && cargo test --all
 
+  # Create the release exactly once, before any build job uploads into it.
+  # `--verify-tag` refuses to mint a new tag from HEAD on a typo'd dispatch input.
   release:
-    needs: test
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release (if absent)
+        shell: bash
+        run: |
+          if gh release view "$TAG" --json name > /dev/null 2>&1; then
+            echo "release $TAG already exists — reusing"
+          else
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          fi
+
+  build-windows:
+    needs: [version, release]
     runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -61,24 +129,65 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y --no-progress
 
-      - name: Derive version
-        id: ver
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          if ($tag -like 'v*') { $v = $tag -replace '^v', '' }
-          elseif ('${{ github.event.inputs.version }}') { $v = '${{ github.event.inputs.version }}' }
-          else { $v = '0.1.0' }
-          "version=$v" >> $env:GITHUB_OUTPUT
-          Write-Host "version = $v"
-
       - name: Build installer
         shell: pwsh
-        run: ./rs/packaging/build-installer.ps1 -Version ${{ steps.ver.outputs.version }}
+        run: ./rs/packaging/build-installer.ps1 -Version ${{ needs.version.outputs.version }}
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - name: Upload installer to release
+        shell: bash
+        run: |
+          shopt -s failglob # an unmatched glob (no installer produced) must fail the job
+          gh release upload "${{ needs.version.outputs.tag }}" rs/packaging/dist/*-setup.exe --clobber
+
+  build-linux:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # test.yml dev-package list + libfuse2 (appimagetool runtime needs FUSE 2).
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config cmake clang \
+            libfuse2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          files: rs/packaging/dist/*-setup.exe
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+          workspaces: rs/crates/app
+
+      - name: Build AppImage
+        run: bash rs/packaging/appimage.sh "${{ needs.version.outputs.version }}"
+
+      - name: Upload AppImage to release
+        run: |
+          shopt -s failglob
+          gh release upload "${{ needs.version.outputs.tag }}" rs/packaging/out/*.AppImage --clobber
+
+  build-macos:
+    needs: [version, release]
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs/crates/app
+
+      - name: Build DMG bundle
+        run: bash rs/packaging/macos/bundle.sh "${{ needs.version.outputs.version }}"
+
+      - name: Upload DMG to release
+        run: |
+          shopt -s failglob
+          gh release upload "${{ needs.version.outputs.tag }}" rs/packaging/out/*.dmg --clobber
