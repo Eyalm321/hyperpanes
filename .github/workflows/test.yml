@@ -35,11 +35,16 @@ permissions:
 
 jobs:
   test:
-    name: test (${{ matrix.workspace }})
-    runs-on: windows-latest
+    name: test (${{ matrix.workspace }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - windows-latest
+          # Linux leg (W0-SEAMS): core + terminal-widget only — the GUI app crate stays
+          # off the per-push path on every OS (it is build-verified at tag time).
+          - ubuntu-latest
         workspace:
           - rs
           - rs/crates/terminal-widget
@@ -48,6 +53,15 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      # Slint/femtovg + the widget's font/window stack need the system dev packages on Linux.
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config cmake clang
 
       - uses: dtolnay/rust-toolchain@stable
         with:
