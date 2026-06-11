@@ -15,6 +15,43 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+// The per-platform apply step: how a downloaded update is actually installed. Windows =
+// the silent NSIS `/S` flow (`windows.rs`, moved verbatim); Linux/macOS are NotifyOnly
+// stubs the Wave-1 `app-unix-shared` track fills. Surface frozen in `docs/ports-seams.md`:
+//   pub const APPLY_STRATEGY: ApplyStrategy;
+//   pub fn launch_installer(path: &Path) -> Result<(), String>;
+#[cfg(windows)]
+#[path = "windows.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
+#[cfg(not(any(windows, target_os = "macos")))]
+#[path = "linux.rs"]
+mod platform;
+
+pub use platform::launch_installer;
+
+/// How an available update is applied on this platform. Seam surface for the Wave-1
+/// tracks — the Windows UI flow doesn't branch on it yet (allow dead_code until the
+/// non-Windows General panel consumes it).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyStrategy {
+    /// Download the release's installer asset and run it silently, then exit so it can
+    /// replace the files (the Windows NSIS `/S` flow).
+    SilentInstaller,
+    /// Only surface "update available" and point the user at the releases page — no
+    /// in-app download/install (the non-Windows default until a native flow ships).
+    NotifyOnly,
+}
+
+/// This platform's apply strategy.
+#[allow(dead_code)]
+pub fn apply_strategy() -> ApplyStrategy {
+    platform::APPLY_STRATEGY
+}
+
 /// The running app version (the app `Cargo.toml`'s `version`), surfaced in the General
 /// panel's "About" block and compared against the latest GitHub release tag.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -215,17 +252,6 @@ impl Updater {
         g.phase = Phase::Error;
         g.message = msg;
     }
-}
-
-/// Launch the staged installer **silently** (NSIS `/S`) as a detached process. The caller
-/// then quits the app so the installer can replace the files. Returns the spawn error string
-/// on failure (so the panel can surface it instead of silently doing nothing).
-pub fn launch_installer(path: &Path) -> Result<(), String> {
-    std::process::Command::new(path)
-        .arg("/S")
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 /// The fields a release check extracts from the GitHub JSON.

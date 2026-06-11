@@ -124,7 +124,9 @@ pub trait GlobalPointer {
     /// the drag pump then never engages.
     fn poll(&self) -> Option<(slint::PhysicalPosition, bool)>;
     /// Whether the pointer can be tracked across/outside this app's own windows
-    /// (drives tear-off-to-new-window and cross-window stitch/dock).
+    /// (drives tear-off-to-new-window and cross-window stitch/dock). Unused on Windows
+    /// today (always true there); the Wayland in-window fallback branches on it.
+    #[allow(dead_code)]
     fn supports_cross_window(&self) -> bool;
 }
 
