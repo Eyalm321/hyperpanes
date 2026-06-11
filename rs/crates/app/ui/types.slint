@@ -197,10 +197,16 @@ export global RemindersAdapter {
     in property <bool> open;
     // True while any reminder has fired and not been restored (bell badge/accent).
     in property <bool> alert;
+    // Fired reminders whose alert toast is still up (not clicked/dismissed, < ~10s old).
+    // Projected by the same pump as `rows`; the toast stack in app.slint renders these.
+    in property <[ReminderItem]> toasts;
     // Bell icon clicked → toggle the list panel.
     callback toggle();
     // A list row clicked → re-dock that pane into the active tab + clear the reminder.
+    // (An alert toast's body click reuses this — same restore path as the bell list.)
     callback restore(string);
+    // An alert toast's × clicked → hide just the toast (the reminder + bell badge stay).
+    callback toast-dismiss(string);
 }
 
 // One option in a preferences picker (font family). `active` marks the current value.

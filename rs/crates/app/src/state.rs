@@ -508,7 +508,18 @@ pub struct Reminder {
     /// Human due label computed at set time from the LOCAL clock ("14:32" / "tomorrow 09:00").
     pub due_label: SharedString,
     pub fired: bool,
+    /// When the reminder fired, in epoch ms (0 = not fired yet). Anchors the alert toast's
+    /// auto-expiry window — the toast shows from fire until `REMINDER_TOAST_MS` later.
+    pub fired_at_ms: u64,
+    /// The alert toast was clicked away (or aged out). The bell badge/list highlight is
+    /// untouched by this — only the transient toast honours it.
+    pub toast_dismissed: bool,
 }
+
+/// How long a fired reminder's alert toast stays up unclicked, in ms. Deliberately much
+/// longer than the in-pane copy/paste toast (~1.3s) — a fired reminder is an alert, not a
+/// confirmation — but it still ages out so a wall of stale toasts can't pile up overnight.
+pub const REMINDER_TOAST_MS: u64 = 10_000;
 
 /// The pane menu's reminder offsets — the four quick picks plus the flyout's Custom input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3172,6 +3183,8 @@ impl State {
             due_ms: crate::glow::now_epoch_ms() + delay_ms,
             due_label: due_label.into(),
             fired: false,
+            fired_at_ms: 0,
+            toast_dismissed: false,
         });
         self.dirty = true;
     }
@@ -3193,6 +3206,12 @@ impl State {
         for r in &mut self.reminders {
             if !r.fired && now_ms >= r.due_ms {
                 r.fired = true;
+                r.fired_at_ms = now_ms;
+                changed = true;
+            }
+            // Age out the alert toast (the bell badge stays — only the toast is transient).
+            if r.fired && !r.toast_dismissed && now_ms >= r.fired_at_ms + REMINDER_TOAST_MS {
+                r.toast_dismissed = true;
                 changed = true;
             }
         }
@@ -3200,6 +3219,17 @@ impl State {
             self.dirty = true;
         }
         changed
+    }
+
+    /// The fired-reminder alert toast's × was clicked: hide the toast without restoring the
+    /// pane. The reminder itself (and the bell badge) stays until the pane is restored.
+    pub fn dismiss_reminder_toast(&mut self, uid: &str) {
+        if let Some(r) = self.reminders.iter_mut().find(|r| r.pane.uid == uid) {
+            if !r.toast_dismissed {
+                r.toast_dismissed = true;
+                self.dirty = true;
+            }
+        }
     }
 
     /// A bell-list row was clicked: re-dock the parked pane into the ACTIVE tab's layout
@@ -3729,6 +3759,53 @@ mod reminder_tests {
         assert_eq!(st.active_tab().panes.len(), 2);
         let f = st.active_tab().focused;
         assert_eq!(st.active_tab().panes[f].uid, "a");
+    }
+
+    #[test]
+    fn toast_shows_on_fire_ages_out_and_dismisses() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        st.remind_pane(0, ReminderOffset::Min15);
+
+        // Fire → the toast becomes visible (fired && !dismissed) with the fire time stamped.
+        let due = st.reminders[0].due_ms;
+        assert!(st.tick_reminders(due));
+        assert!(st.reminders[0].fired && !st.reminders[0].toast_dismissed);
+        assert_eq!(st.reminders[0].fired_at_ms, due);
+
+        // Inside the window the toast stays; at the boundary it ages out (a state change,
+        // so the pump re-pushes), while `fired` — the bell badge — is untouched.
+        assert!(!st.tick_reminders(due + REMINDER_TOAST_MS - 1));
+        assert!(!st.reminders[0].toast_dismissed);
+        assert!(st.tick_reminders(due + REMINDER_TOAST_MS));
+        assert!(st.reminders[0].toast_dismissed);
+        assert!(st.reminders[0].fired);
+    }
+
+    #[test]
+    fn toast_dismiss_keeps_reminder_and_is_idempotent() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        st.remind_pane(0, ReminderOffset::Min15);
+        let due = st.reminders[0].due_ms;
+        st.tick_reminders(due);
+
+        st.dirty = false;
+        st.dismiss_reminder_toast("a");
+        assert!(st.reminders[0].toast_dismissed);
+        assert!(st.dirty);
+        // The reminder (and the bell badge) survive a toast dismiss; restoring still works.
+        assert!(st.reminders[0].fired);
+        st.dirty = false;
+        st.dismiss_reminder_toast("a"); // already dismissed → no work
+        assert!(!st.dirty);
+        st.dismiss_reminder_toast("nope"); // unknown uid → noop
+        st.restore_reminder("a", &m);
+        assert!(st.reminders.is_empty());
     }
 
     #[test]

@@ -773,6 +773,9 @@ impl App {
                 for r in &st.reminders {
                     mix(r.pane.uid.as_bytes());
                     mix(if r.fired { b"\x01" } else { b"\x00" });
+                    // The alert toast's visibility (fired && !dismissed) must re-push too —
+                    // its age-out flips `toast_dismissed` without touching `fired`.
+                    mix(if r.toast_dismissed { b"\x01" } else { b"\x00" });
                     mix(b"\x1e");
                 }
                 (h, st.reminders_open)
@@ -781,7 +784,7 @@ impl App {
                 continue;
             }
             w.last_reminders.set(Some(sig));
-            let (rows, alert) = {
+            let (rows, alert, toasts) = {
                 let st = w.state.borrow();
                 let palette = st.settings.frame_palette;
                 let alert = st.reminders.iter().any(|r| r.fired);
@@ -800,12 +803,22 @@ impl App {
                         overdue: r.fired,
                     })
                     .collect();
-                (rows, alert)
+                // The alert-toast stack: fired entries whose toast wasn't clicked away or
+                // aged out (tick_reminders flips `toast_dismissed` after REMINDER_TOAST_MS).
+                let toasts: Vec<crate::ReminderItem> = st
+                    .reminders
+                    .iter()
+                    .zip(rows.iter())
+                    .filter(|(r, _)| r.fired && !r.toast_dismissed)
+                    .map(|(_, row)| row.clone())
+                    .collect();
+                (rows, alert, toasts)
             };
             let g = w.app.global::<crate::RemindersAdapter>();
             g.set_rows(slint::ModelRc::from(Rc::new(slint::VecModel::from(rows))));
             g.set_open(open);
             g.set_alert(alert);
+            g.set_toasts(slint::ModelRc::from(Rc::new(slint::VecModel::from(toasts))));
         }
     }
 
@@ -2013,6 +2026,17 @@ impl App {
                 .on_restore(move |uid| {
                     if let Some(w) = app.window_by_id(id) {
                         app.run_command(&w, Command::RestoreReminder(uid.to_string()));
+                    }
+                });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app
+                .global::<crate::RemindersAdapter>()
+                .on_toast_dismiss(move |uid| {
+                    if let Some(w) = app.window_by_id(id) {
+                        app.run_command(&w, Command::DismissReminderToast(uid.to_string()));
                     }
                 });
         }

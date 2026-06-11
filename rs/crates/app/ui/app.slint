@@ -352,6 +352,85 @@ export component AppWindow inherits Window {
         }
     }
 
+    // ===== fired-reminder alert toasts (Track: wave3y-reminder-fire) =====
+    // A top-right stack of alert cards, one per fired reminder whose toast hasn't been
+    // clicked/dismissed (~10s auto-expiry — see state::REMINDER_TOAST_MS). Clicking a card
+    // restores the pane into the active tab (the bell list's exact restore path); the ×
+    // hides just the toast (the bell badge stays). Mounted before the modal overlays so
+    // the palette/prefs scrim covers it; fired reminders naturally stack newest-last,
+    // matching the bell list's order. Same window-root pattern as the fullscreen hint —
+    // no new overlay system.
+    VerticalLayout {
+        width: 300px;
+        x: parent.width - self.width - 56px;   // clear of the 44px sidebar rail
+        y: root.fullscreen ? 12px : 44px;      // below the 32px top bar
+        spacing: 8px;
+        alignment: start;
+        for t in RemindersAdapter.toasts : Rectangle {
+            height: tbody.preferred-height;
+            border-radius: 8px;
+            background: tta.has-hover ? Theme.surface : Theme.mantle;
+            border-width: 1px;
+            border-color: t.tint.with-alpha(0.65);
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.scrim;
+            drop-shadow-offset-y: 8px;
+            tta := TouchArea { clicked => { RemindersAdapter.restore(t.uid); } }
+            tbody := HorizontalLayout {
+                padding: 12px;
+                spacing: 10px;
+                // tint dot (same treatment as the bell-list rows)
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: t.tint;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Reminder: " + t.title;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "due " + t.due + " — click to restore";
+                        color: Theme.subtext;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+                // ---- × dismiss (drawn as geometry — the UI font lacks the glyph) ----
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 5px;
+                        background: xta.has-hover ? Theme.surface2 : transparent;
+                        Path {
+                            width: 10px;
+                            height: 10px;
+                            viewbox-width: 16;
+                            viewbox-height: 16;
+                            stroke: xta.has-hover ? Theme.text : Theme.subtext;
+                            stroke-width: 1.6px;
+                            fill: transparent;
+                            commands: "M 4 4 L 12 12 M 12 4 L 4 12";
+                        }
+                        xta := TouchArea { clicked => { RemindersAdapter.toast-dismiss(t.uid); } }
+                    }
+                }
+            }
+        }
+    }
+
     // ===== Wave-2 overlay (command palette / preferences) =====
     // Mounted at the window root so its frosted scrim covers the top bar + sidebar too,
     // making their buttons non-interactive while open. The scrim is split so the top-right
