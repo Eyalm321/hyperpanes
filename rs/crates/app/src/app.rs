@@ -1797,9 +1797,11 @@ impl App {
             let app = app.clone();
             let id = win.id;
             win.app.on_pane_paste(move |i| {
+                crate::dbg_log(&format!("on_pane_paste i={i}"));
                 if let Some(w) = app.window_by_id(id) {
                     // RefCell rule: the borrow ends at the statement, before run_command.
                     let copied = w.state.borrow_mut().copy_selection_on_right_click(i as usize);
+                    crate::dbg_log(&format!("on_pane_paste i={i} copied={copied}"));
                     if !copied {
                         app.run_command(&w, Command::PastePane(i as usize));
                     }
