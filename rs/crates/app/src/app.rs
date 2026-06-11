@@ -928,6 +928,12 @@ impl App {
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
             let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
+            crate::dbg_log(&format!(
+                "key ctrl+shift text={:x?} alt={} -> {:?}",
+                msg.text.chars().map(|c| c as u32).collect::<Vec<_>>(),
+                msg.alt,
+                cmd
+            ));
             if let Some(cmd) = cmd {
                 self.run_command(win, cmd);
             }
