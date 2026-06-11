@@ -35,6 +35,10 @@ slint = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331
     "unstable-wgpu-29",
     "renderer-femtovg-wgpu",
     "raw-window-handle-06",
+    # Linux chrome ops must go through the winit window object (Wayland has no global-handle
+    # protocol); this exposes the slint::winit_030 accessor. Additive — no behavior change
+    # on Windows/macOS.
+    "unstable-winit-030",
 ] }
 raw-window-handle = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
@@ -66,6 +70,11 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
+
+# X11 global pointer (QueryPointer) for cross-window pane tear-off + the override-redirect
+# drag ghost. Pure-Rust XCB, no C deps. Linux only (the unix-minus-macos cfg).
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+x11rb = "0.13"
 
 # Unix local wall clock (`localtime_r`) for reminder due-times — epoch math is UTC and
 # would put "tomorrow 9am" off by the timezone offset.
