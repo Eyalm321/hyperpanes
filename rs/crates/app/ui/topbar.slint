@@ -22,10 +22,10 @@ component HamburgerIcon inherits Rectangle {
 
 component PlusIcon inherits Rectangle {
     in property <color> ink;
-    width: 14px;
-    height: 14px;
-    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.6px; height: 11px; border-radius: 1px; background: ink; }
-    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.6px; width: 11px; border-radius: 1px; background: ink; }
+    width: 11px;
+    height: 11px;
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.6px; height: 8px; border-radius: 1px; background: ink; }
+    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.6px; width: 8px; border-radius: 1px; background: ink; }
 }
 
 component MinIcon inherits Rectangle {
@@ -311,9 +311,9 @@ export component TopBar inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     new-btn := Rectangle {
-                        width: 26px;
-                        height: 26px;
-                        border-radius: 6px;
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 5px;
                         background: nta.has-hover ? Theme.surface2 : transparent;
                         PlusIcon {
                             x: (parent.width - self.width) / 2;
