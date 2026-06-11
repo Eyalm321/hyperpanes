@@ -416,6 +416,7 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> auto-update: false;        // persisted "check on startup" toggle
     in property <string> update-status: "";       // human status line from the updater
     in property <int> update-phase: 0;            // 0 idle · 1 checking · 2 up-to-date · 3 available · 4 downloading · 5 downloaded · 6 error
+    in property <bool> update-notify-only: false; // Linux/macOS: no in-app install — "available" opens the releases page
     in property <float> update-progress: 0;       // 0..1 download progress (phase 4)
     // keybindings editor (effective keymap; editable)
     in property <[KeybindingItem]> keybindings;
@@ -1265,9 +1266,10 @@ export component OverlayLayer inherits Rectangle {
                         }
                     }
                 }
-                // a newer release exists → offer to fetch the installer.
+                // a newer release exists → fetch the installer, or (NotifyOnly platforms)
+                // open the GitHub releases page.
                 if root.update-phase == 3 : Pill {
-                    label: "Download update";
+                    label: root.update-notify-only ? "View release" : "Download update";
                     active: true;
                     clicked => { root.pref-action(19, 0); }
                 }

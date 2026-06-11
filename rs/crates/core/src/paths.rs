@@ -329,8 +329,9 @@ fn launch(command_line: &str) {
 
 /// Open a path with the OS default handler (folder or non-executable file). Returns the
 /// underlying error string on spawn failure. The Electron version uses `shell.openPath`; here
-/// we shell out to the platform opener.
-fn os_open(path: &str) -> Result<(), String> {
+/// we shell out to the platform opener. Public so the app can open URLs (e.g. the GitHub
+/// releases page from the NotifyOnly update flow) without growing its own opener.
+pub fn os_open(path: &str) -> Result<(), String> {
     let spawn = if cfg!(windows) {
         // `start` is a cmd builtin; the empty "" is the window title arg so a quoted path
         // isn't consumed as the title.
