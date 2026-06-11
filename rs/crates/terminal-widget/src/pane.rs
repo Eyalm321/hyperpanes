@@ -421,6 +421,16 @@ impl TerminalPane {
         }
         let hit = self.link_at(x, y, surf_w, surf_h)?;
         if ctrl {
+            // Copy here with the pane's own (arboard) clipboard handle — the proven path the
+            // selection copy uses — instead of relying on the caller: the app shell's `clip`
+            // shell-out failed silently in live testing. The action is still returned so the
+            // caller can do its (now best-effort, redundant) copy and any follow-up UX.
+            if self.clipboard.copy(&hit.abs_path) {
+                self.set_toast(format!(
+                    "Copied {} to clipboard",
+                    if hit.is_url { "link" } else { "path" }
+                ));
+            }
             return Some(LinkAction::Copy(hit.abs_path));
         }
         let res = if hit.is_url {
