@@ -101,7 +101,7 @@ if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
 
 Write-Host "==> makensis -> $OutFile" -ForegroundColor Cyan
 $ResourcesDir = Join-Path $RepoRoot 'resources'
-foreach ($f in @('conpty\conpty.dll', 'conpty\OpenConsole.exe', 'shell-integration\hp-init.ps1', 'shell-integration\hp-init.sh')) {
+foreach ($f in @('conpty\conpty.dll', 'conpty\OpenConsole.exe', 'shell-integration\hp-init.ps1', 'shell-integration\hp-init.sh', 'shell-integration\zdotdir\.zshenv', 'shell-integration\zdotdir\.zshrc')) {
   if (-not (Test-Path (Join-Path $ResourcesDir $f))) { throw "Missing packaged resource: resources\$f" }
 }
 & $makensis `

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 pub enum ShellKind {
     Pwsh,
     Bash,
+    Zsh,
     Cmd,
     Other,
 }
@@ -47,6 +48,9 @@ pub fn classify(shell: &str) -> ShellKind {
     let base = basename(&lower);
     if base == "bash" || base == "bash.exe" {
         return ShellKind::Bash;
+    }
+    if base == "zsh" {
+        return ShellKind::Zsh;
     }
     if base == "cmd" || base == "cmd.exe" {
         return ShellKind::Cmd;
@@ -78,6 +82,12 @@ pub fn shell_integration_dir() -> PathBuf {
     let candidates = [
         exe_dir.join("resources").join("shell-integration"),
         exe_dir.join("shell-integration"),
+        // macOS .app bundle: the binary lives in Contents/MacOS, the idiomatic copy in
+        // Contents/Resources — i.e. ../Resources relative to the executable.
+        exe_dir
+            .parent()
+            .map(|p| p.join("Resources").join("shell-integration"))
+            .unwrap_or_else(|| exe_dir.join("shell-integration")),
     ];
     for c in &candidates {
         if c.is_dir() {
@@ -121,6 +131,29 @@ pub fn integration_for(shell: &str, dir: &Path) -> Option<Integration> {
             Some(Integration {
                 args: vec!["--rcfile".to_string(), posix, "-i".to_string()],
                 env: Vec::new(),
+            })
+        }
+        ShellKind::Zsh => {
+            // zsh has no --rcfile; instead point ZDOTDIR at our bundled zdotdir whose
+            // .zshenv/.zshrc chain-load the user's real startup (restoring their original
+            // ZDOTDIR via HYPERPANES_ZDOTDIR_ORIG) and then source hp-init.sh. Mechanism
+            // documented in the hp-init.sh header and zdotdir/.zshenv.
+            let zdotdir = dir.join("zdotdir");
+            if !zdotdir.join(".zshenv").is_file() {
+                return None;
+            }
+            let mut env = vec![(
+                "ZDOTDIR".to_string(),
+                zdotdir.to_string_lossy().into_owned(),
+            )];
+            if let Ok(orig) = std::env::var("ZDOTDIR") {
+                if !orig.is_empty() {
+                    env.push(("HYPERPANES_ZDOTDIR_ORIG".to_string(), orig));
+                }
+            }
+            Some(Integration {
+                args: vec!["-i".to_string()],
+                env,
             })
         }
         ShellKind::Cmd => {
@@ -170,8 +203,14 @@ mod tests {
     }
 
     #[test]
+    fn detects_zsh() {
+        assert_eq!(classify("zsh"), ShellKind::Zsh);
+        assert_eq!(classify("/bin/zsh"), ShellKind::Zsh);
+        assert_eq!(classify("/usr/local/bin/zsh"), ShellKind::Zsh);
+    }
+
+    #[test]
     fn everything_else_is_other_no_integration() {
-        assert_eq!(classify("zsh"), ShellKind::Other);
         assert_eq!(classify("fish"), ShellKind::Other);
         assert_eq!(classify(""), ShellKind::Other);
     }
@@ -195,7 +234,7 @@ mod tests {
 
     #[test]
     fn still_returns_none_for_an_unknown_other_shell() {
-        assert_eq!(integration_for("zsh", Path::new("/x")), None);
+        assert_eq!(integration_for("fish", Path::new("/x")), None);
     }
 
     // ---- pwsh / bash branches (not reachable from the TS test — needs a script on disk) ----
@@ -258,6 +297,33 @@ mod tests {
     fn bash_is_null_when_the_script_is_missing() {
         let dir = temp_dir("bash-missing");
         assert_eq!(integration_for("/bin/bash", &dir), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- zsh branch (ZDOTDIR mechanism) ----
+
+    #[test]
+    fn zsh_points_zdotdir_at_the_bundled_dir_when_present() {
+        let dir = temp_dir("zsh");
+        let zdotdir = dir.join("zdotdir");
+        fs::create_dir_all(&zdotdir).unwrap();
+        fs::write(zdotdir.join(".zshenv"), b"# init").unwrap();
+        let r = integration_for("/bin/zsh", &dir).expect("zdotdir exists → integration");
+        assert_eq!(r.args, vec!["-i".to_string()]);
+        let set = r
+            .env
+            .iter()
+            .find(|(k, _)| k == "ZDOTDIR")
+            .map(|(_, v)| v.as_str())
+            .expect("zsh sets ZDOTDIR");
+        assert!(set.ends_with("zdotdir"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zsh_is_null_when_the_bundled_zdotdir_is_missing() {
+        let dir = temp_dir("zsh-missing"); // no zdotdir/.zshenv
+        assert_eq!(integration_for("zsh", &dir), None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -38,7 +38,7 @@ fn main() {
             }
         }
     }
-    for f in ["hp-init.ps1", "hp-init.sh"] {
+    for f in ["hp-init.ps1", "hp-init.sh", "zdotdir/.zshenv", "zdotdir/.zshrc"] {
         println!("cargo:rerun-if-changed={}", scripts.join(f).display());
     }
     if target_windows {

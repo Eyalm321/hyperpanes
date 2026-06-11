@@ -62,6 +62,9 @@ SHELL_INT="$ROOT/resources/shell-integration"
 mkdir -p "$APPDIR/usr/bin/resources/shell-integration"
 install -m 644 "$SHELL_INT/hp-init.sh"  "$APPDIR/usr/bin/resources/shell-integration/hp-init.sh"
 install -m 644 "$SHELL_INT/hp-init.ps1" "$APPDIR/usr/bin/resources/shell-integration/hp-init.ps1"
+mkdir -p "$APPDIR/usr/bin/resources/shell-integration/zdotdir"
+install -m 644 "$SHELL_INT/zdotdir/.zshenv" "$APPDIR/usr/bin/resources/shell-integration/zdotdir/.zshenv"
+install -m 644 "$SHELL_INT/zdotdir/.zshrc"  "$APPDIR/usr/bin/resources/shell-integration/zdotdir/.zshrc"
 
 # Desktop entry + MIME info (registered by appimaged/AppImageLauncher or a
 # package manager hook via update-mime-database on integration).

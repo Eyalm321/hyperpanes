@@ -65,6 +65,7 @@ for d in "$APP/Contents/MacOS/resources/shell-integration" "$APP/Contents/Resour
     mkdir -p "$d"
     cp "$ROOT/resources/shell-integration/hp-init.ps1" "$d/"
     cp "$ROOT/resources/shell-integration/hp-init.sh" "$d/"
+    cp -R "$ROOT/resources/shell-integration/zdotdir" "$d/"
 done
 
 echo "==> generating hyperpanes.icns from build/icon.png"
