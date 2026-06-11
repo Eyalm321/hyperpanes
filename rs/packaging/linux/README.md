@@ -74,6 +74,18 @@ Build-time (CI) additionally needs the dev headers:
 `libfontconfig1-dev libxkbcommon-dev` (plus the standard Rust toolchain;
 Slint's femtovg/wgpu renderers need no further -dev packages).
 
+## Known launch blocker (app source, not packaging — reported 2026-06-11)
+
+`theme::load_font()` candidates are hardcoded `C:/Windows/Fonts/*.ttf` and
+`load_font_at()` hard-falls-back to `consola.ttf`, so the first window panics
+on Linux (`load monospace font: No such file or directory`, crash log at
+`$TMPDIR/hyperpanes-crash.log`) before the bundled-font machinery
+(`prefs::font_path()` / `bundled_font_dir()`) is ever consulted. Owned by the
+shared-file owner (theme.rs/app.rs are frozen for platform tracks). The full
+AppImage launch path was smoke-verified under WSLg with a local font-candidate
+patch: window opens, pane spawns `/bin/bash --rcfile
+<mount>/usr/bin/resources/shell-integration/hp-init.sh -i`.
+
 ## File ownership (Wave-1 track T5)
 
 This directory + `rs/packaging/appimage.sh` belong to the packaging-linux
