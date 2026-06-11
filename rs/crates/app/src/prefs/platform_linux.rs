@@ -85,4 +85,15 @@ mod tests {
         // the frozen prefs::tests contract expects font_path() to end in .ttf
         assert!(FALLBACK_FONT.ends_with(".ttf"));
     }
+
+    #[test]
+    fn default_font_resolves_to_a_real_file_where_dejavu_is_installed() {
+        // On the distros our gates run (WSL Ubuntu, CI ubuntu-latest) DejaVu is present,
+        // so the empty "System default" value must resolve to an actually-existing file.
+        // Skipped quietly on a distro without it (the bundled fonts cover those at runtime).
+        if std::path::Path::new(FALLBACK_FONT).exists() {
+            let p = super::super::resolve_or_default("");
+            assert!(std::path::Path::new(&p).exists(), "unresolved default font: {p}");
+        }
+    }
 }

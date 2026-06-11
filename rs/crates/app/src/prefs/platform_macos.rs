@@ -75,4 +75,12 @@ mod tests {
         assert!(FALLBACK_FONT.ends_with(".ttf"));
         assert!(std::path::Path::new(FALLBACK_FONT).exists());
     }
+
+    #[test]
+    fn default_font_resolves_to_a_real_file() {
+        // Monaco always ships with macOS, so the empty "System default" value must
+        // resolve to an actually-existing file on any Mac.
+        let p = super::super::resolve_or_default("");
+        assert!(std::path::Path::new(&p).exists(), "unresolved default font: {p}");
+    }
 }
