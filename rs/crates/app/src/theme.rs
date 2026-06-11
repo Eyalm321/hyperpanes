@@ -227,51 +227,34 @@ pub fn layout_name(l: Layout) -> &'static str {
     }
 }
 
-/// A Segoe MDL2 Assets glyph evoking each layout, for the picker + top-bar button.
-pub fn layout_glyph(l: Layout) -> &'static str {
-    match l {
-        Layout::Auto => "\u{E80A}",      // GridView
-        Layout::Single => "\u{E737}",    // Checkbox/single
-        Layout::Columns => "\u{E76F}",   // DockLeft-ish (columns)
-        Layout::Rows => "\u{E78A}",      // rows
-        Layout::Grid => "\u{E80A}",      // GridView
-        Layout::MainStack => "\u{E8A4}", // main + stack
-    }
+/// Drawn-icon kinds for the application (hamburger) menu's action rows. Icons used to be
+/// font glyph strings (Segoe MDL2 Assets PUA codepoints, before that emoji, before that
+/// the geometric ▤▥▦… chars) but Slint on Windows renders a hollow box whenever the
+/// resolved font lacks the codepoint — the recurring failure df73005 / the wave3x bell
+/// fixed by drawing geometry. Each kind selects a vector-drawn icon in the `MenuIcon`
+/// component (`ui/contextmenu.slint`); keep the two lists in lock-step.
+pub mod menu_icon {
+    // (0 = no leading icon — rows pass a literal 0 rather than a const.)
+    /// New pane — a drawn "+".
+    pub const NEW_PANE: i32 = 1;
+    /// Command palette — a drawn ">_" prompt.
+    pub const COMMAND_PALETTE: i32 = 2;
+    /// Open workspace — a drawn folder.
+    pub const OPEN_WORKSPACE: i32 = 3;
+    /// Save workspace — a drawn floppy disk.
+    pub const SAVE_WORKSPACE: i32 = 4;
+    /// Preferences — drawn slider bars.
+    pub const PREFERENCES: i32 = 5;
+    /// Base for the layout minis: `LAYOUT_BASE + layout_id(l)` (see [`super::layout_icon_kind`]).
+    pub const LAYOUT_BASE: i32 = 10;
 }
 
-/// Segoe MDL2 Assets glyphs for the application (hamburger) menu's action rows — the
-/// native-icon replacement for the earlier ad-hoc emoji set (`＋ ⌘ 📂 💾 ⚙`), so every
-/// menu row speaks one icon language. Same icon font as [`layout_glyph`]; these live in
-/// the Unicode Private-Use Area and so render *only* in the icon font, which the context
-/// menu applies (`font-family: "Segoe MDL2 Assets"`) for exactly these codepoints —
-/// unlike the geometric [`layout_icon`] set, which renders in any UI font. Kept in lock-
-/// step with the `mdl2-glyph` predicate in `ui/contextmenu.slint`.
-pub mod menu_glyph {
-    /// New pane — MDL2 `Add`.
-    pub const NEW_PANE: &str = "\u{E710}";
-    /// Command palette — MDL2 `CommandPrompt`.
-    pub const COMMAND_PALETTE: &str = "\u{E756}";
-    /// Open workspace — MDL2 `OpenFolderHorizontal`.
-    pub const OPEN_WORKSPACE: &str = "\u{ED25}";
-    /// Save workspace — MDL2 `Save`.
-    pub const SAVE_WORKSPACE: &str = "\u{E74E}";
-    /// Preferences — MDL2 `Setting` (gear).
-    pub const PREFERENCES: &str = "\u{E713}";
-}
-
-/// The geometric Unicode icon for each layout — the exact glyphs the Electron app uses
-/// (`presets.ts` `LAYOUTS[].icon` + `AUTO_LAYOUT.icon`). Unlike [`layout_glyph`] (Segoe
-/// MDL2 private-use codepoints, which need the icon font) these render in any UI font, so
-/// the menus show them reliably. Used by the application + tab Layout submenus.
-pub fn layout_icon(l: Layout) -> &'static str {
-    match l {
-        Layout::Auto => "⊞",
-        Layout::Single => "□",
-        Layout::Columns => "▥",
-        Layout::Rows => "▤",
-        Layout::Grid => "▦",
-        Layout::MainStack => "▧",
-    }
+/// The drawn-icon kind evoking a layout (`menu_icon::LAYOUT_BASE + layout_id`), rendered
+/// as an outlined mini-frame with dividers by `IconLayout` in `ui/contextmenu.slint` —
+/// the vector replacement for the Electron `presets.ts` ⊞ □ ▥ ▤ ▦ ▧ chars, which the
+/// default UI font lacks. Used by the application + tab Layout submenus.
+pub fn layout_icon_kind(l: Layout) -> i32 {
+    menu_icon::LAYOUT_BASE + layout_id(l)
 }
 
 /// The human display label for each layout, matching Electron's `LAYOUTS[].label` /

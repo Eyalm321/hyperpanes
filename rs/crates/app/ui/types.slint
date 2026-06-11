@@ -90,7 +90,6 @@ export struct DividerItem {
 export struct LayoutOption {
     id: int,        // matches the Rust Layout discriminant order
     label: string,
-    glyph: string,
     active: bool,
     // optional dim hint shown to the right (e.g. the "— grid" the Automatic row resolves
     // to right now in the application menu's Layout submenu); "" = none.
@@ -241,10 +240,16 @@ export struct KeybindingItem {
 // One row of a cursor-anchored context menu. Built fresh by the controller on each right-click
 // so its gating + checkmarks are live. `kind`: -1 separator · 0 plain item · 2 Change-Color
 // submenu · 3 Move-to-Tab submenu · 4 Layout submenu.
+// `icon` selects a DRAWN leading icon (see MenuIcon in contextmenu.slint) — 0 none ·
+// 1 new-pane · 2 command-palette · 3 open-folder · 4 save · 5 preferences ·
+// 10+layout-id a layout mini (mirrors theme::menu_icon / theme::layout_icon_kind in Rust).
+// Icons used to be font glyph strings (Segoe MDL2 PUA codepoints + ▤▥▦…) but Slint on
+// Windows silently drops codepoints the resolved font lacks (the df73005 chevron failure),
+// so every icon is now vector geometry keyed by this int.
 export struct MenuEntry {
     label: string,
     shortcut: string,
-    glyph: string,
+    icon: int,
     kind: int,
     checked: bool,
     show-check: bool,

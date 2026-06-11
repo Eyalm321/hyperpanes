@@ -447,18 +447,23 @@ component ProjectRow inherits Rectangle {
                 padding-right: 8px;
                 spacing: 4px;
 
-                // chevron (toggles expand/collapse)
+                // chevron (toggles expand/collapse) — DRAWN geometry, not the former
+                // "▾"/"▸" Text: those codepoints aren't in the default UI font, so the
+                // glyph rendered as a hollow box (the df73005 failure class).
                 Rectangle {
                     width: 20px;
-                    Text {
-                        text: root.expanded ? "▾" : "▸";
-                        // visible by default (was a dim 11px Theme.subtext): bright, larger,
-                        // bold; the accent on hover makes the toggle target obvious.
-                        color: cta.has-hover ? Theme.accent : Theme.text;
-                        font-size: 13px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    Path {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 9px;
+                        height: 9px;
+                        viewbox-width: 10;
+                        viewbox-height: 10;
+                        stroke: cta.has-hover ? Theme.accent : Theme.text;
+                        stroke-width: 1.7px;
+                        fill: transparent;
+                        // right-pointing ›, rotating to a down-pointing ⌄ when expanded
+                        commands: root.expanded ? "M 1.5 3 L 5 7 L 8.5 3" : "M 3 1.5 L 7 5 L 3 8.5";
                     }
                     cta := TouchArea {
                         mouse-cursor: pointer;
