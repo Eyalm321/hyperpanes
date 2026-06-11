@@ -229,16 +229,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut handoff_primary = None;
     match hyperpanes_core::single_instance::acquire(&salt) {
         Ok(hyperpanes_core::single_instance::Instance::Secondary(sec)) => {
+            dbg_log("single-instance: secondary, forwarding argv");
             let msg = hyperpanes_core::single_instance::HandoffMessage { argv, cwd };
-            return rt.block_on(async move {
-                sec.forward(&msg).await?;
-                Ok(())
-            });
+            let fwd = rt.block_on(async move { sec.forward(&msg).await });
+            dbg_log(&format!("single-instance: forward -> {fwd:?}"));
+            // Don't wait for the runtime's worker threads on the way out — the hand-off
+            // is flushed; exit like Electron's second instance does.
+            drop(_guard);
+            rt.shutdown_timeout(Duration::from_secs(2));
+            fwd?;
+            return Ok(());
         }
         Ok(hyperpanes_core::single_instance::Instance::Primary(primary)) => {
+            dbg_log("single-instance: primary, serving hand-offs");
             handoff_primary = Some(primary);
         }
-        Err(_) => { /* gate unavailable on this platform/setup → run standalone */ }
+        Err(e) => {
+            // Gate unavailable on this platform/setup → run standalone.
+            dbg_log(&format!("single-instance: gate unavailable ({e})"));
+        }
     }
 
     let (etx, erx) = unbounded_channel::<SessionEvent>();
