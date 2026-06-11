@@ -3137,7 +3137,32 @@ impl State {
             // it was; absent or skipped → the first appended tab.
             self.active = active_new.unwrap_or(first_new);
             self.editing_tab = -1;
+            // The file brought real content — drop any pre-existing 0-pane tab. The only
+            // legal one is `State::new`'s pristine placeholder (a workspace-seeded window
+            // loads into a fresh State whose seed tab never got a pane); leaving it in
+            // produces a ghost empty "term 1" tab next to the restored session (the live
+            // 0-pane-tab sighting that motivated the B6 hardening).
+            self.purge_empty_tabs();
             self.dirty = true;
+        }
+    }
+
+    /// Remove every 0-pane tab, keeping `active` pointed at the same tab. Callers must
+    /// guarantee at least one non-empty tab remains.
+    fn purge_empty_tabs(&mut self) {
+        let mut i = 0;
+        while i < self.tabs.len() {
+            if self.tabs[i].panes.is_empty() {
+                self.tabs.remove(i);
+                if self.active > i {
+                    self.active -= 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len().saturating_sub(1);
         }
     }
 
@@ -3827,6 +3852,26 @@ mod session_file_tests {
         assert_eq!(groups.len(), 1, "empty tab dropped");
         assert_eq!(groups[0].panes.len(), 1);
         assert_eq!(file.active, Some(0), "active remapped to the filtered index");
+    }
+
+    /// A workspace-seeded window starts from a fresh `State` whose `State::new` placeholder
+    /// tab never receives a pane — once the file's content lands, that 0-pane ghost tab
+    /// must be dropped (with `active` following the content tab).
+    #[test]
+    fn purge_drops_the_empty_seed_tab_and_keeps_active_on_content() {
+        let mut st = fresh();
+        let m = mgr();
+        // fresh() = State::new → tabs[0] is the pristine empty placeholder.
+        assert!(st.tabs[0].panes.is_empty());
+        // Simulate the appended workspace tab (tab 1, with a pane) + active landing on it.
+        st.tabs.push(Tab::empty("restored".into()));
+        st.active = 1;
+        st.adopt_pane(&m, det("content", 14.0)); // adopts into the active tab
+        assert_eq!(st.tabs[1].panes.len(), 1);
+        st.purge_empty_tabs();
+        assert_eq!(st.tabs.len(), 1, "placeholder dropped");
+        assert_eq!(st.active, 0, "active follows the content tab");
+        assert_eq!(st.tabs[0].title.as_str(), "restored");
     }
 
     /// Loading a workspace whose groups are all contentless appends nothing and leaves
