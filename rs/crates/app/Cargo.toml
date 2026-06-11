@@ -45,15 +45,17 @@ serde_json = "1"
 # dedicated background thread (never the UI thread). `blocking` over the already-present
 # (via core) reqwest; rustls-tls to avoid an OpenSSL build dep on Windows.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-# Native Open/Save file dialogs for the application menu's workspace items. On Windows this
-# uses the COM IFileDialog via `windows-sys` (separate from the `windows` crate below, so it
-# doesn't perturb the pinned 0.62 graph); no GTK/xdg on this Windows-first target.
-rfd = { version = "0.15", default-features = false }
+# Native Open/Save file dialogs: see the per-target rfd declarations below (Windows needs
+# no backend feature; Linux/macOS need one, so the dep is target-split).
 # Frameless window / custom titlebar (strip WS_CAPTION + the HTCAPTION drag trick + min/max/close)
 # — lifted from spike-tearoff. Bumped 0.58 -> 0.62 to unify with wgpu-hal 29 / gpu-allocator and
 # avoid two `windows` crate versions in the graph (which breaks wgpu-hal's d3d12 backend).
 # Target-gated so Linux/macOS builds never pull the Win32 bindings.
 [target.'cfg(windows)'.dependencies]
+# Native Open/Save dialogs via the COM IFileDialog (`windows-sys`, separate from the
+# `windows` crate below so it doesn't perturb the pinned 0.62 graph); no backend feature
+# needed on Windows.
+rfd = { version = "0.15", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     # GetLocalTime — reminder panes need the LOCAL wall clock ("tomorrow 9am", due labels).
@@ -69,6 +71,9 @@ windows = { version = "0.62", features = [
 # would put "tomorrow 9am" off by the timezone offset.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# rfd requires picking a backend off-Windows: xdg-portal (no GTK dev-dep) + tokio (its
+# portal transport needs an async runtime, and tokio is already in the tree).
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [build-dependencies]
 slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
