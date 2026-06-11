@@ -994,22 +994,19 @@ impl App {
             return;
         }
         if let Some(bytes) = encode_key(&msg.text, msg.control, msg.alt, msg.shift) {
-            // Type-over selection (prompt-line-only, safe scope): a printable character (ordinary
-            // text, no Ctrl/Alt) typed over a drag-selection that sits entirely on the cursor's
-            // own row — the live shell input line — drops the selection highlight first, since
-            // you're replacing your own prompt input. A selection on any other row (scrollback /
-            // command output) is left intact: that text isn't in the shell's editable buffer, so
-            // we never emit speculative deletes for it (the brief's no-PTY-corruption fallback —
-            // we clear only the on-screen highlight, never edit off-row text).
-            let printable = !msg.control
-                && !msg.alt
-                && msg.text.chars().next().is_some_and(|c| {
-                    let u = c as u32;
-                    u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
-                });
+            // Typing clears the selection (#33, standard terminal behavior): a printable
+            // character or Enter/Backspace/Delete drops the highlight of ANY active
+            // drag-selection — scrollback, command output, or the prompt line — while the key
+            // itself still goes to the shell unmodified. We only ever clear the on-screen
+            // highlight, never erase the selected text: off-prompt rows aren't in the shell's
+            // editable buffer, so a speculative delete would corrupt the pty stream. Modifier
+            // chords (Ctrl+C interrupt, Alt-meta) and navigation keys keep the selection —
+            // app chords (Ctrl+Shift+…, palette keys) returned before this point. Ctrl+V is a
+            // chord too (PasteFocused), and clears the selection inside `paste_pane`.
+            let clears = keys::clears_selection(&msg.text, msg.control, msg.alt);
             let mut st = win.state.borrow_mut();
             if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
-                if printable && ps.pane.selection_on_cursor_row() {
+                if clears && ps.pane.selection_is_drag() {
                     ps.pane.selection_clear();
                 }
                 // Any key that reaches the shell snaps the viewport back to the live edge so the
@@ -1714,7 +1711,10 @@ impl App {
                         .borrow_mut()
                         .pane_link_activate(i as usize, x, y, ctrl);
                     if let Some(hyperpanes_terminal_widget::LinkAction::Copy(path)) = action {
-                        copy_to_clipboard(&path);
+                        // Copy via the pane's arboard clipboard + "Copied …" toast — NOT a
+                        // `clip.exe` shell-out, whose blocking `child.wait()` froze the UI
+                        // thread on every Ctrl+click (and showed no indicator).
+                        win.state.borrow_mut().copy_link_text(i as usize, &path);
                     }
                 }
             });
@@ -1753,14 +1753,21 @@ impl App {
             });
         }
 
-        // right-click in a pane body → paste the clipboard into that pane's session (mirrors
-        // Electron; routed through the command path so it uses the session manager).
+        // right-click in a pane body → paste the clipboard into that pane's session, mirroring
+        // Windows Terminal — UNLESS the pane has an active selection, in which case the
+        // right-click copies it (and clears the highlight) instead (#32). The pane was already
+        // focused by `focus-requested` (fired on the same mouse-down, before this callback).
+        // Routed through the command path so the paste uses the session manager.
         {
             let app = app.clone();
             let id = win.id;
             win.app.on_pane_paste(move |i| {
                 if let Some(w) = app.window_by_id(id) {
-                    app.run_command(&w, Command::PastePane(i as usize));
+                    // RefCell rule: the borrow ends at the statement, before run_command.
+                    let copied = w.state.borrow_mut().copy_selection_on_right_click(i as usize);
+                    if !copied {
+                        app.run_command(&w, Command::PastePane(i as usize));
+                    }
                 }
             });
         }
@@ -2491,18 +2498,5 @@ fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> S
     match port {
         Some(p) => format!("Running · http://127.0.0.1:{p} · {input}"),
         None => format!("Starting… · {input}"),
-    }
-}
-
-/// Copy `text` to the Windows clipboard via the built-in `clip` utility (no extra crate /
-/// Win32 feature needed). Used by the Ctrl+click branch of clickable paths. Best-effort.
-pub(crate) fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    if let Ok(mut child) = Command::new("clip").stdin(Stdio::piped()).spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
     }
 }

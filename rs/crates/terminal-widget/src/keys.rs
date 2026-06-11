@@ -129,6 +129,32 @@ pub fn scroll_page_key(text: &str, shift: bool) -> Option<bool> {
     }
 }
 
+/// True when this key press should drop an active selection highlight (the standard terminal
+/// "typing clears the selection" rule). Clearing keys are the ones that *edit* the shell's input
+/// line: printable characters plus Enter / Backspace / Delete. Everything else keeps the
+/// selection — bare modifiers (which never reach the encode path anyway), Ctrl-/Alt- combos
+/// (Ctrl+C interrupt, app chords, Alt-meta sequences) and navigation/special keys, so copying
+/// with a chord or arrow-scrolling history can't eat the highlight. The caller only clears the
+/// HIGHLIGHT — the key still goes to the shell unmodified (no speculative erase of off-row text).
+pub fn clears_selection(text: &str, ctrl: bool, alt: bool) -> bool {
+    if ctrl || alt {
+        return false;
+    }
+    let is = |k: Key| -> bool {
+        let s: slint::SharedString = k.into();
+        text == s.as_str()
+    };
+    if is(Key::Return) || is(Key::Backspace) || is(Key::Delete) {
+        return true;
+    }
+    // A printable character: at/above space, not DEL, and not a Slint private-use special key
+    // (Key::* map to U+F700-range codepoints inside the BMP private-use area).
+    text.chars().next().is_some_and(|c| {
+        let u = c as u32;
+        u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +213,40 @@ mod tests {
         // The scrollback gesture must never leak bytes to the shell.
         assert_eq!(encode_key(&special(Key::PageUp), false, false, true), None);
         assert_eq!(encode_key(&special(Key::PageDown), false, false, true), None);
+    }
+
+    #[test]
+    fn printables_and_line_edits_clear_the_selection() {
+        // Printable characters (any case/shift state — shift isn't consulted).
+        assert!(clears_selection("a", false, false));
+        assert!(clears_selection("A", false, false));
+        assert!(clears_selection("5", false, false));
+        assert!(clears_selection(" ", false, false));
+        // The line-editing specials.
+        assert!(clears_selection(&special(Key::Return), false, false));
+        assert!(clears_selection(&special(Key::Backspace), false, false));
+        assert!(clears_selection(&special(Key::Delete), false, false));
+    }
+
+    #[test]
+    fn modifiers_chords_and_navigation_keep_the_selection() {
+        // Ctrl-/Alt- combos never clear (Ctrl+C interrupt, app chords, Alt-meta sequences).
+        assert!(!clears_selection("c", true, false));
+        assert!(!clears_selection("v", true, false));
+        assert!(!clears_selection("b", false, true));
+        assert!(!clears_selection(&special(Key::Return), true, false));
+        // Bare modifier presses (Slint private-use codepoints) never clear.
+        assert!(!clears_selection(&special(Key::Control), false, false));
+        assert!(!clears_selection(&special(Key::Shift), false, false));
+        assert!(!clears_selection(&special(Key::Alt), false, false));
+        // Navigation / non-editing specials never clear.
+        assert!(!clears_selection(&special(Key::UpArrow), false, false));
+        assert!(!clears_selection(&special(Key::PageUp), false, false));
+        assert!(!clears_selection(&special(Key::Escape), false, false));
+        assert!(!clears_selection(&special(Key::Tab), false, false));
+        assert!(!clears_selection(&special(Key::F5), false, false));
+        // Empty text (nothing typed) never clears.
+        assert!(!clears_selection("", false, false));
     }
 
     #[test]
