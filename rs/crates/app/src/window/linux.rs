@@ -233,7 +233,9 @@ pub fn make_frameless(raw: isize) {
 /// active button grab) — which is exactly how the top bar wires it.
 pub fn start_drag(raw: isize) {
     with_window(raw, |w| {
-        let _ = w.drag_window();
+        if let Err(e) = w.drag_window() {
+            crate::dbg_log(&format!("start_drag: drag_window failed: {e}"));
+        }
     });
 }
 
