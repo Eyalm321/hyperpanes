@@ -99,8 +99,8 @@ if command -v xmllint >/dev/null 2>&1; then
 fi
 
 # --- 3. appimagetool (pinned), cached download --------------------------------
-APPIMAGETOOL_VERSION="13"   # AppImageKit release tag
-APPIMAGETOOL_URL="https://github.com/AppImage/AppImageKit/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+APPIMAGETOOL_VERSION="1.9.1"   # AppImage/appimagetool release tag (the old AppImageKit/13 assets are gone)
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/hyperpanes-packaging"
 TOOL="$CACHE_DIR/appimagetool-${APPIMAGETOOL_VERSION}-x86_64.AppImage"
 

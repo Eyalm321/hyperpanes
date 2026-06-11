@@ -10,7 +10,8 @@ rs/packaging/appimage.sh 0.0.6
 
 The script runs from any cwd, release-builds `rs/crates/app` (a non-member
 crate — built via `--manifest-path`), assembles an AppDir, and packs it with a
-pinned **appimagetool 13** (AppImageKit release), downloaded into
+pinned **appimagetool 1.9.1** (`AppImage/appimagetool` release — the legacy
+AppImageKit/13 assets no longer exist), downloaded into
 `${XDG_CACHE_HOME:-~/.cache}/hyperpanes-packaging/` on first use. The tool is
 invoked with `--appimage-extract-and-run`, so neither the build host nor CI
 needs FUSE.
