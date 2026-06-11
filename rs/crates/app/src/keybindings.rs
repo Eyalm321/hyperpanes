@@ -644,7 +644,7 @@ mod tests {
         let rows = km.rows();
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
         assert!(palette.overridden);
-        assert_eq!(palette.parts, vec!["Ctrl", "J"]);
+        assert_eq!(palette.parts, vec![CTRL_LABEL, "J"]);
     }
 
     #[test]
