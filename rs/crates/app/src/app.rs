@@ -185,6 +185,9 @@ pub struct App {
     /// Whether the pump is currently at the slow (idle) cadence (so we re-interval only on a
     /// transition, never every tick).
     cadence_slow: Cell<bool>,
+    /// Second-instance `{argv, cwd}` hand-offs from the single-instance server (the
+    /// receiver end; the tokio-side handler sends). Drained on the UI thread each tick.
+    handoffs: RefCell<Option<std::sync::mpsc::Receiver<hyperpanes_core::single_instance::HandoffMessage>>>,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -220,7 +223,17 @@ impl App {
             timer: RefCell::new(None),
             idle_ticks: Cell::new(0),
             cadence_slow: Cell::new(false),
+            handoffs: RefCell::new(None),
         })
+    }
+
+    /// Install the second-instance hand-off receiver (primary instance only). Called once
+    /// from `main` after the single-instance gate resolves to Primary.
+    pub fn set_handoff_rx(
+        &self,
+        rx: std::sync::mpsc::Receiver<hyperpanes_core::single_instance::HandoffMessage>,
+    ) {
+        *self.handoffs.borrow_mut() = Some(rx);
     }
 
     /// Hand the shared pump timer to the app so the adaptive cadence (#3) can re-interval it.
@@ -394,6 +407,8 @@ impl App {
     /// One UI-thread tick across all windows: realize HWNDs, drain the shared session
     /// stream into the owning windows, render each window, then reap any that closed.
     pub fn tick(self: &Rc<Self>) {
+        // Second-instance hand-offs first (they may add tabs/windows this very tick).
+        self.drain_handoffs();
         // Snapshot the registry so per-window work can borrow each window freely.
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
         if windows.is_empty() {
@@ -929,6 +944,73 @@ impl App {
         }
         let mut st = win.state.borrow_mut();
         paneview::pump(&win.app, &mut st, &win.ui, (aw, ah), scale, &self.mgr)
+    }
+
+    // ---- second-instance hand-offs ----
+
+    /// Drain pending `{argv, cwd}` hand-offs and route each (the native port of Electron's
+    /// `second-instance` event → `resolveSecondInstanceWindows` + routing).
+    fn drain_handoffs(self: &Rc<Self>) {
+        loop {
+            let msg = match &*self.handoffs.borrow() {
+                Some(rx) => match rx.try_recv() {
+                    Ok(m) => m,
+                    Err(_) => return,
+                },
+                None => return,
+            };
+            self.apply_handoff(msg);
+        }
+    }
+
+    fn apply_handoff(self: &Rc<Self>, msg: hyperpanes_core::single_instance::HandoffMessage) {
+        use hyperpanes_core::cli::parse::{AttachAs, LaunchRouting};
+        use hyperpanes_core::workspace::model::WorkspaceFile;
+        crate::dbg_log(&format!("second-instance handoff argv={:?}", msg.argv));
+        self.wake();
+        let si = hyperpanes_core::cli::routing::resolve_second_instance_windows(&msg.argv, &msg.cwd);
+        if si.windows.is_empty() {
+            return; // a bare relaunch just focuses the primary (nothing to open)
+        }
+        match si.routing {
+            LaunchRouting::NewWindow => {
+                for ws in si.windows {
+                    let file = WorkspaceFile {
+                        groups: Some(ws.groups),
+                        active: ws.active,
+                        ..Default::default()
+                    };
+                    self.spawn_window(PendingSeed::Workspace(Box::new(file)));
+                }
+            }
+            LaunchRouting::Attach { as_, .. } => {
+                // Attach into the first (primary) window — the native stand-in for
+                // Electron's "last-focused window" target.
+                let Some(w) = self.windows.borrow().first().cloned() else {
+                    return;
+                };
+                let mut st = w.state.borrow_mut();
+                match as_ {
+                    AttachAs::Tab => {
+                        for ws in si.windows {
+                            let file = WorkspaceFile {
+                                groups: Some(ws.groups),
+                                active: ws.active,
+                                ..Default::default()
+                            };
+                            st.load_workspace(file, &self.mgr);
+                        }
+                    }
+                    AttachAs::Panes => {
+                        for ws in si.windows {
+                            for g in ws.groups {
+                                st.attach_panes_from_specs(&self.mgr, &g.panes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---- key routing for one window (app chords first, else encode to the pane) ----

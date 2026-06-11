@@ -3141,6 +3141,27 @@ impl State {
         }
     }
 
+    /// Attach panes (spawned from specs) into the ACTIVE tab — the `--as panes` routing of
+    /// a second-instance hand-off. Sizes re-equalize; specs that spawn nothing are skipped.
+    pub fn attach_panes_from_specs(&mut self, mgr: &SessionManager, specs: &[PaneSpec]) {
+        let palette = self.settings.frame_palette;
+        let start = self.active_tab().panes.len();
+        let mut added = Vec::new();
+        for (i, spec) in specs.iter().enumerate() {
+            if let Some(ps) = self.make_pane_from_spec(mgr, start + i, spec) {
+                added.push(ps);
+            }
+        }
+        if added.is_empty() {
+            return;
+        }
+        let t = self.active_tab_mut();
+        t.panes.extend(added);
+        t.sizes = equal_sizes(t.panes.len());
+        t.relabel(palette);
+        self.dirty = true;
+    }
+
     /// Build a tab from a `GroupSpec` (spawning a pane per spec) and append it.
     fn append_tab_from_group(&mut self, mgr: &SessionManager, g: GroupSpec) {
         let palette = self.settings.frame_palette;

@@ -289,6 +289,24 @@ fn spawn_pane(
             .collect::<EnvMap>()
     });
 
+    // Interactive control-spawned panes get the same shell integration as GUI panes
+    // (cwd OSC → project tint / clickable paths; zsh needs the bundled ZDOTDIR). The
+    // TS app applied this inside the Session constructor, so dispatch passing `None`
+    // here silently no-op'd integration for every control-API pane.
+    let integration = command.is_none().then(|| {
+        let shell_path = shell
+            .clone()
+            .unwrap_or_else(crate::session::spawn::default_shell);
+        crate::shell_integration::integration_for(
+            &shell_path,
+            &crate::shell_integration::shell_integration_dir(),
+        )
+        .map(|si| crate::session_manager::Integration {
+            args: si.args,
+            env: si.env.into_iter().collect(),
+        })
+    })
+    .flatten();
     let opts = SpawnOptions {
         uid: session_uid.clone(),
         shell: shell.clone(),
@@ -299,7 +317,7 @@ fn spawn_pane(
         cols: None,
         rows: None,
         pane_id: Some(pane_id.clone()),
-        integration: None,
+        integration,
         control_file: control_file.map(str::to_string),
     };
     sessions.create(opts).map_err(|e| e.to_string())?;

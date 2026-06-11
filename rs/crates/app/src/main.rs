@@ -214,11 +214,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Runtime::new()?;
     let _guard = rt.enter();
 
+    // Single-instance gate (replaces Electron `requestSingleInstanceLock`). Salted by the
+    // userData dir so an isolated instance (temp APPDATA / XDG dirs) or a differently-housed
+    // dev build never collides with the installed app, exactly like Electron keyed its lock
+    // off the userData path. A second launch forwards `{argv, cwd}` to the primary and exits;
+    // the primary drains hand-offs in `App::tick` and routes them (attach / new window).
+    let argv: Vec<String> = std::env::args().collect();
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let salt = hyperpanes_core::persistence::paths::user_data_dir()
+        .to_string_lossy()
+        .into_owned();
+    let mut handoff_primary = None;
+    match hyperpanes_core::single_instance::acquire(&salt) {
+        Ok(hyperpanes_core::single_instance::Instance::Secondary(sec)) => {
+            let msg = hyperpanes_core::single_instance::HandoffMessage { argv, cwd };
+            return rt.block_on(async move {
+                sec.forward(&msg).await?;
+                Ok(())
+            });
+        }
+        Ok(hyperpanes_core::single_instance::Instance::Primary(primary)) => {
+            handoff_primary = Some(primary);
+        }
+        Err(_) => { /* gate unavailable on this platform/setup → run standalone */ }
+    }
+
     let (etx, erx) = unbounded_channel::<SessionEvent>();
     let mgr = Arc::new(SessionManager::new(etx));
 
     // The app owns the window registry + the shared session stream.
     let application = App::new(mgr.clone(), erx);
+
+    // Primary: accept hand-offs on a background task; `App::tick` drains the channel on the
+    // UI thread (the handler runs on the tokio runtime and must not touch UI state).
+    if let Some(primary) = handoff_primary {
+        let (htx, hrx) = std::sync::mpsc::channel();
+        application.set_handoff_rx(hrx);
+        rt.spawn(async move {
+            let _ = primary
+                .run_server(move |msg| {
+                    let _ = htx.send(msg);
+                })
+                .await;
+        });
+    }
 
     // Wire the launch seed: `hyperpanes -c "<cmd>" --shell … --cwd … --name …` (or a
     // positional workspace `.hyperpanes`/`.json`) seeds the first window from that spec;
@@ -226,10 +267,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the final window closes — see `app::persist_last_session`), so tabs/layout/per-pane
     // zoom survive a plain relaunch (#14). A first-ever launch (no last-session file)
     // stays an empty shell pane.
-    let argv: Vec<String> = std::env::args().collect();
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_string());
     let seed = match hyperpanes_core::workspace::launch::resolve_launch_workspace(&argv, &cwd) {
         Some(file) => PendingSeed::Workspace(Box::new(file)),
         None => PendingSeed::EmptyTab,

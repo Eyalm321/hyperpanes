@@ -73,14 +73,14 @@ def main():
     http("POST", f"{base}/panes/{zsh_id}/input", token, {"data": "vim", "submit": True})
     time.sleep(3)
     out = http("GET", f"{base}/panes/{zsh_id}/output?mode=screen", token)
-    screen = out.get("data") or out.get("text") or ""
+    screen = out.get("output") or ""
     vim_up = "VIM" in screen or screen.count("~") >= 5
     check(vim_up, "vim opened + rendered (alt screen)",
           f"screen has {screen.count('~')} tildes")
     http("POST", f"{base}/panes/{zsh_id}/input", token, {"data": ":q!", "submit": True})
     time.sleep(2)
     out2 = http("GET", f"{base}/panes/{zsh_id}/output?mode=screen", token)
-    screen2 = out2.get("data") or out2.get("text") or ""
+    screen2 = out2.get("output") or ""
     check(screen2.count("~") < 5, "vim quit back to shell", "")
 
     # ---- 3. .hyperpanes open via second-instance handoff ----
