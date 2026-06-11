@@ -2,7 +2,8 @@
 name = "hyperpanes-core"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.85"
+# 1.89: std File::try_lock (unix single-instance detector). Toolchains in play are 1.95+.
+rust-version = "1.89"
 publish = false
 
 # Dependencies are PRE-DECLARED by the fan-out scaffold so no track edits this file
