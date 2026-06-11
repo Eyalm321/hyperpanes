@@ -200,6 +200,9 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
                     WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                         t.raw = raw;
                         t.left_down = *state == ElementState::Pressed;
+                        if t.left_down {
+                            crate::dbg_log(&format!("ptr-press raw={raw} pos={:?}", t.pos));
+                        }
                     }
                     _ => {}
                 }
