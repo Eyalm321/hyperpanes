@@ -366,6 +366,17 @@ pub(crate) fn key_tok_from_text(text: &str, control: bool) -> Option<keybindings
     }
     let c = text.chars().next()?;
     let u = c as u32;
+    // Slint's NAMED MODIFIER keys are C0 control codepoints (key_codes.rs): Shift=U+0010,
+    // Control=U+0011, Alt=U+0012, AltGr=U+0013, CapsLock=U+0014, ShiftR=U+0015,
+    // ControlR=U+0016, Meta=U+0017, MetaR=U+0018. They must NEVER reach the Ctrl
+    // control-char remap below: pressing the bare Shift key while Ctrl was already down
+    // delivered U+0010 with ctrl+shift modifiers, which remapped to 'p' — a phantom
+    // Ctrl+Shift+P that popped the command palette on every Ctrl+Shift press. Real letter
+    // keys arrive as their literal character on this backend (live-traced: Ctrl+Shift+C =
+    // "C"), so dropping the modifier codepoints loses nothing.
+    if (0x10..=0x18).contains(&u) {
+        return None;
+    }
     // Remap a control codepoint back to a letter only when Ctrl is actually held (Ctrl+A =
     // U+0001 … Ctrl+Z = U+001A). The named-key checks above already consumed Tab/Enter/Esc.
     if control && (1..=26).contains(&u) {
@@ -460,15 +471,22 @@ mod tests {
     // path a live key event takes), for both encodings Slint can deliver the key in.
 
     #[test]
-    fn ctrl_shift_p_opens_palette_control_char_encoding() {
-        // With Ctrl held Slint reports the control codepoint: Ctrl+(Shift+)P = U+0010.
-        let cmd = route_chord(&keymap(), &msg("\u{10}", true, false, true));
-        assert!(matches!(cmd, Some(Command::PaletteOpen)), "got {cmd:?}");
+    fn bare_modifier_presses_route_no_chord() {
+        // Slint named modifiers are C0 codepoints (Shift=U+0010 … MetaR=U+0018). U+0010 used
+        // to remap to 'p' under the Ctrl control-char rule, so pressing the bare Shift key
+        // with Ctrl already down was a phantom Ctrl+Shift+P that popped the palette (live-
+        // reproduced; the old test here pinned that phantom as "the control-char encoding").
+        for u in 0x10u32..=0x18 {
+            let text = char::from_u32(u).unwrap().to_string();
+            let cmd = route_chord(&keymap(), &msg(&text, true, false, true));
+            assert!(cmd.is_none(), "modifier codepoint {u:#x} routed {cmd:?}");
+        }
     }
 
     #[test]
     fn ctrl_shift_p_opens_palette_letter_encoding() {
-        // Backends that deliver the literal letter instead: shifted = "P", plain = "p".
+        // Real letter keys arrive as their literal character (live-traced: Ctrl+Shift+C =
+        // "C"): shifted = "P", plain = "p".
         for text in ["P", "p"] {
             let cmd = route_chord(&keymap(), &msg(text, true, false, true));
             assert!(matches!(cmd, Some(Command::PaletteOpen)), "text {text:?} got {cmd:?}");
@@ -477,7 +495,19 @@ mod tests {
 
     #[test]
     fn ctrl_p_without_shift_is_not_the_palette() {
-        assert!(route_chord(&keymap(), &msg("\u{10}", true, false, false)).is_none());
+        for text in ["P", "p"] {
+            assert!(route_chord(&keymap(), &msg(text, true, false, false)).is_none());
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_not_palette() {
+        // The chord that surfaced the phantom: Ctrl+Shift+C must copy — and the bare-Shift
+        // press on the way to it (previous test) must not open the palette first.
+        for text in ["C", "c"] {
+            let cmd = route_chord(&keymap(), &msg(text, true, false, true));
+            assert!(matches!(cmd, Some(Command::CopyFocused)), "text {text:?} got {cmd:?}");
+        }
     }
 
     // ---- palette_key: the app-side keyboard while the palette overlay is open ----

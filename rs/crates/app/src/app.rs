@@ -928,6 +928,12 @@ impl App {
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
             let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
+            crate::dbg_log(&format!(
+                "key ctrl+shift text={:x?} alt={} -> {:?}",
+                msg.text.chars().map(|c| c as u32).collect::<Vec<_>>(),
+                msg.alt,
+                cmd
+            ));
             if let Some(cmd) = cmd {
                 self.run_command(win, cmd);
             }
@@ -1006,7 +1012,36 @@ impl App {
             let clears = keys::clears_selection(&msg.text, msg.control, msg.alt);
             let mut st = win.state.borrow_mut();
             if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
+                crate::dbg_log(&format!(
+                    "key pane={} text={:x?} clears={} drag={} on_cursor_row={}",
+                    idx,
+                    msg.text.chars().map(|c| c as u32).collect::<Vec<_>>(),
+                    clears,
+                    ps.pane.selection_is_drag(),
+                    ps.pane.selection_on_cursor_row()
+                ));
                 if clears && ps.pane.selection_is_drag() {
+                    // Prompt-line TYPE-OVER: a printable key over a single-row selection on the
+                    // cursor's own row first ERASES the selected text (clamp-safe arrow/
+                    // backspace/forward-delete bytes — see `type_over_selection`), so the
+                    // keystroke replaces it like an editor; Backspace/Delete DELETE the
+                    // selection the same way, with the key itself swallowed (the erase IS the
+                    // deletion — letting it through would eat an extra character beside the
+                    // caret). Anywhere else (scrollback, multi-row, alt-screen) the highlight
+                    // just clears and the key goes through.
+                    let line_delete = !msg.control
+                        && !msg.alt
+                        && (crate::is_key(&msg.text, Key::Backspace)
+                            || crate::is_key(&msg.text, Key::Delete));
+                    if keys::is_printable(&msg.text, msg.control, msg.alt) || line_delete {
+                        if let Some(erase) = ps.pane.type_over_selection() {
+                            self.mgr.write(&ps.uid, &String::from_utf8_lossy(&erase));
+                            if line_delete {
+                                ps.pane.scroll_to_bottom();
+                                return;
+                            }
+                        }
+                    }
                     ps.pane.selection_clear();
                 }
                 // Any key that reaches the shell snaps the viewport back to the live edge so the
@@ -1762,9 +1797,11 @@ impl App {
             let app = app.clone();
             let id = win.id;
             win.app.on_pane_paste(move |i| {
+                crate::dbg_log(&format!("on_pane_paste i={i}"));
                 if let Some(w) = app.window_by_id(id) {
                     // RefCell rule: the borrow ends at the statement, before run_command.
                     let copied = w.state.borrow_mut().copy_selection_on_right_click(i as usize);
+                    crate::dbg_log(&format!("on_pane_paste i={i} copied={copied}"));
                     if !copied {
                         app.run_command(&w, Command::PastePane(i as usize));
                     }
@@ -2318,6 +2355,7 @@ impl App {
                             .unwrap_or_default(),
                     ),
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
+                    21 => crate::state::Setting::CopyOnSelect(arg != 0),
                     // idle-glow settings — apply immediately (not drafted).
                     10 => crate::state::Setting::IdleAlert(arg != 0),
                     11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),

@@ -542,6 +542,82 @@ impl TerminalPane {
         self.grid.cursor_row() == Some(start.row)
     }
 
+    /// Type-over selection: the byte sequence that ERASES the selected prompt-line text, to be
+    /// written to the pty *before* a printable keystroke so the key replaces the selection.
+    /// `None` (and no state change) unless the dragged selection lies on the cursor's own
+    /// logical line — its visual row, or any rows soft-WRAPPED into it (a long shell input
+    /// spanning several visual rows is still one editable line) — and the main screen is
+    /// active; on `Some` the selection is also cleared.
+    ///
+    /// Safety model — the sequence is built ONLY from edit keys the line editor **clamps at the
+    /// input-region boundaries** (left/right arrows, backspace, forward-delete are no-ops at the
+    /// edges in PSReadLine/readline): if the selection overlaps the prompt decoration itself, the
+    /// surplus moves/deletes simply do nothing — only the selected chars inside the editable
+    /// input are removed, and nothing left of the input start can ever be touched. The
+    /// alternate screen is excluded ([`TermGrid::alt_screen`](crate::grid::TermGrid::alt_screen)):
+    /// there these bytes would be app commands (vim motions), not edits.
+    ///
+    /// Cell↔char caveat: counts are in grid cells, exact for ASCII (same wide-glyph caveat as
+    /// [`selection_text`](Self::selection_text)).
+    pub fn type_over_selection(&mut self) -> Option<Vec<u8>> {
+        if self.grid.alt_screen() {
+            return None;
+        }
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return None,
+        };
+        let (start, end) = sel.ordered();
+        let crow = self.grid.cursor_row()?;
+        let (cols, _) = self.grid_size();
+        if cols == 0 {
+            return None;
+        }
+        // The selection must lie on the SAME WRAPPED LOGICAL LINE as the cursor: every visual
+        // row between the selection and the cursor (inclusive bounds, exclusive of the last)
+        // must carry the WRAPLINE continuation flag. A single-row selection on the cursor's own
+        // row is the degenerate case (empty range). This is what makes a long soft-wrapped
+        // shell input editable across its visual rows, while a selection on a genuinely
+        // different line (scrollback, command output) still declines.
+        let lo = start.row.min(crow);
+        let hi = end.row.max(crow);
+        if (lo..hi).any(|r| !self.grid.row_wraps(r)) {
+            return None;
+        }
+        // Linear cell offsets within the wrapped line: a wrapped row is always `cols` cells
+        // wide, and the line editor's arrows/backspace walk straight through the wrap, so the
+        // single-row arithmetic below holds verbatim in linear space.
+        let s = start.row * cols + start.col;
+        let e = end.row * cols + end.col;
+        let c = crow * cols + self.grid.cursor_col();
+        const LEFT: &[u8] = b"\x1b[D";
+        const RIGHT: &[u8] = b"\x1b[C";
+        const BS: &[u8] = &[0x7f];
+        const FDEL: &[u8] = b"\x1b[3~"; // forward delete (DeleteChar)
+        let mut bytes = Vec::new();
+        let mut rep = |seq: &[u8], n: usize| {
+            for _ in 0..n {
+                bytes.extend_from_slice(seq);
+            }
+        };
+        if c > e {
+            // Caret right of the selection (the common case — you selected text you just
+            // typed): step left to the selection end, then backspace it away.
+            rep(LEFT, c - (e + 1));
+            rep(BS, e - s + 1);
+        } else if c <= s {
+            // Caret left of (or at) the selection: step right to its start, forward-delete it.
+            rep(RIGHT, s - c);
+            rep(FDEL, e - s + 1);
+        } else {
+            // Caret inside the selection: backspace the left part, forward-delete the rest.
+            rep(BS, c - s);
+            rep(FDEL, e - c + 1);
+        }
+        self.selection_clear();
+        Some(bytes)
+    }
+
     /// Highlight rectangles (logical px) for the active *dragged* selection over a surface of
     /// `surf_w`×`surf_h`. Empty for no selection or a non-dragged click — so a plain click never
     /// leaves a stray one-cell highlight.
@@ -1062,6 +1138,95 @@ mod tests {
         // A stationary click (not dragged) is not a selection.
         p.selection_begin(0.5, 2.5, w, h);
         assert!(!p.selection_on_cursor_row(), "a click is not a drag-selection");
+    }
+
+    /// 10px/cell on a 20x5 grid: drags between exact cells while clearing the 4px threshold.
+    fn prompt_pane() -> (TerminalPane, f32, f32) {
+        let mut p = unit_pane(20, 5);
+        p.feed("a\r\nb\r\nprompt"); // cursor ends at row 2, col 6
+        (p, 200.0, 50.0)
+    }
+
+    fn drag(p: &mut TerminalPane, c1: usize, c2: usize, row: usize, w: f32, h: f32) {
+        let y = row as f32 * 10.0 + 5.0;
+        p.selection_begin(c1 as f32 * 10.0 + 5.0, y, w, h);
+        p.selection_update(c2 as f32 * 10.0 + 5.0, y, w, h);
+        assert!(p.selection_is_drag());
+    }
+
+    #[test]
+    fn type_over_backspaces_a_selection_left_of_the_caret() {
+        // Select all of "prompt" (cols 0..=5); caret at col 6, right after it → 6 backspaces.
+        let (mut p, w, h) = prompt_pane();
+        drag(&mut p, 0, 5, 2, w, h);
+        assert_eq!(p.type_over_selection(), Some(vec![0x7f; 6]));
+        assert!(!p.selection_is_drag(), "type-over consumes the selection");
+    }
+
+    #[test]
+    fn type_over_steps_left_across_a_gap_before_backspacing() {
+        // Select "ro" (cols 1..=2); caret at col 6 → 3 lefts to land after the selection, 2 BS.
+        let (mut p, w, h) = prompt_pane();
+        drag(&mut p, 1, 2, 2, w, h);
+        assert_eq!(
+            p.type_over_selection(),
+            Some(b"\x1b[D\x1b[D\x1b[D\x7f\x7f".to_vec())
+        );
+    }
+
+    #[test]
+    fn type_over_forward_deletes_a_selection_right_of_the_caret() {
+        // Select cols 8..=9 (right of the caret at col 6) → 2 rights + 2 forward-deletes.
+        let (mut p, w, h) = prompt_pane();
+        drag(&mut p, 8, 9, 2, w, h);
+        assert_eq!(
+            p.type_over_selection(),
+            Some(b"\x1b[C\x1b[C\x1b[3~\x1b[3~".to_vec())
+        );
+    }
+
+    #[test]
+    fn type_over_splits_around_a_caret_inside_the_selection() {
+        // Select cols 4..=8 with the caret at col 6 → 2 BS (cols 4-5) + 3 FDEL (cols 6-8).
+        let (mut p, w, h) = prompt_pane();
+        drag(&mut p, 4, 8, 2, w, h);
+        assert_eq!(
+            p.type_over_selection(),
+            Some(b"\x7f\x7f\x1b[3~\x1b[3~\x1b[3~".to_vec())
+        );
+    }
+
+    #[test]
+    fn type_over_declines_off_row_and_keeps_the_selection() {
+        // A selection on a non-cursor row is not editable text — no bytes, selection intact
+        // (the caller just clears the highlight).
+        let (mut p, w, h) = prompt_pane();
+        drag(&mut p, 0, 3, 0, w, h);
+        assert_eq!(p.type_over_selection(), None);
+        assert!(p.selection_is_drag(), "declining must not consume the selection");
+    }
+
+    #[test]
+    fn type_over_spans_a_soft_wrapped_input_line() {
+        // 30 chars on a 20-col grid soft-wrap onto row 1 (cursor row 1, col 10). A selection
+        // up on row 0 is STILL the same editable line — erase distances go linear through the
+        // wrap: caret lin=30, selection cols 5..=8 lin → 21 lefts + 4 backspaces.
+        let mut p = unit_pane(20, 5);
+        p.feed("abcdefghijklmnopqrstuvwxyz0123");
+        let (w, h) = (200.0, 50.0);
+        drag(&mut p, 5, 8, 0, w, h);
+        let mut expect = b"\x1b[D".repeat(21);
+        expect.extend_from_slice(&[0x7f; 4]);
+        assert_eq!(p.type_over_selection(), Some(expect));
+    }
+
+    #[test]
+    fn type_over_declines_on_the_alternate_screen() {
+        // In a TUI (vim/htop) the erase bytes would be app commands, not line edits.
+        let (mut p, w, h) = prompt_pane();
+        p.feed("\x1b[?1049h"); // enter the alternate screen
+        drag(&mut p, 0, 5, 2, w, h);
+        assert_eq!(p.type_over_selection(), None);
     }
 
     #[test]

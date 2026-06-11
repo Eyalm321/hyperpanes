@@ -209,6 +209,34 @@ impl TermGrid {
         self.term.grid().display_offset()
     }
 
+    /// The cursor's column (0-based grid cell). Pairs with [`cursor_row`](Self::cursor_row) to
+    /// compute the type-over-selection edit sequence (how far the selection sits from the caret).
+    pub fn cursor_col(&self) -> usize {
+        self.term.grid().cursor.point.column.0
+    }
+
+    /// Whether viewport row `row` CONTINUES onto the next row — alacritty's `WRAPLINE` flag on
+    /// its last cell — i.e. rows `row` and `row+1` render one wrapped logical line. Lets
+    /// type-over-selection treat a long shell input that soft-wrapped across visual rows as the
+    /// single editable line it is (the line editor's arrows/backspace walk straight through the
+    /// wrap, so linear cell distances stay valid).
+    pub fn row_wraps(&self, row: usize) -> bool {
+        if row >= self.size.rows || self.size.cols == 0 {
+            return false;
+        }
+        let grid = self.term.grid();
+        let line = alacritty_terminal::index::Line(row as i32 - grid.display_offset() as i32);
+        let last = alacritty_terminal::index::Column(self.size.cols - 1);
+        grid[line][last].flags.contains(Flags::WRAPLINE)
+    }
+
+    /// Whether the application has switched to the **alternate screen** (vim, htop, full-screen
+    /// TUIs). Type-over-selection must not fire there: its arrow/backspace bytes would be app
+    /// commands (vim motions), not line edits.
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+    }
+
     /// The cursor's row within the current viewport (display offset applied), or `None` when the
     /// cursor is scrolled out of view. Cheap — reads the grid cursor directly, no snapshot. Used
     /// to scope type-over-selection to the live prompt line (the cursor's own row).

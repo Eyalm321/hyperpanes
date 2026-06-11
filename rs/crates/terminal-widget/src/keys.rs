@@ -147,8 +147,17 @@ pub fn clears_selection(text: &str, ctrl: bool, alt: bool) -> bool {
     if is(Key::Return) || is(Key::Backspace) || is(Key::Delete) {
         return true;
     }
-    // A printable character: at/above space, not DEL, and not a Slint private-use special key
-    // (Key::* map to U+F700-range codepoints inside the BMP private-use area).
+    is_printable(text, ctrl, alt)
+}
+
+/// True for a plain printable character press (ordinary text — no Ctrl/Alt, at/above space, not
+/// DEL, and not a Slint private-use special key: `Key::*` map to U+F700-range codepoints inside
+/// the BMP private-use area). These are the keys that *replace* a prompt-line selection
+/// (type-over), a strict subset of [`clears_selection`].
+pub fn is_printable(text: &str, ctrl: bool, alt: bool) -> bool {
+    if ctrl || alt {
+        return false;
+    }
     text.chars().next().is_some_and(|c| {
         let u = c as u32;
         u >= 0x20 && u != 0x7f && !(0xe000..=0xf8ff).contains(&u)
