@@ -141,6 +141,46 @@ fn sync_model<T: Clone + 'static>(model: &VecModel<T>, items: Vec<T>) {
     }
 }
 
+/// Re-apply the mouse cursor after a hovered-link flip (see the call site in [`resync`]).
+/// Slint samples a TouchArea's `mouse-cursor` only while dispatching a mouse event, so the
+/// pointer/text switch otherwise waits for the next real OS mouse move — leaving the cursor
+/// stale when the mouse comes to rest exactly as a link appears under it. Re-posting the move
+/// through the OS doesn't work (a same-point `SetCursorPos` — even a 1px out-and-back, which
+/// Windows coalesces — never reaches winit as a move), and a synthetic Slint `PointerMoved`
+/// re-sampled unreliably. So set the Win32 cursor directly from the link state the resync
+/// just wrote — `link_active` — which is authoritative. winit may re-assert its stored icon
+/// on a later `WM_SETCURSOR`, but every real mouse move re-samples through Slint and
+/// converges (verified live: one 1px move corrects it). No-op when the cursor is outside the
+/// window.
+#[cfg(windows)]
+fn replay_cursor_pos(app: &AppWindow, link_active: bool) {
+    use slint::ComponentHandle;
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, LoadCursorW, SetCursor, IDC_HAND, IDC_IBEAM,
+    };
+    let mut p = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut p) }.is_err() {
+        return;
+    }
+    let win = app.window();
+    let pos = win.position();
+    let size = win.size();
+    let (dx, dy) = (p.x - pos.x, p.y - pos.y);
+    if dx < 0 || dy < 0 || dx as u32 >= size.width || dy as u32 >= size.height {
+        return;
+    }
+    unsafe {
+        let idc = if link_active { IDC_HAND } else { IDC_IBEAM };
+        if let Ok(cur) = LoadCursorW(None, idc) {
+            SetCursor(Some(cur));
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn replay_cursor_pos(_app: &AppWindow, _link_active: bool) {}
+
 /// Build a model row for pane `i`. `editing` flags the pane whose label is being renamed
 /// inline; `show_frame`/`show_dot` are the GLOBAL Appearance prefs, folded here over each
 /// pane's per-pane override (a clean new pane resolves OFF, a git-project pane ON).
@@ -392,7 +432,39 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .enumerate()
         .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot, p.font_px))
         .collect();
+    // Slint samples a TouchArea's `mouse-cursor` only while dispatching a mouse event, and the
+    // link hover hit-test lands in the model one pump tick AFTER the move that triggered it —
+    // so the pointer/text cursor switch is permanently one OS mouse-move late (the tooltip and
+    // underline are model-driven and fine). When a pane's hovered-link presence flips, replay
+    // the cursor at its current position: the same-point SetCursorPos posts a fresh
+    // WM_MOUSEMOVE, which re-runs Slint's input pipeline against the now-correct property.
+    let link_flipped = (0..items.len()).any(|i| {
+        ui.panes
+            .row_data(i)
+            .is_some_and(|old| old.link_visible != items[i].link_visible)
+    });
     sync_model(&ui.panes, items);
+    if link_flipped {
+        // MUST be deferred: resync runs inside the pump with the window's state RefCell
+        // borrowed, and re-entering UI callbacks here is the #18 re-borrow crash class.
+        // Two shots: 30ms covers the common settle, and 250ms outlasts the window in which
+        // Slint's input pipeline still re-samples the PRE-flip cursor on real mouse moves
+        // (~100ms observed live) — a move in that window re-asserts the stale cursor over
+        // the first replay. Each shot reads the model live, so a flip in between can't
+        // apply an outdated cursor.
+        for delay in [30u64, 250] {
+            let weak = {
+                use slint::ComponentHandle;
+                app.as_weak()
+            };
+            slint::Timer::single_shot(Duration::from_millis(delay), move || {
+                if let Some(app) = weak.upgrade() {
+                    let active = app.get_panes().iter().any(|p| p.link_visible);
+                    replay_cursor_pos(&app, active);
+                }
+            });
+        }
+    }
 
     // dividers
     let divs = build_dividers(state, area);
