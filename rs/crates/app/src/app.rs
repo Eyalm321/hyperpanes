@@ -1012,6 +1012,14 @@ impl App {
             let clears = keys::clears_selection(&msg.text, msg.control, msg.alt);
             let mut st = win.state.borrow_mut();
             if let Some(ps) = st.active_tab_mut().panes.get_mut(idx) {
+                crate::dbg_log(&format!(
+                    "key pane={} text={:x?} clears={} drag={} on_cursor_row={}",
+                    idx,
+                    msg.text.chars().map(|c| c as u32).collect::<Vec<_>>(),
+                    clears,
+                    ps.pane.selection_is_drag(),
+                    ps.pane.selection_on_cursor_row()
+                ));
                 if clears && ps.pane.selection_is_drag() {
                     // Prompt-line TYPE-OVER: a printable key over a single-row selection on the
                     // cursor's own row first ERASES the selected text (clamp-safe arrow/

@@ -544,9 +544,10 @@ impl TerminalPane {
 
     /// Type-over selection: the byte sequence that ERASES the selected prompt-line text, to be
     /// written to the pty *before* a printable keystroke so the key replaces the selection.
-    /// `None` (and no state change) unless [`selection_on_cursor_row`]
-    /// (Self::selection_on_cursor_row) holds and the main screen is active; on `Some` the
-    /// selection is also cleared.
+    /// `None` (and no state change) unless the dragged selection lies on the cursor's own
+    /// logical line — its visual row, or any rows soft-WRAPPED into it (a long shell input
+    /// spanning several visual rows is still one editable line) — and the main screen is
+    /// active; on `Some` the selection is also cleared.
     ///
     /// Safety model — the sequence is built ONLY from edit keys the line editor **clamps at the
     /// input-region boundaries** (left/right arrows, backspace, forward-delete are no-ops at the
@@ -559,12 +560,36 @@ impl TerminalPane {
     /// Cell↔char caveat: counts are in grid cells, exact for ASCII (same wide-glyph caveat as
     /// [`selection_text`](Self::selection_text)).
     pub fn type_over_selection(&mut self) -> Option<Vec<u8>> {
-        if self.grid.alt_screen() || !self.selection_on_cursor_row() {
+        if self.grid.alt_screen() {
             return None;
         }
-        let (start, end) = self.selection.as_ref()?.ordered();
-        let (s, e) = (start.col, end.col);
-        let c = self.grid.cursor_col();
+        let sel = match &self.selection {
+            Some(s) if s.dragged => s,
+            _ => return None,
+        };
+        let (start, end) = sel.ordered();
+        let crow = self.grid.cursor_row()?;
+        let (cols, _) = self.grid_size();
+        if cols == 0 {
+            return None;
+        }
+        // The selection must lie on the SAME WRAPPED LOGICAL LINE as the cursor: every visual
+        // row between the selection and the cursor (inclusive bounds, exclusive of the last)
+        // must carry the WRAPLINE continuation flag. A single-row selection on the cursor's own
+        // row is the degenerate case (empty range). This is what makes a long soft-wrapped
+        // shell input editable across its visual rows, while a selection on a genuinely
+        // different line (scrollback, command output) still declines.
+        let lo = start.row.min(crow);
+        let hi = end.row.max(crow);
+        if (lo..hi).any(|r| !self.grid.row_wraps(r)) {
+            return None;
+        }
+        // Linear cell offsets within the wrapped line: a wrapped row is always `cols` cells
+        // wide, and the line editor's arrows/backspace walk straight through the wrap, so the
+        // single-row arithmetic below holds verbatim in linear space.
+        let s = start.row * cols + start.col;
+        let e = end.row * cols + end.col;
+        let c = crow * cols + self.grid.cursor_col();
         const LEFT: &[u8] = b"\x1b[D";
         const RIGHT: &[u8] = b"\x1b[C";
         const BS: &[u8] = &[0x7f];
@@ -1179,6 +1204,20 @@ mod tests {
         drag(&mut p, 0, 3, 0, w, h);
         assert_eq!(p.type_over_selection(), None);
         assert!(p.selection_is_drag(), "declining must not consume the selection");
+    }
+
+    #[test]
+    fn type_over_spans_a_soft_wrapped_input_line() {
+        // 30 chars on a 20-col grid soft-wrap onto row 1 (cursor row 1, col 10). A selection
+        // up on row 0 is STILL the same editable line — erase distances go linear through the
+        // wrap: caret lin=30, selection cols 5..=8 lin → 21 lefts + 4 backspaces.
+        let mut p = unit_pane(20, 5);
+        p.feed("abcdefghijklmnopqrstuvwxyz0123");
+        let (w, h) = (200.0, 50.0);
+        drag(&mut p, 5, 8, 0, w, h);
+        let mut expect = b"\x1b[D".repeat(21);
+        expect.extend_from_slice(&[0x7f; 4]);
+        assert_eq!(p.type_over_selection(), Some(expect));
     }
 
     #[test]
