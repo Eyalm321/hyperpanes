@@ -67,11 +67,14 @@ pub(crate) fn pointer_track() -> PointerTrack {
     POINTER.with(|p| p.get())
 }
 
-/// Whether the app realized on Wayland (vs X11/XWayland). Decided once from the actual
-/// session environment — winit picks Wayland whenever `WAYLAND_DISPLAY` is set (WSLg
-/// sets both `WAYLAND_DISPLAY` and `DISPLAY`; force X11 by clearing the former).
+static WAYLAND: OnceLock<bool> = OnceLock::new();
+
+/// Whether the app realized on Wayland (vs X11/XWayland). Pinned from the first real
+/// window's handle in [`hwnd_of`] (authoritative even when winit's backend is forced,
+/// e.g. `SLINT_BACKEND=winit-x11`); before any window exists, fall back to winit's own
+/// selection rule — Wayland whenever `WAYLAND_DISPLAY` is set (WSLg sets both
+/// `WAYLAND_DISPLAY` and `DISPLAY`; force X11 by clearing the former).
 pub(crate) fn is_wayland() -> bool {
-    static WAYLAND: OnceLock<bool> = OnceLock::new();
     *WAYLAND.get_or_init(|| {
         std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
     })
@@ -125,6 +128,13 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
         return 0;
     };
     let raw = Arc::as_ptr(&w) as isize;
+    // Pin the backend from the realized handle (beats the env heuristic).
+    if WAYLAND.get().is_none() {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(h) = w.window_handle() {
+            let _ = WAYLAND.set(matches!(h.as_raw(), RawWindowHandle::Wayland(_)));
+        }
+    }
     let fresh = REGISTRY.with(|r| {
         let mut r = r.borrow_mut();
         r.retain(|(_, w)| w.strong_count() > 0); // purge closed windows
