@@ -198,6 +198,10 @@ component TabChip inherits Rectangle {
 }
 
 export component TopBar inherits Rectangle {
+    // macOS: the native traffic lights overlay the bar's top-left corner (the window keeps
+    // them — see window/macos.rs), so pad the leading edge past them and drop the custom
+    // min/max/close cluster (the traffic lights already cover those).
+    in property <bool> macos: false;
     in property <[TabItem]> tabs;
     in property <int> editing-tab: -1;
     in property <[LayoutOption]> layouts;
@@ -259,7 +263,8 @@ export component TopBar inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 10px;
+        // 70px extra leading room on macOS clears the overlaid traffic lights.
+        padding-left: root.macos ? 80px : 10px;
         spacing: 8px;
 
         // ===== hamburger menu =====
@@ -335,14 +340,14 @@ export component TopBar inherits Rectangle {
             }
         }
 
-        // ===== window controls (flush right corner) =====
-        Rectangle {
+        // ===== window controls (flush right corner; macOS uses the traffic lights) =====
+        if !root.macos : Rectangle {
             width: 1px;
             height: 18px;
             y: (parent.height - self.height) / 2;
             background: Theme.border;
         }
-        HorizontalLayout {
+        if !root.macos : HorizontalLayout {
             WinBtn := Rectangle {
                 width: 44px;
                 background: minh.has-hover ? Theme.surface2 : transparent;

@@ -49,6 +49,9 @@ export component AppWindow inherits Window {
     // Our own OS-maximized flag (synced from Win32). Named `win-maximized` to avoid colliding
     // with Slint 1.17's new builtin `Window.maximized`, which we don't use (custom frameless window).
     in property <bool> win-maximized: false;
+    // Running on macOS (set once from Rust — Slint has no cfg). The top bar pads left for
+    // the overlaid native traffic lights and drops the custom min/max/close cluster.
+    in property <bool> macos: false;
     // Briefly true after entering fullscreen → flashes the "hold Esc to exit" hint.
     in property <bool> fullscreen-hint: false;
     // True while Esc is held → keeps the hint up and fills its progress bar.
@@ -249,6 +252,7 @@ export component AppWindow inherits Window {
 
         // The top bar hides in OS fullscreen (chrome-free terminal).
         if !root.fullscreen : TopBar {
+            macos: root.macos;
             tabs: root.tabs;
             editing-tab: root.editing-tab;
             layouts: root.layouts;
