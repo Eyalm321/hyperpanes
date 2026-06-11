@@ -280,6 +280,10 @@ impl App {
             }
         };
         crate::perf::mark("spawn_window: AppWindow::new done (wgpu device ready)");
+        // macOS keeps the native traffic lights overlaid on the custom bar (see
+        // window/macos.rs) — tell the UI so it pads past them and drops the custom
+        // min/max/close cluster. Constant per build; Slint has no cfg of its own.
+        aw.set_macos(cfg!(target_os = "macos"));
         let ui = Ui::new();
         ui.attach(&aw);
 
