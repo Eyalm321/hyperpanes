@@ -1711,7 +1711,10 @@ impl App {
                         .borrow_mut()
                         .pane_link_activate(i as usize, x, y, ctrl);
                     if let Some(hyperpanes_terminal_widget::LinkAction::Copy(path)) = action {
-                        copy_to_clipboard(&path);
+                        // Copy via the pane's arboard clipboard + "Copied …" toast — NOT a
+                        // `clip.exe` shell-out, whose blocking `child.wait()` froze the UI
+                        // thread on every Ctrl+click (and showed no indicator).
+                        win.state.borrow_mut().copy_link_text(i as usize, &path);
                     }
                 }
             });
@@ -2495,18 +2498,5 @@ fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> S
     match port {
         Some(p) => format!("Running · http://127.0.0.1:{p} · {input}"),
         None => format!("Starting… · {input}"),
-    }
-}
-
-/// Copy `text` to the Windows clipboard via the built-in `clip` utility (no extra crate /
-/// Win32 feature needed). Used by the Ctrl+click branch of clickable paths. Best-effort.
-pub(crate) fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    if let Ok(mut child) = Command::new("clip").stdin(Stdio::piped()).spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
     }
 }

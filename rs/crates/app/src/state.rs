@@ -2411,6 +2411,16 @@ impl State {
         }
     }
 
+    /// Copy a Ctrl+clicked link/path into the clipboard via pane `idx`'s own arboard instance,
+    /// raising its "Copied …" toast. Replaces the blocking `clip.exe` shell-out (which froze
+    /// the UI thread per Ctrl+click and gave no feedback).
+    pub fn copy_link_text(&mut self, idx: usize, text: &str) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.pane.copy_text(text);
+            self.dirty = true;
+        }
+    }
+
     /// The Windows-Terminal right-click nuance (#32): when pane `idx` has an active
     /// drag-selection, right-click COPIES it (and clears the highlight) instead of pasting.
     /// Returns true when that happened — the caller then skips the paste. The selection is

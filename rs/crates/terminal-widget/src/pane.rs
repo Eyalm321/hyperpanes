@@ -609,6 +609,20 @@ impl TerminalPane {
         }
     }
 
+    /// Copy arbitrary `text` (a Ctrl+clicked link/path) to the system clipboard and raise the
+    /// "Copied …" indicator — the same arboard instance + toast as
+    /// [`copy_selection`](Self::copy_selection). Replaces the app's `clip.exe` shell-out, which
+    /// blocked the UI thread on `child.wait()` for every Ctrl+click (a visible freeze) and
+    /// showed no indicator.
+    pub fn copy_text(&mut self, text: &str) -> bool {
+        if self.clipboard.copy(text) {
+            self.set_toast("Copied to clipboard");
+            true
+        } else {
+            false
+        }
+    }
+
     /// Read the system clipboard for a right-click / Ctrl+V paste, raising a "Pasted …"
     /// indicator. Returns the text the caller should write to this pane's session (the controller
     /// doesn't own the session transport), or `None` when the clipboard is empty/unavailable.
