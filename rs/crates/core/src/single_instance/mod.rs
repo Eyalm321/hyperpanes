@@ -67,21 +67,45 @@ pub fn instance_names(salt: &str) -> InstanceNames {
     }
 }
 
-/// A stable per-user salt. Keyed off the user's roaming-appdata path (which already embeds
-/// the username and is exactly what the Electron userData lock was keyed under); falls back
-/// to the username, then a fixed default, so it is never empty.
+/// A stable per-user salt, never empty. Windows: keyed off the user's roaming-appdata
+/// path (which already embeds the username and is exactly what the Electron userData
+/// lock was keyed under), falling back to the username. Unix: keyed off
+/// `$XDG_RUNTIME_DIR` (already per-user) then `$HOME` then `$USER` — the seam-doc
+/// shape, landed by the `unix-core` track under the granted `mod.rs` exception.
 pub fn user_salt() -> String {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        if !appdata.is_empty() {
-            return appdata.to_lowercase();
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            if !appdata.is_empty() {
+                return appdata.to_lowercase();
+            }
         }
-    }
-    if let Ok(user) = std::env::var("USERNAME") {
-        if !user.is_empty() {
-            return format!("user:{}", user.to_lowercase());
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                return format!("user:{}", user.to_lowercase());
+            }
         }
+        "hyperpanes-default".to_string()
     }
-    "hyperpanes-default".to_string()
+    #[cfg(not(windows))]
+    {
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if !dir.is_empty() {
+                return dir;
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return home;
+            }
+        }
+        if let Ok(user) = std::env::var("USER") {
+            if !user.is_empty() {
+                return format!("user:{user}");
+            }
+        }
+        "hyperpanes-default".to_string()
+    }
 }
 
 // FNV-1a (64-bit). Tiny, dependency-free, and stable across runs/processes — all we need to
