@@ -53,6 +53,15 @@ fn is_win() -> bool {
     cfg!(windows)
 }
 
+/// Whether this platform's default filesystem ignores path case — the gate for the
+/// case-insensitive dedup key. True on Windows (NTFS) AND macOS (APFS/HFS+ default to
+/// case-insensitive), so `/Users/me/Repo` and `/users/me/repo` dedup to one project
+/// there; Linux filesystems are case-sensitive and keep the exact-case key.
+#[inline]
+fn case_insensitive_fs() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+}
+
 /// Canonical absolute path for storage. Strips trailing separators; on Windows
 /// normalises `/`→`\` and uppercases the drive letter.
 pub fn canonical_path(p: &str) -> String {
@@ -79,12 +88,13 @@ pub fn canonical_path(p: &str) -> String {
     out
 }
 
-/// Dedup key — case-insensitive on Windows (its paths ignore case). Public so callers
-/// matching a pane cwd's git root against a stored [`Project::path`] compare with the
-/// SAME key the store dedups by (e.g. the app's recolor-propagation).
+/// Dedup key — case-insensitive on case-insensitive filesystems (Windows NTFS, macOS
+/// APFS). Public so callers matching a pane cwd's git root against a stored
+/// [`Project::path`] compare with the SAME key the store dedups by (e.g. the app's
+/// recolor-propagation).
 pub fn path_key(p: &str) -> String {
     let c = canonical_path(p);
-    if is_win() {
+    if case_insensitive_fs() {
         c.to_lowercase()
     } else {
         c
@@ -445,6 +455,17 @@ mod tests {
     #[test]
     fn color_is_drive_case_insensitive_on_windows() {
         assert_eq!(color_for_path("c:\\repo"), color_for_path("C:/repo/"));
+    }
+
+    #[test]
+    fn path_key_case_sensitivity_follows_the_platform_fs() {
+        // Windows (NTFS) and macOS (APFS default) ignore path case → one dedup key;
+        // Linux filesystems are case-sensitive → distinct keys.
+        if cfg!(any(windows, target_os = "macos")) {
+            assert_eq!(path_key("/Users/me/Repo"), path_key("/users/me/repo"));
+        } else {
+            assert_ne!(path_key("/Users/me/Repo"), path_key("/users/me/repo"));
+        }
     }
 
     fn unique_temp(tag: &str) -> std::path::PathBuf {
