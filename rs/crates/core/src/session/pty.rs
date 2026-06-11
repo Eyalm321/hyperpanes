@@ -104,6 +104,7 @@ impl Pty for PortablePty {
 /// Length of the longest suffix of `data` that is a strict prefix of one of the conpty
 /// startup queries (`ESC[6n` / `ESC[c`) — bytes the handshake scanner must carry to the
 /// next read so a query split across chunk boundaries is still matched.
+#[cfg(windows)]
 fn query_prefix_suffix_len(data: &[u8]) -> usize {
     for keep in (1..=3usize.min(data.len())).rev() {
         let tail = &data[data.len() - keep..];
@@ -112,6 +113,107 @@ fn query_prefix_suffix_len(data: &[u8]) -> usize {
         }
     }
     0
+}
+
+/// ConPTY startup-query interception (Windows only — see the long comment in
+/// [`spawn_pty`]): answers + STRIPS the host's gating queries — DSR (`ESC[6n`, cursor
+/// position) and DA1 (`ESC[c`, device attributes) — at the very front of the stream.
+/// The 1.24 redistributable host asks BOTH and stalls the console session ~1.1s per
+/// unanswered query (its timeout); in-box conhost asks only DSR. Answers are written to
+/// the master, the query bytes are stripped (so the GUI widget can't send a late
+/// duplicate reply that would reach the shell as stray input), and everything else
+/// forwards immediately — only a ≤3-byte possible-query-prefix is carried across chunk
+/// boundaries. Scanning stops once both are answered or after the first 512 bytes (the
+/// handshake is always at the very front of the stream).
+///
+/// Compile-time gated: on POSIX there is no host handshake — an early `ESC[6n` is a
+/// real application query the widget must answer with the true cursor — so this
+/// interception code does not exist in unix builds (the filter there is a pure
+/// pass-through; see the `#[cfg(not(windows))]` impl + test).
+#[cfg(windows)]
+struct StartupQueryFilter {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    want_dsr: bool,
+    want_da: bool,
+    scanned: usize,
+    carry: Vec<u8>,
+}
+
+#[cfg(windows)]
+impl StartupQueryFilter {
+    fn new(writer: Arc<Mutex<Box<dyn Write + Send>>>) -> Self {
+        StartupQueryFilter { writer, want_dsr: true, want_da: true, scanned: 0, carry: Vec::new() }
+    }
+
+    /// Process one read chunk, returning the bytes to forward to the sink now (a
+    /// possible split-query suffix is held back in `carry` until the next chunk).
+    fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if !self.want_dsr && !self.want_da {
+            return chunk.to_vec();
+        }
+        let mut data = std::mem::take(&mut self.carry);
+        data.extend_from_slice(chunk);
+        if self.want_dsr {
+            if let Some(pos) = data.windows(4).position(|w| w == b"\x1b[6n") {
+                if let Ok(mut w) = self.writer.lock() {
+                    let _ = w.write_all(b"\x1b[1;1R");
+                    let _ = w.flush();
+                }
+                self.want_dsr = false;
+                data.drain(pos..pos + 4);
+            }
+        }
+        if self.want_da {
+            if let Some(pos) = data.windows(3).position(|w| w == b"\x1b[c") {
+                if let Ok(mut w) = self.writer.lock() {
+                    // VT102 device attributes — the same class of answer the GUI grid
+                    // gives to later DA queries.
+                    let _ = w.write_all(b"\x1b[?6c");
+                    let _ = w.flush();
+                }
+                self.want_da = false;
+                data.drain(pos..pos + 3);
+            }
+        }
+        self.scanned += data.len();
+        if self.scanned > 512 {
+            self.want_dsr = false;
+            self.want_da = false;
+        } else if self.want_dsr || self.want_da {
+            // Hold back a trailing run that could be the start of a query split across
+            // reads (a suffix of "\x1b[6n"/"\x1b[c").
+            let keep = query_prefix_suffix_len(&data);
+            if keep > 0 {
+                self.carry = data.split_off(data.len() - keep);
+            }
+        }
+        data
+    }
+
+    /// Any held-back bytes at EOF (a query prefix that never completed).
+    fn flush(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.carry)
+    }
+}
+
+/// POSIX pass-through: no ConPTY host handshake exists, and an early `ESC[6n` is a real
+/// child query the widget must answer — nothing is intercepted, answered, or stripped.
+#[cfg(not(windows))]
+struct StartupQueryFilter;
+
+#[cfg(not(windows))]
+impl StartupQueryFilter {
+    fn new(_writer: Arc<Mutex<Box<dyn Write + Send>>>) -> Self {
+        StartupQueryFilter
+    }
+
+    fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
+        chunk.to_vec()
+    }
+
+    fn flush(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 /// Spawn a pty running `spec`, delivering output and exit via `on_event`. The returned
@@ -168,82 +270,29 @@ pub fn spawn_pty(
     // Later queries pass through untouched. The child handle arrives over a channel once
     // spawned; the thread reaps it for the exit code at EOF.
     let (child_tx, child_rx) = std::sync::mpsc::channel::<Box<dyn Child + Send + Sync>>();
-    let handshake_writer = Arc::clone(&writer);
+    // The startup-query filter (Windows: answer + strip the ConPTY host handshake;
+    // POSIX: pure pass-through — see [`StartupQueryFilter`]).
+    let mut filter = StartupQueryFilter::new(Arc::clone(&writer));
     thread::Builder::new()
         .name("hp-pty-reader".into())
         .spawn(move || {
             let mut buf = [0u8; 65536];
-            // Startup queries the host gates on: DSR (`ESC[6n`, cursor position) and DA1
-            // (`ESC[c`, device attributes). The 1.24 redistributable host asks BOTH and
-            // stalls the console session ~1.1s per unanswered query (its timeout); in-box
-            // conhost asks only DSR. Answers are written here, the query bytes are
-            // STRIPPED (so the GUI widget can't send a late duplicate reply that would
-            // reach the shell as stray input), and everything else forwards immediately —
-            // only a ≤3-byte possible-query-prefix is carried across chunk boundaries.
-            // Scanning stops once both are answered or after the first 512 bytes (the
-            // handshake is always at the very front of the stream).
-            let mut want_dsr = cfg!(windows);
-            let mut want_da = cfg!(windows);
-            let mut scanned: usize = 0;
-            let mut carry: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF — pseudoconsole closed
                     Ok(n) => {
-                        if want_dsr || want_da {
-                            let mut data = std::mem::take(&mut carry);
-                            data.extend_from_slice(&buf[..n]);
-                            if want_dsr {
-                                if let Some(pos) =
-                                    data.windows(4).position(|w| w == b"\x1b[6n")
-                                {
-                                    if let Ok(mut w) = handshake_writer.lock() {
-                                        let _ = w.write_all(b"\x1b[1;1R");
-                                        let _ = w.flush();
-                                    }
-                                    want_dsr = false;
-                                    data.drain(pos..pos + 4);
-                                }
-                            }
-                            if want_da {
-                                if let Some(pos) =
-                                    data.windows(3).position(|w| w == b"\x1b[c")
-                                {
-                                    if let Ok(mut w) = handshake_writer.lock() {
-                                        // VT102 device attributes — the same class of
-                                        // answer the GUI grid gives to later DA queries.
-                                        let _ = w.write_all(b"\x1b[?6c");
-                                        let _ = w.flush();
-                                    }
-                                    want_da = false;
-                                    data.drain(pos..pos + 3);
-                                }
-                            }
-                            scanned += data.len();
-                            if scanned > 512 {
-                                want_dsr = false;
-                                want_da = false;
-                            } else if want_dsr || want_da {
-                                // Hold back a trailing run that could be the start of a
-                                // query split across reads (a suffix of "\x1b[6n"/"\x1b[c").
-                                let keep = query_prefix_suffix_len(&data);
-                                if keep > 0 {
-                                    carry = data.split_off(data.len() - keep);
-                                }
-                            }
-                            if !data.is_empty() {
-                                on_event(PtyEvent::Data(data));
-                            }
-                            continue;
+                        let data = filter.process(&buf[..n]);
+                        if !data.is_empty() {
+                            on_event(PtyEvent::Data(data));
                         }
-                        on_event(PtyEvent::Data(buf[..n].to_vec()));
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
             }
-            if !carry.is_empty() {
-                on_event(PtyEvent::Data(std::mem::take(&mut carry)));
+            let tail = filter.flush();
+            if !tail.is_empty() {
+                on_event(PtyEvent::Data(tail));
             }
             // `recv` fails only if spawn_command failed (sender dropped) — no child, no Exit.
             if let Ok(mut child) = child_rx.recv() {
@@ -282,6 +331,23 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    /// On POSIX an early `ESC[6n` (DSR) is a REAL application query the widget must
+    /// answer with the true cursor position — the unix filter must forward it untouched
+    /// (no interception, no answer, no stripping). Pins the compile-time gate: the
+    /// ConPTY handshake code must not exist (or act) in unix builds.
+    #[cfg(not(windows))]
+    #[test]
+    fn early_dsr_passes_through_untouched_on_unix() {
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(std::io::sink())));
+        let mut f = StartupQueryFilter::new(writer);
+        let chunk = b"\x1b[6n\x1b[chello";
+        assert_eq!(f.process(chunk), chunk.to_vec(), "DSR/DA must pass through verbatim");
+        // And a split query is never held back across reads either.
+        assert_eq!(f.process(b"\x1b["), b"\x1b[".to_vec());
+        assert!(f.flush().is_empty());
+    }
 
     // An INTERACTIVE shell spec. We drive interactive shells (not one-shot
     // `cmd /c ...`) because Windows ConPTY scrapes a live screen: a process that
