@@ -311,14 +311,9 @@ export component TerminalPane inherits Rectangle {
         border-color: #ff9e64;
     }
 
-    // Hover underline drawn over the terminal surface, spanning the path's columns.
-    if root.link-visible: Rectangle {
-        x: root.link-x;
-        y: root.link-y;
-        width: root.link-w;
-        height: 1px;
-        background: root.accent;
-    }
+    // (No hover underline: the pointer cursor + tooltip are the link affordance. The
+    // link-x/y/w properties stay in the contract — the controller still computes the span
+    // for hit-testing, and a consumer could reintroduce an overlay without a widget change.)
 
     // Path tooltip near the cursor (absolute target + the open/copy hint). MUST hug its
     // content: an unsized Rectangle fills the whole pane (a Slint default), which painted the
