@@ -3022,10 +3022,22 @@ impl State {
     /// differs from the base size records `font_size`, so zoom survives a plain relaunch.
     pub fn to_session_file(&self) -> WorkspaceFile {
         let base = self.settings.font_px.round() as u32;
+        // A 0-pane tab can exist transiently while the window is closing (the emptied
+        // last tab is left in place — `take_pane_in`), and this snapshot is taken exactly
+        // then. Never persist it: an empty group restores to nothing, and an `active`
+        // index pointing at it would land the relaunch on an empty tab. Filter, and remap
+        // `active` to the filtered indexing.
+        let mut active_out = 0u32;
         let groups: Vec<GroupSpec> = self
             .tabs
             .iter()
-            .map(|t| {
+            .enumerate()
+            .filter(|(_, t)| !t.panes.is_empty())
+            .enumerate()
+            .map(|(out_i, (i, t))| {
+                if i == self.active {
+                    active_out = out_i as u32;
+                }
                 let panes: Vec<PaneSpec> = t
                     .panes
                     .iter()
@@ -3053,7 +3065,7 @@ impl State {
             .collect();
         WorkspaceFile {
             groups: Some(groups),
-            active: Some(self.active as u32),
+            active: Some(active_out),
             ..Default::default()
         }
     }
@@ -3107,18 +3119,23 @@ impl State {
             return;
         };
         let first_new = self.tabs.len();
-        let saved_active = win.active;
-        for g in win.groups {
+        let saved_active = win.active.map(|a| a as usize);
+        // Contentless groups are skipped by `append_tab_from_group`, which shifts the
+        // indices of everything after them — remap the file's `active` to the tab its
+        // group ACTUALLY became, so a saved active index can never select (or be clamped
+        // onto) the wrong tab, let alone an empty one.
+        let mut active_new: Option<usize> = None;
+        for (i, g) in win.groups.into_iter().enumerate() {
+            let before = self.tabs.len();
             self.append_tab_from_group(mgr, g);
+            if self.tabs.len() > before && saved_active == Some(i) {
+                active_new = Some(before);
+            }
         }
         if self.tabs.len() > first_new {
-            // Land on the file's saved active tab (clamped to what actually spawned) so a
-            // session restore comes back where it was; absent → the first appended tab.
-            let added = self.tabs.len() - first_new;
-            self.active = first_new
-                + saved_active
-                    .map(|a| (a as usize).min(added - 1))
-                    .unwrap_or(0);
+            // Land on the file's saved active tab so a session restore comes back where
+            // it was; absent or skipped → the first appended tab.
+            self.active = active_new.unwrap_or(first_new);
             self.editing_tab = -1;
             self.dirty = true;
         }
@@ -3755,6 +3772,58 @@ mod session_file_tests {
         assert!(g.layout.is_some());
         // An unpinned (slot-coloured) pane restores clean — no color recorded.
         assert_eq!(g.panes[0].color, None);
+    }
+
+    /// The emptied-last-tab-mid-close case: closing the only pane of the only tab leaves
+    /// a 0-pane tab in place (the window is about to close) — and that's exactly when the
+    /// last-session snapshot is taken. It must not persist the empty group, or the next
+    /// restore can land on a tab with 0 panes.
+    #[test]
+    fn an_emptied_last_tab_is_not_persisted() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("only", 14.0));
+        assert!(!st.close_pane(0, &m), "workspace emptied → caller quits");
+        assert!(st.active_tab().panes.is_empty(), "empty tab left while closing");
+        let file = st.to_session_file();
+        assert_eq!(file.groups.as_deref().map(|g| g.len()), Some(0));
+        assert_eq!(file.active, Some(0));
+    }
+
+    /// A 0-pane tab anywhere in the list is skipped and `active` is remapped to the
+    /// filtered indexing (not blindly recorded), so the restored session activates the
+    /// same CONTENT, not the same raw index.
+    #[test]
+    fn snapshot_skips_empty_tabs_and_remaps_active() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a", 14.0)); // tab 0
+        // Manufacture an empty tab before it (defensive: no normal flow keeps one).
+        st.tabs.insert(0, Tab::empty("ghost".into()));
+        st.active = 1; // the real tab
+        let file = st.to_session_file();
+        let groups = file.groups.unwrap();
+        assert_eq!(groups.len(), 1, "empty tab dropped");
+        assert_eq!(groups[0].panes.len(), 1);
+        assert_eq!(file.active, Some(0), "active remapped to the filtered index");
+    }
+
+    /// Loading a workspace whose groups are all contentless appends nothing and leaves
+    /// the current tabs/active untouched (the seed path then falls back to a fresh pane).
+    #[test]
+    fn loading_an_all_empty_workspace_is_a_noop() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("keep", 14.0));
+        let file = WorkspaceFile {
+            groups: Some(vec![GroupSpec { panes: vec![], ..Default::default() }]),
+            active: Some(0),
+            ..Default::default()
+        };
+        st.load_workspace(file, &m);
+        assert_eq!(st.tabs.len(), 1);
+        assert_eq!(st.active, 0);
+        assert_eq!(st.active_tab().panes.len(), 1);
     }
 }
 
