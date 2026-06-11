@@ -125,8 +125,14 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
     let fut = WinitWindowAccessor::winit_window(win);
     let mut fut = std::pin::pin!(fut);
     let mut cx = Context::from_waker(Waker::noop());
-    let Poll::Ready(Ok(w)) = fut.as_mut().poll(&mut cx) else {
-        return 0;
+    let w = match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(Ok(w)) => w,
+        Poll::Ready(Err(e)) => {
+            // Wrong backend / window torn down — permanent for this window, worth a trace.
+            crate::dbg_log(&format!("hwnd_of: winit accessor failed: {e}"));
+            return 0;
+        }
+        Poll::Pending => return 0, // not realized yet; the caller retries next tick
     };
     let raw = Arc::as_ptr(&w) as isize;
     // Pin the backend from the realized handle (beats the env heuristic).
@@ -147,6 +153,10 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
         }
     });
     if fresh {
+        crate::dbg_log(&format!(
+            "hwnd_of: realized raw={raw} wayland={}",
+            WAYLAND.get().copied().unwrap_or(false)
+        ));
         // Feed the pointer tracker (the Wayland drag fallback) from this window's
         // event stream. Positions are physical px, window-relative.
         win.on_winit_window_event(move |_, ev| {
