@@ -33,3 +33,6 @@ _mw2_win*.png
 
 # Claude Code transient scheduler lock
 .claude/scheduled_tasks.lock
+
+# packaging artifacts (AppImage/dmg staging)
+rs/packaging/out/
