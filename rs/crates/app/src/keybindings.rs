@@ -227,6 +227,9 @@ pub fn default_bindings() -> Vec<Binding> {
         // Ctrl+V pastes via the app (fresh OS-clipboard read + bracketed paste), matching
         // Windows Terminal. Unbind it to forward a literal 0x16 to the shell instead (#9).
         b("pane.paste", true, false, false, Char('v'), "Panes", "Paste", Command::PasteFocused),
+        // Ctrl+Shift+C copies the selection — the explicit copy gesture now that copy-on-select
+        // defaults off (Ctrl+C stays the shell interrupt).
+        b("pane.copy", true, false, true, Char('c'), "Panes", "Copy selection", Command::CopyFocused),
         // Zoom (font)
         b("zoom.in", true, false, false, Char('='), "Zoom", "Zoom in (font)", Command::FontZoom(1)),
         b("zoom.out", true, false, false, Char('-'), "Zoom", "Zoom out (font)", Command::FontZoom(-1)),
@@ -651,6 +654,18 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert("pane.paste".into(), None);
         assert!(km.match_chord(true, false, false, KeyTok::Char('v')).is_none());
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_the_focused_selection() {
+        // The explicit copy gesture (copy-on-select defaults off). Plain Ctrl+C stays the
+        // shell interrupt — only the shifted chord is bound.
+        let km = empty_keymap();
+        assert!(matches!(
+            km.match_chord(true, false, true, KeyTok::Char('c')),
+            Some(Command::CopyFocused)
+        ));
+        assert!(km.match_chord(true, false, false, KeyTok::Char('c')).is_none());
     }
 
     #[test]

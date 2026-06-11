@@ -104,6 +104,8 @@ pub enum Setting {
     ShowDot(bool),
     /// Toggle whether terminal paths are clickable.
     ClickablePaths(bool),
+    /// Toggle copy-on-select (finishing a drag copies it; right-click then always pastes).
+    CopyOnSelect(bool),
     /// Set the editor-command template used to open clicked paths ("" = auto).
     EditorCommand(String),
     /// Toggle the idle-glow (AI-pane quiescence glow).
@@ -1762,6 +1764,7 @@ impl State {
             // Non-appearance settings never reach the draft.
             Setting::DefaultShell(_)
             | Setting::ClickablePaths(_)
+            | Setting::CopyOnSelect(_)
             | Setting::EditorCommand(_)
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
@@ -1882,6 +1885,7 @@ impl State {
             Setting::ShowFrame(on) => self.settings.show_frame = on,
             Setting::ShowDot(on) => self.settings.show_dot = on,
             Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
+            Setting::CopyOnSelect(on) => self.settings.copy_on_select = on,
             Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
             Setting::IdleAlert(on) => self.settings.idle_alert = on,
             Setting::IdleEffect(idx) => {
@@ -2426,7 +2430,13 @@ impl State {
     /// Returns true when that happened — the caller then skips the paste. The selection is
     /// cleared even if the clipboard write failed (the gesture consumed it either way), so a
     /// follow-up right-click always pastes.
+    ///
+    /// Only in the modal (copy-on-select OFF) mode — WT's coupling: with copy-on-select ON the
+    /// release already copied, so a modal copy would be redundant and right-click ALWAYS pastes.
     pub fn copy_selection_on_right_click(&mut self, idx: usize) -> bool {
+        if self.settings.copy_on_select {
+            return false;
+        }
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             if p.pane.selection_is_drag() {
                 p.pane.copy_selection();
@@ -2440,18 +2450,25 @@ impl State {
 
     /// Paste the clipboard into pane `idx`'s session (the widget owns the clipboard; the
     /// controller owns the transport, so we write the returned text via the manager).
+    /// PASTE-OVER: a type-over-eligible selection (single row on the prompt line, main screen)
+    /// is erased first — same clamp-safe sequence as typing — so the paste REPLACES it.
     pub fn paste_pane(&mut self, idx: usize, mgr: &SessionManager) {
         let payload = self.active_tab_mut().panes.get_mut(idx).and_then(|p| {
             let text = p.pane.paste_from_clipboard()?;
-            // Drop any active drag-selection: its highlight should clear on paste, and a
-            // lingering "live" selection could otherwise be re-copied (pasting stale text).
+            // Erase a prompt-line selection so the paste lands in its place; elsewhere just
+            // drop the highlight (it must clear on paste, and a lingering "live" selection
+            // could otherwise be re-copied, pasting stale text).
+            let erase = p.pane.type_over_selection();
             p.pane.selection_clear();
             // Snap the viewport to the live edge so the caret lands at the end of the pasted
             // text (visible), regardless of where the pane was scrolled when pasting.
             p.pane.scroll_to_bottom();
-            Some((p.uid.clone(), text))
+            Some((p.uid.clone(), erase, text))
         });
-        if let Some((uid, text)) = payload {
+        if let Some((uid, erase, text)) = payload {
+            if let Some(erase) = erase {
+                mgr.write(&uid, &String::from_utf8_lossy(&erase));
+            }
             mgr.write(&uid, &text);
             self.dirty = true;
         }
@@ -2493,9 +2510,16 @@ impl State {
     /// "Copied …" toast) and keeps its highlight; a stationary click clears the zero-size
     /// selection so it doesn't linger or block the next click.
     pub fn pane_selection_end(&mut self, idx: usize) {
+        let copy_on_select = self.settings.copy_on_select;
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             if p.pane.selection_is_drag() {
-                p.pane.copy_selection();
+                // Copy-on-select is a PREF (off by default, like Windows Terminal): when off,
+                // a finished drag only highlights — the clipboard keeps whatever you copied
+                // elsewhere, so "select the target, paste over it" works. Copy via right-click
+                // (modal), Ctrl+Shift+C, or the context menu instead.
+                if copy_on_select {
+                    p.pane.copy_selection();
+                }
             } else {
                 p.pane.selection_clear();
             }

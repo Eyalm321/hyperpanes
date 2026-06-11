@@ -194,6 +194,12 @@ pub struct Settings {
     /// — when on, an available update surfaces a hint in Preferences → General; it never
     /// downloads or installs without consent, and an offline check is silently skipped.
     pub auto_update: bool,
+    /// Whether finishing a drag-selection copies it to the clipboard immediately (the PuTTY/
+    /// X11-style behavior). OFF by default, matching Windows Terminal: selecting only
+    /// highlights, so an external copy survives "select the target, paste over it", and the
+    /// body right-click is modal (copy the selection if one exists, else paste). When ON,
+    /// right-click always pastes — the selection was already copied on release.
+    pub copy_on_select: bool,
 }
 
 impl Default for Settings {
@@ -214,6 +220,7 @@ impl Default for Settings {
             idle_effect: String::from("firefly"),
             idle_alert_seconds: DEFAULT_IDLE_SECONDS,
             auto_update: false,
+            copy_on_select: false,
         }
     }
 }
@@ -343,6 +350,7 @@ mod tests {
             idle_effect: "pulse".into(),
             idle_alert_seconds: 120,
             auto_update: true,
+            copy_on_select: true,
         }
     }
 

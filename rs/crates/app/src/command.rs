@@ -83,6 +83,9 @@ pub enum Command {
     SearchFocused,
     /// Copy pane `0`'s current selection to the clipboard.
     CopyPane(usize),
+    /// Copy the focused pane's selection (the Ctrl+Shift+C keybinding) — the explicit copy
+    /// gesture now that copy-on-select defaults off. No-op without a selection.
+    CopyFocused,
     /// Paste the clipboard into pane `0`'s session.
     PastePane(usize),
     /// Paste the clipboard into the focused pane's session (the Ctrl+V keybinding). Reads
@@ -314,6 +317,10 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             state.open_search(f);
         }
         Command::CopyPane(i) => state.copy_pane(i),
+        Command::CopyFocused => {
+            let f = state.active_tab().focused;
+            state.copy_pane(f);
+        }
         Command::PastePane(i) => state.paste_pane(i, mgr),
         Command::PasteFocused => {
             let f = state.active_tab().focused;

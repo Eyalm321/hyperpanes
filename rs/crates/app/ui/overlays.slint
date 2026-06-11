@@ -425,6 +425,7 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> show-frame: true;
     in property <bool> show-dot: true;
     in property <bool> clickable-paths: true;
+    in property <bool> copy-on-select: false;
     in property <string> editor-command: "";
     in property <bool> prefs-confirm: false;  // showing the unsaved-changes prompt
     // ---- New Pane dialog (kind 3) ----
@@ -763,6 +764,21 @@ export component OverlayLayer inherits Rectangle {
                 options: root.shells;
                 current-label: root.shell-label;
                 selected(id) => { root.pref-action(5, id); }
+            }
+
+            // ---- copy on select (WT-coupled: off = modal right-click; on = right-click
+            //      always pastes since the release already copied) ----
+            PrefToggle {
+                label: "Copy on select";
+                on: root.copy-on-select;
+                toggled(v) => { root.pref-action(21, v ? 1 : 0); }
+            }
+            Text {
+                text: root.copy-on-select
+                    ? "Finishing a selection copies it · right-click always pastes"
+                    : "Selecting only highlights · right-click copies a selection, else pastes";
+                color: Theme.faint;
+                font-size: 10px;
             }
 
             // ---- clickable file paths (click opens · Ctrl+click copies) ----

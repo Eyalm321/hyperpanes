@@ -716,6 +716,7 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     app.set_show_dot(state.settings.show_dot);
     app.set_prefs_confirm(state.prefs_confirm);
     app.set_pref_clickable(state.settings.clickable_paths);
+    app.set_pref_copy_on_select(state.settings.copy_on_select);
     app.set_pref_editor(state.settings.editor_command.clone().into());
 
     // sidebar / projects: the rail gating + flyout state + rows
