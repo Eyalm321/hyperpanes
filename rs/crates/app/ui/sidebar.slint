@@ -33,18 +33,20 @@ component PlusGlyph inherits Rectangle {
     Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.7px; width: root.bar; border-radius: 1px; background: ink; }
 }
 
-// Material "add panel" icon (window frame + inner panel + plus) — the rail's new-pane
-// button. Filled Path straight from the Material SVG (viewBox 0 -960 960 960).
-component NewPaneGlyph inherits Path {
+// "Add panel" icon (window frame + inner panel + plus, after Material's add-to-panel) —
+// the rail's new-pane button. Composed from Rectangles: Slint's Path garbled the raw
+// Material path data (relative q/v commands + negative viewbox), so drawn geometry it is.
+component NewPaneGlyph inherits Rectangle {
     in property <color> ink;
     width: 18px;
     height: 18px;
-    viewbox-x: 0;
-    viewbox-y: -960;
-    viewbox-width: 960;
-    viewbox-height: 960;
-    fill: ink;
-    commands: "M160-240v-480 480Zm80-80v-200h360v200H240Zm-80 160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h640q33 0 56.5 23.5T880-720v240h-80v-240H160v480h360v80H160Zm500-320v-100H360v-60h360v160h-60Zm60 400v-120H600v-80h120v-120h80v120h120v80H800v120h-80Z";
+    // window frame
+    Rectangle { x: 0px; y: 1.5px; width: 14px; height: 11px; border-width: 1.6px; border-color: ink; border-radius: 2px; background: transparent; }
+    // inner panel
+    Rectangle { x: 3px; y: 6.5px; width: 7px; height: 3.5px; border-radius: 1px; background: ink; }
+    // plus, bottom-right
+    Rectangle { x: 13.2px; y: 10.5px; width: 1.6px; height: 7px; border-radius: 1px; background: ink; }
+    Rectangle { x: 10.5px; y: 13.2px; width: 7px; height: 1.6px; border-radius: 1px; background: ink; }
 }
 
 // A folder silhouette (stroked).
