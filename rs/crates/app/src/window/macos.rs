@@ -20,8 +20,10 @@
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSCursor, NSEvent, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
+use objc2_foundation::{NSPoint, NSProcessInfo};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -82,15 +84,35 @@ pub fn make_frameless(raw: isize) {
     }
 }
 
-/// Begin a system move-drag (drag-the-bar). `performWindowDragWithEvent:` with the
-/// event being dispatched right now — the Slint pointer-down that triggered this
-/// callback is still `NSApp.currentEvent`.
+/// Begin a system move-drag (drag-the-bar) via `performWindowDragWithEvent:`.
+///
+/// The anchor event is SYNTHESIZED at the live global mouse position rather than taken
+/// from `NSApp.currentEvent`: by the time the Slint callback runs, the current event's
+/// location is not reliably the press on the bar (observed live: a garbage anchor that
+/// teleported the window on drag). AppKit only reads the event's `locationInWindow` +
+/// `windowNumber` to compute the drag anchor, so a minimal synthetic left-mouse-down at
+/// the cursor anchors the drag exactly under the pointer.
 pub fn start_drag(raw: isize) {
     let Some(w) = ns_window(raw) else { return };
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    if let Some(ev) = app.currentEvent() {
-        unsafe {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    unsafe {
+        let cursor = NSEvent::mouseLocation(); // cocoa global (bottom-left) points
+        let frame = w.frame();
+        let loc_in_win = NSPoint::new(cursor.x - frame.origin.x, cursor.y - frame.origin.y);
+        let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            NSEventType::LeftMouseDown,
+            loc_in_win,
+            NSEventModifierFlags::empty(),
+            NSProcessInfo::processInfo().systemUptime(),
+            w.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        );
+        if let Some(ev) = ev {
             w.performWindowDragWithEvent(&ev);
         }
     }
