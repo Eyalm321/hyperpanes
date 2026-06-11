@@ -266,6 +266,13 @@ pub struct Keymap {
 }
 
 impl Keymap {
+    /// An override-free keymap (pure compiled-in defaults) for tests — `load()` would
+    /// read the developer's real `native-keybindings.json` and make tests env-dependent.
+    #[cfg(test)]
+    pub(crate) fn default_for_tests() -> Self {
+        Keymap { overrides: BTreeMap::new() }
+    }
+
     /// Load the persisted overrides (an empty map on a missing/corrupt file). Unknown ids are
     /// dropped and un-parseable chords fall back to the default, so an older blob never breaks
     /// the editor. A `null` value is an explicit unbind.

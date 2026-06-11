@@ -349,7 +349,15 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         }
         // ---- Wave-2 overlays ----
         Command::CloseOverlay => state.close_overlay(),
-        Command::PaletteOpen => state.open_palette(),
+        // Ctrl+Shift+P TOGGLES (the binding id is `palette.toggle`, matching the renderer):
+        // pressed with the palette already up it dismisses instead of resetting the query.
+        Command::PaletteOpen => {
+            if state.overlay == crate::state::Overlay::Palette {
+                state.close_overlay();
+            } else {
+                state.open_palette();
+            }
+        }
         Command::PaletteQuery(q) => state.palette_set_query(&q),
         Command::PaletteNav(d) => state.palette_nav(d),
         Command::PaletteSelect(i) => state.palette_select(i),

@@ -32,7 +32,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::command::{dispatch, set_layout_from_id, Command, Effect};
 use crate::drag::{self, DragKind, DragState, Hover};
 use crate::paneview::{self, Ui};
-use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, State};
+use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, Overlay, State};
 use crate::{theme, window, AppWindow, KeyMsg};
 
 /// Fast (active) pump cadence in ms — the responsive default whenever there's work to do.
@@ -919,6 +919,22 @@ impl App {
                 self.run_command(win, cmd);
             }
             return;
+        }
+        // While the command palette is open the keyboard drives it app-side: every key
+        // maps to a palette command (query edit / nav / activate / dismiss) and the rest
+        // are swallowed so nothing leaks to the shell under the overlay. The terminal
+        // FocusScope keeps focus throughout — see `palette_key` for why the query is a
+        // controller-owned mirror instead of a focused TextInput.
+        {
+            let st = win.state.borrow();
+            if st.overlay == Overlay::Palette {
+                let cmd = crate::palette_key(&st.palette_query, &msg);
+                drop(st); // RefCell rule: no live borrow across dispatch
+                if let Some(cmd) = cmd {
+                    self.run_command(win, cmd);
+                }
+                return;
+            }
         }
         // Other modifier chords (Alt+… focus, bare F11) — run + swallow.
         let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
@@ -2074,7 +2090,6 @@ impl App {
                 }
             });
         }
-        cb_i32!(on_palette_nav, Command::PaletteNav);
         cb_usize!(on_palette_pick, Command::PaletteSelect);
         // `open-project` is overloaded by the sidebar worktree tree: a normal index opens
         // the project in a pane, while an out-of-range encoded index means "remove worktree
@@ -2185,15 +2200,6 @@ impl App {
                     env: None,
                 };
                 app.run_command(&w, Command::SubmitNewPane(opts));
-            });
-        }
-        {
-            let app = app.clone();
-            let id = win.id;
-            win.app.on_palette_query(move |q| {
-                if let Some(w) = app.window_by_id(id) {
-                    app.run_command(&w, Command::PaletteQuery(q.to_string()));
-                }
             });
         }
         {

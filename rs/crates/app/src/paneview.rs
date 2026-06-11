@@ -536,6 +536,9 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .collect();
     sync_model(&ui.palette, palette);
     app.set_palette_sel(state.palette_sel as i32);
+    // The query display is a controller-owned mirror (the key router edits
+    // state.palette_query while the palette is open — no focused TextInput).
+    app.set_palette_query(state.palette_query.as_str().into());
 
     // Appearance controls reflect the DRAFT while Preferences is open (so edits preview
     // without touching the live panes), else the committed settings.
