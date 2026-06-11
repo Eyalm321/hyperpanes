@@ -191,6 +191,9 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
                         t.raw = raw;
                         t.pos = (position.x as i32, position.y as i32);
                         t.inside = true;
+                        if t.left_down {
+                            crate::dbg_log(&format!("ptr-move-held pos={:?}", t.pos));
+                        }
                     }
                     WindowEvent::CursorLeft { .. } => {
                         if t.raw == raw {
@@ -232,6 +235,7 @@ pub fn make_frameless(raw: isize) {
 /// Must be called from a pointer-down gesture (both backends key the move off the
 /// active button grab) — which is exactly how the top bar wires it.
 pub fn start_drag(raw: isize) {
+    crate::dbg_log(&format!("start_drag raw={raw}"));
     with_window(raw, |w| {
         if let Err(e) = w.drag_window() {
             crate::dbg_log(&format!("start_drag: drag_window failed: {e}"));
