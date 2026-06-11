@@ -271,8 +271,10 @@ mod tests {
         let s = Settings::default();
         assert!(s.show_frame && s.show_dot);
         assert_eq!(s.font_px, DEFAULT_FONT_PX);
-        // font_path resolves to an installed font path string.
-        assert!(s.font_path().ends_with(".ttf"));
+        // font_path resolves to an installed font path string (.ttc covers a
+        // possible Menlo.ttc default on macOS).
+        let p = s.font_path();
+        assert!(p.ends_with(".ttf") || p.ends_with(".ttc"));
     }
 
     #[test]
