@@ -157,6 +157,19 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
             "hwnd_of: realized raw={raw} wayland={}",
             WAYLAND.get().copied().unwrap_or(false)
         ));
+        // Flip the Slint WindowItem's `no-frame` ON at realize time. A bare winit
+        // `set_decorations(false)` (in `make_frameless`) is NOT durable here: the Slint
+        // adapter re-asserts `set_decorations(!no_frame)` on every window-property sync
+        // (title change etc.), which silently re-grew the title bar. Owning the property
+        // makes Slint itself maintain framelessness. (`app.slint` can't set it: the
+        // Windows build keeps decorations at the winit level and strips WS_CAPTION in
+        // its own subclass instead, so `no-frame: true` there would change its chrome.)
+        {
+            use slint::private_unstable_api::re_exports::{WindowInner, WindowItem};
+            if let Some(item) = WindowInner::from_pub(win).window_item() {
+                WindowItem::FIELD_OFFSETS.no_frame().apply_pin(item.as_pin_ref()).set(true);
+            }
+        }
         // Feed the pointer tracker (the Wayland drag fallback) from this window's
         // event stream. Positions are physical px, window-relative.
         win.on_winit_window_event(move |_, ev| {
