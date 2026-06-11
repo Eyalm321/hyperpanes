@@ -1067,15 +1067,19 @@ impl App {
             .get(pane_idx)
             .map(|p| p.uid.clone());
         if let Some(uid) = uid {
+            // No global pointer on this platform → drags can't be tracked; stay a click.
+            let Some((pos, down)) = drag::global_pointer().poll() else {
+                return;
+            };
             crate::dbg_log(&format!("pane-grab win={} idx={} uid={}", win.id, pane_idx, uid));
             let mut ds = DragState::new(
                 win.id,
                 DragKind::Pane { uid },
-                drag::cursor_pos(),
+                (pos.x, pos.y),
             );
             // The button is down right now (this fires on pointer-down); arm immediately so
             // a click faster than one tick still resolves its release.
-            ds.armed = drag::left_button_down();
+            ds.armed = down;
             *self.drag.borrow_mut() = Some(ds);
             // Snap the pump to the fast cadence so the drag tracks immediately even when the
             // pane was idle (the adaptive idle pump otherwise lags the grab by up to a tick).
@@ -1088,15 +1092,19 @@ impl App {
         if tab_idx >= win.state.borrow().tabs.len() {
             return;
         }
+        // No global pointer on this platform → drags can't be tracked; stay a click.
+        let Some((pos, down)) = drag::global_pointer().poll() else {
+            return;
+        };
         crate::dbg_log(&format!("tab-grab win={} idx={}", win.id, tab_idx));
         // Select the grabbed tab so it's visually distinct (active chip) while dragging.
         win.state.borrow_mut().switch_tab(tab_idx);
         let mut ds = DragState::new(
             win.id,
             DragKind::Tab { index: tab_idx },
-            drag::cursor_pos(),
+            (pos.x, pos.y),
         );
-        ds.armed = drag::left_button_down();
+        ds.armed = down;
         *self.drag.borrow_mut() = Some(ds);
         self.wake();
     }
@@ -1118,8 +1126,12 @@ impl App {
             return;
         }
 
-        let cursor = drag::cursor_pos();
-        let down = drag::left_button_down();
+        let Some((pos, down)) = drag::global_pointer().poll() else {
+            // Pointer state vanished (platform stub) — abandon the gesture quietly.
+            *self.drag.borrow_mut() = None;
+            return;
+        };
+        let cursor = (pos.x, pos.y);
 
         // Update arm/threshold state; read out what the rest of the tick needs.
         let (source_id, is_pane, active, released) = {
@@ -1335,7 +1347,10 @@ impl App {
     /// `state` borrow is dropped *before* `run_command` takes `borrow_mut()`. Never hold a
     /// `state.borrow()` across the reopen.
     fn reopen_context_at_cursor(self: &Rc<Self>, win: &Rc<Window>) {
-        let cursor = drag::cursor_pos();
+        let Some((pos, _down)) = drag::global_pointer().poll() else {
+            return; // no global cursor on this platform → no chain target
+        };
+        let cursor = (pos.x, pos.y);
         let raw = win.hwnd.get();
 
         // Resolve the chained menu to a single Command while the shared borrow is held ONLY to

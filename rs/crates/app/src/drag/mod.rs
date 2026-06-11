@@ -108,154 +108,39 @@ pub fn edge_band(pos: f32, size: f32, vertical: bool) -> (usize, u8) {
     }
 }
 
-// ---- the Win32 ghost + global-cursor helpers (lifted from spike-tearoff) ----
+// ---- the per-platform pointer pump + ghost (the GlobalPointer seam) ----
 
-#[cfg(windows)]
-pub use imp::*;
-
-#[cfg(windows)]
-mod imp {
-    use core::ffi::c_void;
-    use windows::core::w;
-    use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-    use windows::Win32::UI::WindowsAndMessaging::*;
-
-    fn hwnd(raw: isize) -> HWND {
-        HWND(raw as *mut c_void)
-    }
-
-    /// The ghost never handles input (`WS_EX_TRANSPARENT`); forward everything.
-    /// `DefWindowProcW` is generic in windows-0.58 so it can't be a raw fn pointer —
-    /// this thin shim gives a concrete `extern "system"` proc.
-    unsafe extern "system" fn ghost_wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-        DefWindowProcW(h, msg, wp, lp)
-    }
-
-    /// Screen-global cursor position (physical px). Slint exposes no equivalent.
-    pub fn cursor_pos() -> (i32, i32) {
-        let mut p = POINT::default();
-        unsafe {
-            let _ = GetCursorPos(&mut p);
-        }
-        (p.x, p.y)
-    }
-
-    /// Is the primary (left) mouse button currently held?
-    pub fn left_button_down() -> bool {
-        unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
-    }
-
-    /// A window's screen rect (physical px), `(left, top, right, bottom)`. `0`-rect when
-    /// the HWND isn't realized yet.
-    pub fn window_rect(raw: isize) -> (i32, i32, i32, i32) {
-        let mut r = RECT::default();
-        if raw != 0 {
-            unsafe {
-                let _ = GetWindowRect(hwnd(raw), &mut r);
-            }
-        }
-        (r.left, r.top, r.right, r.bottom)
-    }
-
-    /// Transparent, click-through, always-on-top window that chases the cursor — the
-    /// drag "ghost". Kept entirely out of Slint's render path.
-    pub struct Ghost {
-        hwnd: HWND,
-        w: i32,
-        h: i32,
-    }
-
-    impl Ghost {
-        pub fn new() -> Ghost {
-            let w = 200;
-            let h = 44;
-            unsafe {
-                let hmod = GetModuleHandleW(None).unwrap();
-                let hinst = HINSTANCE(hmod.0);
-                let class = w!("HyperpanesTearoffGhost");
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(ghost_wndproc),
-                    hInstance: hinst,
-                    lpszClassName: class,
-                    // brand green (#5ee08f) as 0x00BBGGRR.
-                    hbrBackground: CreateSolidBrush(COLORREF(0x008f_e05e)),
-                    ..Default::default()
-                };
-                RegisterClassW(&wc);
-
-                let hwnd = CreateWindowExW(
-                    WS_EX_LAYERED
-                        | WS_EX_TRANSPARENT
-                        | WS_EX_TOPMOST
-                        | WS_EX_TOOLWINDOW
-                        | WS_EX_NOACTIVATE,
-                    class,
-                    w!("ghost"),
-                    WS_POPUP,
-                    0,
-                    0,
-                    w,
-                    h,
-                    None,
-                    None,
-                    Some(hinst),
-                    None,
-                )
-                .unwrap();
-
-                // ~78% opaque so it reads as a translucent overlay.
-                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 200, LWA_ALPHA);
-                Ghost { hwnd, w, h }
-            }
-        }
-
-        /// Move + show, offset a little below/right of the cursor hotspot.
-        pub fn follow(&self, p: (i32, i32)) {
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    Some(HWND_TOPMOST),
-                    p.0 + 14,
-                    p.1 + 16,
-                    self.w,
-                    self.h,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
-            }
-        }
-
-        pub fn hide(&self) {
-            unsafe {
-                let _ = ShowWindow(self.hwnd, SW_HIDE);
-            }
-        }
-    }
+/// The global-pointer seam the drag pump runs on. The whole tear-off gesture is driven
+/// from OS-global pointer state polled every tick (Slint pointer delivery is per-window
+/// and loses the grab the instant the cursor crosses into another window).
+///
+/// Implementations: Windows = `GetCursorPos`/`GetAsyncKeyState` (`windows.rs`). The
+/// Wave-1 platform tracks own `linux.rs`/`macos.rs`; Wayland cannot poll a global
+/// cursor, so its implementation returns `supports_cross_window() == false` and the
+/// app falls back to in-window drags only.
+pub trait GlobalPointer {
+    /// Screen-global cursor position (physical px) + whether the primary (left) button
+    /// is currently held. `None` when the platform cannot read global pointer state —
+    /// the drag pump then never engages.
+    fn poll(&self) -> Option<(slint::PhysicalPosition, bool)>;
+    /// Whether the pointer can be tracked across/outside this app's own windows
+    /// (drives tear-off-to-new-window and cross-window stitch/dock).
+    fn supports_cross_window(&self) -> bool;
 }
 
-// Non-Windows stub so the crate still type-checks off-Windows (it only ships on Windows).
-#[cfg(not(windows))]
-pub use stub::*;
-
-#[cfg(not(windows))]
-mod stub {
-    pub fn cursor_pos() -> (i32, i32) {
-        (0, 0)
-    }
-    pub fn left_button_down() -> bool {
-        false
-    }
-    pub fn window_rect(_raw: isize) -> (i32, i32, i32, i32) {
-        (0, 0, 0, 0)
-    }
-    pub struct Ghost;
-    impl Ghost {
-        pub fn new() -> Ghost {
-            Ghost
-        }
-        pub fn follow(&self, _p: (i32, i32)) {}
-        pub fn hide(&self) {}
-    }
+/// The platform's global pointer (a static zero-sized provider).
+pub fn global_pointer() -> &'static dyn GlobalPointer {
+    &platform::PlatformPointer
 }
+
+#[cfg(windows)]
+#[path = "windows.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
+#[cfg(not(any(windows, target_os = "macos")))]
+#[path = "linux.rs"]
+mod platform;
+
+pub use platform::{window_rect, Ghost};
