@@ -1,0 +1,21 @@
+{
+  "name": "claude-dev",
+  "groups": [
+    {
+      "title": "claude-dev",
+      "layout": "main-stack",
+      "panes": [
+        {
+          "label": "claude",
+          "color": "#d77757",
+          "command": "claude",
+          "meta": { "agent": "claude" }
+        },
+        { "label": "shell", "color": "#3b82f6" },
+        { "label": "git", "color": "#a855f7", "command": "git log --oneline --graph -12 && git status -sb" },
+        { "label": "monitor", "color": "#30a46c", "command": "btop" }
+      ],
+      "mainFraction": 0.6
+    }
+  ]
+}
