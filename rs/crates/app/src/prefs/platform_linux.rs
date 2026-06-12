@@ -18,6 +18,60 @@ pub const SHELL_OPTIONS: [(&str, &str); 4] = [
 /// falls through to them when this path is missing too.
 pub const FALLBACK_FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
 
+/// The fixed font-family choices offered in the picker (label + value). Unlike Windows,
+/// distros scatter fonts across per-family subdirectories with no stable file names, so
+/// the system entries are fontconfig **family names** (resolved via [`resolve_family`])
+/// rather than file names; the two bundled OFL fonts keep their file-name values. The
+/// families listed cover the common distro spreads (Noto = Fedora/openSUSE default,
+/// Liberation = RHEL-family, DejaVu = Debian/Ubuntu default, Source Code Pro = popular
+/// install); a missing family simply falls back when loaded.
+pub const FONT_OPTIONS: [(&str, &str); 7] = [
+    ("System default (monospace)", ""),
+    ("Noto Sans Mono", "Noto Sans Mono"),
+    ("DejaVu Sans Mono", "DejaVu Sans Mono"),
+    ("Liberation Mono", "Liberation Mono"),
+    ("Source Code Pro", "Source Code Pro"),
+    // Fira Code + JetBrains Mono are baked in (see BUNDLED_FONTS), so they always render.
+    ("Fira Code", "FiraCode-Regular.ttf"),
+    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
+];
+
+/// The path the empty "System default" value resolves to: whatever fontconfig aliases
+/// `monospace` to (the distro/user default — the same font every other terminal shows),
+/// else the bundled JetBrains Mono, else the conventional DejaVu path.
+pub fn default_font() -> String {
+    if let Some(p) = fc_query("fc-match", "monospace") {
+        return p;
+    }
+    super::resolve_font("JetBrainsMono-Regular.ttf").unwrap_or_else(|| FALLBACK_FONT.to_string())
+}
+
+/// Resolve a fontconfig family name to an installed font file. `fc-list` (unlike
+/// `fc-match`) returns only *actually installed* faces of the family — an uninstalled
+/// pick must return `None` so the caller falls back, not silently substitute.
+pub fn resolve_family(family: &str) -> Option<String> {
+    fc_query("fc-list", family)
+}
+
+/// Shared fontconfig shell-out: the file of the best face for `pattern`. For `fc-list`
+/// the Regular face is preferred over the (alphabetically first) Bold/Italic siblings.
+fn fc_query(cmd: &str, pattern: &str) -> Option<String> {
+    let out = std::process::Command::new(cmd)
+        .args(["--format", "%{file}\\n", pattern])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let files: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let pick = files
+        .iter()
+        .find(|f| f.contains("Regular") || f.contains("regular"))
+        .or_else(|| files.first())?;
+    std::path::Path::new(pick).exists().then(|| pick.to_string())
+}
+
 /// The shell to prefer when the user picked "System": the login shell from `$SHELL` when
 /// it's set and actually present on disk, else `None` to let core pick the OS default.
 pub fn preferred_shell() -> Option<String> {
@@ -87,13 +141,29 @@ mod tests {
     }
 
     #[test]
-    fn default_font_resolves_to_a_real_file_where_dejavu_is_installed() {
-        // On the distros our gates run (WSL Ubuntu, CI ubuntu-latest) DejaVu is present,
-        // so the empty "System default" value must resolve to an actually-existing file.
-        // Skipped quietly on a distro without it (the bundled fonts cover those at runtime).
-        if std::path::Path::new(FALLBACK_FONT).exists() {
+    fn default_font_resolves_to_a_real_file_where_fontconfig_is_installed() {
+        // Any desktop Linux (and CI ubuntu-latest) has fontconfig, so the empty "System
+        // default" value must resolve via `fc-match monospace` to an actually-existing
+        // file. Skipped quietly without fontconfig (the bundled fonts cover that at runtime).
+        if std::process::Command::new("fc-match").arg("--version").output().is_ok() {
             let p = super::super::resolve_or_default("");
             assert!(std::path::Path::new(&p).exists(), "unresolved default font: {p}");
+        }
+    }
+
+    #[test]
+    fn resolve_family_finds_installed_families_only() {
+        if std::process::Command::new("fc-list").arg("--version").output().is_err() {
+            return; // no fontconfig on this box — runtime falls back to bundled fonts
+        }
+        // A family no distro ships must NOT resolve (fc-list, unlike fc-match, never
+        // substitutes) — that silent substitution was the original "every pick looks
+        // the same" bug.
+        assert_eq!(resolve_family("No Such Font Family Xyzzy"), None);
+        // DejaVu is present on every distro our gates run; when it is, the family
+        // resolves to a real file even though it lives in a distro-specific subdir.
+        if let Some(p) = resolve_family("DejaVu Sans Mono") {
+            assert!(std::path::Path::new(&p).exists());
         }
     }
 }

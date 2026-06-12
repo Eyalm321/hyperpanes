@@ -14,9 +14,11 @@ use hyperpanes_core::persistence::paths;
 use serde::{Deserialize, Serialize};
 
 // The per-platform `PlatformDefaults` provider: the shell-picker list (`SHELL_OPTIONS`),
-// the preferred-system-shell probe (`preferred_shell`), the font directories
-// (`font_dirs`), and the always-present fallback font path (`FALLBACK_FONT`). One
-// cfg-selected module per OS; the surface is frozen in `docs/ports-seams.md`.
+// the preferred-system-shell probe (`preferred_shell`), the font picker list
+// (`FONT_OPTIONS`), the font directories (`font_dirs`), the default-font and
+// family-name resolvers (`default_font` / `resolve_family`), and the always-present
+// fallback font path (`FALLBACK_FONT`). One cfg-selected module per OS; the surface is
+// frozen in `docs/ports-seams.md`.
 #[cfg(windows)]
 #[path = "platform_windows.rs"]
 mod platform;
@@ -27,26 +29,15 @@ mod platform;
 #[path = "platform_linux.rs"]
 mod platform;
 
-pub use platform::{font_dirs, SHELL_OPTIONS};
-use platform::FALLBACK_FONT;
+pub use platform::{font_dirs, FONT_OPTIONS, SHELL_OPTIONS};
 
-/// The fixed font-family choices offered in the picker — a 1:1 mirror of the renderer's
-/// `FONT_OPTIONS` (label + value): the empty value is the built-in default; every other
-/// value is the font-file name resolved against the system/per-user font folders (see
-/// [`font_dirs`]). Shown as a fixed list (not filtered by what's installed) so it matches
-/// the Electron dropdown exactly; a missing font simply falls back when loaded. A "Custom…"
-/// entry (handled in the UI) lets the user type any font-file path. Selection is persisted
-/// by value.
-pub const FONT_OPTIONS: [(&str, &str); 7] = [
-    ("System default (Consolas)", ""),
-    ("Cascadia Code", "CascadiaCode.ttf"),
-    ("Cascadia Mono", "CascadiaMono.ttf"),
-    ("Consolas", "consola.ttf"),
-    ("Courier New", "cour.ttf"),
-    // Fira Code + JetBrains Mono are baked in (see BUNDLED_FONTS), so they always render.
-    ("Fira Code", "FiraCode-Regular.ttf"),
-    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
-];
+// The fixed font-family choices offered in the picker (`FONT_OPTIONS`) live in the
+// platform provider now: each OS offers fonts that actually exist there (the old shared
+// list was Windows file names, which never resolved on Linux/macOS — every pick silently
+// fell back to the same bundled font). The shape is shared: (label, value) pairs, the
+// empty value = the platform default, the rest resolved by [`resolve_or_default`]
+// (file-name join, then a platform family lookup). A "Custom…" entry (handled in the UI)
+// lets the user type any font-file path. Selection is persisted by value.
 
 /// Whether `font` is a user-typed custom value (non-empty and not one of [`FONT_OPTIONS`]).
 pub fn is_custom_font(font: &str) -> bool {
@@ -220,23 +211,24 @@ impl Settings {
     }
 }
 
-/// Resolve a saved font value to an actually-loadable `.ttf`/`.ttc` path. Handles the three
-/// value shapes: empty (the default → Consolas/fallback), a bare font-file name from
-/// [`FONT_OPTIONS`] (looked up in the font folders), or a custom absolute path. Anything that
-/// can't be found falls back to the always-present Consolas, so loading never fails. Shared by
-/// the live settings and the in-dialog appearance draft so both highlight the same font.
+/// Resolve a saved font value to an actually-loadable font path. Handles the value shapes:
+/// empty (→ the platform default via `default_font`), a [`FONT_OPTIONS`] value — a font-file
+/// name looked up in the font folders, or (Linux) a fontconfig family name — or a custom
+/// absolute path. Anything that can't be found falls back to the platform default, so
+/// loading never fails. Shared by the live settings and the in-dialog appearance draft so
+/// both highlight the same font.
 pub fn resolve_or_default(font: &str) -> String {
     if font.is_empty() {
-        return resolve_font("consola.ttf").unwrap_or_else(|| FALLBACK_FONT.to_string());
+        return platform::default_font();
     }
     // A custom absolute path (contains a separator) is used verbatim when it exists.
     if (font.contains('/') || font.contains('\\')) && std::path::Path::new(font).exists() {
         return font.replace('\\', "/");
     }
-    // Otherwise treat it as a font-file name and look it up in the font folders.
+    // Otherwise a font-file name in the font folders, then a platform family lookup.
     resolve_font(font)
-        .or_else(|| resolve_font("consola.ttf"))
-        .unwrap_or_else(|| FALLBACK_FONT.to_string())
+        .or_else(|| platform::resolve_family(font))
+        .unwrap_or_else(platform::default_font)
 }
 
 /// Load the persisted settings (defaults on a missing/corrupt file).
@@ -272,9 +264,9 @@ mod tests {
         assert!(s.show_frame && s.show_dot);
         assert_eq!(s.font_px, DEFAULT_FONT_PX);
         // font_path resolves to an installed font path string (.ttc covers a
-        // possible Menlo.ttc default on macOS).
+        // possible Menlo.ttc default on macOS, .otf an OpenType fc-match on Linux).
         let p = s.font_path();
-        assert!(p.ends_with(".ttf") || p.ends_with(".ttc"));
+        assert!(p.ends_with(".ttf") || p.ends_with(".ttc") || p.ends_with(".otf"));
     }
 
     #[test]
@@ -287,19 +279,24 @@ mod tests {
     #[test]
     fn font_options_present_and_resolve() {
         // The fixed list mirrors the renderer (System default first) and every value
-        // resolves to a loadable .ttf/.ttc (missing fonts fall back to Consolas).
+        // resolves to a loadable font file (missing fonts fall back to the platform
+        // default). `.otf` joins the accepted set for Linux families that ship OpenType
+        // (e.g. Source Code Pro on Fedora).
         assert_eq!(FONT_OPTIONS[0].1, "");
         assert!(FONT_OPTIONS.len() >= 7);
         for (_, value) in FONT_OPTIONS {
             let p = resolve_or_default(value);
-            assert!(p.ends_with(".ttf") || p.ends_with(".ttc"), "unresolved: {value} -> {p}");
+            assert!(
+                p.ends_with(".ttf") || p.ends_with(".ttc") || p.ends_with(".otf"),
+                "unresolved: {value} -> {p}"
+            );
         }
     }
 
     #[test]
     fn custom_font_detection() {
         assert!(!is_custom_font(""));
-        assert!(!is_custom_font("consola.ttf")); // a preset value
+        assert!(!is_custom_font(FONT_OPTIONS[1].1)); // a preset value
         assert!(is_custom_font("C:/Fonts/MyFont.ttf"));
     }
 

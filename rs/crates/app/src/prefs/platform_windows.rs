@@ -16,6 +16,33 @@ pub const SHELL_OPTIONS: [(&str, &str); 4] = [
 /// The fallback font path used when nothing else resolves (always present on Windows).
 pub const FALLBACK_FONT: &str = "C:/Windows/Fonts/consola.ttf";
 
+/// The fixed font-family choices offered in the picker (label + value) — the Windows
+/// mirror of the renderer's `FONT_OPTIONS`. The empty value is the platform default
+/// (Consolas); every other value is a font-file name resolved against [`font_dirs`].
+/// Shown as a fixed list (not filtered by what's installed); a missing font simply
+/// falls back when loaded.
+pub const FONT_OPTIONS: [(&str, &str); 7] = [
+    ("System default (Consolas)", ""),
+    ("Cascadia Code", "CascadiaCode.ttf"),
+    ("Cascadia Mono", "CascadiaMono.ttf"),
+    ("Consolas", "consola.ttf"),
+    ("Courier New", "cour.ttf"),
+    // Fira Code + JetBrains Mono are baked in (see BUNDLED_FONTS), so they always render.
+    ("Fira Code", "FiraCode-Regular.ttf"),
+    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
+];
+
+/// The path the empty "System default" value resolves to: Consolas (always installed).
+pub fn default_font() -> String {
+    super::resolve_font("consola.ttf").unwrap_or_else(|| FALLBACK_FONT.to_string())
+}
+
+/// Family-name resolution beyond the file-name join — not needed on Windows, where the
+/// picker values are real file names under `C:/Windows/Fonts`.
+pub fn resolve_family(_family: &str) -> Option<String> {
+    None
+}
+
 /// The shell to prefer when the user picked "System" (empty token): **pwsh** (PowerShell 7)
 /// when it's available, else `None` to let core pick the OS default. Mirrors the renderer's
 /// "use pwsh if installed" default.

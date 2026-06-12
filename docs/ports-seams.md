@@ -68,10 +68,16 @@ fallback in the platform file; the tear-off/new-window paths must not be reachab
 
 ```rust
 pub const SHELL_OPTIONS: [(&str, &str); N];       // picker label + spawn token ("" = system)
+pub const FONT_OPTIONS: [(&str, &str); N];        // font picker label + value ("" = default;
+                                                  // else a font-file name, or on Linux a
+                                                  // fontconfig family name)
 pub const FALLBACK_FONT: &str;                    // always-present monospace font path
 pub fn preferred_shell() -> Option<String>;       // "System" resolution (None = let core pick)
 pub fn font_dirs() -> Vec<std::path::PathBuf>;    // candidate font folders, must INCLUDE
                                                   // super::bundled_font_dir() last
+pub fn default_font() -> String;                  // what the "" value resolves to
+pub fn resolve_family(f: &str) -> Option<String>; // family-name → file (fontconfig on Linux;
+                                                  // None where file names suffice)
 ```
 
 `N` may differ per platform (each file compiles alone). Everything else in `prefs/`

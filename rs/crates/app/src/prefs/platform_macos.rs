@@ -18,6 +18,32 @@ pub const SHELL_OPTIONS: [(&str, &str); 4] = [
 /// (index 0) if a user picks one as a custom font.
 pub const FALLBACK_FONT: &str = "/System/Library/Fonts/Monaco.ttf";
 
+/// The fixed font-family choices offered in the picker (label + value). macOS keeps
+/// flat font directories with stable file names, so values are file names resolved
+/// against [`font_dirs`] like Windows (no fontconfig here). Menlo ships as a `.ttc`
+/// collection — swash loads index 0 (the Regular face).
+pub const FONT_OPTIONS: [(&str, &str); 7] = [
+    ("System default (Monaco)", ""),
+    ("Menlo", "Menlo.ttc"),
+    ("Monaco", "Monaco.ttf"),
+    ("SF Mono", "SFNSMono.ttf"),
+    ("Courier New", "Courier New.ttf"),
+    // Fira Code + JetBrains Mono are baked in (see BUNDLED_FONTS), so they always render.
+    ("Fira Code", "FiraCode-Regular.ttf"),
+    ("JetBrains Mono", "JetBrainsMono-Regular.ttf"),
+];
+
+/// The path the empty "System default" value resolves to: Monaco (always installed).
+pub fn default_font() -> String {
+    super::resolve_font("Monaco.ttf").unwrap_or_else(|| FALLBACK_FONT.to_string())
+}
+
+/// Family-name resolution beyond the file-name join — not needed on macOS, where the
+/// picker values are real file names under the system font libraries.
+pub fn resolve_family(_family: &str) -> Option<String> {
+    None
+}
+
 /// The shell to prefer when the user picked "System": the login shell from `$SHELL` when
 /// it's set and present, else `/bin/zsh` — the macOS default login shell, always present.
 pub fn preferred_shell() -> Option<String> {
@@ -39,6 +65,8 @@ pub fn font_dirs() -> Vec<std::path::PathBuf> {
     }
     dirs.push(std::path::PathBuf::from("/Library/Fonts"));
     dirs.push(std::path::PathBuf::from("/System/Library/Fonts"));
+    // Where the classic cross-platform fonts (Courier New, etc.) live on modern macOS.
+    dirs.push(std::path::PathBuf::from("/System/Library/Fonts/Supplemental"));
     dirs.push(super::bundled_font_dir());
     dirs
 }

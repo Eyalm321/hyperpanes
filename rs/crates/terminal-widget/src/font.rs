@@ -8,8 +8,9 @@
 //! A single font rarely covers everything a TUI draws. When a font lacks a glyph,
 //! `charmap().map(ch)` returns 0 and swash rasterizes `.notdef` → the `□` tofu box. So,
 //! per character, we walk a chain and rasterize from the **first** font that actually maps
-//! it: primary → bundled JetBrains Mono (broad coverage) → Segoe UI Symbol (box-drawing,
-//! powerline, misc symbols) → Segoe UI Emoji (monochrome here — colour is a follow-up) →
+//! it: primary → bundled JetBrains Mono (broad coverage) → the platform's symbol + emoji
+//! fonts (Segoe on Windows, Apple Symbols/Emoji on macOS, Noto/Symbola via fontconfig on
+//! Linux — see [`fallback_specs`]; emoji are monochrome here, colour is a follow-up) →
 //! last-resort the primary's `.notdef` so truly-unknown codepoints still draw *something*.
 //!
 //! Cell metrics stay driven by the primary font so the grid stays monospace; an oversized
@@ -243,10 +244,18 @@ impl Font {
 
 /// A lazily-resolved fallback font source.
 enum FallbackSpec {
-    /// Bytes already in the binary (the bundled JetBrains Mono).
+    /// Bytes already in the binary (the bundled JetBrains Mono / Symbols Nerd Font).
     Embedded(&'static [u8]),
     /// A file under `%WINDIR%\Fonts` (the Segoe fonts).
+    #[cfg_attr(not(windows), allow(dead_code))]
     WindowsFont(&'static str),
+    /// An absolute path probed directly (the macOS system fonts).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    SystemPath(&'static str),
+    /// A fontconfig family name resolved via `fc-list` (Linux — font files have no
+    /// stable paths across distros, but family names are universal).
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+    Family(&'static str),
 }
 
 impl FallbackSpec {
@@ -258,22 +267,112 @@ impl FallbackSpec {
                 let path = std::path::Path::new(&dir).join("Fonts").join(name);
                 std::fs::read(path).ok()
             }
+            FallbackSpec::SystemPath(path) => std::fs::read(path).ok(),
+            FallbackSpec::Family(family) => std::fs::read(fontconfig_family_file(family)?).ok(),
         }
     }
 }
 
-/// The fallback chain after the primary, in priority order: the bundled JetBrains Mono
-/// (broad Unicode coverage), then system Segoe UI Symbol (box-drawing/misc symbols), then
-/// the bundled Symbols Nerd Font (private-use icon ranges), then Segoe UI Emoji
-/// (monochrome). Missing files are simply skipped. Order matters only for codepoints more
-/// than one font maps — the nerd PUA ranges are unique to the Symbols font.
+/// The installed font file for a fontconfig family, or `None` when the family isn't
+/// installed. Uses `fc-list` (which lists only real installs — `fc-match` substitutes the
+/// closest font and would silently pull in something wrong). Prefers the Regular face over
+/// alphabetically-earlier Bold/Italic siblings. Called once per fallback per font load (a
+/// rare event: startup + preference changes), so a shell-out is fine.
+fn fontconfig_family_file(family: &str) -> Option<String> {
+    let out = std::process::Command::new("fc-list")
+        .args(["--format", "%{file}\\n", family])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let files: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    files
+        .iter()
+        .find(|f| f.contains("Regular") || f.contains("regular"))
+        .or_else(|| files.first())
+        .map(|f| f.to_string())
+}
+
+/// The fallback chain after the primary, in priority order, per platform. Always: the
+/// bundled JetBrains Mono (broad Unicode coverage) first and the bundled Symbols Nerd Font
+/// (private-use icon ranges) in the middle; around those, the OS's own symbol + emoji
+/// fonts. Missing fonts are simply skipped. Order matters only for codepoints more than
+/// one font maps — the nerd PUA ranges are unique to the Symbols font.
+///
+/// Emoji render monochrome everywhere (the pipeline is alpha-mask only — a colour bitmap
+/// strike collapses to its alpha channel, i.e. a silhouette); colour is a follow-up.
 fn fallback_specs() -> Vec<FallbackSpec> {
-    vec![
+    #[cfg(windows)]
+    return vec![
         FallbackSpec::Embedded(JETBRAINS_MONO),
         FallbackSpec::WindowsFont("seguisym.ttf"),
         FallbackSpec::Embedded(SYMBOLS_NERD),
         FallbackSpec::WindowsFont("seguiemj.ttf"),
-    ]
+    ];
+    #[cfg(target_os = "macos")]
+    return vec![
+        FallbackSpec::Embedded(JETBRAINS_MONO),
+        FallbackSpec::SystemPath("/System/Library/Fonts/Apple Symbols.ttf"),
+        FallbackSpec::Embedded(SYMBOLS_NERD),
+        FallbackSpec::SystemPath("/System/Library/Fonts/Apple Color Emoji.ttc"),
+    ];
+    // Linux: the Noto symbol pair (Fedora/openSUSE/Ubuntu default coverage) + Symbola
+    // (very broad single-file symbol font, gdouros-symbola on Fedora), then the Nerd
+    // icons, then Noto Emoji (monochrome) with Noto Color Emoji as the silhouette-only
+    // last resort, and DejaVu Sans as a broad catch-all tail.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return vec![
+        FallbackSpec::Embedded(JETBRAINS_MONO),
+        FallbackSpec::Family("Noto Sans Symbols 2"),
+        FallbackSpec::Family("Noto Sans Symbols"),
+        FallbackSpec::Family("Symbola"),
+        FallbackSpec::Embedded(SYMBOLS_NERD),
+        FallbackSpec::Family("Noto Emoji"),
+        FallbackSpec::Family("Noto Color Emoji"),
+        FallbackSpec::Family("DejaVu Sans"),
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `Font` whose primary is the bundled JetBrains Mono (written to a temp
+    /// file — `from_path` is the only constructor), with the platform fallback chain.
+    fn jetbrains_font() -> Font {
+        let p = std::env::temp_dir().join("hp-font-test-jbmono.ttf");
+        std::fs::write(&p, JETBRAINS_MONO).unwrap();
+        Font::from_path(p.to_str().unwrap(), 14.0).unwrap()
+    }
+
+    #[test]
+    fn nerd_icons_resolve_past_the_primary() {
+        // U+F121 (font-awesome "code") lives only in the bundled Symbols Nerd Font
+        // (JetBrains Mono carries the powerline E0B0s itself, but not this range) —
+        // it must resolve to a non-primary face with a real gid on every platform.
+        let mut f = jetbrains_font();
+        let (font_id, gid) = f.resolve('\u{f121}');
+        assert!(font_id > 0 && gid != 0, "nerd icon fell to ({font_id}, {gid})");
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn emoji_resolve_via_a_system_fallback_when_installed() {
+        // 😀 is in no bundled font; with a fontconfig emoji font installed the chain
+        // must pick it up (the original Linux bug: the chain probed only Segoe paths,
+        // so emoji were tofu regardless of the selected family). Skipped quietly on a
+        // box without any Noto Emoji.
+        if fontconfig_family_file("Noto Emoji").is_none()
+            && fontconfig_family_file("Noto Color Emoji").is_none()
+        {
+            return;
+        }
+        let mut f = jetbrains_font();
+        let (font_id, gid) = f.resolve('😀');
+        assert!(font_id > 0 && gid != 0, "emoji fell to ({font_id}, {gid})");
+    }
 }
 
 /// Uniform shrink factor so this fallback's glyphs fit the primary cell height. Returns
