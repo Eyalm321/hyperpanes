@@ -73,7 +73,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Same dev-package list as test.yml (Slint/femtovg + font/window stack).
       - name: Install Linux build deps
@@ -102,7 +102,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Create release (if absent)
         shell: bash
         run: |
@@ -118,7 +118,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -145,7 +145,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # test.yml dev-package list + libfuse2 (appimagetool runtime needs FUSE 2).
       - name: Install Linux build deps
@@ -176,7 +176,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 

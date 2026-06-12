@@ -55,7 +55,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Slint/femtovg + the widget's font/window stack need the system dev packages on Linux.
       - name: Install Linux build deps
