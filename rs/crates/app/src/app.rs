@@ -976,6 +976,11 @@ impl App {
         crate::dbg_log(&format!("second-instance handoff argv={:?}", msg.argv));
         self.wake();
         let si = hyperpanes_core::cli::routing::resolve_second_instance_windows(&msg.argv, &msg.cwd);
+        crate::dbg_log(&format!(
+            "handoff resolved: windows={} routing={:?}",
+            si.windows.len(),
+            si.routing
+        ));
         if si.windows.is_empty() {
             return; // a bare relaunch just focuses the primary (nothing to open)
         }
