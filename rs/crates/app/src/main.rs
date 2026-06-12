@@ -346,7 +346,7 @@ pub(crate) fn is_key(text: &str, k: Key) -> bool {
 /// `encode_key` would otherwise pass through as garbage bytes.
 pub(crate) fn forwardable(text: &str) -> bool {
     // Special keys we explicitly translate to terminal sequences (encode_key).
-    const ALLOWED: [Key; 13] = [
+    const ALLOWED: [Key; 14] = [
         Key::UpArrow,
         Key::DownArrow,
         Key::LeftArrow,
@@ -359,6 +359,9 @@ pub(crate) fn forwardable(text: &str) -> bool {
         Key::Return,
         Key::Backspace,
         Key::Tab,
+        // Shift+Tab arrives as Backtab (U+0019, a C0 control char) — without this entry
+        // the control-char filter below ate it and Shift+Tab never reached the pty.
+        Key::Backtab,
         Key::Escape,
     ];
     if ALLOWED.iter().any(|k| {

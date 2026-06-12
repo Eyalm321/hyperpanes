@@ -67,7 +67,13 @@ pub fn encode_key(text: &str, ctrl: bool, alt: bool, shift: bool) -> Option<Vec<
         return Some(vec![0x7f]);
     }
     if is(Key::Tab) {
-        return Some(b"\t".to_vec());
+        // Shift+Tab is the backtab sequence (CSI Z) — TUIs bind it (e.g. Claude Code's
+        // mode cycle). Slint normally reports Shift+Tab as `Key::Backtab` (below), but
+        // some backends deliver Tab + the shift modifier instead; handle both.
+        return Some(if shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() });
+    }
+    if is(Key::Backtab) {
+        return Some(b"\x1b[Z".to_vec());
     }
     if is(Key::Escape) {
         return Some(vec![0x1b]);
@@ -185,6 +191,16 @@ mod tests {
         assert_eq!(encode_key(&special(Key::Return), false, false, false), Some(b"\r".to_vec()));
         assert_eq!(encode_key(&special(Key::Backspace), false, false, false), Some(vec![0x7f]));
         assert_eq!(encode_key(&special(Key::Tab), false, false, false), Some(b"\t".to_vec()));
+    }
+
+    #[test]
+    fn shift_tab_is_backtab() {
+        // Slint's normal delivery: the dedicated Backtab key (with or without the
+        // shift flag set).
+        assert_eq!(encode_key(&special(Key::Backtab), false, false, true), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(encode_key(&special(Key::Backtab), false, false, false), Some(b"\x1b[Z".to_vec()));
+        // Defensive: a backend that reports Tab + shift modifier instead.
+        assert_eq!(encode_key(&special(Key::Tab), false, false, true), Some(b"\x1b[Z".to_vec()));
     }
 
     #[test]
