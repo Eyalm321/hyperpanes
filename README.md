@@ -151,7 +151,10 @@ See [`bench/README.md`](bench/README.md) for suites, flags, and fairness caveats
 ## Workspace files
 
 A workspace is a JSON file describing the panes and layout. Relative `cwd`s resolve against the
-file's own directory. See [`workspaces/example.json`](workspaces/example.json).
+file's own directory. See [`workspaces/example.json`](workspaces/example.json) (Windows),
+[`workspaces/example-unix.json`](workspaces/example-unix.json) (Linux/macOS), or
+[`workspaces/claude-dev.json`](workspaces/claude-dev.json) — an agent-first preset with a Claude
+pane, shell, git summary, and system monitor.
 
 ```json
 {
