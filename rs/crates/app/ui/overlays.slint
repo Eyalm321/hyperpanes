@@ -414,6 +414,7 @@ export component OverlayLayer inherits Rectangle {
     // General panel — app info + self-update (Task 8).
     in property <string> app-version: "";        // running build version (env CARGO_PKG_VERSION)
     in property <bool> auto-update: false;        // persisted "check on startup" toggle
+    in property <bool> keep-alive: true;          // session-daemon M3: keep terminals alive on quit
     in property <string> update-status: "";       // human status line from the updater
     in property <int> update-phase: 0;            // 0 idle · 1 checking · 2 up-to-date · 3 available · 4 downloading · 5 downloaded · 6 error
     in property <bool> update-notify-only: false; // Linux/macOS: no in-app install — "available" opens the releases page
@@ -1292,6 +1293,20 @@ export component OverlayLayer inherits Rectangle {
             }
             Text {
                 text: "checks GitHub on startup and shows a hint here when a new version is out — never downloads or installs without your consent (offline is silently skipped)";
+                color: Theme.faint;
+                font-size: 11px;
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            // ---- background terminals (session-daemon M3) ----
+            PrefToggle {
+                label: "Keep terminals running in the background when Hyperpanes closes";
+                on: root.keep-alive;
+                toggled(v) => { root.pref-action(21, v ? 1 : 0); }
+            }
+            Text {
+                text: "leaves your terminal sessions alive after you quit so they're restored on the next launch — turn off to stop every terminal when Hyperpanes closes";
                 color: Theme.faint;
                 font-size: 11px;
             }

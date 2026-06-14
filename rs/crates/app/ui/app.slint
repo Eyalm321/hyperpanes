@@ -99,6 +99,8 @@ export component AppWindow inherits Window {
     // the update-* trio mirror the off-thread updater's live status (phase/message/progress).
     in property <string> pref-app-version: "";
     in property <bool> pref-auto-update: false;
+    // session-daemon M3: "keep terminals running in the background when Hyperpanes closes".
+    in property <bool> pref-keep-alive: true;
     in property <string> pref-update-status: "";
     in property <int> pref-update-phase: 0;
     in property <float> pref-update-progress: 0;
@@ -498,6 +500,7 @@ export component AppWindow inherits Window {
             control-status: root.pref-control-status;
             app-version: root.pref-app-version;
             auto-update: root.pref-auto-update;
+            keep-alive: root.pref-keep-alive;
             update-status: root.pref-update-status;
             update-phase: root.pref-update-phase;
             update-progress: root.pref-update-progress;

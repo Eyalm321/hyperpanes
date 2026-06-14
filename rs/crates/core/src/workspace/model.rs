@@ -43,6 +43,13 @@ pub struct PaneSpec {
     /// free-form per-pane metadata (agent-orchestration C)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<BTreeMap<String, String>>,
+    /// The pane's live session uid at snapshot time — recorded only by the relaunch
+    /// ("last session") snapshot so a future session-daemon relaunch can `Attach{uid}` a
+    /// surviving session instead of re-spawning it (session-daemon plan, M2 re-attach).
+    /// Omitted by the save-dialog snapshot (a saved workspace is a launch *template*, not a
+    /// re-attach target). New here (no TS sibling), so it trails the ported fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
 }
 
 /// One tab (group): a layout plus its panes and per-slot split state.
@@ -212,6 +219,35 @@ mod tests {
   ]
 }"#;
         assert_round_trips(json);
+    }
+
+    /// Session-daemon prep: a pane's live `uid` (camelCase) plus its spawn `command`/`shell`
+    /// survive the round-trip, so the relaunch snapshot carries what M2 re-attach needs (match
+    /// a surviving session by uid; re-run the original program if it's gone). A pane with no
+    /// uid omits the field entirely (`skip_serializing_if`).
+    #[test]
+    fn round_trips_pane_with_uid_and_command() {
+        let json = r#"{
+  "panes": [
+    {
+      "command": "claude",
+      "shell": "pwsh",
+      "uid": "pane-7"
+    }
+  ]
+}"#;
+        assert_round_trips(json);
+        let parsed: WorkspaceFile = serde_json::from_str(json).unwrap();
+        let panes = parsed.panes.unwrap();
+        assert_eq!(panes[0].uid.as_deref(), Some("pane-7"));
+        assert_eq!(panes[0].command.as_deref(), Some("claude"));
+        // A pane left without a uid serializes nothing for it (not `null`).
+        let bare = serde_json::to_string(&PaneSpec {
+            command: Some("bash".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!bare.contains("uid"), "unset uid omitted: {bare}");
     }
 
     #[test]

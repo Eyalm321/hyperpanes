@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::session::batcher::DataBatcher;
@@ -47,9 +48,27 @@ use crate::session::replay::Replay;
 use crate::session::screen::Screen;
 use crate::session::spawn::{build_env, default_shell, resolve_spawn, resolve_windows_command, EnvInputs, EnvMap};
 
+/// Process-global counter for the in-process backend's `pane-N` uids (see
+/// [`SessionManager::fresh_uid`]). Must be process-global (not per-manager) so two windows
+/// sharing the one in-process `SessionManager` never mint the same `pane-0` — the historical
+/// collision the GUI's own `state.rs` counter was hardened against; minting here keeps that
+/// invariant for the daemon scheme too.
+static NEXT_INPROC_UID: AtomicU64 = AtomicU64::new(0);
+
+/// `pane-0`, `pane-1`, … — the in-process uid scheme (PTYs die with the GUI, so per-run
+/// uniqueness suffices). The daemon scheme is a UUID for cross-run uniqueness; see
+/// [`SessionManager::fresh_uid`].
+fn next_inproc_uid() -> String {
+    format!("pane-{}", NEXT_INPROC_UID.fetch_add(1, Ordering::Relaxed))
+}
+
 /// An event emitted by a live session, delivered on the manager's event channel.
 /// Mirrors the TS `SessionHandlers` callbacks (`onData` / `onCwd` / `onExit`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` so the session daemon (`session::proto`) can carry the
+/// event verbatim to attached clients (`DaemonMsg::Event`) — the enum is a flat,
+/// owned-data shape with no GUI/runtime types, so the wire form is the in-process form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// A flushed (batched) output chunk. The renderer/control writes this to its
     /// terminal; it is also what the replay buffer and `output_bytes` accumulate.
@@ -143,9 +162,12 @@ impl Shared {
 /// real spawn and the test mock can both hold and invoke it.
 pub type EventSink = Arc<dyn Fn(PtyEvent) + Send + Sync>;
 
-// A factory that turns a spec + sink into a live pty. The default uses `spawn_pty`;
-// tests inject a mock so the async pipeline is exercised without ConPTY.
-type SpawnFn = Box<dyn FnOnce(&PtySpec, EventSink) -> io::Result<Box<dyn Pty>> + Send>;
+/// A factory that turns a spec + sink into a live pty. The default uses `spawn_pty`;
+/// tests inject a mock so the async pipeline is exercised without ConPTY. `pub(crate)` so
+/// the daemon backend ([`session::daemon_client`](crate::session::daemon_client)) can name
+/// it in its mirroring `create_with` signature (it ignores the factory — a closure can't
+/// cross a socket; the daemon owns real PTYs).
+pub(crate) type SpawnFn = Box<dyn FnOnce(&PtySpec, EventSink) -> io::Result<Box<dyn Pty>> + Send>;
 
 /// One live session: the pty handle plus the shared read state. The driver task runs
 /// detached; dropping the `Session` drops the pty (closing its handles).
@@ -154,20 +176,46 @@ struct Session {
     shared: Arc<Shared>,
 }
 
-/// Owns every live pty session, keyed by uid. Cheap to clone-share via `Arc` — and
-/// `Clone` itself shares the same session map + event sender (a handle, not a copy),
-/// so spawn work can move onto a worker thread (`Spawn` on Windows ConPTY can block
-/// ~1s for some shells — see `docs/conpty-passthrough-investigation.md`).
+/// The reusable, transport-agnostic per-uid session store + operations — the heart of
+/// what was historically `SessionManager`, factored out so the **session daemon**
+/// (`session::daemon`) can own the very same registry the in-process GUI owns through
+/// [`SessionManager`]. Cheap to clone-share via `Arc`; `Clone` shares the same session
+/// map + event sender + uid counter (a handle, not a copy), so spawn work can move onto
+/// a worker thread (`Spawn` on Windows ConPTY can block ~1s for some shells — see
+/// `docs/conpty-passthrough-investigation.md`).
+///
+/// Every method here is the literal body of the corresponding old `SessionManager`
+/// method; `SessionManager` now delegates verbatim so its public API is unchanged.
+///
+/// ## Daemon-assignable uids
+/// The daemon must be the source of truth for uids across GUI restarts (a re-attaching
+/// pane references a session by uid — see the plan's "uid stability" note). [`mint_uid`]
+/// hands out a process-unique `s{n}` token from a per-registry counter so the daemon can
+/// allocate the uid itself when a client's [`proto::SpawnSpec`] left it blank. The GUI
+/// path keeps minting uids exactly as before (it passes its own `uid` in `SpawnOptions`),
+/// so this is purely additive.
 #[derive(Clone)]
-pub struct SessionManager {
+pub struct SessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     events: UnboundedSender<SessionEvent>,
+    /// Monotonic uid source for daemon-assigned sessions (see [`mint_uid`]).
+    next_uid: Arc<AtomicU64>,
 }
 
-impl SessionManager {
-    /// Create a manager that emits [`SessionEvent`]s on `events`.
+impl SessionRegistry {
+    /// Create a registry that emits [`SessionEvent`]s on `events`.
     pub fn new(events: UnboundedSender<SessionEvent>) -> Self {
-        Self { sessions: Arc::new(Mutex::new(HashMap::new())), events }
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            events,
+            next_uid: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Allocate a fresh process-unique uid (`s1`, `s2`, …). The daemon calls this when a
+    /// client did not pin a uid, making the daemon the authoritative uid source.
+    pub fn mint_uid(&self) -> String {
+        format!("s{}", self.next_uid.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Spawn a real pty session for `opts`. Returns once the pty is live and its driver
@@ -301,6 +349,219 @@ impl SessionManager {
     }
 }
 
+/// Owns every live pty session, keyed by uid — the GUI's single handle to sessions. The
+/// GUI holds an `Arc<SessionManager>` and calls this exact API; the **backend** behind it
+/// is chosen once at construction (`docs/session-daemon-plan.md` M1):
+///
+/// * [`Backend::InProcess`] — the historical path: the PTYs are children of the GUI process
+///   and live in a [`SessionRegistry`] right here. This is the default
+///   ([`SessionManager::new`]) and what CI / `--no-daemon` use.
+/// * [`Backend::Daemon`] — a [`DaemonSessionManager`] talking to the PTY-owning
+///   [session daemon](crate::session::daemon) over a UDS, so the PTYs survive a GUI crash
+///   (selected by [`SessionManager::new_daemon`], wired to `HYPERPANES_SESSION_DAEMON=1`).
+///
+/// Every public method dispatches to the active backend with an **identical signature**, so
+/// the GUI's call sites are untouched — the whole point of M1: the backend swap is invisible
+/// above this type. The daemon backend honors the plan's non-blocking-API contract (shadow
+/// state + a mirror buffer; only `render_screen` does a bounded round-trip).
+///
+/// `SessionManager` stays **`Clone`** exactly as the historical in-process one was — the
+/// in-process variant clones the cheap [`SessionRegistry`] handle (a shared map + sender),
+/// and the daemon variant is an `Arc<DaemonSessionManager>` so a clone shares the one
+/// socket + reader thread (the daemon backend is single-connection; a clone is another
+/// handle, not another connection). Preserving `Clone` keeps GUI code that moves an owned
+/// `mgr.clone()` onto a worker thread (`state.rs::spawn_session_async`) untouched.
+#[derive(Clone)]
+pub enum SessionManager {
+    /// The PTYs live in this process (the default, pre-daemon path).
+    InProcess(SessionRegistry),
+    /// The PTYs live in the session daemon; this talks to it over a socket. `Arc` so the
+    /// non-`Clone` socket/reader inside is shared across manager clones.
+    Daemon(Arc<crate::session::daemon_client::DaemonSessionManager>),
+}
+
+impl SessionManager {
+    /// Create an **in-process** manager that emits [`SessionEvent`]s on `events` (the
+    /// default backend — PTYs are children of this process, as before the daemon existed).
+    pub fn new(events: UnboundedSender<SessionEvent>) -> Self {
+        SessionManager::InProcess(SessionRegistry::new(events))
+    }
+
+    /// Create a **daemon-backed** manager: connect to (spawning if needed) the session
+    /// daemon for `salt` and forward its events to `events`. Errors only if the daemon
+    /// can't be reached/spawned — `main` falls back to [`new`](Self::new) on `Err` so a
+    /// daemon failure never blocks launch. `salt` is the user-data dir (same key the GUI's
+    /// single-instance gate and the daemon's discovery use). Unix-only in M1.
+    pub fn new_daemon(events: UnboundedSender<SessionEvent>, salt: &str) -> io::Result<Self> {
+        Ok(SessionManager::Daemon(Arc::new(
+            crate::session::daemon_client::DaemonSessionManager::new(events, salt)?,
+        )))
+    }
+
+    /// The underlying [`SessionRegistry`] for the in-process backend, or `None` when this
+    /// manager is daemon-backed (the registry then lives in the daemon, not here). Unused by
+    /// the GUI today; kept for in-process tooling that wants the registry directly.
+    pub fn registry(&self) -> Option<&SessionRegistry> {
+        match self {
+            SessionManager::InProcess(r) => Some(r),
+            SessionManager::Daemon(_) => None,
+        }
+    }
+
+    /// Whether this manager is backed by the (crash-surviving) session daemon. The GUI uses
+    /// this to decide whether re-attach (M2) is even possible — only a daemon retains a
+    /// session across a GUI restart, so the in-process backend always re-spawns from the
+    /// recorded spawn command instead.
+    pub fn is_daemon(&self) -> bool {
+        matches!(self, SessionManager::Daemon(_))
+    }
+
+    /// Mint a fresh, **unique** session uid for a NEWLY created pane, choosing a scheme that
+    /// fits the backend's uid-stability needs (`docs/session-daemon-plan.md` "uid stability"):
+    ///
+    /// * **In-process** — the historical `pane-N` token from a process-global counter. The
+    ///   PTYs die with the GUI, so a uid only ever has to be unique *within* this run; the
+    ///   short readable form is kept (and existing call sites/tests see no change).
+    /// * **Daemon** — a `pane-<uuid>` token. Daemon sessions OUTLIVE the GUI, so a re-attaching
+    ///   pane references its session by a uid recorded in a *previous* run's snapshot; were a
+    ///   new run to re-use a per-run counter (`pane-0`, `pane-1`, …) its fresh panes would
+    ///   collide with the daemon's still-live sessions from the prior run (silently adopting a
+    ///   stranger's pty). A v4 UUID is globally unique across runs, so a new pane's uid can
+    ///   never alias a survivor — and that same uid is exactly what [`to_session_file`] records
+    ///   and a later launch re-attaches by.
+    ///
+    /// (The wire side already PINS whatever uid the GUI passes — see
+    /// [`daemon_client`](crate::session::daemon_client) — so making the GUI's *minting* stable
+    /// is the whole fix; the daemon honors it verbatim.)
+    pub fn fresh_uid(&self) -> String {
+        match self {
+            SessionManager::InProcess(_) => next_inproc_uid(),
+            SessionManager::Daemon(_) => format!("pane-{}", uuid::Uuid::new_v4()),
+        }
+    }
+
+    /// Spawn a real pty session for `opts`. Returns once the pty is live and its driver
+    /// task is running (in-process), or the create request is sent (daemon). Errors if the
+    /// pty fails to spawn (in-process) / the request can't be sent (daemon).
+    pub fn create(&self, opts: SpawnOptions) -> io::Result<()> {
+        match self {
+            SessionManager::InProcess(r) => r.create(opts),
+            SessionManager::Daemon(d) => d.create(opts),
+        }
+    }
+
+    /// Spawn a session using a custom pty `factory` (tests inject a mock). The daemon
+    /// backend ignores the factory (a closure can't cross a socket; the daemon owns real
+    /// PTYs) and spawns a normal session — no production caller uses `create_with`.
+    pub fn create_with(&self, opts: SpawnOptions, factory: SpawnFn) -> io::Result<()> {
+        match self {
+            SessionManager::InProcess(r) => r.create_with(opts, factory),
+            SessionManager::Daemon(d) => d.create_with(opts, factory),
+        }
+    }
+
+    /// Whether a session with `uid` is currently live.
+    pub fn has(&self, uid: &str) -> bool {
+        match self {
+            SessionManager::InProcess(r) => r.has(uid),
+            SessionManager::Daemon(d) => d.has(uid),
+        }
+    }
+
+    /// The uids of all live sessions.
+    pub fn uids(&self) -> Vec<String> {
+        match self {
+            SessionManager::InProcess(r) => r.uids(),
+            SessionManager::Daemon(d) => d.uids(),
+        }
+    }
+
+    /// Recent output for a re-attaching view (the rolling replay buffer).
+    pub fn replay(&self, uid: &str) -> Option<String> {
+        match self {
+            SessionManager::InProcess(r) => r.replay(uid),
+            SessionManager::Daemon(d) => d.replay(uid),
+        }
+    }
+
+    /// Monotonic count of all output UTF-16 code units ever emitted (the `since`
+    /// cursor; pair with `control::output::sliceSince`).
+    pub fn output_bytes(&self, uid: &str) -> Option<u64> {
+        match self {
+            SessionManager::InProcess(r) => r.output_bytes(uid),
+            SessionManager::Daemon(d) => d.output_bytes(uid),
+        }
+    }
+
+    /// Epoch-ms of the last output flush, or `None` if the pane has produced nothing
+    /// yet (feeds `control::output::waitDecision`).
+    pub fn last_output_at(&self, uid: &str) -> Option<u64> {
+        match self {
+            SessionManager::InProcess(r) => r.last_output_at(uid),
+            SessionManager::Daemon(d) => d.last_output_at(uid),
+        }
+    }
+
+    /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
+    /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`);
+    /// the daemon backend does a bounded `RenderScreen` round-trip.
+    pub fn render_screen(&self, uid: &str) -> Option<String> {
+        match self {
+            SessionManager::InProcess(r) => r.render_screen(uid),
+            SessionManager::Daemon(d) => d.render_screen(uid),
+        }
+    }
+
+    /// Write input to the pane's pty.
+    pub fn write(&self, uid: &str, data: &str) {
+        match self {
+            SessionManager::InProcess(r) => r.write(uid, data),
+            SessionManager::Daemon(d) => d.write(uid, data),
+        }
+    }
+
+    /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
+    pub fn resize(&self, uid: &str, cols: u16, rows: u16) {
+        match self {
+            SessionManager::InProcess(r) => r.resize(uid, cols, rows),
+            SessionManager::Daemon(d) => d.resize(uid, cols, rows),
+        }
+    }
+
+    /// Kill the pane's pty and forget it. The natural-exit `Exit` event is suppressed
+    /// (mirrors TS `destroy()`), so a deliberate kill is silent.
+    pub fn kill(&self, uid: &str) {
+        match self {
+            SessionManager::InProcess(r) => r.kill(uid),
+            SessionManager::Daemon(d) => d.kill(uid),
+        }
+    }
+
+    /// Kill every live pane and clear the map.
+    pub fn kill_all(&self) {
+        match self {
+            SessionManager::InProcess(r) => r.kill_all(),
+            SessionManager::Daemon(d) => d.kill_all(),
+        }
+    }
+
+    /// Ask the session **daemon** to shut down (kill its sessions + exit), the
+    /// quit-vs-keep-alive "OFF" branch and `--kill-daemon` (`docs/session-daemon-plan.md` M3).
+    /// **Inert for the in-process backend** — there is no out-of-process daemon to stop; the
+    /// PTYs die with the GUI on exit anyway (the GUI's `main` already calls `kill_all` on the
+    /// way out). Returns whether a daemon shutdown was actually requested, so a caller can
+    /// distinguish "told the daemon to stop" from "nothing to do".
+    pub fn shutdown_daemon(&self) -> bool {
+        match self {
+            SessionManager::InProcess(_) => false,
+            SessionManager::Daemon(d) => {
+                d.shutdown_daemon();
+                true
+            }
+        }
+    }
+}
+
 // Build the resolved pty spec from spawn options — the port of the TS `Session`
 // constructor's resolution block (resolveSpawn → win-resolve → integration → env).
 fn build_spec(opts: &SpawnOptions) -> PtySpec {
@@ -344,11 +605,48 @@ fn build_spec(opts: &SpawnOptions) -> PtySpec {
     PtySpec {
         file: spawn_file,
         args: final_args,
-        cwd: opts.cwd.clone(),
+        // A spawnable working directory MUST exist or the underlying `posix_spawn`/
+        // `CreateProcessW` fails with ENOENT *before the child ever runs* — sinking the
+        // whole session silently (no pty, so no Data/Exit ever reaches an attached
+        // client). `opts.cwd` is honored when it is a real directory; otherwise we fall
+        // back to one that exists rather than inheriting a stale/missing cwd (e.g. a
+        // pane's saved cwd that was since deleted, or a `$HOME` on an unmounted drive —
+        // portable-pty defaults a None cwd to `$HOME`, which need not exist). `None`
+        // means "let the pty layer pick its default" only when nothing valid is found.
+        cwd: resolve_spawn_cwd(opts.cwd.as_deref(), &env),
         env,
         cols: opts.cols.unwrap_or(80),
         rows: opts.rows.unwrap_or(24),
     }
+}
+
+/// Pick a working directory that is guaranteed to exist (or `None` to defer to the pty
+/// layer's own default). A non-existent cwd makes the child spawn fail with ENOENT, so
+/// we never hand one through: the requested `cwd` if it is a real directory, else the
+/// resolved env's `$HOME` if that exists, else the daemon/process cwd, else `/` (which
+/// always exists on unix). `None` only if even the process cwd is unreadable AND there
+/// is no usable `$HOME` — leaving the pty layer to apply its own fallback.
+fn resolve_spawn_cwd(requested: Option<&str>, env: &EnvMap) -> Option<String> {
+    let is_dir = |p: &str| std::path::Path::new(p).is_dir();
+    if let Some(c) = requested {
+        if is_dir(c) {
+            return Some(c.to_string());
+        }
+    }
+    if let Some(home) = env.get("HOME") {
+        if is_dir(home) {
+            return Some(home.clone());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(s) = cwd.to_str() {
+            return Some(s.to_string());
+        }
+    }
+    if cfg!(unix) && is_dir("/") {
+        return Some("/".to_string());
+    }
+    None
 }
 
 fn epoch_ms() -> u64 {
@@ -805,5 +1103,41 @@ mod tests {
         mgr.resize("u1", 120, 40);
         // Screen render works post-resize (smoke that the screen lock path is sound).
         assert!(mgr.render_screen("u1").is_some());
+    }
+
+    // ---- uid minting policy (session-daemon-plan "uid stability") ----
+
+    #[test]
+    fn in_process_backend_is_not_daemon() {
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        assert!(!mgr.is_daemon(), "the in-process backend reports is_daemon() == false");
+    }
+
+    // shutdown_daemon is INERT for the in-process backend (session-daemon M3): there is no
+    // out-of-process daemon to stop, so it returns false and does nothing — the quit path
+    // distinguishes this from a daemon shutdown by the bool.
+    #[test]
+    fn in_process_shutdown_daemon_is_inert() {
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        assert!(!mgr.shutdown_daemon(), "in-process shutdown_daemon is a no-op returning false");
+    }
+
+    #[test]
+    fn in_process_fresh_uid_is_pane_n_and_unique() {
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        // The in-process scheme is the readable `pane-N` (PTYs die with the GUI, so per-run
+        // uniqueness suffices); the counter is process-global so two managers never alias.
+        let a = mgr.fresh_uid();
+        let b = mgr.fresh_uid();
+        assert!(a.starts_with("pane-"), "in-process fresh_uid is pane-N, got {a}");
+        assert_ne!(a, b, "successive fresh_uids are unique");
+        let (etx2, _erx2) = unbounded_channel::<SessionEvent>();
+        let mgr2 = SessionManager::new(etx2);
+        // A SECOND manager shares the process-global counter — no cross-manager `pane-0`
+        // collision (the historical multi-window clobber this counter was hardened against).
+        assert_ne!(mgr2.fresh_uid(), a, "the counter is process-global across managers");
     }
 }
