@@ -37,9 +37,12 @@ use crate::control::output::{
     DEFAULT_SETTLE_MS, DEFAULT_WAIT_TIMEOUT_MS,
 };
 use crate::control::readmodel::PaneStatus;
-use crate::control::scope::{check_mintable, coerce_scope, pane_in_scope, Scope};
+use crate::control::scope::{check_mintable, coerce_scope, pane_in_scope, queue_in_scope, Scope};
 use crate::control::server::{events_url, notify_state, now_ms, Shared};
 use crate::control::tokens::TokenInfo;
+use crate::control::work::{
+    Counts, EnqueueOpts, LeaseOutcome, ListFilter, NackOpts, QueueSummary, Task, TaskState,
+};
 
 /// Build the full router with the shared state baked in.
 pub fn router(shared: Arc<Shared>) -> Router {
@@ -52,6 +55,15 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/panes/{id}/input", post(input))
         .route("/panes/{id}/messages", get(messages_get).post(messages_post))
         .route("/panes/{id}/lock", post(lock_post).delete(lock_delete))
+        // ---- work queue (worker-pool phase-2/3) ----
+        .route("/queues", get(queues_list))
+        .route("/queues/{queue}/tasks", post(task_enqueue).get(tasks_list))
+        .route("/queues/{queue}/claim", post(task_claim))
+        .route("/queues/{queue}/purge", post(queue_purge))
+        .route("/tasks/{id}", get(task_get))
+        .route("/tasks/{id}/ack", post(task_ack))
+        .route("/tasks/{id}/nack", post(task_nack))
+        .route("/tasks/{id}/extend", post(task_extend))
         .route("/events", get(events_ws))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
@@ -546,6 +558,359 @@ async fn lock_delete(
     }
 }
 
+// ---- work queue: /queues + /tasks ---------------------------------------------------------
+//
+// Same spine as every existing route: `authorize → 401`; a queue-scope gate → 403
+// (`queue_in_scope`, master = any); camelCase JSON via `ok_json`/`jstatus`; bodies parsed
+// with `serde_json::from_slice(..).unwrap_or(Value::Null)` and validated with the same
+// `expected { … }` 400 style. One NEW status — `409 Conflict` for a stale lease (a wrong
+// `fencingToken`, the optimistic-concurrency failure) — distinct from the lock module's
+// `423 Locked`. The serialized `Task` IS the canonical wire format (camelCase, epoch-ms,
+// flattened lease fields claimedBy/fencingToken/visibilityDeadline), so claim/get return it
+// verbatim and the controller presents the task's own `fencingToken` back on ack/nack/extend.
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnqueueOut {
+    ok: bool,
+    id: String,
+    seq: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaimOut {
+    ok: bool,
+    tasks: Vec<Task>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TasksListOut {
+    queue: String,
+    tasks: Vec<Task>,
+    counts: Counts,
+    latest_seq: u64,
+}
+
+#[derive(Serialize)]
+struct QueuesOut {
+    queues: Vec<QueueSummary>,
+}
+
+/// Map a lease-guarded outcome (`ack`/`nack`/`extend`) to the byte-exact response: the
+/// `ok_body` closure builds the 200 body from the resulting task; `Conflict → 409` (stale
+/// `fencingToken`); `NotFound → 404`.
+fn lease_response(outcome: LeaseOutcome, id: &str, ok_body: impl FnOnce(&Task) -> Value) -> Response {
+    match outcome {
+        LeaseOutcome::Ok(task) => jstatus(200, ok_body(&task)),
+        LeaseOutcome::Conflict => {
+            jstatus(409, json!({ "error": "stale lease", "taskId": id }))
+        }
+        LeaseOutcome::NotFound => {
+            jstatus(404, json!({ "error": "no such task", "taskId": id }))
+        }
+    }
+}
+
+/// The shared queue-scope gate: 403 unless `queue_in_scope` (master passes).
+fn queue_scope_gate(scope: Option<&Scope>, queue: &str) -> Option<Response> {
+    if queue_in_scope(scope, queue) {
+        None
+    } else {
+        Some(jstatus(403, json!({ "error": "queue out of scope", "queue": queue })))
+    }
+}
+
+// POST /queues/{queue}/tasks — enqueue
+async fn task_enqueue(
+    State(shared): State<Arc<Shared>>,
+    Path(queue): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let payload = match b.get("payload").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => {
+            return jstatus(
+                400,
+                json!({ "error": "expected { payload: string, kind?, title?, priority?, maxAttempts?, visibilityTimeoutMs?, delayMs?|availableAt?, dedupeKey? }" }),
+            )
+        }
+    };
+    let mut opts = EnqueueOpts::default();
+    if let Some(k) = b.get("kind").and_then(Value::as_str) {
+        opts.kind = k.to_string();
+    }
+    if let Some(t) = b.get("title").and_then(Value::as_str) {
+        opts.title = t.to_string();
+    }
+    if let Some(p) = b.get("priority").and_then(Value::as_i64) {
+        opts.priority = p;
+    }
+    if let Some(m) = b.get("maxAttempts").and_then(Value::as_i64).filter(|&m| m > 0) {
+        opts.max_attempts = m as u32;
+    }
+    if let Some(v) = b.get("visibilityTimeoutMs").and_then(Value::as_i64).filter(|&v| v > 0) {
+        opts.visibility_timeout_ms = v;
+    }
+    let now = now_ms();
+    // `availableAt` (absolute ms) wins; else `delayMs` schedules `now + delay`.
+    if let Some(a) = b.get("availableAt").and_then(Value::as_i64) {
+        opts.available_at = Some(a);
+    } else if let Some(d) = b.get("delayMs").and_then(Value::as_i64).filter(|&d| d > 0) {
+        opts.available_at = Some(now + d);
+    }
+    if let Some(k) = b.get("dedupeKey").and_then(Value::as_str) {
+        opts.dedupe_key = Some(k.to_string());
+    }
+    let task = shared.work.lock().unwrap().enqueue(&queue, &payload, opts, now);
+    ok_json(EnqueueOut { ok: true, id: task.id, seq: task.seq })
+}
+
+// GET /queues/{queue}/tasks — list/inspect (cursor `after`, optional `state`, `limit`)
+async fn tasks_list(
+    State(shared): State<Arc<Shared>>,
+    Path(queue): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
+        return e;
+    }
+    let after = non_neg_num(q.get("after")).filter(|&a| a > 0).map(|a| a as u64).unwrap_or(0);
+    let limit = pos_num(q.get("limit")).unwrap_or(100).min(1000) as usize;
+    // Only a state string that round-trips is a real filter (an unknown value is ignored,
+    // never silently coerced to `queued`).
+    let state = q.get("state").and_then(|s| {
+        let st = TaskState::from_str(s);
+        (st.as_str() == s).then_some(st)
+    });
+    let wq = shared.work.lock().unwrap();
+    let tasks = wq.list(&queue, ListFilter { state }, after, limit);
+    let counts = wq.counts(&queue);
+    let latest_seq = tasks.iter().map(|t| t.seq).max().unwrap_or(after);
+    ok_json(TasksListOut { queue, tasks, counts, latest_seq })
+}
+
+// POST /queues/{queue}/claim — claim the next task(s) (competing consumers)
+async fn task_claim(
+    State(shared): State<Arc<Shared>>,
+    Path(queue): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let worker = match b.get("worker").and_then(Value::as_str).filter(|w| !w.is_empty()) {
+        Some(w) => w.to_string(),
+        None => {
+            return jstatus(400, json!({ "error": "expected { worker: string, leaseMs?, count? }" }))
+        }
+    };
+    // `leaseMs <= 0` ⇒ the queue falls back to the task's own visibility timeout.
+    let lease_ms = b.get("leaseMs").and_then(Value::as_i64).filter(|&v| v > 0).unwrap_or(0);
+    let count = b
+        .get("count")
+        .and_then(Value::as_i64)
+        .filter(|&c| c > 0)
+        .map(|c| c.min(100) as usize)
+        .unwrap_or(1);
+    let now = now_ms();
+    let mut tasks = Vec::new();
+    {
+        let mut wq = shared.work.lock().unwrap();
+        for _ in 0..count {
+            match wq.claim(&queue, &worker, lease_ms, now) {
+                Some(c) => tasks.push(c.task),
+                None => break, // queue drained — an EMPTY claim is 200 {tasks:[]}, never 204
+            }
+        }
+    }
+    ok_json(ClaimOut { ok: true, tasks })
+}
+
+// POST /queues/{queue}/purge — drop terminal tasks (retention/cleanup)
+async fn queue_purge(
+    State(shared): State<Arc<Shared>>,
+    Path(queue): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let now = now_ms();
+    // `olderThan` = absolute ms cutoff; `olderThanMs` = an age (cutoff = now - age);
+    // neither ⇒ purge every currently-terminal task.
+    let older_than = if let Some(abs) = b.get("olderThan").and_then(Value::as_i64) {
+        abs
+    } else if let Some(age) = b.get("olderThanMs").and_then(Value::as_i64) {
+        now - age
+    } else {
+        now
+    };
+    let removed = shared.work.lock().unwrap().purge(&queue, older_than);
+    jstatus(200, json!({ "ok": true, "removed": removed }))
+}
+
+// GET /queues — every queue + its depth (scope-filtered)
+async fn queues_list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let all = shared.work.lock().unwrap().queues();
+    let queues = all
+        .into_iter()
+        .filter(|qs| queue_in_scope(info.scope.as_ref(), &qs.queue))
+        .collect();
+    ok_json(QueuesOut { queues })
+}
+
+// GET /tasks/{id} — fetch one task (scope resolved from its queue)
+async fn task_get(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let task = shared.work.lock().unwrap().get(&id);
+    match task {
+        None => jstatus(404, json!({ "error": "no such task", "taskId": id })),
+        Some(task) => {
+            if let Some(e) = queue_scope_gate(info.scope.as_ref(), &task.queue) {
+                return e;
+            }
+            ok_json(task)
+        }
+    }
+}
+
+/// Resolve `fencingToken` + the task's queue-scope for a lease op, or the error response.
+/// Returns `(fencing_token, body)` on success.
+fn lease_op_preamble(
+    shared: &Arc<Shared>,
+    info: &TokenInfo,
+    id: &str,
+    body: &Bytes,
+) -> Result<(u64, Value), Response> {
+    let b: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let token = match b.get("fencingToken").and_then(Value::as_u64) {
+        Some(t) => t,
+        None => {
+            return Err(jstatus(400, json!({ "error": "expected { fencingToken: number, … }" })))
+        }
+    };
+    // Resolve the task → its queue for the scope gate; 404 if it's gone.
+    let queue = match shared.work.lock().unwrap().get(id) {
+        Some(t) => t.queue,
+        None => return Err(jstatus(404, json!({ "error": "no such task", "taskId": id }))),
+    };
+    if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
+        return Err(e);
+    }
+    Ok((token, b))
+}
+
+// POST /tasks/{id}/ack — complete a claimed task (lease-guarded)
+async fn task_ack(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let (token, b) = match lease_op_preamble(&shared, &info, &id, &body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let result = b.get("result").and_then(Value::as_str);
+    let outcome = shared.work.lock().unwrap().ack(&id, token, result, now_ms());
+    lease_response(outcome, &id, |t| json!({ "ok": true, "state": t.state.as_str() }))
+}
+
+// POST /tasks/{id}/nack — fail/retry a claimed task (lease-guarded)
+async fn task_nack(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let (token, b) = match lease_op_preamble(&shared, &info, &id, &body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let opts = NackOpts {
+        // default requeue=true (retry with backoff); requeue=false ⇒ give up now (Failed)
+        requeue: b.get("requeue").and_then(Value::as_bool).unwrap_or(true),
+        error: b.get("error").and_then(Value::as_str).map(str::to_string),
+        delay_ms: b.get("delayMs").and_then(Value::as_i64),
+    };
+    let outcome = shared.work.lock().unwrap().nack(&id, token, opts, now_ms());
+    lease_response(outcome, &id, |t| json!({ "ok": true, "state": t.state.as_str() }))
+}
+
+// POST /tasks/{id}/extend — heartbeat: extend the lease (lease-guarded)
+async fn task_extend(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let (token, b) = match lease_op_preamble(&shared, &info, &id, &body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let extra_ms = match b.get("extraMs").and_then(Value::as_i64).filter(|&x| x > 0) {
+        Some(x) => x,
+        None => {
+            return jstatus(400, json!({ "error": "expected { fencingToken: number, extraMs: number }" }))
+        }
+    };
+    let outcome = shared.work.lock().unwrap().extend(&id, token, extra_ms, now_ms());
+    lease_response(outcome, &id, |t| {
+        json!({ "ok": true, "visibilityDeadline": t.visibility_deadline })
+    })
+}
+
 // ---- /command -----------------------------------------------------------------------------
 
 async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -994,5 +1359,221 @@ mod golden {
             .body(format!(r#"{{"type":"closePane","paneId":"{pane_id}"}}"#))
             .send()
             .await;
+    }
+
+    // ---- work queue routes -----------------------------------------------------------------
+
+    use serde_json::{json, Value};
+
+    async fn post(s: &Server, path: &str, token: &str, body: &str) -> reqwest::Response {
+        client()
+            .post(format!("{}{}", s.base, path))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Enqueue one task into `queue` and claim it as `worker`; return `(id, fencingToken)`.
+    async fn enqueue_and_claim(s: &Server, queue: &str, worker: &str) -> (String, u64) {
+        let enq: Value = post(s, &format!("/queues/{queue}/tasks"), &s.token, r#"{"payload":"{}"}"#)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let id = enq["id"].as_str().unwrap().to_string();
+        let claim: Value = post(
+            s,
+            &format!("/queues/{queue}/claim"),
+            &s.token,
+            &format!(r#"{{"worker":"{worker}"}}"#),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        let fencing = claim["tasks"][0]["fencingToken"].as_u64().unwrap();
+        (id, fencing)
+    }
+
+    #[tokio::test]
+    async fn queue_enqueue_claim_ack_happy_path() {
+        let s = boot(true).await;
+        let enq: Value = post(
+            &s,
+            "/queues/build/tasks",
+            &s.token,
+            r#"{"payload":"{\"prompt\":\"do it\"}","kind":"manual","title":"T","priority":7}"#,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(enq["ok"], json!(true));
+        assert_eq!(enq["seq"], json!(1));
+        let id = enq["id"].as_str().unwrap().to_string();
+
+        // claim → a canonical Task carrying the fencing token + opaque payload verbatim
+        let claim: Value = post(&s, "/queues/build/claim", &s.token, r#"{"worker":"wkr-1"}"#)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let t = &claim["tasks"][0];
+        assert_eq!(t["id"], json!(id));
+        assert_eq!(t["state"], json!("claimed"));
+        assert_eq!(t["claimedBy"], json!("wkr-1"));
+        assert_eq!(t["attempts"], json!(1));
+        assert_eq!(t["fencingToken"], json!(1));
+        assert_eq!(t["payload"], json!(r#"{"prompt":"do it"}"#));
+        let fencing = t["fencingToken"].as_u64().unwrap();
+
+        // ack with the fencing token → done
+        let ack: Value = post(
+            &s,
+            &format!("/tasks/{id}/ack"),
+            &s.token,
+            &format!(r#"{{"fencingToken":{fencing},"result":"artifact://x"}}"#),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(ack, json!({ "ok": true, "state": "done" }));
+
+        // GET reflects the terminal state + recorded result
+        let got: Value = client()
+            .get(format!("{}/tasks/{id}", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(got["state"], json!("done"));
+        assert_eq!(got["result"], json!("artifact://x"));
+    }
+
+    #[tokio::test]
+    async fn queue_claim_empty_is_200_empty_tasks_byte_exact() {
+        let s = boot(true).await;
+        let r = post(&s, "/queues/nothing/claim", &s.token, r#"{"worker":"w"}"#).await;
+        assert_eq!(r.status().as_u16(), 200);
+        assert_eq!(r.text().await.unwrap(), r#"{"ok":true,"tasks":[]}"#);
+    }
+
+    #[tokio::test]
+    async fn queue_ack_with_stale_fencing_token_is_409() {
+        let s = boot(true).await;
+        let (id, fencing) = enqueue_and_claim(&s, "build", "wkr-1").await;
+        let r = post(
+            &s,
+            &format!("/tasks/{id}/ack"),
+            &s.token,
+            &format!(r#"{{"fencingToken":{}}}"#, fencing + 1),
+        )
+        .await;
+        assert_eq!(r.status().as_u16(), 409);
+        assert_eq!(
+            r.text().await.unwrap(),
+            format!(r#"{{"error":"stale lease","taskId":"{id}"}}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_task_wire_shape_is_camelcase_with_flattened_lease() {
+        let s = boot(true).await;
+        let (id, _fencing) = enqueue_and_claim(&s, "build", "wkr").await;
+        let body = client()
+            .get(format!("{}/tasks/{id}", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        // camelCase columns + epoch-ms numbers
+        assert!(body.contains(r#""maxAttempts":5"#));
+        assert!(body.contains(r#""availableAt":"#));
+        assert!(body.contains(r#""createdAt":"#));
+        // FLATTENED lease fields (claimedBy/fencingToken/visibilityDeadline) — never a nested object
+        assert!(body.contains(r#""claimedBy":"wkr""#));
+        assert!(body.contains(r#""fencingToken":1"#));
+        assert!(body.contains(r#""visibilityDeadline":"#));
+        assert!(!body.contains(r#""lease""#)); // not nested
+        assert!(!body.contains("claimed_by")); // not snake_case
+    }
+
+    #[tokio::test]
+    async fn queue_nack_requeue_then_extend_heartbeat() {
+        let s = boot(true).await;
+        let (id, fencing) = enqueue_and_claim(&s, "build", "wkr").await;
+        // extend (heartbeat) bumps the visibility deadline
+        let ext: Value = post(
+            &s,
+            &format!("/tasks/{id}/extend"),
+            &s.token,
+            &format!(r#"{{"fencingToken":{fencing},"extraMs":5000}}"#),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(ext["ok"], json!(true));
+        assert!(ext["visibilityDeadline"].is_number());
+        // nack(requeue=true) returns it to queued
+        let nack: Value = post(
+            &s,
+            &format!("/tasks/{id}/nack"),
+            &s.token,
+            &format!(r#"{{"fencingToken":{fencing},"requeue":true,"error":"boom"}}"#),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(nack, json!({ "ok": true, "state": "queued" }));
+    }
+
+    #[tokio::test]
+    async fn queue_enqueue_requires_auth_401() {
+        let s = boot(true).await;
+        let r = client()
+            .post(format!("{}/queues/build/tasks", s.base))
+            .header("content-type", "application/json")
+            .body(r#"{"payload":"x"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"unauthorized"}"#);
+    }
+
+    #[tokio::test]
+    async fn queue_scoped_token_is_gated_to_its_queue() {
+        let s = boot(true).await;
+        // master mints a token scoped to queue "build" only
+        let minted: Value = post(&s, "/tokens", &s.token, r#"{"scope":{"queueIds":["build"]}}"#)
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(minted["ok"], json!(true));
+        assert_eq!(minted["scope"], json!({ "queueIds": ["build"] }));
+        let scoped = minted["token"].as_str().unwrap().to_string();
+        // it CAN enqueue to its own queue
+        let ok = post(&s, "/queues/build/tasks", &scoped, r#"{"payload":"x"}"#).await;
+        assert_eq!(ok.status().as_u16(), 200);
+        // but a foreign queue is 403
+        let denied = post(&s, "/queues/deploy/tasks", &scoped, r#"{"payload":"x"}"#).await;
+        assert_eq!(denied.status().as_u16(), 403);
+        assert_eq!(
+            denied.text().await.unwrap(),
+            r#"{"error":"queue out of scope","queue":"deploy"}"#
+        );
     }
 }

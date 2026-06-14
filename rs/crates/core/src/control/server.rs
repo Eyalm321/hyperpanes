@@ -28,6 +28,7 @@ use crate::control::lock::PaneLocks;
 use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
 use crate::control::routes;
 use crate::control::tokens::{random_token, TokenStore};
+use crate::control::work::WorkQueue;
 use crate::session_manager::{SessionEvent, SessionManager};
 
 /// The renderer idle threshold (`useSettings.idleAlertSeconds`, default 10s): a running pane with
@@ -47,6 +48,12 @@ pub struct Shared {
     pub tokens: Mutex<TokenStore>,
     pub inbox: Mutex<MessageInbox>,
     pub locks: Mutex<PaneLocks>,
+    /// Durable, claimable work queue backing the `/queues` + `/tasks` routes
+    /// (worker-pool phase-2). `rusqlite::Connection` is `Send` but not `Sync`, so —
+    /// exactly like every other component — it lives behind a `Mutex` that serializes
+    /// queue ops. Opened in-memory here (test-safe, zero-config); a durable embedder
+    /// swaps in `WorkQueue::open(paths::work_db())` + boot recovery (work.rs §3.3).
+    pub work: Mutex<WorkQueue>,
     pub events: EventHub,
     pub sessions: Arc<SessionManager>,
     pub allow_input: AtomicBool,
@@ -77,6 +84,7 @@ impl Shared {
             tokens: Mutex::new(TokenStore::new()),
             inbox: Mutex::new(MessageInbox::new()),
             locks: Mutex::new(PaneLocks::new()),
+            work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
             events: EventHub::new(),
             sessions,
             allow_input: AtomicBool::new(allow_input),
