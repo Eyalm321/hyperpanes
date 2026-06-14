@@ -94,6 +94,12 @@ pub enum Command {
     /// can come up empty/stale right after an external copy (#9). Unbinding `pane.paste`
     /// in Preferences restores the literal-0x16 passthrough for shells that want it.
     PasteFocused,
+    /// Forward a literal Ctrl+V (0x16) to the focused pane (the Alt+V keybinding) so an in-pane
+    /// TUI that reads the OS clipboard itself — e.g. Claude Code's image paste — can pull a
+    /// clipboard IMAGE. hyperpanes' text paste can't carry image bytes through the pty; this
+    /// hands the clipboard read to the focused program. Matches the shortcut Claude Code
+    /// documents for terminals that intercept Ctrl+V.
+    PasteImageFocused,
     /// Select all of pane `0`'s viewport.
     SelectAllPane(usize),
     /// Clear pane `0`'s screen + scrollback.
@@ -325,6 +331,10 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::PasteFocused => {
             let f = state.active_tab().focused;
             state.paste_pane(f, mgr);
+        }
+        Command::PasteImageFocused => {
+            let f = state.active_tab().focused;
+            state.paste_image_focused(f, mgr);
         }
         Command::SelectAllPane(i) => state.select_all_pane(i),
         Command::ClearPane(i) => state.clear_pane(i),

@@ -709,6 +709,13 @@ impl TerminalPane {
         Some(prepare_paste(&text, self.grid.bracketed_paste()))
     }
 
+    /// Whether the OS clipboard holds an image (vs text). The controller uses this to decide
+    /// whether a Ctrl+V with no clipboard text should forward a literal 0x16 to an in-pane TUI
+    /// (Claude Code) that reads the clipboard image itself — see [`Clipboard::has_image`].
+    pub fn clipboard_has_image(&mut self) -> bool {
+        self.clipboard.has_image()
+    }
+
     /// Pin the viewport back to the live edge (display offset 0) so the cursor is visible at the
     /// end of whatever was just written — e.g. after a paste, regardless of scrollback position.
     pub fn scroll_to_bottom(&mut self) {

@@ -3,7 +3,7 @@ name: Release (Rust native)
 # Build + publish the NATIVE Rust app (`rs/crates/app`, binary `hyperpanes`) for all
 # three desktop OSes and attach every artifact to ONE GitHub Release:
 #   * windows-latest → rs/packaging/build-installer.ps1      → rs/packaging/dist/*-setup.exe
-#   * ubuntu-latest  → rs/packaging/appimage.sh <version>    → rs/packaging/out/hyperpanes-<version>-x86_64.AppImage
+#   * ubuntu-latest  → rs/packaging/{appimage,deb,rpm}.sh <version> → rs/packaging/out/hyperpanes-<version>{.AppImage,.deb,.rpm}
 #   * macos-latest   → rs/packaging/macos/bundle.sh <version> → rs/packaging/out/hyperpanes-<version>.dmg
 # (script paths/argv per docs/ports-seams.md §3 — <version> arrives WITHOUT the `v`.)
 #
@@ -169,6 +169,20 @@ jobs:
         run: |
           shopt -s failglob
           gh release upload "${{ needs.version.outputs.tag }}" rs/packaging/out/*.AppImage --clobber
+
+      # deb + rpm reuse the release binary appimage.sh just built (cargo build --release is a
+      # no-op here); the scripts self-install cargo-deb / cargo-generate-rpm (pure-Rust, no
+      # dpkg/rpmbuild) on first run. Build deps installed above already cover the link.
+      - name: Build deb + rpm
+        run: |
+          bash rs/packaging/deb.sh "${{ needs.version.outputs.version }}"
+          bash rs/packaging/rpm.sh "${{ needs.version.outputs.version }}"
+
+      - name: Upload deb + rpm to release
+        run: |
+          shopt -s failglob
+          gh release upload "${{ needs.version.outputs.tag }}" \
+            rs/packaging/out/*.deb rs/packaging/out/*.rpm --clobber
 
   build-macos:
     needs: [version, release]

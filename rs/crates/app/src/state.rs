@@ -2482,6 +2482,34 @@ impl State {
             }
             mgr.write(&uid, &text);
             self.dirty = true;
+            return;
+        }
+        // No clipboard TEXT: if the clipboard holds an IMAGE, forward a literal Ctrl+V (0x16)
+        // so an in-pane TUI that reads the OS clipboard itself (e.g. Claude Code's image paste)
+        // can pull the image — the pty can't carry image bytes and the widget clipboard wrapper
+        // is text-only. Mirrors the explicit Alt+V gesture (`paste_image_focused`). Today a
+        // Ctrl+V on an image-only clipboard was a silent no-op, so this only adds behavior.
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            if p.pane.clipboard_has_image() {
+                let uid = p.uid.clone();
+                p.pane.set_toast("Pasting image…");
+                mgr.write(&uid, "\u{16}");
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Forward a literal Ctrl+V (0x16) to pane `idx`'s session so an in-pane TUI that reads the
+    /// OS clipboard itself (e.g. Claude Code) can paste a clipboard IMAGE — which hyperpanes'
+    /// own text paste can't deliver through the pty. Bound to Alt+V, the shortcut Claude Code
+    /// documents for "your terminal intercepts Ctrl+V". Unconditional (the user knows there's an
+    /// image): the app simply lets the focused program resolve the clipboard.
+    pub fn paste_image_focused(&mut self, idx: usize, mgr: &SessionManager) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            let uid = p.uid.clone();
+            p.pane.set_toast("Pasting image…");
+            mgr.write(&uid, "\u{16}");
+            self.dirty = true;
         }
     }
 

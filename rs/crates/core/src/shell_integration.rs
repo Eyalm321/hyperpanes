@@ -88,6 +88,19 @@ pub fn shell_integration_dir() -> PathBuf {
             .parent()
             .map(|p| p.join("Resources").join("shell-integration"))
             .unwrap_or_else(|| exe_dir.join("shell-integration")),
+        // FHS system install (deb/rpm): the binary lands in <prefix>/bin/hyperpanes and the
+        // scripts in <prefix>/share/hyperpanes/resources/shell-integration (an arch-independent
+        // <prefix>/lib/... is also accepted). Prefix-relative — exe_dir.parent() is the prefix
+        // — so it resolves for both /usr and /usr/local, and `current_exe()` reads
+        // /proc/self/exe through any /usr/bin symlink to the real install directory.
+        exe_dir
+            .parent()
+            .map(|p| p.join("share").join("hyperpanes").join("resources").join("shell-integration"))
+            .unwrap_or_else(|| exe_dir.join("shell-integration")),
+        exe_dir
+            .parent()
+            .map(|p| p.join("lib").join("hyperpanes").join("resources").join("shell-integration"))
+            .unwrap_or_else(|| exe_dir.join("shell-integration")),
     ];
     for c in &candidates {
         if c.is_dir() {

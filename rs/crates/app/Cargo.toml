@@ -1,7 +1,9 @@
 [package]
 name = "hyperpanes"
-version = "0.0.7"
+version = "0.0.8"
 edition = "2021"
+license = "MIT"
+description = "Tiled terminal workspace with AI-pane orchestration"
 rust-version = "1.85"
 publish = false
 
@@ -100,3 +102,56 @@ slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572
 opt-level = 3
 [profile.dev]
 opt-level = 1
+
+# ---------------------------------------------------------------------------
+# Linux distro packaging (deb via `cargo deb`, rpm via `cargo generate-rpm`).
+# Built by rs/packaging/{deb,rpm}.sh. FHS layout: the binary goes to /usr/bin and the
+# shell-integration scripts to /usr/share/hyperpanes/resources/shell-integration — found by
+# the prefix-relative candidate in core::shell_integration::shell_integration_dir(). Asset
+# `source` paths are relative to THIS manifest dir (rs/crates/app). Keep both asset lists in
+# sync; they mirror the AppDir that rs/packaging/appimage.sh assembles.
+[package.metadata.deb]
+maintainer = "Eyal Mizrachi <eyal@sunsationsusa.com>"
+copyright = "2026 Eyalm321, MIT"
+section = "utils"
+priority = "optional"
+extended-description = "Hyperpanes is a native tiled terminal workspace with tabs-as-workspaces, pane drag/tear-off, clickable paths, and AI-pane orchestration over a control API."
+depends = "libc6, libfontconfig1, libfreetype6, libxkbcommon0"
+assets = [
+    ["target/release/hyperpanes", "/usr/bin/hyperpanes", "755"],
+    ["../../../resources/shell-integration/hp-init.sh", "/usr/share/hyperpanes/resources/shell-integration/hp-init.sh", "644"],
+    ["../../../resources/shell-integration/hp-init.ps1", "/usr/share/hyperpanes/resources/shell-integration/hp-init.ps1", "644"],
+    ["../../../resources/shell-integration/zdotdir/.zshenv", "/usr/share/hyperpanes/resources/shell-integration/zdotdir/.zshenv", "644"],
+    ["../../../resources/shell-integration/zdotdir/.zshrc", "/usr/share/hyperpanes/resources/shell-integration/zdotdir/.zshrc", "644"],
+    ["../../packaging/linux/hyperpanes.desktop", "/usr/share/applications/hyperpanes.desktop", "644"],
+    ["../../packaging/linux/hyperpanes-mime.xml", "/usr/share/mime/packages/hyperpanes.xml", "644"],
+    ["../../packaging/linux/icons/hicolor/16x16/apps/hyperpanes.png", "/usr/share/icons/hicolor/16x16/apps/hyperpanes.png", "644"],
+    ["../../packaging/linux/icons/hicolor/32x32/apps/hyperpanes.png", "/usr/share/icons/hicolor/32x32/apps/hyperpanes.png", "644"],
+    ["../../packaging/linux/icons/hicolor/48x48/apps/hyperpanes.png", "/usr/share/icons/hicolor/48x48/apps/hyperpanes.png", "644"],
+    ["../../packaging/linux/icons/hicolor/64x64/apps/hyperpanes.png", "/usr/share/icons/hicolor/64x64/apps/hyperpanes.png", "644"],
+    ["../../packaging/linux/icons/hicolor/128x128/apps/hyperpanes.png", "/usr/share/icons/hicolor/128x128/apps/hyperpanes.png", "644"],
+    ["../../packaging/linux/icons/hicolor/256x256/apps/hyperpanes.png", "/usr/share/icons/hicolor/256x256/apps/hyperpanes.png", "644"],
+    ["../../packaging/linux/icons/hicolor/512x512/apps/hyperpanes.png", "/usr/share/icons/hicolor/512x512/apps/hyperpanes.png", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Tiled terminal workspace with AI-pane orchestration"
+# No find-requires on the build host (Fedora rpm-build tooling not assumed) — skip auto deps.
+auto-req = "no"
+requires = { fontconfig = "*", freetype = "*", libxkbcommon = "*" }
+assets = [
+    { source = "target/release/hyperpanes", dest = "/usr/bin/hyperpanes", mode = "0755" },
+    { source = "../../../resources/shell-integration/hp-init.sh", dest = "/usr/share/hyperpanes/resources/shell-integration/hp-init.sh", mode = "0644" },
+    { source = "../../../resources/shell-integration/hp-init.ps1", dest = "/usr/share/hyperpanes/resources/shell-integration/hp-init.ps1", mode = "0644" },
+    { source = "../../../resources/shell-integration/zdotdir/.zshenv", dest = "/usr/share/hyperpanes/resources/shell-integration/zdotdir/.zshenv", mode = "0644" },
+    { source = "../../../resources/shell-integration/zdotdir/.zshrc", dest = "/usr/share/hyperpanes/resources/shell-integration/zdotdir/.zshrc", mode = "0644" },
+    { source = "../../packaging/linux/hyperpanes.desktop", dest = "/usr/share/applications/hyperpanes.desktop", mode = "0644" },
+    { source = "../../packaging/linux/hyperpanes-mime.xml", dest = "/usr/share/mime/packages/hyperpanes.xml", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/16x16/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/16x16/apps/hyperpanes.png", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/32x32/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/32x32/apps/hyperpanes.png", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/48x48/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/48x48/apps/hyperpanes.png", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/64x64/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/64x64/apps/hyperpanes.png", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/128x128/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/128x128/apps/hyperpanes.png", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/256x256/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/256x256/apps/hyperpanes.png", mode = "0644" },
+    { source = "../../packaging/linux/icons/hicolor/512x512/apps/hyperpanes.png", dest = "/usr/share/icons/hicolor/512x512/apps/hyperpanes.png", mode = "0644" },
+]

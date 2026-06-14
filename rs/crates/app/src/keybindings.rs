@@ -233,6 +233,12 @@ pub fn default_bindings() -> Vec<Binding> {
         // Ctrl+V pastes via the app (fresh OS-clipboard read + bracketed paste), matching
         // Windows Terminal. Unbind it to forward a literal 0x16 to the shell instead (#9).
         b("pane.paste", true, false, false, Char('v'), "Panes", "Paste", Command::PasteFocused),
+        // Alt+V forwards a literal Ctrl+V (0x16) to the focused pane so an in-pane TUI that reads
+        // the OS clipboard itself — Claude Code's image paste — can pull a clipboard IMAGE that
+        // the text-only app paste above can't carry through the pty. Alt+V is the shortcut Claude
+        // Code documents for "your terminal intercepts Ctrl+V" (which `pane.paste` does). The
+        // natural Ctrl+V also auto-forwards when the clipboard holds an image, not text.
+        b("pane.pasteImage", false, true, false, Char('v'), "Panes", "Paste image (Alt+V)", Command::PasteImageFocused),
         // Ctrl+Shift+C copies the selection — the explicit copy gesture now that copy-on-select
         // defaults off (Ctrl+C stays the shell interrupt).
         b("pane.copy", true, false, true, Char('c'), "Panes", "Copy selection", Command::CopyFocused),
@@ -660,6 +666,27 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert("pane.paste".into(), None);
         assert!(km.match_chord(true, false, false, KeyTok::Char('v')).is_none());
+    }
+
+    #[test]
+    fn alt_v_forwards_image_paste_to_focused_pane() {
+        // Alt+V (native-only `pane.pasteImage`) resolves to PasteImageFocused, whose handler
+        // writes a literal Ctrl+V (0x16) to the focused pane so an in-pane TUI (Claude Code)
+        // reads the OS clipboard image itself — the shortcut Claude Code documents for
+        // terminals that intercept Ctrl+V (which our `pane.paste` does).
+        let km = empty_keymap();
+        assert!(matches!(
+            km.match_chord(false, true, false, KeyTok::Char('v')),
+            Some(Command::PasteImageFocused)
+        ));
+        // It must stay distinct from the plain Ctrl+V text paste — no cross-talk between the two.
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('v')),
+            Some(Command::PasteFocused)
+        ));
+        // Bare V and Shift+V are ordinary text, never the image forward.
+        assert!(km.match_chord(false, false, false, KeyTok::Char('v')).is_none());
+        assert!(km.match_chord(false, false, true, KeyTok::Char('v')).is_none());
     }
 
     #[test]

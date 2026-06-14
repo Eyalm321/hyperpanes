@@ -42,6 +42,16 @@ impl Clipboard {
             _ => None,
         }
     }
+
+    /// Whether the system clipboard currently holds an IMAGE (rather than text). Best-effort:
+    /// a decode failure, a text-only clipboard, or an unavailable handle all read as `false`.
+    /// `arboard::get_image` decodes to RGBA — we only need presence, so the pixels are dropped.
+    /// Used by the paste path to decide whether a Ctrl+V should forward a literal 0x16 to an
+    /// in-pane TUI (e.g. Claude Code) that reads the OS clipboard image itself, since the pty
+    /// can't carry image bytes and this wrapper is text-only.
+    pub fn has_image(&mut self) -> bool {
+        self.inner.as_mut().is_some_and(|c| c.get_image().is_ok())
+    }
 }
 
 impl Default for Clipboard {
