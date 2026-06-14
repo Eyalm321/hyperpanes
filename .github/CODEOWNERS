@@ -1,0 +1,25 @@
+# CODEOWNERS — the hard human-review backstop for the unattended auto-merge pipeline.
+#
+# With "Require review from Code Owners" enabled in the branch ruleset (see
+# docs/auto-merge.md), any PR that touches a code-owned path below needs an actual
+# code owner's approval before it can merge. The fleet/automation bot is NOT a code
+# owner, so it physically cannot self-approve these — the dangerous ~5% of paths stop
+# for a human while everything else flows through the checks-only green path.
+#
+# Last match wins (GitHub CODEOWNERS semantics). Keep these globs in lockstep with any
+# risky-path pre-filter in the auto-merge automation; CODEOWNERS is the authoritative stop.
+
+# Default: no owner -> agent path, gated only by the `verify` checks (this is intended).
+
+# CI/CD, the gates themselves, secret usage, this very file.
+/.github/                @Eyalm321
+
+# GPU/GUI surface — heavy, hardware-dependent, not exercised by the per-PR test gate.
+/rs/crates/app/          @Eyalm321
+
+# build.rs = arbitrary code execution at build time.
+**/build.rs              @Eyalm321
+
+# Dependency / supply-chain changes.
+**/Cargo.toml            @Eyalm321
+**/Cargo.lock            @Eyalm321
