@@ -36,6 +36,7 @@ fn kitchen_sink() -> WorkspaceFile {
             ("ai.subtitle".to_string(), "compiling".to_string()),
             ("role".to_string(), "worker".to_string()),
         ])),
+        uid: Some("pane-3".into()),
     };
     let group = GroupSpec {
         title: Some("build".into()),
