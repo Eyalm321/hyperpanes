@@ -48,6 +48,20 @@ use crate::session::replay::Replay;
 use crate::session::screen::Screen;
 use crate::session::spawn::{build_env, default_shell, resolve_spawn, resolve_windows_command, EnvInputs, EnvMap};
 
+/// Process-global counter for the in-process backend's `pane-N` uids (see
+/// [`SessionManager::fresh_uid`]). Must be process-global (not per-manager) so two windows
+/// sharing the one in-process `SessionManager` never mint the same `pane-0` — the historical
+/// collision the GUI's own `state.rs` counter was hardened against; minting here keeps that
+/// invariant for the daemon scheme too.
+static NEXT_INPROC_UID: AtomicU64 = AtomicU64::new(0);
+
+/// `pane-0`, `pane-1`, … — the in-process uid scheme (PTYs die with the GUI, so per-run
+/// uniqueness suffices). The daemon scheme is a UUID for cross-run uniqueness; see
+/// [`SessionManager::fresh_uid`].
+fn next_inproc_uid() -> String {
+    format!("pane-{}", NEXT_INPROC_UID.fetch_add(1, Ordering::Relaxed))
+}
+
 /// An event emitted by a live session, delivered on the manager's event channel.
 /// Mirrors the TS `SessionHandlers` callbacks (`onData` / `onCwd` / `onExit`).
 ///
@@ -391,6 +405,38 @@ impl SessionManager {
         match self {
             SessionManager::InProcess(r) => Some(r),
             SessionManager::Daemon(_) => None,
+        }
+    }
+
+    /// Whether this manager is backed by the (crash-surviving) session daemon. The GUI uses
+    /// this to decide whether re-attach (M2) is even possible — only a daemon retains a
+    /// session across a GUI restart, so the in-process backend always re-spawns from the
+    /// recorded spawn command instead.
+    pub fn is_daemon(&self) -> bool {
+        matches!(self, SessionManager::Daemon(_))
+    }
+
+    /// Mint a fresh, **unique** session uid for a NEWLY created pane, choosing a scheme that
+    /// fits the backend's uid-stability needs (`docs/session-daemon-plan.md` "uid stability"):
+    ///
+    /// * **In-process** — the historical `pane-N` token from a process-global counter. The
+    ///   PTYs die with the GUI, so a uid only ever has to be unique *within* this run; the
+    ///   short readable form is kept (and existing call sites/tests see no change).
+    /// * **Daemon** — a `pane-<uuid>` token. Daemon sessions OUTLIVE the GUI, so a re-attaching
+    ///   pane references its session by a uid recorded in a *previous* run's snapshot; were a
+    ///   new run to re-use a per-run counter (`pane-0`, `pane-1`, …) its fresh panes would
+    ///   collide with the daemon's still-live sessions from the prior run (silently adopting a
+    ///   stranger's pty). A v4 UUID is globally unique across runs, so a new pane's uid can
+    ///   never alias a survivor — and that same uid is exactly what [`to_session_file`] records
+    ///   and a later launch re-attaches by.
+    ///
+    /// (The wire side already PINS whatever uid the GUI passes — see
+    /// [`daemon_client`](crate::session::daemon_client) — so making the GUI's *minting* stable
+    /// is the whole fix; the daemon honors it verbatim.)
+    pub fn fresh_uid(&self) -> String {
+        match self {
+            SessionManager::InProcess(_) => next_inproc_uid(),
+            SessionManager::Daemon(_) => format!("pane-{}", uuid::Uuid::new_v4()),
         }
     }
 
@@ -1041,5 +1087,31 @@ mod tests {
         mgr.resize("u1", 120, 40);
         // Screen render works post-resize (smoke that the screen lock path is sound).
         assert!(mgr.render_screen("u1").is_some());
+    }
+
+    // ---- uid minting policy (session-daemon-plan "uid stability") ----
+
+    #[test]
+    fn in_process_backend_is_not_daemon() {
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        assert!(!mgr.is_daemon(), "the in-process backend reports is_daemon() == false");
+    }
+
+    #[test]
+    fn in_process_fresh_uid_is_pane_n_and_unique() {
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        // The in-process scheme is the readable `pane-N` (PTYs die with the GUI, so per-run
+        // uniqueness suffices); the counter is process-global so two managers never alias.
+        let a = mgr.fresh_uid();
+        let b = mgr.fresh_uid();
+        assert!(a.starts_with("pane-"), "in-process fresh_uid is pane-N, got {a}");
+        assert_ne!(a, b, "successive fresh_uids are unique");
+        let (etx2, _erx2) = unbounded_channel::<SessionEvent>();
+        let mgr2 = SessionManager::new(etx2);
+        // A SECOND manager shares the process-global counter — no cross-manager `pane-0`
+        // collision (the historical multi-window clobber this counter was hardened against).
+        assert_ne!(mgr2.fresh_uid(), a, "the counter is process-global across managers");
     }
 }

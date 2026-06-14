@@ -829,6 +829,149 @@ mod tests {
         mgr2.kill("surv");
     }
 
+    // ---- M2 re-attach: the SessionManager-level decision the GUI restore branches on ----
+    //
+    // `state.rs::make_pane_from_spec` decides RE-ATTACH vs RE-SPAWN with exactly this
+    // predicate: `mgr.is_daemon() && spec.uid.map(|u| mgr.has(u)).unwrap_or(false)`. These
+    // tests stand up a SessionManager::Daemon over a REAL (in-process) daemon and prove that
+    // predicate end-to-end — a SURVIVING uid re-attaches (the session was NOT re-spawned;
+    // `replay` carries the prior output), an UNKNOWN/dead uid does not — plus the
+    // uid-stability invariant the whole scheme rests on.
+
+    use crate::session_manager::SessionManager;
+
+    // Wrap a real connected daemon socket in a SessionManager::Daemon — the same backend the
+    // GUI holds (`new_daemon` builds this; here we connect to a temp-socket in-process daemon
+    // instead of spawning `current_exe`, which a test binary can't do).
+    fn daemon_manager(socket: &Path) -> (SessionManager, UnboundedReceiver<SessionEvent>) {
+        let stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
+        let (etx, erx) = unbounded_channel::<SessionEvent>();
+        let mgr = DaemonSessionManager::from_stream(stream, etx).expect("manager");
+        (SessionManager::Daemon(Arc::new(mgr)), erx)
+    }
+
+    // The crux: a snapshot uid that is STILL LIVE in the daemon re-attaches (no re-spawn),
+    // and a dead/unknown uid does not — so the GUI restore would re-spawn it instead.
+    #[test]
+    fn surviving_uid_reattaches_unknown_uid_does_not() {
+        let socket = temp_socket("reattach-decide");
+        let _daemon = spawn_in_process(&socket).expect("daemon binds");
+
+        // --- "previous run": create a long-lived session under a recorded uid + drive output.
+        let recorded_uid = {
+            let (mgr1, mut rx1) = daemon_manager(&socket);
+            assert!(mgr1.is_daemon(), "the daemon backend reports is_daemon()");
+            // A GUI pane would mint this via `mgr.fresh_uid()` (a UUID on the daemon backend);
+            // a literal uid is fine for the test — the point is it's PINNED + recorded.
+            let uid = mgr1.fresh_uid();
+            assert!(uid.starts_with("pane-"), "daemon fresh_uid is a pane-<uuid>, got {uid}");
+            mgr1.create(SpawnOptions {
+                uid: uid.clone(),
+                shell: Some("/bin/sh".into()),
+                args: Some(vec!["-i".into()]),
+                ..Default::default()
+            })
+            .expect("create");
+            mgr1.write(&uid, "echo REATTACH_MARKER\n");
+            assert!(
+                recv_event_until(&mut rx1, Dur::from_secs(10), |e| {
+                    matches!(e, SessionEvent::Data { uid: u, data } if *u == uid && data.contains("REATTACH_MARKER"))
+                })
+                .is_some(),
+                "marker should stream into the live session"
+            );
+            // Snapshot would record `uid` (to_session_file does). Drop the manager = GUI crash.
+            uid
+        };
+
+        // --- "next launch": a FRESH manager on the same daemon. The restore predicate:
+        let (mgr2, _rx2) = daemon_manager(&socket);
+
+        // (a) The surviving uid: is_daemon && has(uid) → RE-ATTACH. The session was NOT
+        //     re-spawned (it's the very same one), and replay carries its prior output.
+        assert!(
+            wait_until(Dur::from_secs(2), || mgr2.has(&recorded_uid)),
+            "the survivor's uid is live in the daemon after reconnect, got uids {:?}",
+            mgr2.uids()
+        );
+        let reattach_survivor = mgr2.is_daemon() && mgr2.has(&recorded_uid);
+        assert!(reattach_survivor, "restore would RE-ATTACH the surviving uid (no re-spawn)");
+        assert!(
+            wait_until(Dur::from_secs(3), || {
+                mgr2.replay(&recorded_uid).map_or(false, |r| r.contains("REATTACH_MARKER"))
+            }),
+            "re-attach seeds the fresh grid from the survivor's replay, got {:?}",
+            mgr2.replay(&recorded_uid)
+        );
+
+        // (b) An unknown/dead uid (the program had exited last run): has() is false → the GUI
+        //     falls back to a fresh spawn from spec.command/args/shell.
+        let dead_uid = "pane-00000000-dead-dead-dead-000000000000";
+        let reattach_dead = mgr2.is_daemon() && mgr2.has(dead_uid);
+        assert!(!reattach_dead, "an unknown/dead uid does NOT re-attach → restore re-spawns it");
+
+        mgr2.kill(&recorded_uid);
+    }
+
+    // uid-stability invariant (the plan's "uid stability"): the daemon backend's fresh_uid is
+    // UNIQUE across independent "runs" (manager instances) — a new run's freshly minted uid
+    // can never collide with (and thus silently adopt) a survivor from a prior run. A literal
+    // process-local counter would re-issue `pane-0` every run and alias the survivor.
+    #[test]
+    fn daemon_fresh_uid_is_unique_across_runs() {
+        let socket = temp_socket("uid-stability");
+        let _daemon = spawn_in_process(&socket).expect("daemon binds");
+
+        // Two independent managers (two GUI runs against the same daemon) each mint a batch
+        // of fresh uids; the two batches must be disjoint (no cross-run collision).
+        let (runa, _ra) = daemon_manager(&socket);
+        let (runb, _rb) = daemon_manager(&socket);
+
+        let batch1: Vec<String> = (0..8).map(|_| runa.fresh_uid()).collect();
+        let batch2: Vec<String> = (0..8).map(|_| runb.fresh_uid()).collect();
+
+        // Unique within each run AND across the two runs.
+        let mut all = batch1.clone();
+        all.extend(batch2.clone());
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), batch1.len() + batch2.len(), "fresh_uid never collides across runs");
+        drop((runa, runb, _ra, _rb));
+
+        // And the same uid a run minted is exactly the one a survivor would be re-attached by:
+        // create under a minted uid, drop, reconnect, has(uid) true (the round-trip the GUI
+        // snapshot→reattach relies on).
+        let (run_a, mut rx_a) = daemon_manager(&socket);
+        let surv = run_a.fresh_uid();
+        run_a.create(SpawnOptions {
+            uid: surv.clone(),
+            shell: Some("/bin/sh".into()),
+            args: Some(vec!["-i".into()]),
+            ..Default::default()
+        })
+        .expect("create");
+        // Drive a marker and wait for its echo so the session is CONFIRMED registered + live
+        // daemon-side before we drop (mirrors the reconnect test — without this the daemon may
+        // not have finished spawning the pty when ListSessions runs on the next connect).
+        run_a.write(&surv, "echo STABLE_SURVIVOR\n");
+        assert!(
+            recv_event_until(&mut rx_a, Dur::from_secs(10), |e| {
+                matches!(e, SessionEvent::Data { uid: u, data } if *u == surv && data.contains("STABLE_SURVIVOR"))
+            })
+            .is_some(),
+            "the minted-uid session is live daemon-side before we drop"
+        );
+        drop(run_a);
+        drop(rx_a);
+
+        let (run3, _r3) = daemon_manager(&socket);
+        assert!(
+            wait_until(Dur::from_secs(2), || run3.has(&surv)),
+            "the minted uid round-trips: a later run re-attaches the survivor by that exact uid"
+        );
+        run3.kill(&surv);
+    }
+
     // ---- keystroke→echo micro-bench: daemon vs in-process ----
     //
     // The plan's latency risk: the daemon adds a local UDS hop per keystroke/output chunk.
