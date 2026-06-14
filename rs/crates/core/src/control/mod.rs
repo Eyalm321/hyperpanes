@@ -6,6 +6,7 @@ pub mod inbox;
 pub mod lock;
 pub mod input;
 pub mod output;
+pub mod work;
 
 pub mod tokens;
 pub mod readmodel;
