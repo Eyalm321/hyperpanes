@@ -188,6 +188,10 @@ pub struct App {
     /// Second-instance `{argv, cwd}` hand-offs from the single-instance server (the
     /// receiver end; the tokio-side handler sends). Drained on the UI thread each tick.
     handoffs: RefCell<Option<std::sync::mpsc::Receiver<hyperpanes_core::single_instance::HandoffMessage>>>,
+    /// Crash-recovery autosave (#2): when we last wrote the session snapshot, and the JSON we
+    /// wrote — so [`App::autosave_session`] throttles to a few seconds and skips unchanged writes.
+    last_autosave: Cell<Option<std::time::Instant>>,
+    last_autosave_json: RefCell<String>,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -224,7 +228,43 @@ impl App {
             idle_ticks: Cell::new(0),
             cadence_slow: Cell::new(false),
             handoffs: RefCell::new(None),
+            last_autosave: Cell::new(None),
+            last_autosave_json: RefCell::new(String::new()),
         })
+    }
+
+    /// Crash-recovery autosave (#2): periodically snapshot the current session to
+    /// `last-workspace.json` so a crash — or any relaunch — restores the workspace as it was.
+    /// Reuses the same writer + restore path as the clean-close save; throttled to a few seconds
+    /// and skipped when nothing changed. Snapshots the primary (first) window, matching the
+    /// single-window clean-close/restore behaviour. Cheap: the snapshot is structural (layout +
+    /// cwd + labels + zoom), never scrollback. Called every tick; early-returns most of them.
+    fn autosave_session(&self) {
+        const EVERY: Duration = Duration::from_secs(4);
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_autosave.get() {
+            if now.duration_since(last) < EVERY {
+                return;
+            }
+        }
+        let file = match self.windows.borrow().first() {
+            Some(w) => w.state.borrow().to_session_file(),
+            None => return,
+        };
+        // Never clobber a good save with a transient empty snapshot (e.g. mid window-close).
+        if file.groups.as_deref().map_or(true, |g| g.is_empty()) {
+            return;
+        }
+        let json = match serde_json::to_string(&file) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        self.last_autosave.set(Some(now));
+        if *self.last_autosave_json.borrow() == json {
+            return; // unchanged since the last write — skip the I/O
+        }
+        persist_last_session(&file);
+        *self.last_autosave_json.borrow_mut() = json;
     }
 
     /// Install the second-instance hand-off receiver (primary instance only). Called once
@@ -567,6 +607,12 @@ impl App {
         // printed their banner into the replay buffer), re-host window 0's focused pane
         // into a fresh window — proving re-host shows real replayed scrollback.
         self.ticks.set(self.ticks.get() + 1);
+        // Test affordance (inert unless the env is set): panic once the app is up + autosaved, to
+        // exercise the crash reporter end-to-end — hook → crash log → reporter dialog → relaunch →
+        // session restore. Mirrors the `HYPERPANES_MULTIWIN` / `HYPERPANES_DEBUG` test hooks.
+        if self.ticks.get() == 220 && std::env::var_os("HYPERPANES_TEST_PANIC").is_some() {
+            panic!("HYPERPANES_TEST_PANIC: simulated crash");
+        }
         if !self.scaffold_done.get()
             && self.ticks.get() > 350 // ≈2.8 s at 8 ms/tick
             && std::env::var_os("HYPERPANES_MULTIWIN").is_some()
@@ -614,6 +660,10 @@ impl App {
                 let _ = slint::quit_event_loop();
             }
         }
+
+        // 5. Crash-recovery autosave (#2): keep `last-workspace.json` fresh (throttled) so a crash
+        //    loses at most a few seconds and a relaunch restores the workspace as it was.
+        self.autosave_session();
 
         // ---- adaptive idle cadence (#3) ----
         // A tick "did work" if it drained any session output, animated/rendered real pane

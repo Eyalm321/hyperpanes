@@ -24,6 +24,7 @@ mod app;
 mod command;
 mod contextmenu;
 mod control_host;
+mod crash;
 mod drag;
 mod glow;
 mod history_scan;
@@ -197,14 +198,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     perf::init();
     perf::mark("main: enter");
 
-    // Capture any panic to a crash log (the windowed subsystem has no console).
+    // Crash-reporter mode: a fresh process spawned by the panic hook (or by the next launch when a
+    // crash went unacknowledged) to show the recovery dialog. Handle it before ANY app init or the
+    // single-instance gate — it only needs a Tokio runtime for rfd's portal backend, and it never
+    // installs the panic hook below (so a panic in the reporter can't recurse).
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--crash-report") {
+            let log = args
+                .get(i + 1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(crash::default_log_path);
+            let rt = tokio::runtime::Runtime::new()?;
+            let _guard = rt.enter();
+            let outcome = crash::run_report(&log);
+            crash::clear_marker();
+            if matches!(outcome, crash::Outcome::Relaunch) {
+                crash::relaunch();
+            }
+            return Ok(());
+        }
+    }
+
+    // Capture any panic to a crash log (the windowed subsystem has no console), then pop a crash
+    // reporter from a fresh process (this one is unwinding) — see `crate::crash`.
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
         let path = std::env::temp_dir().join("hyperpanes-crash.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             let _ = writeln!(f, "PANIC: {info}");
             let bt = std::backtrace::Backtrace::force_capture();
             let _ = writeln!(f, "{bt}");
+        }
+        crate::crash::write_marker(&path);
+        // Guard against recursion if the reporter itself panics (it sets this env on its child).
+        if std::env::var_os("HYPERPANES_CRASH_CHILD").is_none() {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe)
+                    .arg("--crash-report")
+                    .arg(&path)
+                    .env("HYPERPANES_CRASH_CHILD", "1")
+                    .spawn();
+            }
         }
     }));
 
@@ -280,6 +315,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(file) => PendingSeed::Workspace(Box::new(file)),
         None => PendingSeed::EmptyTab,
     };
+    // Next-launch crash detection: if a previous run crashed and its instant reporter never ran
+    // (or was killed), surface the dialog now from a separate process. Primary only — a secondary
+    // already returned above. The instant reporter clears the marker once shown, so this won't
+    // double-fire after a normal crash + dismiss.
+    if let Some(log) = crash::pending() {
+        crash::clear_marker();
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe)
+                .arg("--crash-report")
+                .arg(&log)
+                .env("HYPERPANES_CRASH_CHILD", "1")
+                .spawn();
+        }
+    }
+
     perf::mark("main: spawn_window begin");
     application.spawn_window(seed);
     perf::mark("main: spawn_window done");
