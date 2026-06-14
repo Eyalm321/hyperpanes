@@ -66,6 +66,26 @@ pub fn dbg_log(msg: &str) {
     }
 }
 
+/// Parse the `--session-daemon <salt>` mode flag out of `argv`, returning the salt when
+/// present. Accepts both `--session-daemon <salt>` and `--session-daemon=<salt>`. Returns
+/// `None` for a normal GUI launch. Kept here (not in core) so `main` stays the entry and
+/// core owns the daemon logic.
+fn session_daemon_salt(argv: &[String]) -> Option<String> {
+    let mut it = argv.iter();
+    while let Some(arg) = it.next() {
+        if let Some(rest) = arg.strip_prefix("--session-daemon") {
+            if let Some(inline) = rest.strip_prefix('=') {
+                return Some(inline.to_string());
+            }
+            if rest.is_empty() {
+                // `--session-daemon <salt>` — the salt is the next argv token.
+                return it.next().cloned();
+            }
+        }
+    }
+    None
+}
+
 /// Lightweight perf instrumentation for the Wave-2 perf track (Task 17). Enabled by setting
 /// `HYPERPANES_PERFLOG` to a file path (or `1` / empty for a default temp path), so the
 /// startup-latency (#2) and scroll-region-throughput (#1) work can be measured before/after
@@ -207,6 +227,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = writeln!(f, "{bt}");
         }
     }));
+
+    // Session-daemon mode (`--session-daemon <salt>`): run the headless PTY-owning daemon
+    // and return — no GUI, no fonts, no window. The daemon owns the sessions so they
+    // survive a GUI crash (session-daemon-plan M0); the logic lives entirely in core, this
+    // is just the entry. It builds its own Tokio runtime and blocks until the daemon exits.
+    let argv0: Vec<String> = std::env::args().collect();
+    if let Some(salt) = session_daemon_salt(&argv0) {
+        dbg_log(&format!("session-daemon: starting for salt {salt:?}"));
+        hyperpanes_core::session::daemon::run(&salt)?;
+        return Ok(());
+    }
 
     // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.
     crate::prefs::init_bundled_fonts();
@@ -514,6 +545,32 @@ mod tests {
     fn keymap() -> keybindings::Keymap {
         // No user overrides → the compiled-in defaults (Ctrl+Shift+P → palette).
         keybindings::Keymap::default_for_tests()
+    }
+
+    // ---- --session-daemon mode parsing ----
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn session_daemon_salt_parses_space_and_eq_forms() {
+        assert_eq!(
+            session_daemon_salt(&argv(&["hyperpanes", "--session-daemon", "/data/dir"])),
+            Some("/data/dir".to_string())
+        );
+        assert_eq!(
+            session_daemon_salt(&argv(&["hyperpanes", "--session-daemon=/data/dir"])),
+            Some("/data/dir".to_string())
+        );
+    }
+
+    #[test]
+    fn session_daemon_salt_is_none_for_a_normal_launch() {
+        assert_eq!(session_daemon_salt(&argv(&["hyperpanes"])), None);
+        assert_eq!(session_daemon_salt(&argv(&["hyperpanes", "-c", "ls", "--cwd", "/tmp"])), None);
+        // A bare flag with no following salt yields None (nothing to run a daemon for).
+        assert_eq!(session_daemon_salt(&argv(&["hyperpanes", "--session-daemon"])), None);
     }
 
     // ---- Ctrl+Shift+P → palette, pinned at the ROUTER level (the full text→tok→chord
