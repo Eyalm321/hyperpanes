@@ -466,11 +466,48 @@ fn build_spec(opts: &SpawnOptions) -> PtySpec {
     PtySpec {
         file: spawn_file,
         args: final_args,
-        cwd: opts.cwd.clone(),
+        // A spawnable working directory MUST exist or the underlying `posix_spawn`/
+        // `CreateProcessW` fails with ENOENT *before the child ever runs* — sinking the
+        // whole session silently (no pty, so no Data/Exit ever reaches an attached
+        // client). `opts.cwd` is honored when it is a real directory; otherwise we fall
+        // back to one that exists rather than inheriting a stale/missing cwd (e.g. a
+        // pane's saved cwd that was since deleted, or a `$HOME` on an unmounted drive —
+        // portable-pty defaults a None cwd to `$HOME`, which need not exist). `None`
+        // means "let the pty layer pick its default" only when nothing valid is found.
+        cwd: resolve_spawn_cwd(opts.cwd.as_deref(), &env),
         env,
         cols: opts.cols.unwrap_or(80),
         rows: opts.rows.unwrap_or(24),
     }
+}
+
+/// Pick a working directory that is guaranteed to exist (or `None` to defer to the pty
+/// layer's own default). A non-existent cwd makes the child spawn fail with ENOENT, so
+/// we never hand one through: the requested `cwd` if it is a real directory, else the
+/// resolved env's `$HOME` if that exists, else the daemon/process cwd, else `/` (which
+/// always exists on unix). `None` only if even the process cwd is unreadable AND there
+/// is no usable `$HOME` — leaving the pty layer to apply its own fallback.
+fn resolve_spawn_cwd(requested: Option<&str>, env: &EnvMap) -> Option<String> {
+    let is_dir = |p: &str| std::path::Path::new(p).is_dir();
+    if let Some(c) = requested {
+        if is_dir(c) {
+            return Some(c.to_string());
+        }
+    }
+    if let Some(home) = env.get("HOME") {
+        if is_dir(home) {
+            return Some(home.clone());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(s) = cwd.to_str() {
+            return Some(s.to_string());
+        }
+    }
+    if cfg!(unix) && is_dir("/") {
+        return Some("/".to_string());
+    }
+    None
 }
 
 fn epoch_ms() -> u64 {
