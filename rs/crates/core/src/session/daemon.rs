@@ -138,6 +138,15 @@ fn daemon_names(salt: &str) -> DaemonNames {
     }
 }
 
+/// The salted socket path a daemon for `salt` binds — the one a client connects to. Kept
+/// `pub(crate)` so the M1 [`DaemonSessionManager`](crate::session::daemon_client) resolves
+/// the SAME path the daemon's own [`run`]/[`connect`](DaemonClient::connect) use, without
+/// re-deriving the hash (one source of truth for the name scheme).
+#[cfg(unix)]
+pub(crate) fn socket_path_for(salt: &str) -> PathBuf {
+    daemon_names(salt).socket
+}
+
 /// Tighten the socket to owner-only (`0600`), matching the single-instance trust boundary
 /// (filesystem-scoped to the user, no network surface). Best-effort.
 #[cfg(unix)]
@@ -304,15 +313,31 @@ impl Daemon {
                 // session's birth is forwarded to its creator. A separate `Attach` remains
                 // for OTHER connections (and re-attach after a crash).
                 attached.lock().unwrap().insert(uid.clone());
-                // A spawn failure is swallowed here (M0 keeps create fire-and-forget on the
-                // engine side; the client learns of a dead session via the absence of
-                // events / a later ListSessions). The uid still lets it correlate the
-                // request. Enter the runtime so `create`'s `tokio::spawn` of the pty driver
-                // succeeds from this plain OS thread.
+                // Enter the runtime so `create`'s `tokio::spawn` of the pty driver succeeds
+                // from this plain OS thread, then SURFACE a spawn failure to the client
+                // (M1 follow-up). Previously the result was swallowed (`let _created = …`),
+                // so a pane whose pty failed to spawn (bad shell, ENOENT cwd that slipped
+                // past the guard, fork/exec failure) produced NO events at all — the GUI
+                // pane just hung blank with no Data and no Exit. Now we still reply
+                // `Created` (the uid lets the client correlate its request and key its
+                // shadow state), but on a spawn error we ALSO inject a synthetic
+                // `Exit{code:-1}` onto the bus for the uid. The creator was just
+                // auto-attached above, so the writer forwards it immediately — the pane
+                // reflects a dead session instead of hanging. A successful create needs no
+                // injection: the pty driver emits real Data/Exit. (`Exit` is the only
+                // failure shape the wire carries today; a richer `DaemonMsg::Error` is a
+                // possible M3 refinement, but `Exit` already drives the GUI's
+                // pane-died path, so it reuses an existing, tested route.)
                 let _guard = self.rt.enter();
-                let _created = self.registry.create(opts);
+                let created = self.registry.create(opts);
                 drop(_guard);
-                let _ = out.send(DaemonMsg::Created { uid });
+                let _ = out.send(DaemonMsg::Created { uid: uid.clone() });
+                if created.is_err() {
+                    // Broadcast so EVERY connection attached to this uid (the creator, and
+                    // any future re-attacher that races the failure) sees it; the pump's
+                    // cwd cache has nothing to clean since no session was created.
+                    let _ = self.bus.send(SessionEvent::Exit { uid, code: -1 });
+                }
             }
             ClientMsg::Write { uid, data } => self.registry.write(&uid, &data),
             ClientMsg::Resize { uid, cols, rows } => self.registry.resize(&uid, cols, rows),
@@ -500,15 +525,18 @@ impl DaemonClient {
 /// where 400+ concurrent tests could starve the 16 ms batch timer and make the pty-output
 /// assertions flaky. Dropping it lets the runtime + accept thread tear down.
 #[cfg(all(unix, test))]
-struct InProcessDaemon {
+pub(crate) struct InProcessDaemon {
     _accept: std::thread::JoinHandle<()>,
 }
 
 /// Start a daemon **in-process** on an explicit socket path, for tests. The daemon gets
 /// its own runtime (see [`InProcessDaemon`]); this returns once the listener is bound, so
 /// a client can connect immediately. No flock (the temp path is unique per test/run).
+/// `pub(crate)` so the M1 `daemon_client` tests can stand up a real daemon to exercise
+/// [`DaemonSessionManager`](crate::session::daemon_client) against — the same harness M0's
+/// own loopback tests use.
 #[cfg(all(unix, test))]
-fn spawn_in_process(socket: &Path) -> io::Result<InProcessDaemon> {
+pub(crate) fn spawn_in_process(socket: &Path) -> io::Result<InProcessDaemon> {
     let _ = std::fs::remove_file(socket);
     let listener = std::os::unix::net::UnixListener::bind(socket)?;
     let accept = std::thread::Builder::new()
