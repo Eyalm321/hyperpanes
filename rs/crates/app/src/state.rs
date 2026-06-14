@@ -80,6 +80,11 @@ pub struct DetachedPane {
     /// The pane's per-pane zoom (terminal font px), carried across a re-host so a zoomed pane
     /// keeps its size when torn off / moved.
     pub font_px: f32,
+    /// The pane's original spawn spec (command/args/shell), carried across a re-host so a
+    /// torn-off / moved pane still records its program in a later relaunch snapshot.
+    pub spawn_command: Option<String>,
+    pub spawn_args: Option<Vec<String>>,
+    pub spawn_shell: Option<String>,
 }
 
 /// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
@@ -288,6 +293,14 @@ pub struct PaneState {
     /// the title in the header. "" = unknown (e.g. a re-hosted pane whose original shell
     /// isn't tracked across the detach).
     pub shell_label: String,
+    /// What this pane was spawned with — the original `command`/`args`/`shell` handed to
+    /// [`SpawnOptions`] at creation, kept so the relaunch snapshot ([`State::to_session_file`])
+    /// can record them. That lets restore re-run the *original program* (e.g. `claude`) instead
+    /// of a default shell — and is the spawn-spec half of the session-daemon M2 re-attach (the
+    /// uid half is `self.uid`). `None` = an interactive shell at the default (nothing to record).
+    pub spawn_command: Option<String>,
+    pub spawn_args: Option<Vec<String>>,
+    pub spawn_shell: Option<String>,
 }
 
 impl PaneState {
@@ -847,8 +860,10 @@ impl State {
             rows: Some(rows),
             pane_id: Some(uid.clone()),
             cwd,
-            shell,
-            command,
+            // Cloned so the resolved spawn spec is also kept on the PaneState (below) for the
+            // relaunch snapshot.
+            shell: shell.clone(),
+            command: command.clone(),
             env: opts.env.clone(),
             integration,
             ..Default::default()
@@ -904,6 +919,11 @@ impl State {
             env: opts.env,
             // The resolved shell program → its short header badge (computed once here).
             shell_label: shell_label(&shell_path),
+            // Remember the spawn spec so the relaunch snapshot can re-run this program. A New
+            // Pane dialog carries no argv, so `spawn_args` stays None.
+            spawn_command: command,
+            spawn_args: None,
+            spawn_shell: shell,
         })
     }
 
@@ -1029,6 +1049,9 @@ impl State {
                 show_frame: ps.show_frame,
                 show_dot: ps.show_dot,
                 font_px: ps.font_px,
+                spawn_command: ps.spawn_command,
+                spawn_args: ps.spawn_args,
+                spawn_shell: ps.spawn_shell,
             },
             alive,
         ))
@@ -1088,6 +1111,11 @@ impl State {
             // A re-hosted session: its original spawn shell isn't tracked across the detach,
             // so the badge stays hidden ("") rather than guessing.
             shell_label: String::new(),
+            // The spawn spec IS carried across the detach, so a relaunch snapshot of a
+            // re-hosted pane still records its program.
+            spawn_command: det.spawn_command,
+            spawn_args: det.spawn_args,
+            spawn_shell: det.spawn_shell,
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -1132,6 +1160,9 @@ impl State {
                 show_frame: ps.show_frame,
                 show_dot: ps.show_dot,
                 font_px: ps.font_px,
+                spawn_command: ps.spawn_command,
+                spawn_args: ps.spawn_args,
+                spawn_shell: ps.spawn_shell,
             },
             alive,
         ))
@@ -2627,7 +2658,9 @@ impl State {
             rows: Some(rows),
             pane_id: Some(uid.clone()),
             cwd,
-            shell,
+            // Cloned so the resolved shell is also recorded on the pane (below) as its new
+            // spawn spec.
+            shell: shell.clone(),
             env: env.clone(),
             integration,
             ..Default::default()
@@ -2651,6 +2684,12 @@ impl State {
             p.surface = Image::default();
             // Plain restart drops the overrides (env: None); refresh re-applies them.
             p.env = env;
+            // A restart re-spawns a plain interactive shell at the resolved default — drop any
+            // original command/args and record the new shell so a later relaunch snapshot
+            // reflects what's actually running.
+            p.spawn_command = None;
+            p.spawn_args = None;
+            p.spawn_shell = shell;
         }
         self.dirty = true;
     }
@@ -2670,6 +2709,9 @@ impl State {
             show_frame: ps.show_frame,
             show_dot: ps.show_dot,
             font_px: ps.font_px,
+            spawn_command: ps.spawn_command,
+            spawn_args: ps.spawn_args,
+            spawn_shell: ps.spawn_shell,
         })
     }
 
@@ -2726,6 +2768,11 @@ impl State {
             // A re-hosted session: its original spawn shell isn't tracked across the detach,
             // so the badge stays hidden ("") rather than guessing.
             shell_label: String::new(),
+            // The spawn spec IS carried across the detach, so a relaunch snapshot of a
+            // re-hosted pane still records its program.
+            spawn_command: det.spawn_command,
+            spawn_args: det.spawn_args,
+            spawn_shell: det.spawn_shell,
         };
         let auto = self.tabs[ti].layout == Layout::Auto;
         let t = &mut self.tabs[ti];
@@ -2888,6 +2935,9 @@ impl State {
                 show_frame: p.show_frame,
                 show_dot: p.show_dot,
                 font_px: p.font_px,
+                spawn_command: p.spawn_command,
+                spawn_args: p.spawn_args,
+                spawn_shell: p.spawn_shell,
             })
             .collect();
         Some((
@@ -3016,8 +3066,10 @@ impl State {
 
     /// Snapshot the **active tab** into the persistable file shape — the native port of
     /// `serializeWorkspace()` (`{ name, layout, panes }`; runtime-only fields dropped). Pane
-    /// identity is the label + color; the cwd/command aren't tracked per-pane in the native
-    /// state, so a reloaded pane re-spawns a plain shell at its saved label/color.
+    /// identity is the label + color; the pane's original spawn command/args/shell ARE recorded
+    /// so a reloaded pane re-runs its program (e.g. `claude`) rather than a plain shell. The
+    /// live session `uid` is deliberately NOT recorded here — a saved workspace is a launch
+    /// *template* (re-spawn fresh), not a re-attach target.
     ///
     /// Per-pane zoom (Task 14) IS persisted: a pane whose terminal font differs from the base
     /// size carries its `font_size`, so a zoomed pane keeps its zoom across save→load. A pane
@@ -3033,6 +3085,10 @@ impl State {
                 PaneSpec {
                     label: Some(p.title.to_string()),
                     color: Some(color_hex(p.accent)),
+                    // The original program so a reloaded pane re-runs it (not a plain shell).
+                    command: p.spawn_command.clone(),
+                    args: p.spawn_args.clone(),
+                    shell: p.spawn_shell.clone(),
                     // Only a zoomed pane records its size (keeps un-zoomed files clean).
                     font_size: (px != base).then_some(px),
                     ..Default::default()
@@ -3055,7 +3111,13 @@ impl State {
     ///     a clean slot-coloured pane restores clean instead of becoming a tinted
     ///     project pane (specs with a color pin their accent on load);
     ///   * each pane's live `cwd` (shell-integration tracked) is recorded so the
-    ///     restored shell reopens where it was.
+    ///     restored shell reopens where it was;
+    ///   * the pane's original spawn `command`/`args`/`shell` are recorded so restore re-runs
+    ///     the program it was running (e.g. `claude`) instead of a plain shell — the
+    ///     crash-recovery gap this prep fixes;
+    ///   * each pane's live session `uid` is recorded so a future session-daemon relaunch can
+    ///     `Attach{uid}` a surviving session before falling back to a re-spawn (the M2
+    ///     re-attach payoff in `docs/session-daemon-plan.md`).
     /// Per-pane zoom (#14): exactly like the workspace path, a pane whose terminal font
     /// differs from the base size records `font_size`, so zoom survives a plain relaunch.
     pub fn to_session_file(&self) -> WorkspaceFile {
@@ -3084,8 +3146,16 @@ impl State {
                         PaneSpec {
                             label: Some(p.title.to_string()),
                             color: p.pinned_accent.map(color_hex),
+                            // The original program (command/args/shell) so restore re-runs it
+                            // instead of a default shell — and the live session uid so a future
+                            // session-daemon relaunch can re-attach a surviving session by uid
+                            // before falling back to a re-spawn (session-daemon plan, M2).
+                            command: p.spawn_command.clone(),
+                            args: p.spawn_args.clone(),
+                            shell: p.spawn_shell.clone(),
                             cwd: p.cwd.clone(),
                             font_size: (px != base).then_some(px),
+                            uid: Some(p.uid.clone()),
                             ..Default::default()
                         }
                     })
@@ -3293,7 +3363,9 @@ impl State {
             rows: Some(rows),
             pane_id: Some(uid.clone()),
             cwd: spec.cwd.clone(),
-            shell,
+            // Cloned so the resolved shell is also kept on the PaneState (below) for a
+            // subsequent relaunch snapshot.
+            shell: shell.clone(),
             command: spec.command.clone(),
             args: spec.args.clone(),
             integration,
@@ -3347,6 +3419,11 @@ impl State {
             env: None,
             // The resolved shell program → its short header badge (computed once here).
             shell_label: shell_label(&shell_path),
+            // Carry the spawned program forward so a later relaunch snapshot still records it
+            // (the spec's command/args + the resolved shell).
+            spawn_command: spec.command.clone(),
+            spawn_args: spec.args.clone(),
+            spawn_shell: shell,
         })
     }
 }
@@ -3733,6 +3810,9 @@ mod spawn_cells_tests {
             show_frame: None,
             show_dot: None,
             font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
         }
     }
 
@@ -3815,6 +3895,9 @@ mod session_file_tests {
             show_frame: None,
             show_dot: None,
             font_px,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
         }
     }
 
@@ -3843,6 +3926,9 @@ mod session_file_tests {
             t.focused = 1;
             t.zoomed = Some(1);
             t.panes[0].cwd = Some("C:/work".into());
+            // Pane 0 was launched running a program; pane 1 is a plain shell.
+            t.panes[0].spawn_command = Some("claude".into());
+            t.panes[0].spawn_shell = Some("pwsh".into());
         }
         let file = st.to_session_file();
         assert_eq!(file.active, Some(0));
@@ -3855,6 +3941,66 @@ mod session_file_tests {
         assert!(g.layout.is_some());
         // An unpinned (slot-coloured) pane restores clean — no color recorded.
         assert_eq!(g.panes[0].color, None);
+        // The session snapshot records each pane's live uid + its spawn command/shell, so a
+        // relaunch can re-attach by uid (session-daemon M2) or re-run the original program.
+        assert_eq!(g.panes[0].uid.as_deref(), Some("a"));
+        assert_eq!(g.panes[1].uid.as_deref(), Some("b"));
+        assert_eq!(g.panes[0].command.as_deref(), Some("claude"));
+        assert_eq!(g.panes[0].shell.as_deref(), Some("pwsh"));
+        // A plain-shell pane records no command (omitted) but still records its uid.
+        assert_eq!(g.panes[1].command, None);
+    }
+
+    /// Session-daemon prep round-trip: a pane LOADED from a spec carrying a `command` keeps
+    /// that command on its [`PaneState`] (`make_pane_from_spec`), so the next `to_session_file`
+    /// re-records it (the crash-recovery gap fix) AND stamps the pane's live uid. Re-loading the
+    /// snapshot preserves the command — restore re-runs the original program rather than a plain
+    /// shell. (The live uid is freshly minted per launch, so it's recorded, not round-tripped.)
+    #[test]
+    fn session_snapshot_round_trips_uid_and_command() {
+        // `load_workspace` fires an async pty spawn that grabs the current Tokio handle, so
+        // hold a runtime context for the duration of this test (the app always runs inside one).
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        let m = mgr();
+        // Seed a pane from a command-bearing spec (the restore path stores the spawn spec).
+        let seed = WorkspaceFile {
+            groups: Some(vec![GroupSpec {
+                panes: vec![PaneSpec {
+                    command: Some("claude".into()),
+                    args: Some(vec!["--model".into(), "opus".into()]),
+                    shell: Some("pwsh".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            active: Some(0),
+            ..Default::default()
+        };
+        st.load_workspace(seed, &m);
+        // The loaded pane remembers what it was spawned with.
+        let live = &st.active_tab().panes[0];
+        assert_eq!(live.spawn_command.as_deref(), Some("claude"));
+        assert_eq!(live.spawn_args.as_deref(), Some(&["--model".into(), "opus".into()][..]));
+        assert_eq!(live.spawn_shell.as_deref(), Some("pwsh"));
+        let live_uid = live.uid.clone();
+
+        // Snapshot: the live uid + the spawn command/args/shell are recorded.
+        let snap = st.to_session_file();
+        let pane = &snap.groups.as_ref().unwrap()[0].panes[0];
+        assert_eq!(pane.uid.as_deref(), Some(live_uid.as_str()), "live uid recorded");
+        assert_eq!(pane.command.as_deref(), Some("claude"));
+        assert_eq!(pane.args.as_deref(), Some(&["--model".into(), "opus".into()][..]));
+        assert_eq!(pane.shell.as_deref(), Some("pwsh"));
+
+        // Re-load the snapshot into a fresh window: the command survives, so restore re-runs
+        // the original program (uid is freshly minted, but the program is preserved).
+        let mut st2 = fresh();
+        st2.load_workspace(snap, &mgr());
+        let restored = &st2.active_tab().panes[0];
+        assert_eq!(restored.spawn_command.as_deref(), Some("claude"));
+        assert_eq!(restored.spawn_shell.as_deref(), Some("pwsh"));
     }
 
     /// The emptied-last-tab-mid-close case: closing the only pane of the only tab leaves
@@ -3889,6 +4035,9 @@ mod session_file_tests {
         assert_eq!(groups.len(), 1, "empty tab dropped");
         assert_eq!(groups[0].panes.len(), 1);
         assert_eq!(file.active, Some(0), "active remapped to the filtered index");
+        // The surviving pane still carries its uid through the empty-tab filtering, so a
+        // session-daemon relaunch can match it.
+        assert_eq!(groups[0].panes[0].uid.as_deref(), Some("a"));
     }
 
     /// A workspace-seeded window starts from a fresh `State` whose `State::new` placeholder
@@ -4006,6 +4155,9 @@ mod reminder_tests {
             show_frame: None,
             show_dot: None,
             font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
         }
     }
 
