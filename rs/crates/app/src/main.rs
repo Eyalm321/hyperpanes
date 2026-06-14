@@ -282,7 +282,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (etx, erx) = unbounded_channel::<SessionEvent>();
-    let mgr = Arc::new(SessionManager::new(etx));
+    // Backend selection (session-daemon-plan M1): `HYPERPANES_SESSION_DAEMON=1` routes
+    // sessions through the PTY-owning daemon (so they survive a GUI crash); anything else
+    // (unset/"0") keeps today's in-process path. Selected ONCE here — the GUI's
+    // `Arc<SessionManager>` and every call site are backend-agnostic. The daemon is keyed by
+    // the SAME `salt` (the user-data dir) as the single-instance gate above, so a dev/isolated
+    // instance gets its own daemon. A daemon connect/spawn failure falls back to in-process
+    // rather than blocking launch — the daemon is an enhancement, never a hard dependency.
+    let want_daemon = std::env::var("HYPERPANES_SESSION_DAEMON").as_deref() == Ok("1");
+    let mgr = Arc::new(if want_daemon {
+        match SessionManager::new_daemon(etx.clone(), &salt) {
+            Ok(m) => {
+                dbg_log("session-backend: daemon");
+                m
+            }
+            Err(e) => {
+                dbg_log(&format!("session-backend: daemon unavailable ({e}); falling back to in-process"));
+                SessionManager::new(etx)
+            }
+        }
+    } else {
+        SessionManager::new(etx)
+    });
 
     // The app owns the window registry + the shared session stream.
     let application = App::new(mgr.clone(), erx);
