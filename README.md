@@ -16,18 +16,23 @@ Every tab is a self-contained workspace; panes and whole tabs can be **dragged b
 off into separate windows**. Panes are created two ways — ad‑hoc through a **command palette** or the
 **New pane** form, or in one shot from a declarative **`workspace.json`** file.
 
-It's tmux's power (tiling, zoom) on a modern GPU renderer (xterm.js + real shells via node‑pty), plus
-first‑class named, color‑framed, command‑driven panes and a browser‑like tab/window model. Frameless,
-with its window controls built into an icon‑only top bar.
+It's tmux's power (tiling, zoom) in a **native, GPU‑rendered** app — a single self‑contained binary
+(no Electron, no browser) built on Slint, an `alacritty_terminal` VTE core, and real native shells
+via `portable-pty` (ConPTY on Windows, Unix PTYs elsewhere) — plus first‑class named, color‑framed,
+command‑driven panes and a browser‑like
+tab/window model. Frameless, with its window controls built into an icon‑only top bar. Runs on
+**Windows, Linux, and macOS**.
 
 And it's **agent‑first**: AI panes glow when their agent goes quiet, and an opt‑in **Control API /
 MCP** lets an agent — or a whole recursive agent org — watch and drive your panes (see
 [Agents & the Control API](#agents--the-control-api-mcp)).
 
 > [!NOTE]
-> **Status: early days (v0.1.1).** Every feature documented below is implemented; some of the newer
-> window/drag features have been verified statically and still want a thorough manual pass. Expect
-> rough edges, and please file issues.
+> **Status: early days (native v0.0.9).** Hyperpanes was rebuilt from scratch as a **native Rust
+> app** (Slint · `alacritty_terminal` · `portable-pty`) — one self‑contained binary for **Windows,
+> Linux, and macOS**, replacing the original Electron build. Every feature below is implemented;
+> expect rough edges on the newer cross‑platform ports, and please file issues. Prebuilt downloads
+> are on the [Releases page](https://github.com/Eyalm321/hyperpanes/releases).
 
 ## Features
 
@@ -35,6 +40,10 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
 - **Idle‑agent glow** — panes running an agent CLI (claude, aider, codex, gemini, …) pulse when the
   agent goes quiet at its prompt, so you can see at a glance which one is waiting on you (effect
   styles under [Appearance](#customization-preferences)).
+- **Ambient AI subtitles** — an optional local LLM (via Ollama) reads what each pane is doing and
+  writes a live one‑line subtitle under its label, revealed with a typewriter effect.
+- **Claude history** — browse past Claude Code conversations per project from the sidebar,
+  full‑text search inside them, and click an entry to resume it in a pane.
 - **Control API (MCP)** — an opt‑in loopback HTTP/WebSocket API that lets an agent or a companion
   MCP server read pane structure & output, stream activity/exit events, exchange messages between
   panes, and (after a second opt‑in) drive panes. Off by default, token‑authenticated, with
@@ -49,6 +58,8 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
 - **Per‑pane frame colors** — a palette + custom color picker (click the header dot).
 - **Command panes** — launch a pane running any command (`npm run dev`, `tail -f log`, …) with live
   status, an exit‑code badge, and one‑click **Restart**.
+- **Reminder panes** — set a reminder on a pane; a sidebar bell and a toast fire when it's due
+  (click to jump back to the pane).
 - **Maximize vs. fullscreen** — `⤢` (`Alt+Z`) maximizes a pane to fill its window; `⛶` (`F11`) takes
   it to OS fullscreen with the top bar hidden (hold `Esc` to exit).
 - **Per‑pane font zoom** — `Ctrl +` / `Ctrl -` / `Ctrl 0`, or `Ctrl + mouse‑wheel`, with a live
@@ -80,9 +91,16 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
   pane to reorder/re‑slot it in the layout.
 
 ### Terminal
-- **WebGL renderer** with an automatic DOM fallback; real shells via node‑pty.
+- **Native GPU renderer** — each pane's grid is rasterised with `swash` and composited by Slint
+  (femtovg on the GPU, with a software fallback for headless/remote). No browser, no DOM.
+- **Real native terminals** — shells run on actual OS PTYs via `portable-pty`: **ConPTY** on
+  Windows (the build bundles a newer ConPTY redistributable next to the exe for throughput) and
+  native Unix PTYs (openpty/forkpty) on Linux/macOS, parsed by an `alacritty_terminal` VTE core.
 - **Per‑pane search** (`Ctrl+F`).
 - **Copy‑on‑select** (auto‑copies the selection, with a toast) and **right‑click paste**.
+- **Paste images into TUIs** — `Alt+V` forwards the clipboard image to an in‑pane program that reads
+  it itself (e.g. Claude Code); a plain `Ctrl+V` auto‑forwards when the clipboard holds an image
+  rather than text.
 - **Clickable file paths** — paths in output are verified on disk, then **click to open** (in your
   editor or the OS default) and **Ctrl+click to copy** the resolved absolute path; `file:line:col`
   jumps are honored.
@@ -91,7 +109,7 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
 ### Command palette
 - **`Ctrl/Cmd+Shift+P`** — fuzzy runner for tabs (new/close/reopen), panes (new/shell/restart/close),
   zoom, layout switching, focus‑by‑pane, font zoom, preferences, open/save workspace, and
-  diagnostics (**Performance: Dump metrics** — memory, processes, startup, WebGL contexts).
+  diagnostics (**Performance: Dump metrics** — memory, processes, startup).
 
 ### Workspaces & sessions
 - **Save/Open** the current tab to a `.json` file (top bar or palette).
@@ -110,39 +128,60 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
   command, and the **Control API** (agents / MCP) — a loopback API, off by default, with a second
   opt‑in before agents may send input to live shells.
 
-## Quick start
+## Install
+
+Grab a prebuilt binary from the [**Releases page**](https://github.com/Eyalm321/hyperpanes/releases):
+
+- **Linux** — `hyperpanes-<ver>-x86_64.AppImage` (`chmod +x` and run), or the `.deb` / `.rpm`.
+- **macOS** — `hyperpanes-<ver>.dmg`.
+- **Windows** — `hyperpanes-<ver>-setup.exe`.
+
+Builds are currently unsigned, so your OS may warn on first launch.
+
+## Build from source
+
+The app is a Rust crate under `rs/crates/app` (its own standalone workspace — build it by path):
 
 ```bash
-npm install        # node-pty ships N-API prebuilds → no native rebuild needed
-npm run dev        # launch in development (Vite HMR)
+cargo build --release --manifest-path rs/crates/app/Cargo.toml
+# → rs/crates/app/target/release/hyperpanes
 ```
 
-### Build & package
+You need a Rust toolchain plus the usual Slint/winit native build deps (fontconfig, freetype,
+libxkbcommon, Wayland/X11, GL — see [`rs/packaging/linux/README.md`](rs/packaging/linux/README.md)).
+
+### Package
+
+Per‑OS scripts produce the release artifacts (each takes a bare `<version>`; output lands in
+`rs/packaging/out/`):
 
 ```bash
-npm run make:icon  # rasterize build/icon.svg → build/icon.{png,ico} (run once / when the art changes)
-npm run build      # bundle main / preload / renderer to out/
-npm run pack:win   # build + produce a Windows installer in release/ (electron-builder nsis)
+bash rs/packaging/appimage.sh 0.0.9            # Linux AppImage
+bash rs/packaging/deb.sh      0.0.9            # Linux .deb  (cargo-deb)
+bash rs/packaging/rpm.sh      0.0.9            # Linux .rpm  (cargo-generate-rpm)
+bash rs/packaging/macos/bundle.sh 0.0.9        # macOS .dmg
+pwsh rs/packaging/build-installer.ps1 -Version 0.0.9   # Windows setup.exe
 ```
 
-The installer's app icon comes from `build/icon.ico`; the source art is `build/icon.svg`.
-`npm run make:repo-assets` regenerates the README logo and `docs/` favicons from the source art.
+Pushing a `v<version>` tag runs all of these in CI and attaches them to a GitHub Release.
 
-### Tests & checks
+### Tests
 
 ```bash
-npm test           # vitest unit tests (layout math, navigation, workspace round-trip, DnD)
-npm run typecheck  # tsc --noEmit
+cd rs && cargo test --all                                      # core workspace
+cargo test --manifest-path rs/crates/terminal-widget/Cargo.toml
+cargo test --manifest-path rs/crates/app/Cargo.toml
 ```
 
 ### Benchmarks
 
-A **detect‑only** harness compares Hyperpanes against other installed Windows terminals (throughput,
-startup, memory) — it never installs, updates, or changes anything on your system.
+A separate **detect‑only** Node harness (`bench/`) compares Hyperpanes against other installed
+terminals (throughput, startup, memory) — it never installs, updates, or changes anything on your
+system.
 
-```powershell
-npm run bench:detect   # list installed terminals → bench/results/terminals.json
-npm run bench          # run the suites      → bench/results/report.md
+```bash
+npm install && npm run bench:detect   # list installed terminals → bench/results/terminals.json
+npm run bench                         # run the suites           → bench/results/report.md
 ```
 
 See [`bench/README.md`](bench/README.md) for suites, flags, and fairness caveats. Output lands in
@@ -250,8 +289,9 @@ windows as new ones. `--attach` overrides that. A positional `.json` launch alwa
 
 > [!TIP]
 > Without any `--window`/`--tab` it stays the simple single-tab launch. Inline `-c` flags take
-> precedence over a positional `.json` path. During development, pass args after a `--`:
-> `npm run dev -- -c "npm run dev"`. On a packaged install, call the `hyperpanes` executable (its
+> precedence over a positional `.json` path. From a source build, run
+> `cargo run --manifest-path rs/crates/app/Cargo.toml -- -c "…"` (args after the `--`). On a packaged
+> install, call the `hyperpanes` executable (its
 > install folder is added to `PATH`). hyperpanes runs as a **single instance**: a second
 > `hyperpanes …` while it's open routes its content into the running app (attaching by default; see
 > above).
@@ -292,8 +332,9 @@ means Ctrl on Windows/Linux and Cmd on macOS.
 ## Agents & the Control API (MCP)
 
 > [!WARNING]
-> **Experimental, and off by default.** The API is built and unit/type‑checked, but the live
-> end‑to‑end round‑trip is still being validated. Turn it on only to drive Hyperpanes from an agent.
+> **Experimental, and off by default.** Turn it on only when you want to drive Hyperpanes from an
+> agent. It's been exercised end‑to‑end — including recursive manager→worker agent orgs over the
+> companion MCP server — but the surface is still evolving.
 
 Hyperpanes can expose a **local control API** so an external agent — or a companion **MCP server**
 (a separate project) — can observe and drive your panes. It's a loopback HTTP + WebSocket server
@@ -319,27 +360,35 @@ See [`docs/cli-multiwindow-mcp-plan.md`](docs/cli-multiwindow-mcp-plan.md) and
 
 ## Architecture
 
-- **Main** (`src/main`) — owns the OS side: `session.ts` wraps `node-pty` (output batched ~16 ms to
-  cut IPC), `session-manager.ts` tracks live sessions, `workspace.ts` handles file I/O + CLI args,
-  `window.ts` manages multiple windows and tab/pane hand‑off, `paths.ts` resolves & opens clickable
-  paths, `control-server.ts` is the opt‑in loopback agent/MCP API and `metrics.ts` backs the
-  diagnostics dump, `ipc.ts` bridges to every renderer (session output is broadcast and filtered by
-  uid, so a pty isn't tied to the window that spawned it — that's what lets a tab move between windows).
-- **Preload** (`src/preload`) — a typed `window.hp` `contextBridge` API; `contextIsolation` on,
-  `nodeIntegration` off.
-- **Renderer** (`src/renderer`) — React + Zustand. State splits into `useWorkspace` (tabs/panes —
-  a tab is a "group" of a flat ordered pane list + a layout descriptor), `useUI` (modals, drags,
-  context menu, fullscreen), `useSettings` (persisted preferences) and `useIdle` (AI‑pane
-  quiescence). `layout/presets.ts` maps a layout to an absolute rect per pane, so switching layouts
-  only restyles and **never remounts terminals** (sessions and scrollback survive). Panes carry a
-  `sessionUid` so they can detach/re‑attach when moved between tabs or windows without killing the pty.
+Three Rust crates under `rs/crates/`:
+
+- **`core`** — the OS side, UI‑agnostic. `session_manager` + `session/` own the `portable-pty`
+  shells (ConPTY on Windows, native Unix PTYs on Linux/macOS); output is decoded by an
+  `alacritty_terminal` VTE and broadcast **by pane uid**, so a pty
+  isn't tied to the window that spawned it — that's what lets a tab move between windows. `workspace/`
+  is the `.hyperpanes` / `.json` model + file I/O, `cli/` parses launch args + routing,
+  `shell_integration` injects the cwd/prompt hooks, `single_instance` is the launch lock + hand‑off,
+  and `control/` is the opt‑in loopback agent/MCP server.
+- **`terminal-widget`** — the Slint terminal pane. An `alacritty_terminal` grid → a `swash` glyph
+  rasteriser → a `slint::Image` (a software path plus an optional shared‑device wgpu path), with
+  selection, search, clickable links, and clipboard.
+- **`app`** — the Slint GUI binary: windows, tabs, the pane tree + layout presets (a layout maps to
+  an absolute rect per pane, so switching layouts only restyles and **never restarts a shell**),
+  drag/tear‑off, preferences, the command palette, ambient‑AI subtitles (`ai.rs`), and Claude
+  history (`history_scan.rs`). Panes carry a session uid so they detach/re‑attach across tab/window
+  moves without killing the pty.
 
 ## Tech stack
 
-Electron · xterm.js (`@xterm/*`, WebGL) · node‑pty · ws (control API) · React 18 · TypeScript ·
-Zustand · electron‑vite · electron‑builder · Vitest.
+Rust · [Slint](https://slint.dev) (GPU UI via femtovg/wgpu, with a software renderer) ·
+[`alacritty_terminal`](https://github.com/alacritty/alacritty) (VTE) ·
+[`portable-pty`](https://github.com/wezterm/wezterm) (ConPTY / Unix PTY) · `swash` (glyph
+rasterisation) · `tokio` · `wgpu` · `arboard` (clipboard) · `reqwest` (self‑update + local‑LLM
+subtitles).
 
 ## Acknowledgements
 
-Pane‑tree resize math and the data‑batching session pattern are adapted from
-[vercel/hyper](https://github.com/vercel/hyper).
+Built on [Slint](https://slint.dev) (UI), [`alacritty_terminal`](https://github.com/alacritty/alacritty)
+(VTE), [`portable-pty`](https://github.com/wezterm/wezterm) (from WezTerm), and
+[`swash`](https://github.com/dfrg/swash) (glyph rasterisation). Pane‑tree resize math and the
+data‑batching session pattern are adapted from [vercel/hyper](https://github.com/vercel/hyper).
