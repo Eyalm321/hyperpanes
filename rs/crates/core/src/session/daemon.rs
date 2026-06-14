@@ -294,13 +294,23 @@ impl Daemon {
                 // The daemon is the uid source of truth: honor a pinned uid, else mint one.
                 let uid = spec.uid.clone().unwrap_or_else(|| self.registry.mint_uid());
                 let opts = spec.into_options(uid.clone());
+                // AUTO-ATTACH the creating connection to the new uid BEFORE spawning. This
+                // closes a lost-event race: a fast-exit command (e.g. `/bin/echo hi`) can
+                // emit its entire Data + Exit stream in microseconds — potentially before
+                // a separate `Attach` round-trip lands — and the writer only forwards
+                // events for attached uids, so those events would be dropped. The writer's
+                // broadcast subscription already exists (created at connection time), so
+                // adding the uid to `attached` first guarantees every event from the
+                // session's birth is forwarded to its creator. A separate `Attach` remains
+                // for OTHER connections (and re-attach after a crash).
+                attached.lock().unwrap().insert(uid.clone());
                 // A spawn failure is swallowed here (M0 keeps create fire-and-forget on the
                 // engine side; the client learns of a dead session via the absence of
                 // events / a later ListSessions). The uid still lets it correlate the
                 // request. Enter the runtime so `create`'s `tokio::spawn` of the pty driver
                 // succeeds from this plain OS thread.
                 let _guard = self.rt.enter();
-                let _ = self.registry.create(opts);
+                let _created = self.registry.create(opts);
                 drop(_guard);
                 let _ = out.send(DaemonMsg::Created { uid });
             }
@@ -379,7 +389,8 @@ fn writer_loop(
         loop {
             match bus_rx.try_recv() {
                 Ok(ev) => {
-                    if attached.lock().unwrap().contains(event_uid(&ev)) {
+                    let is_attached = attached.lock().unwrap().contains(event_uid(&ev));
+                    if is_attached {
                         if write_frame(&mut write_half, &DaemonMsg::Event(ev)).is_err() {
                             return;
                         }
@@ -452,9 +463,16 @@ impl DaemonClient {
             .name("hp-daemon-client-reader".into())
             .spawn(move || {
                 let mut r = read_half;
-                while let Ok(Some(msg)) = read_frame::<_, DaemonMsg>(&mut r) {
-                    if tx.send(msg).is_err() {
-                        break; // client dropped
+                loop {
+                    match read_frame::<_, DaemonMsg>(&mut r) {
+                        Ok(Some(msg)) => {
+                            if tx.send(msg).is_err() {
+                                break; // client dropped
+                            }
+                        }
+                        // Clean EOF (peer closed) or a malformed-frame/socket error: the
+                        // connection is finished, so stop reading.
+                        Ok(None) | Err(_) => break,
                     }
                 }
             })?;
@@ -476,21 +494,34 @@ impl DaemonClient {
     }
 }
 
-/// Start a daemon **in-process** on an explicit socket path, for tests. Spawns the accept
-/// loop on a background thread against the ambient Tokio runtime (the caller must already
-/// be inside one — the pty drivers and the event pump need it). Returns once the listener
-/// is bound, so a client can connect immediately. No flock (the temp path is unique).
+/// A running in-process daemon for tests: it owns a DEDICATED multi-thread Tokio runtime
+/// (built on a background thread, exactly like [`run`] does) so the daemon's event pump +
+/// pty drivers run on their own scheduler — not on the test harness's shared runtime,
+/// where 400+ concurrent tests could starve the 16 ms batch timer and make the pty-output
+/// assertions flaky. Dropping it lets the runtime + accept thread tear down.
 #[cfg(all(unix, test))]
-fn spawn_in_process(socket: &Path) -> io::Result<std::thread::JoinHandle<()>> {
+struct InProcessDaemon {
+    _accept: std::thread::JoinHandle<()>,
+}
+
+/// Start a daemon **in-process** on an explicit socket path, for tests. The daemon gets
+/// its own runtime (see [`InProcessDaemon`]); this returns once the listener is bound, so
+/// a client can connect immediately. No flock (the temp path is unique per test/run).
+#[cfg(all(unix, test))]
+fn spawn_in_process(socket: &Path) -> io::Result<InProcessDaemon> {
     let _ = std::fs::remove_file(socket);
     let listener = std::os::unix::net::UnixListener::bind(socket)?;
-    let daemon = Daemon::new();
-    let handle = std::thread::Builder::new()
+    let accept = std::thread::Builder::new()
         .name("hp-daemon-accept".into())
         .spawn(move || {
+            // The daemon's own runtime — its async work (pump + pty drivers) lives here,
+            // isolated from the test harness's scheduling.
+            let Ok(rt) = tokio::runtime::Runtime::new() else { return };
+            let _guard = rt.enter();
+            let daemon = Daemon::new();
             let _ = daemon.serve(listener);
         })?;
-    Ok(handle)
+    Ok(InProcessDaemon { _accept: accept })
 }
 
 /// Non-unix stub: the daemon transport (UDS) is unix-only in M0; Windows named pipes are
@@ -543,13 +574,11 @@ mod tests {
     // in-process on a temp socket, connect a DaemonClient, Create a session running a
     // short command, assert a Data event containing "hi" and an Exit{code:0}, then attach
     // a SECOND client and assert Attach returns the replay.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn loopback_create_streams_data_and_exit_then_second_client_gets_replay() {
+    #[test]
+    fn loopback_create_streams_data_and_exit_then_second_client_gets_replay() {
         let socket = temp_socket("loopback");
         let _accept = spawn_in_process(&socket).expect("daemon binds");
 
-        // A short command that prints "hi" and exits 0. `/bin/echo` is gated to unix
-        // (the whole module is `#[cfg(unix)]`); `printf` would work too.
         let client = DaemonClient::connect_path(&socket).expect("client connects");
         client.send(&ClientMsg::Hello { proto_ver: PROTO_VER }).unwrap();
         let hello = recv_until(&client, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Hello { .. }));
@@ -558,11 +587,17 @@ mod tests {
         // Create the session and learn its (daemon-minted) uid from the Created reply.
         client
             .send(&ClientMsg::Create(SpawnSpec {
-                // Direct spawn `/bin/echo hi` (command + non-empty args → no shell,
-                // verbatim argv). The command field also carries `/bin/echo` for the
-                // direct-spawn path (resolve_spawn uses `command` as the file).
-                command: Some("/bin/echo".into()),
-                args: Some(vec!["hi".into()]),
+                // `/bin/sh -c "sleep 0.3; echo hi"` — direct spawn (command + non-empty
+                // args → no extra shell wrap, verbatim argv). The 0.3s `sleep` is the
+                // whole point: it holds output back until AFTER this client's `Attach`
+                // round-trip has registered it as a live subscriber, so the `Data{"hi"}`
+                // and `Exit{0}` are observed LIVE and deterministically. A bare one-shot
+                // (`/bin/echo hi`) would emit + exit in microseconds — before `Attach`
+                // lands — making the live stream a race and the post-exit replay empty
+                // (the registry drops a session on exit). `/bin/sh` is gated to unix
+                // (the whole module is `#[cfg(unix)]`).
+                command: Some("/bin/sh".into()),
+                args: Some(vec!["-c".into(), "sleep 0.3; echo hi".into()]),
                 ..Default::default()
             }))
             .unwrap();
@@ -590,11 +625,11 @@ mod tests {
         assert!(exit.is_some(), "expected an Exit{{code:0}} event, timed out");
 
         // A SECOND client attaches and Attach returns the replay for the uid (the
-        // protocol round-trip a re-attaching GUI uses to seed a fresh grid). This session
-        // is a one-shot that has now EXITED, so the daemon has dropped it and the replay
-        // is empty — exactly the in-process model (a dead uid is gone; M2's reconnect
-        // re-spawns those). The non-empty "replay seeds a re-attach" guarantee for a
-        // SURVIVING session is asserted in
+        // protocol round-trip a re-attaching GUI uses to seed a fresh grid). This command
+        // has now EXITED (we observed its Exit above), so the daemon has dropped it and
+        // the replay is empty — exactly the in-process model (a dead uid is gone; M2's
+        // reconnect re-spawns those). The non-empty "replay seeds a re-attach" guarantee
+        // for a SURVIVING session is asserted in
         // `second_client_attach_replays_a_surviving_sessions_output`.
         let client2 = DaemonClient::connect_path(&socket).expect("second client connects");
         // ListSessions over the second client confirms multiple clients can query.
@@ -611,8 +646,8 @@ mod tests {
     // The "replay seeds a re-attach" payoff on a SURVIVING session: a second client that
     // attaches after the session has produced output gets that output back in the Attach
     // reply (so it can prime a fresh grid without a restart — the whole point of M2).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn second_client_attach_replays_a_surviving_sessions_output() {
+    #[test]
+    fn second_client_attach_replays_a_surviving_sessions_output() {
         let socket = temp_socket("replay-survive");
         let _accept = spawn_in_process(&socket).expect("daemon binds");
 
@@ -660,8 +695,8 @@ mod tests {
     // Multiple clients attach to the SAME session and both receive its streamed events —
     // the multiplexing the daemon exists to provide. Drive a long-lived `sh -i` and feed
     // it a line; both attached clients must see the echoed Data.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn two_clients_attached_to_one_session_both_receive_data() {
+    #[test]
+    fn two_clients_attached_to_one_session_both_receive_data() {
         let socket = temp_socket("multiplex");
         let _accept = spawn_in_process(&socket).expect("daemon binds");
 
@@ -704,8 +739,8 @@ mod tests {
 
     // Ping/Pong + ListSessions on an empty daemon — the request/response paths with no
     // sessions in play (smoke that the writer thread serializes replies correctly).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ping_and_empty_list_sessions() {
+    #[test]
+    fn ping_and_empty_list_sessions() {
         let socket = temp_socket("ping");
         let _accept = spawn_in_process(&socket).expect("daemon binds");
         let c = DaemonClient::connect_path(&socket).expect("connect");
