@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::session::batcher::DataBatcher;
@@ -49,7 +50,11 @@ use crate::session::spawn::{build_env, default_shell, resolve_spawn, resolve_win
 
 /// An event emitted by a live session, delivered on the manager's event channel.
 /// Mirrors the TS `SessionHandlers` callbacks (`onData` / `onCwd` / `onExit`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` so the session daemon (`session::proto`) can carry the
+/// event verbatim to attached clients (`DaemonMsg::Event`) — the enum is a flat,
+/// owned-data shape with no GUI/runtime types, so the wire form is the in-process form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// A flushed (batched) output chunk. The renderer/control writes this to its
     /// terminal; it is also what the replay buffer and `output_bytes` accumulate.
@@ -154,20 +159,46 @@ struct Session {
     shared: Arc<Shared>,
 }
 
-/// Owns every live pty session, keyed by uid. Cheap to clone-share via `Arc` — and
-/// `Clone` itself shares the same session map + event sender (a handle, not a copy),
-/// so spawn work can move onto a worker thread (`Spawn` on Windows ConPTY can block
-/// ~1s for some shells — see `docs/conpty-passthrough-investigation.md`).
+/// The reusable, transport-agnostic per-uid session store + operations — the heart of
+/// what was historically `SessionManager`, factored out so the **session daemon**
+/// (`session::daemon`) can own the very same registry the in-process GUI owns through
+/// [`SessionManager`]. Cheap to clone-share via `Arc`; `Clone` shares the same session
+/// map + event sender + uid counter (a handle, not a copy), so spawn work can move onto
+/// a worker thread (`Spawn` on Windows ConPTY can block ~1s for some shells — see
+/// `docs/conpty-passthrough-investigation.md`).
+///
+/// Every method here is the literal body of the corresponding old `SessionManager`
+/// method; `SessionManager` now delegates verbatim so its public API is unchanged.
+///
+/// ## Daemon-assignable uids
+/// The daemon must be the source of truth for uids across GUI restarts (a re-attaching
+/// pane references a session by uid — see the plan's "uid stability" note). [`mint_uid`]
+/// hands out a process-unique `s{n}` token from a per-registry counter so the daemon can
+/// allocate the uid itself when a client's [`proto::SpawnSpec`] left it blank. The GUI
+/// path keeps minting uids exactly as before (it passes its own `uid` in `SpawnOptions`),
+/// so this is purely additive.
 #[derive(Clone)]
-pub struct SessionManager {
+pub struct SessionRegistry {
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     events: UnboundedSender<SessionEvent>,
+    /// Monotonic uid source for daemon-assigned sessions (see [`mint_uid`]).
+    next_uid: Arc<AtomicU64>,
 }
 
-impl SessionManager {
-    /// Create a manager that emits [`SessionEvent`]s on `events`.
+impl SessionRegistry {
+    /// Create a registry that emits [`SessionEvent`]s on `events`.
     pub fn new(events: UnboundedSender<SessionEvent>) -> Self {
-        Self { sessions: Arc::new(Mutex::new(HashMap::new())), events }
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            events,
+            next_uid: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Allocate a fresh process-unique uid (`s1`, `s2`, …). The daemon calls this when a
+    /// client did not pin a uid, making the daemon the authoritative uid source.
+    pub fn mint_uid(&self) -> String {
+        format!("s{}", self.next_uid.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Spawn a real pty session for `opts`. Returns once the pty is live and its driver
@@ -298,6 +329,97 @@ impl SessionManager {
             s.shared.killed.store(true, Ordering::SeqCst);
             let _ = s.pty.kill();
         }
+    }
+}
+
+/// Owns every live pty session, keyed by uid. Cheap to clone-share via `Arc` — and
+/// `Clone` itself shares the same session map + event sender (a handle, not a copy),
+/// so spawn work can move onto a worker thread (`Spawn` on Windows ConPTY can block
+/// ~1s for some shells — see `docs/conpty-passthrough-investigation.md`).
+///
+/// Now a thin wrapper over [`SessionRegistry`] (the daemon owns the same registry type):
+/// every method delegates one-to-one, so the GUI-facing API is unchanged.
+#[derive(Clone)]
+pub struct SessionManager {
+    inner: SessionRegistry,
+}
+
+impl SessionManager {
+    /// Create a manager that emits [`SessionEvent`]s on `events`.
+    pub fn new(events: UnboundedSender<SessionEvent>) -> Self {
+        Self { inner: SessionRegistry::new(events) }
+    }
+
+    /// The underlying [`SessionRegistry`] — the daemon owns one directly; the GUI reaches
+    /// it through this wrapper.
+    pub fn registry(&self) -> &SessionRegistry {
+        &self.inner
+    }
+
+    /// Spawn a real pty session for `opts`. Returns once the pty is live and its driver
+    /// task is running. Errors if the pty fails to spawn.
+    pub fn create(&self, opts: SpawnOptions) -> io::Result<()> {
+        self.inner.create(opts)
+    }
+
+    /// Spawn a session using a custom pty `factory` (tests inject a mock). The resolved
+    /// [`PtySpec`] is built from `opts` exactly as the production path does.
+    pub fn create_with(&self, opts: SpawnOptions, factory: SpawnFn) -> io::Result<()> {
+        self.inner.create_with(opts, factory)
+    }
+
+    /// Whether a session with `uid` is currently live.
+    pub fn has(&self, uid: &str) -> bool {
+        self.inner.has(uid)
+    }
+
+    /// The uids of all live sessions.
+    pub fn uids(&self) -> Vec<String> {
+        self.inner.uids()
+    }
+
+    /// Recent output for a re-attaching view (the rolling replay buffer).
+    pub fn replay(&self, uid: &str) -> Option<String> {
+        self.inner.replay(uid)
+    }
+
+    /// Monotonic count of all output UTF-16 code units ever emitted (the `since`
+    /// cursor; pair with `control::output::sliceSince`).
+    pub fn output_bytes(&self, uid: &str) -> Option<u64> {
+        self.inner.output_bytes(uid)
+    }
+
+    /// Epoch-ms of the last output flush, or `None` if the pane has produced nothing
+    /// yet (feeds `control::output::waitDecision`).
+    pub fn last_output_at(&self, uid: &str) -> Option<u64> {
+        self.inner.last_output_at(uid)
+    }
+
+    /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
+    /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`).
+    pub fn render_screen(&self, uid: &str) -> Option<String> {
+        self.inner.render_screen(uid)
+    }
+
+    /// Write input to the pane's pty.
+    pub fn write(&self, uid: &str, data: &str) {
+        self.inner.write(uid, data)
+    }
+
+    /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
+    pub fn resize(&self, uid: &str, cols: u16, rows: u16) {
+        self.inner.resize(uid, cols, rows)
+    }
+
+    /// Kill the pane's pty and forget it. The natural-exit `Exit` event is suppressed
+    /// (mirrors TS `destroy()`), so a deliberate kill is silent.
+    pub fn kill(&self, uid: &str) {
+        self.inner.kill(uid)
+    }
+
+    /// Kill every live pane and clear the map.
+    pub fn kill_all(&self) {
+        self.inner.kill_all()
     }
 }
 
