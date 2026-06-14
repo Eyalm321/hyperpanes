@@ -23,7 +23,10 @@
 //! ## Versioning
 //! [`PROTO_VER`] rides in the [`ClientMsg::Hello`] / [`DaemonMsg::Hello`] handshake. A
 //! mismatch lets the client kill + respawn the daemon (lock-step upgrades — the daemon
-//! is ours, no third-party compat burden). M0 only carries the field; M3 acts on it.
+//! is ours, no third-party compat burden). M0 only carries the field; M3 acts on it: the
+//! client compares its own [`PROTO_VER`] against the daemon's `Hello.proto_ver` reply and,
+//! on a mismatch, sends [`ClientMsg::Shutdown`] (tearing the stale daemon down) then
+//! respawns a fresh one — see [`daemon_client`](crate::session::daemon_client).
 
 use std::io::{self, Read, Write};
 
@@ -154,6 +157,11 @@ pub enum ClientMsg {
     RenderScreen { uid: String },
     /// Liveness probe (→ [`DaemonMsg::Pong`]).
     Ping,
+    /// Ask the daemon to **shut down**: kill every session and exit the process cleanly,
+    /// releasing the lock + socket (M3). Drives the app's `--kill-daemon` path and the
+    /// quit-vs-keep-alive "OFF" branch. The daemon kills its sessions, then exits — so the
+    /// connection simply drops (no reply frame; the EOF is the acknowledgement).
+    Shutdown,
 }
 
 /// A message from the daemon to a client: handshake/replies plus the streamed event feed.
@@ -323,6 +331,7 @@ mod tests {
             ClientMsg::KillAll,
             ClientMsg::RenderScreen { uid: "s1".into() },
             ClientMsg::Ping,
+            ClientMsg::Shutdown,
         ];
         for m in &msgs {
             assert_eq!(&roundtrip_client(m), m);
