@@ -148,9 +148,12 @@ impl Shared {
 /// real spawn and the test mock can both hold and invoke it.
 pub type EventSink = Arc<dyn Fn(PtyEvent) + Send + Sync>;
 
-// A factory that turns a spec + sink into a live pty. The default uses `spawn_pty`;
-// tests inject a mock so the async pipeline is exercised without ConPTY.
-type SpawnFn = Box<dyn FnOnce(&PtySpec, EventSink) -> io::Result<Box<dyn Pty>> + Send>;
+/// A factory that turns a spec + sink into a live pty. The default uses `spawn_pty`;
+/// tests inject a mock so the async pipeline is exercised without ConPTY. `pub(crate)` so
+/// the daemon backend ([`session::daemon_client`](crate::session::daemon_client)) can name
+/// it in its mirroring `create_with` signature (it ignores the factory — a closure can't
+/// cross a socket; the daemon owns real PTYs).
+pub(crate) type SpawnFn = Box<dyn FnOnce(&PtySpec, EventSink) -> io::Result<Box<dyn Pty>> + Send>;
 
 /// One live session: the pty handle plus the shared read state. The driver task runs
 /// detached; dropping the `Session` drops the pty (closing its handles).
@@ -332,94 +335,168 @@ impl SessionRegistry {
     }
 }
 
-/// Owns every live pty session, keyed by uid. Cheap to clone-share via `Arc` — and
-/// `Clone` itself shares the same session map + event sender (a handle, not a copy),
-/// so spawn work can move onto a worker thread (`Spawn` on Windows ConPTY can block
-/// ~1s for some shells — see `docs/conpty-passthrough-investigation.md`).
+/// Owns every live pty session, keyed by uid — the GUI's single handle to sessions. The
+/// GUI holds an `Arc<SessionManager>` and calls this exact API; the **backend** behind it
+/// is chosen once at construction (`docs/session-daemon-plan.md` M1):
 ///
-/// Now a thin wrapper over [`SessionRegistry`] (the daemon owns the same registry type):
-/// every method delegates one-to-one, so the GUI-facing API is unchanged.
+/// * [`Backend::InProcess`] — the historical path: the PTYs are children of the GUI process
+///   and live in a [`SessionRegistry`] right here. This is the default
+///   ([`SessionManager::new`]) and what CI / `--no-daemon` use.
+/// * [`Backend::Daemon`] — a [`DaemonSessionManager`] talking to the PTY-owning
+///   [session daemon](crate::session::daemon) over a UDS, so the PTYs survive a GUI crash
+///   (selected by [`SessionManager::new_daemon`], wired to `HYPERPANES_SESSION_DAEMON=1`).
+///
+/// Every public method dispatches to the active backend with an **identical signature**, so
+/// the GUI's call sites are untouched — the whole point of M1: the backend swap is invisible
+/// above this type. The daemon backend honors the plan's non-blocking-API contract (shadow
+/// state + a mirror buffer; only `render_screen` does a bounded round-trip).
+///
+/// `SessionManager` stays **`Clone`** exactly as the historical in-process one was — the
+/// in-process variant clones the cheap [`SessionRegistry`] handle (a shared map + sender),
+/// and the daemon variant is an `Arc<DaemonSessionManager>` so a clone shares the one
+/// socket + reader thread (the daemon backend is single-connection; a clone is another
+/// handle, not another connection). Preserving `Clone` keeps GUI code that moves an owned
+/// `mgr.clone()` onto a worker thread (`state.rs::spawn_session_async`) untouched.
 #[derive(Clone)]
-pub struct SessionManager {
-    inner: SessionRegistry,
+pub enum SessionManager {
+    /// The PTYs live in this process (the default, pre-daemon path).
+    InProcess(SessionRegistry),
+    /// The PTYs live in the session daemon; this talks to it over a socket. `Arc` so the
+    /// non-`Clone` socket/reader inside is shared across manager clones.
+    Daemon(Arc<crate::session::daemon_client::DaemonSessionManager>),
 }
 
 impl SessionManager {
-    /// Create a manager that emits [`SessionEvent`]s on `events`.
+    /// Create an **in-process** manager that emits [`SessionEvent`]s on `events` (the
+    /// default backend — PTYs are children of this process, as before the daemon existed).
     pub fn new(events: UnboundedSender<SessionEvent>) -> Self {
-        Self { inner: SessionRegistry::new(events) }
+        SessionManager::InProcess(SessionRegistry::new(events))
     }
 
-    /// The underlying [`SessionRegistry`] — the daemon owns one directly; the GUI reaches
-    /// it through this wrapper.
-    pub fn registry(&self) -> &SessionRegistry {
-        &self.inner
+    /// Create a **daemon-backed** manager: connect to (spawning if needed) the session
+    /// daemon for `salt` and forward its events to `events`. Errors only if the daemon
+    /// can't be reached/spawned — `main` falls back to [`new`](Self::new) on `Err` so a
+    /// daemon failure never blocks launch. `salt` is the user-data dir (same key the GUI's
+    /// single-instance gate and the daemon's discovery use). Unix-only in M1.
+    pub fn new_daemon(events: UnboundedSender<SessionEvent>, salt: &str) -> io::Result<Self> {
+        Ok(SessionManager::Daemon(Arc::new(
+            crate::session::daemon_client::DaemonSessionManager::new(events, salt)?,
+        )))
+    }
+
+    /// The underlying [`SessionRegistry`] for the in-process backend, or `None` when this
+    /// manager is daemon-backed (the registry then lives in the daemon, not here). Unused by
+    /// the GUI today; kept for in-process tooling that wants the registry directly.
+    pub fn registry(&self) -> Option<&SessionRegistry> {
+        match self {
+            SessionManager::InProcess(r) => Some(r),
+            SessionManager::Daemon(_) => None,
+        }
     }
 
     /// Spawn a real pty session for `opts`. Returns once the pty is live and its driver
-    /// task is running. Errors if the pty fails to spawn.
+    /// task is running (in-process), or the create request is sent (daemon). Errors if the
+    /// pty fails to spawn (in-process) / the request can't be sent (daemon).
     pub fn create(&self, opts: SpawnOptions) -> io::Result<()> {
-        self.inner.create(opts)
+        match self {
+            SessionManager::InProcess(r) => r.create(opts),
+            SessionManager::Daemon(d) => d.create(opts),
+        }
     }
 
-    /// Spawn a session using a custom pty `factory` (tests inject a mock). The resolved
-    /// [`PtySpec`] is built from `opts` exactly as the production path does.
+    /// Spawn a session using a custom pty `factory` (tests inject a mock). The daemon
+    /// backend ignores the factory (a closure can't cross a socket; the daemon owns real
+    /// PTYs) and spawns a normal session — no production caller uses `create_with`.
     pub fn create_with(&self, opts: SpawnOptions, factory: SpawnFn) -> io::Result<()> {
-        self.inner.create_with(opts, factory)
+        match self {
+            SessionManager::InProcess(r) => r.create_with(opts, factory),
+            SessionManager::Daemon(d) => d.create_with(opts, factory),
+        }
     }
 
     /// Whether a session with `uid` is currently live.
     pub fn has(&self, uid: &str) -> bool {
-        self.inner.has(uid)
+        match self {
+            SessionManager::InProcess(r) => r.has(uid),
+            SessionManager::Daemon(d) => d.has(uid),
+        }
     }
 
     /// The uids of all live sessions.
     pub fn uids(&self) -> Vec<String> {
-        self.inner.uids()
+        match self {
+            SessionManager::InProcess(r) => r.uids(),
+            SessionManager::Daemon(d) => d.uids(),
+        }
     }
 
     /// Recent output for a re-attaching view (the rolling replay buffer).
     pub fn replay(&self, uid: &str) -> Option<String> {
-        self.inner.replay(uid)
+        match self {
+            SessionManager::InProcess(r) => r.replay(uid),
+            SessionManager::Daemon(d) => d.replay(uid),
+        }
     }
 
     /// Monotonic count of all output UTF-16 code units ever emitted (the `since`
     /// cursor; pair with `control::output::sliceSince`).
     pub fn output_bytes(&self, uid: &str) -> Option<u64> {
-        self.inner.output_bytes(uid)
+        match self {
+            SessionManager::InProcess(r) => r.output_bytes(uid),
+            SessionManager::Daemon(d) => d.output_bytes(uid),
+        }
     }
 
     /// Epoch-ms of the last output flush, or `None` if the pane has produced nothing
     /// yet (feeds `control::output::waitDecision`).
     pub fn last_output_at(&self, uid: &str) -> Option<u64> {
-        self.inner.last_output_at(uid)
+        match self {
+            SessionManager::InProcess(r) => r.last_output_at(uid),
+            SessionManager::Daemon(d) => d.last_output_at(uid),
+        }
     }
 
     /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
-    /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`).
+    /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`);
+    /// the daemon backend does a bounded `RenderScreen` round-trip.
     pub fn render_screen(&self, uid: &str) -> Option<String> {
-        self.inner.render_screen(uid)
+        match self {
+            SessionManager::InProcess(r) => r.render_screen(uid),
+            SessionManager::Daemon(d) => d.render_screen(uid),
+        }
     }
 
     /// Write input to the pane's pty.
     pub fn write(&self, uid: &str, data: &str) {
-        self.inner.write(uid, data)
+        match self {
+            SessionManager::InProcess(r) => r.write(uid, data),
+            SessionManager::Daemon(d) => d.write(uid, data),
+        }
     }
 
     /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
     pub fn resize(&self, uid: &str, cols: u16, rows: u16) {
-        self.inner.resize(uid, cols, rows)
+        match self {
+            SessionManager::InProcess(r) => r.resize(uid, cols, rows),
+            SessionManager::Daemon(d) => d.resize(uid, cols, rows),
+        }
     }
 
     /// Kill the pane's pty and forget it. The natural-exit `Exit` event is suppressed
     /// (mirrors TS `destroy()`), so a deliberate kill is silent.
     pub fn kill(&self, uid: &str) {
-        self.inner.kill(uid)
+        match self {
+            SessionManager::InProcess(r) => r.kill(uid),
+            SessionManager::Daemon(d) => d.kill(uid),
+        }
     }
 
     /// Kill every live pane and clear the map.
     pub fn kill_all(&self) {
-        self.inner.kill_all()
+        match self {
+            SessionManager::InProcess(r) => r.kill_all(),
+            SessionManager::Daemon(d) => d.kill_all(),
+        }
     }
 }
 
