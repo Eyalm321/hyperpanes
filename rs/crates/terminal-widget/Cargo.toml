@@ -16,12 +16,12 @@ hyperpanes-core = { path = "../core" }
 # Slint UI + its wgpu interop seam. `unstable-wgpu-29` exposes `slint::wgpu_29`
 # (texture import via Image::try_from + a shared Device/Queue);
 # `renderer-femtovg-wgpu` is the concrete wgpu renderer Slint needs at runtime.
-# Pinned to our fork's exact rev 9dab2175b (PR head of slint-ui/slint#12000, branch popup-is-open)
-# for `PopupWindow.is-open`. Pinned by rev (not branch) to stop floating-branch drift; that commit
-# fixes is-open in the compiler passes (our COMPILED slint-build path). Must match the app crate.
+# Pinned to our fork rev b68356a5c (branch popup-is-open-wgpufix) = 9dab2175b (`PopupWindow.is-open`,
+# slint-ui/slint#12000) + the femtovg-wgpu Wayland first-frame `Surface::configure` fix
+# (slint-ui/slint#12099). Pinned by rev (not branch) to stop floating-branch drift. Must match the app crate.
 # Slint master's femtovg-wgpu renderer links wgpu 29, so we use `unstable-wgpu-29` to match.
 # default-features = false (minus `accessibility`) must match the app crate — see the note there.
-slint = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93", default-features = false, features = [
+slint = { git = "https://github.com/Eyalm321/slint", rev = "b68356a5c290fc6f09aad2af22c1d8b59b2d1ab6", default-features = false, features = [
     "std",
     "backend-default",
     "renderer-femtovg",
@@ -56,10 +56,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 png = "0.17"
 # Headless Slint platform for pointer-dispatch regression tests (tests/pointer_press.rs):
 # pins that the pane's FocusScope can't swallow the first press. Same fork rev as `slint`.
-i-slint-backend-testing = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
+i-slint-backend-testing = { git = "https://github.com/Eyalm321/slint", rev = "b68356a5c290fc6f09aad2af22c1d8b59b2d1ab6" }
 
 [build-dependencies]
-slint-build = { git = "https://github.com/Eyalm321/slint", rev = "9dab2175b8d572296331df6cb7ff76cf7b31ce93" }
+slint-build = { git = "https://github.com/Eyalm321/slint", rev = "b68356a5c290fc6f09aad2af22c1d8b59b2d1ab6" }
 
 # Optimize deps even in dev so the software renderer is smooth in the demo.
 [profile.dev.package."*"]
