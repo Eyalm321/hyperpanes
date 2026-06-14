@@ -550,6 +550,11 @@ impl ControlHost {
             show_frame: Some(true),
             show_dot: Some(true),
             font_px,
+            // The control model doesn't carry the original spawn spec, so an orphan-adopted
+            // session has no command/args/shell to forward.
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
         };
 
         // Resolve the GUI tab index this pane belongs in (None ⇒ it needs a brand-new tab).
