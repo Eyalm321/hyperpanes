@@ -342,14 +342,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (etx, erx) = unbounded_channel::<SessionEvent>();
-    // Backend selection (session-daemon-plan M1): `HYPERPANES_SESSION_DAEMON=1` routes
-    // sessions through the PTY-owning daemon (so they survive a GUI crash); anything else
-    // (unset/"0") keeps today's in-process path. Selected ONCE here — the GUI's
-    // `Arc<SessionManager>` and every call site are backend-agnostic. The daemon is keyed by
-    // the SAME `salt` (the user-data dir) as the single-instance gate above, so a dev/isolated
-    // instance gets its own daemon. A daemon connect/spawn failure falls back to in-process
-    // rather than blocking launch — the daemon is an enhancement, never a hard dependency.
-    let want_daemon = std::env::var("HYPERPANES_SESSION_DAEMON").as_deref() == Ok("1");
+    // Backend selection (session-daemon-plan M4 — daemon DEFAULT-ON on unix): sessions run in
+    // the PTY-owning daemon so they survive a GUI crash. Opt OUT with HYPERPANES_SESSION_DAEMON=0
+    // (forces today's in-process path); opt IN on any platform with =1. On Windows the named-pipe
+    // transport is not yet verified (WINDOWS-CI-PENDING), so the default there stays in-process
+    // until it lands. Selected ONCE here — the GUI's `Arc<SessionManager>` and every call site are
+    // backend-agnostic. The daemon is keyed by the SAME `salt` (the user-data dir) as the
+    // single-instance gate above, so a dev/isolated instance gets its own daemon. A connect/spawn
+    // failure falls back to in-process rather than blocking launch — the daemon is an enhancement,
+    // never a hard dependency.
+    let want_daemon = match std::env::var("HYPERPANES_SESSION_DAEMON").ok().as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => cfg!(unix),
+    };
     let mgr = Arc::new(if want_daemon {
         match SessionManager::new_daemon(etx.clone(), &salt) {
             Ok(m) => {
