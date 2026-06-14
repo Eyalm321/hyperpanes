@@ -11,3 +11,4 @@ pub mod replay;
 pub mod screen;
 pub mod proto;
 pub mod daemon;
+pub mod daemon_client;
