@@ -335,6 +335,8 @@ impl App {
         // Seed the auto-update toggle from the just-loaded settings (read-only borrow, no
         // command in flight, so the #18 borrow rule is moot here).
         win.app.set_pref_auto_update(win.state.borrow().settings.auto_update);
+        // Seed the keep-alive toggle (session-daemon M3) the same way.
+        win.app.set_pref_keep_alive(win.state.borrow().settings.keep_alive);
         // Cascade additional windows so they don't land exactly on top of each other.
         if id > 0 {
             let off = 36.0 * id as f32;
@@ -2486,6 +2488,16 @@ impl App {
                         },
                         None => app.update.set_error("No downloaded installer to run".to_string()),
                     }
+                    return;
+                }
+                // Keep-terminals-running-in-the-background toggle (session-daemon M3,
+                // persisted) — apply + mirror the prop back immediately, like auto-update.
+                if kind == 21 {
+                    app.run_command(
+                        &w,
+                        Command::ApplySetting(crate::state::Setting::KeepAlive(arg != 0)),
+                    );
+                    w.app.set_pref_keep_alive(arg != 0);
                     return;
                 }
                 let setting = match kind {

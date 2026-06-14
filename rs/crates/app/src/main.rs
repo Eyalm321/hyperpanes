@@ -86,6 +86,14 @@ fn session_daemon_salt(argv: &[String]) -> Option<String> {
     None
 }
 
+/// Whether `argv` carries the `--kill-daemon` flag (the M3 lifecycle entry: connect to the
+/// running session daemon, tell it to shut down its sessions + exit, then return). A bare
+/// flag — the salt is the user-data dir (the same key the daemon's discovery uses), resolved
+/// in `main`. No-op if no daemon is running.
+fn wants_kill_daemon(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--kill-daemon")
+}
+
 /// Lightweight perf instrumentation for the Wave-2 perf track (Task 17). Enabled by setting
 /// `HYPERPANES_PERFLOG` to a file path (or `1` / empty for a default temp path), so the
 /// startup-latency (#2) and scroll-region-throughput (#1) work can be measured before/after
@@ -239,6 +247,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // `--kill-daemon` mode (M3): connect to the running session daemon for THIS user-data dir
+    // and ask it to kill its sessions + exit, then return without launching a GUI. A no-op if
+    // none is running. The salt is the user-data dir — the same key `new_daemon` and the
+    // daemon's discovery use — so we kill the daemon that THIS install/dev build would attach
+    // to (an isolated instance has its own).
+    if wants_kill_daemon(&argv0) {
+        let salt = hyperpanes_core::persistence::paths::user_data_dir()
+            .to_string_lossy()
+            .into_owned();
+        match hyperpanes_core::session::daemon::kill_daemon(&salt) {
+            Ok(true) => dbg_log("kill-daemon: shut the running daemon down"),
+            Ok(false) => dbg_log("kill-daemon: no daemon was running (no-op)"),
+            Err(e) => dbg_log(&format!("kill-daemon: error {e}")),
+        }
+        return Ok(());
+    }
+
     // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.
     crate::prefs::init_bundled_fonts();
 
@@ -366,7 +391,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     application.set_timer(timer); // App owns the timer for the whole loop + adjusts its interval
 
     slint::run_event_loop()?;
-    mgr.kill_all();
+
+    // Quit-vs-keep-alive (session-daemon-plan M3). Read the persisted preference fresh (it
+    // may have been toggled this session) — default ON: "keep terminals running in the
+    // background when Hyperpanes closes".
+    //
+    //  * Daemon backend + keep-alive ON  → LEAVE the daemon (and its sessions) running, so a
+    //    relaunch re-attaches the survivors (the whole point of the daemon). We do NOT call
+    //    `kill_all` here, which would defeat persistence.
+    //  * Daemon backend + keep-alive OFF → ask the daemon to shut down (kill its sessions +
+    //    exit), so nothing lingers after an explicit quit.
+    //  * In-process backend (either way) → the PTYs are our children and die with us; the
+    //    keep-alive preference is INERT, and `kill_all` is the historical clean teardown.
+    let keep_alive = prefs::load().keep_alive;
+    if mgr.is_daemon() {
+        if keep_alive {
+            dbg_log("quit: keep-alive ON — leaving the daemon + sessions running");
+        } else {
+            dbg_log("quit: keep-alive OFF — shutting the daemon down");
+            mgr.shutdown_daemon();
+        }
+    } else {
+        // In-process: keep-alive can't apply (no out-of-process daemon); kill our children.
+        mgr.kill_all();
+    }
     Ok(())
 }
 
@@ -592,6 +640,23 @@ mod tests {
         assert_eq!(session_daemon_salt(&argv(&["hyperpanes", "-c", "ls", "--cwd", "/tmp"])), None);
         // A bare flag with no following salt yields None (nothing to run a daemon for).
         assert_eq!(session_daemon_salt(&argv(&["hyperpanes", "--session-daemon"])), None);
+    }
+
+    // ---- --kill-daemon flag parsing (M3) ----
+
+    #[test]
+    fn kill_daemon_flag_is_detected() {
+        assert!(wants_kill_daemon(&argv(&["hyperpanes", "--kill-daemon"])));
+        // Tolerates other args around it.
+        assert!(wants_kill_daemon(&argv(&["hyperpanes", "--foo", "--kill-daemon", "bar"])));
+    }
+
+    #[test]
+    fn kill_daemon_flag_is_absent_on_a_normal_launch() {
+        assert!(!wants_kill_daemon(&argv(&["hyperpanes"])));
+        assert!(!wants_kill_daemon(&argv(&["hyperpanes", "-c", "ls"])));
+        // Not confused by the daemon-RUN flag.
+        assert!(!wants_kill_daemon(&argv(&["hyperpanes", "--session-daemon", "/data"])));
     }
 
     // ---- Ctrl+Shift+P → palette, pinned at the ROUTER level (the full text→tok→chord

@@ -126,6 +126,8 @@ pub enum Setting {
     IdleSeconds(i32),
     /// Toggle the startup auto-update check (Task 8).
     AutoUpdate(bool),
+    /// Toggle keep-terminals-running-in-the-background on quit (session-daemon M3).
+    KeepAlive(bool),
 }
 
 /// The "New pane" dialog's payload — full spawn options for a configured pane. The simple
@@ -1805,7 +1807,8 @@ impl State {
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
             | Setting::IdleSeconds(_)
-            | Setting::AutoUpdate(_) => {}
+            | Setting::AutoUpdate(_)
+            | Setting::KeepAlive(_) => {}
         }
         self.dirty = true;
     }
@@ -1939,6 +1942,7 @@ impl State {
                 self.settings.idle_alert_seconds = (steps * step) as u32;
             }
             Setting::AutoUpdate(on) => self.settings.auto_update = on,
+            Setting::KeepAlive(on) => self.settings.keep_alive = on,
         }
         prefs::save(&self.settings);
         self.dirty = true;

@@ -172,6 +172,13 @@ pub struct Settings {
     /// body right-click is modal (copy the selection if one exists, else paste). When ON,
     /// right-click always pastes — the selection was already copied on release.
     pub copy_on_select: bool,
+    /// Whether terminals keep running in the background when Hyperpanes closes (the
+    /// session-daemon quit-vs-keep-alive toggle, M3). **ON by default** — with the
+    /// crash-surviving session daemon (`HYPERPANES_SESSION_DAEMON=1`), an explicit quit then
+    /// leaves the daemon + its PTY sessions alive so a relaunch re-attaches them; turning it
+    /// OFF makes quit ask the daemon to shut down (kill its sessions + exit). INERT for the
+    /// in-process backend (those PTYs die with the GUI regardless).
+    pub keep_alive: bool,
 }
 
 impl Default for Settings {
@@ -193,6 +200,7 @@ impl Default for Settings {
             idle_alert_seconds: DEFAULT_IDLE_SECONDS,
             auto_update: false,
             copy_on_select: false,
+            keep_alive: true,
         }
     }
 }
@@ -331,6 +339,7 @@ mod tests {
             idle_alert_seconds: 120,
             auto_update: true,
             copy_on_select: true,
+            keep_alive: false, // non-default (defaults to true)
         }
     }
 
