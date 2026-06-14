@@ -50,19 +50,10 @@ pub enum Overlay {
     AddProject,
 }
 
-/// Process-global pane/session uid counter. Session uids key the SHARED [`SessionManager`]
-/// map, so they must be unique across every window — a per-`State` counter gave each
-/// window's first pane the same "pane-0" uid, and the second window's spawn clobbered the
-/// first's session (both panes then died on its exit; found live by the Wave-2 macOS
-/// hand-off smoke).
-static NEXT_PANE_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn next_pane_uid() -> String {
-    format!(
-        "pane-{}",
-        NEXT_PANE_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
-}
+// Pane/session uid minting moved to the backend: `SessionManager::fresh_uid` picks the
+// scheme (in-process `pane-N` from a process-global counter — same cross-window uniqueness
+// the old `state.rs` counter guaranteed — vs daemon UUID for cross-RUN uniqueness, which
+// re-attach needs). See `session_manager::fresh_uid` and the plan's "uid stability".
 
 /// A session detached from its window for re-hosting in another (Wave-1 multi-window
 /// plumbing). Carries only the session `uid` + chrome; the PTY stays alive centrally in
@@ -821,7 +812,10 @@ impl State {
         idx: usize,
         opts: NewPaneOpts,
     ) -> Option<PaneState> {
-        let uid = next_pane_uid();
+        // Mint via the backend so a daemon-backed pane gets a cross-run-unique uid (it may
+        // outlive this GUI run and be re-attached by uid next launch); in-process keeps the
+        // `pane-N` form. See `SessionManager::fresh_uid` / the plan's "uid stability".
+        let uid = mgr.fresh_uid();
         let palette = self.settings.frame_palette;
         let cwd = opts.cwd.filter(|c| !c.is_empty());
         let accent = opts.accent;
@@ -2639,7 +2633,9 @@ impl State {
             None => return,
         };
         let (cols, rows) = (cols.max(2) as u16, rows.max(1) as u16);
-        let uid = next_pane_uid();
+        // A restart is a brand-new session — mint via the backend (daemon → cross-run-unique
+        // uid; in-process → `pane-N`). See `SessionManager::fresh_uid`.
+        let uid = mgr.fresh_uid();
         let shell = prefs::effective_shell(&self.settings.default_shell);
         let shell_path = shell
             .clone()
@@ -3339,7 +3335,6 @@ impl State {
         idx: usize,
         spec: &PaneSpec,
     ) -> Option<PaneState> {
-        let uid = next_pane_uid();
         let palette = self.settings.frame_palette;
         let shell = spec
             .shell
@@ -3357,23 +3352,50 @@ impl State {
             env: si.env.into_iter().collect(),
         });
         let (cols, rows) = self.spawn_cells();
-        Self::spawn_session_async(mgr, SpawnOptions {
-            uid: uid.clone(),
-            cols: Some(cols),
-            rows: Some(rows),
-            pane_id: Some(uid.clone()),
-            cwd: spec.cwd.clone(),
-            // Cloned so the resolved shell is also kept on the PaneState (below) for a
-            // subsequent relaunch snapshot.
-            shell: shell.clone(),
-            command: spec.command.clone(),
-            args: spec.args.clone(),
-            integration,
-            ..Default::default()
-        });
+
+        // ---- M2 re-attach decision (session-daemon-plan "Reconnect / re-attach") ----
+        // When the backend is the daemon AND the snapshot recorded this pane's session uid
+        // AND that session is STILL ALIVE in the daemon (the program survived the last GUI
+        // crash/quit), we re-ADOPT the surviving pty under that exact uid instead of spawning
+        // a new one: the live process comes back on screen, its prior output replayed into the
+        // fresh grid. Otherwise (in-process backend, no recorded uid, or a dead/unknown uid —
+        // the program had exited) we fall back to today's behaviour: re-spawn from the spec
+        // (Prep made the spec re-run the original program, not a bare shell).
+        let reattach = mgr.is_daemon()
+            && spec.uid.as_deref().map(|u| mgr.has(u)).unwrap_or(false);
+        // The restored pane keeps its snapshot uid when re-attaching (so it identifies the
+        // surviving session); a fresh spawn mints a new backend-appropriate uid.
+        let uid = match (&reattach, &spec.uid) {
+            (true, Some(u)) => u.clone(),
+            _ => mgr.fresh_uid(),
+        };
+
         let mut pane =
             TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        if reattach {
+            // Re-host the survivor: seed the fresh grid from the daemon's retained replay (the
+            // same replay-into-a-fresh-grid path `adopt_into_tab` uses for a moved pane). No
+            // pty spawn — the live process is already running in the daemon.
+            if let Some(replay) = mgr.replay(&uid) {
+                pane.feed(&replay);
+            }
+        } else {
+            Self::spawn_session_async(mgr, SpawnOptions {
+                uid: uid.clone(),
+                cols: Some(cols),
+                rows: Some(rows),
+                pane_id: Some(uid.clone()),
+                cwd: spec.cwd.clone(),
+                // Cloned so the resolved shell is also kept on the PaneState (below) for a
+                // subsequent relaunch snapshot.
+                shell: shell.clone(),
+                command: spec.command.clone(),
+                args: spec.args.clone(),
+                integration,
+                ..Default::default()
+            });
+        }
         let glow = Glow::new(crate::glow::seed_from(&uid));
         let pinned = spec.color.as_deref().map(parse_hex);
         let project = pinned.is_some();
@@ -3400,7 +3422,10 @@ impl State {
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
-            started: false,
+            // A re-attached survivor is already running (replay-primed, like an adopted
+            // pane); a freshly spawned pane starts unstarted so its first-output startup
+            // pump tracks the new shell coming up.
+            started: reattach,
             startup: None,
             pinned_accent: pinned,
             surf: (0.0, 0.0),
@@ -4001,6 +4026,44 @@ mod session_file_tests {
         let restored = &st2.active_tab().panes[0];
         assert_eq!(restored.spawn_command.as_deref(), Some("claude"));
         assert_eq!(restored.spawn_shell.as_deref(), Some("pwsh"));
+    }
+
+    /// M2 restore on the IN-PROCESS backend always RE-SPAWNS (re-attach needs a daemon — the
+    /// PTYs die with the GUI here). Even though the snapshot carries a uid, `make_pane_from_spec`
+    /// must NOT try to re-attach it: `mgr.is_daemon()` is false → it freshly mints a uid and
+    /// re-spawns from the spec. So the restored pane's uid differs from the recorded one, and
+    /// the pane starts unstarted (a fresh shell coming up, not a replay-primed survivor).
+    #[test]
+    fn in_process_restore_respawns_with_a_fresh_uid_not_the_recorded_one() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        let m = mgr(); // in-process backend
+        assert!(!m.is_daemon(), "this test exercises the in-process (re-spawn) path");
+        let snap = WorkspaceFile {
+            groups: Some(vec![GroupSpec {
+                panes: vec![PaneSpec {
+                    // A recorded uid from a "previous run" — on the in-process backend it can't
+                    // be alive (the prior GUI's PTYs are gone), so it must be ignored for restore.
+                    uid: Some("pane-from-last-run".into()),
+                    command: Some("htop".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            active: Some(0),
+            ..Default::default()
+        };
+        st.load_workspace(snap, &m);
+        let restored = &st.active_tab().panes[0];
+        assert_ne!(
+            restored.uid, "pane-from-last-run",
+            "in-process restore mints a fresh uid (no re-attach), got {}",
+            restored.uid
+        );
+        assert!(!restored.started, "a re-spawned pane starts unstarted (fresh shell coming up)");
+        // The original program is still re-run from the spec (Prep's re-spawn-the-program fix).
+        assert_eq!(restored.spawn_command.as_deref(), Some("htop"));
     }
 
     /// The emptied-last-tab-mid-close case: closing the only pane of the only tab leaves
