@@ -127,8 +127,38 @@ impl DaemonSessionManager {
     /// events are forwarded to `events` (the GUI's existing channel). The salt is the
     /// user-data dir, exactly as the GUI's single-instance gate and the daemon's own
     /// discovery use it.
+    ///
+    /// **Proto-version handshake (M3):** before building the manager, this does a bare
+    /// `Hello` round-trip on the raw socket and compares the daemon's `proto_ver` against the
+    /// client's [`PROTO_VER`]. On a MISMATCH the running daemon is a stale build of OUR binary
+    /// (lock-step upgrades — no third-party compat burden), so we tear it down
+    /// ([`tear_down_stale_daemon`]) and respawn a fresh one, then retry. Bounded retries
+    /// guard against a wedged respawn loop.
     pub fn new(events: UnboundedSender<SessionEvent>, salt: &str) -> io::Result<Self> {
         let socket = crate::session::daemon::socket_path_for(salt);
+        // Up to a couple of respawn rounds: a single mismatch should resolve in one
+        // tear-down + respawn; more than that means something is wrong (e.g. two GUIs of
+        // different versions fighting), and we just proceed with whatever answers last.
+        for attempt in 0..3 {
+            let stream = connect_or_spawn(&socket, salt)?;
+            match probe_proto_version(&stream)? {
+                ProtoCheck::Match => return Self::from_stream(stream, events),
+                ProtoCheck::Mismatch { daemon_ver } => {
+                    // The daemon is a stale version of our own binary. Tear it down (Shutdown
+                    // → wait for the socket to drop) and respawn a fresh one on the next loop.
+                    dbg(&format!(
+                        "daemon proto-version mismatch (client {PROTO_VER}, daemon {daemon_ver}); \
+                         tearing down stale daemon (attempt {attempt})"
+                    ));
+                    drop(stream);
+                    tear_down_stale_daemon(&socket, salt);
+                    // Loop: connect_or_spawn will start a fresh daemon if none is now up.
+                }
+            }
+        }
+        // Last resort after exhausting respawns: connect and proceed regardless of version, so
+        // a transient mismatch never hard-blocks launch (the GUI still falls back to in-process
+        // upstream if even this errors).
         let stream = connect_or_spawn(&socket, salt)?;
         Self::from_stream(stream, events)
     }
@@ -327,6 +357,16 @@ impl DaemonSessionManager {
         self.shadows.lock().unwrap().clear();
         let _ = self.send(&ClientMsg::KillAll);
     }
+
+    /// Ask the daemon to **shut down** (kill its sessions + exit): the quit-vs-keep-alive
+    /// "OFF" branch and the `--kill-daemon` path. Fire-and-forget — the daemon exits without
+    /// a reply frame, so the connection just drops (the EOF is the acknowledgement). Clears
+    /// the local shadow so a subsequent accessor sees no sessions. No-op-safe: if the daemon
+    /// is already gone the send simply fails and is ignored.
+    pub fn shutdown_daemon(&self) {
+        self.shadows.lock().unwrap().clear();
+        let _ = self.send(&ClientMsg::Shutdown);
+    }
 }
 
 /// The reader thread body: decode inbound frames forever, demuxing events (which update the
@@ -429,6 +469,89 @@ fn spawn_spec_from(opts: SpawnOptions) -> SpawnSpec {
         integration_args,
         integration_env,
         control_file: opts.control_file,
+    }
+}
+
+/// Result of the proto-version handshake probe ([`probe_proto_version`]).
+#[cfg(unix)]
+enum ProtoCheck {
+    /// The daemon's `proto_ver` equals the client's [`PROTO_VER`] — proceed.
+    Match,
+    /// The daemon speaks a different version — tear it down + respawn.
+    Mismatch { daemon_ver: u32 },
+}
+
+/// Do a bare `Hello` round-trip on a freshly-connected (NOT yet manager-owned) socket and
+/// compare the daemon's reported `proto_ver` to the client's [`PROTO_VER`]. Used by `new`
+/// BEFORE the manager + reader thread are built, so a mismatch can be resolved by tearing
+/// the stale daemon down and respawning (the lock-step-upgrade contract — the daemon is our
+/// own binary). A handshake that doesn't answer in time is treated as a `Match` (proceed):
+/// the version gate must never hard-block launch over a slow/odd handshake — the worst case
+/// is talking to a same-version daemon we couldn't confirm, which is harmless.
+#[cfg(unix)]
+fn probe_proto_version(stream: &std::os::unix::net::UnixStream) -> io::Result<ProtoCheck> {
+    let mut w = stream.try_clone()?;
+    let mut r = stream.try_clone()?;
+    // A bounded read so a daemon that never answers doesn't wedge the probe. NB: the read
+    // timeout is a SOCKET-level option (`SO_RCVTIMEO`), shared across `try_clone`'d fds AND
+    // the original `stream` the manager later owns — so it MUST be cleared before we return,
+    // or the manager's reader thread would spuriously time out every 2s. We clear it on every
+    // path below (`r.set_read_timeout(None)` on the shared socket).
+    r.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let send = write_frame(&mut w, &ClientMsg::Hello { proto_ver: PROTO_VER });
+    let check = match send.and_then(|()| read_frame::<_, DaemonMsg>(&mut r)) {
+        Ok(Some(DaemonMsg::Hello { proto_ver, .. })) => {
+            if proto_ver == PROTO_VER {
+                ProtoCheck::Match
+            } else {
+                ProtoCheck::Mismatch { daemon_ver: proto_ver }
+            }
+        }
+        // Any non-Hello reply, EOF, or a (timed-out) read error: don't block launch over an
+        // unconfirmed handshake — proceed as a match. NB: `from_stream` re-runs its own Hello
+        // round-trip, draining the daemon's (second) reply, so this probe's `Hello` reply does
+        // not desync the stream the manager later owns.
+        _ => ProtoCheck::Match,
+    };
+    // Restore blocking reads on the shared socket before the manager takes it over.
+    let _ = r.set_read_timeout(None);
+    Ok(check)
+}
+
+/// Tear down a stale-version daemon at `socket`: connect, send `Shutdown`, then wait (briefly)
+/// for the socket to disappear (the daemon unlinks it on exit). Best-effort — if the connect
+/// fails the daemon is already gone, and if it lingers, `connect_or_spawn`'s `AddrInUse`
+/// handling + retry on the next `new` loop iteration still converges. `salt` is unused today
+/// (the socket path is enough) but kept for symmetry with the spawn side.
+#[cfg(unix)]
+fn tear_down_stale_daemon(socket: &Path, _salt: &str) {
+    if let Ok(stream) = std::os::unix::net::UnixStream::connect(socket) {
+        let mut w = stream;
+        let _ = write_frame(&mut w, &ClientMsg::Shutdown);
+        // Wait for the daemon to exit (it unlinks the socket on the way out). Bounded so a
+        // wedged daemon doesn't hang launch; the respawn loop tolerates a slow teardown.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            // Once the socket file is gone (or refuses connections), the stale daemon is down.
+            if !socket.exists() || std::os::unix::net::UnixStream::connect(socket).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Append a line to the daemon debug log when `HYPERPANES_DEBUG` is set (mirrors the app's
+/// `dbg_log`; core has no logger of its own). Inert otherwise.
+#[cfg(unix)]
+fn dbg(msg: &str) {
+    use std::io::Write;
+    if std::env::var_os("HYPERPANES_DEBUG").is_none() {
+        return;
+    }
+    let path = std::env::temp_dir().join("hyperpanes-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[daemon-client] {msg}");
     }
 }
 
@@ -1105,5 +1228,122 @@ mod tests {
         });
         assert!(exit.is_some(), "a spawn failure should surface as an Exit, not a hang");
         assert!(wait_until(Dur::from_secs(2), || !mgr.has("bad")), "the failed session is dropped");
+    }
+
+    // ====================== M3 proto-version handshake + shutdown ======================
+
+    // probe_proto_version against a REAL daemon (same PROTO_VER) returns Match, AND the
+    // manager built on that same socket afterwards still works — i.e. the probe's Hello
+    // round-trip did NOT desync the stream nor leave a read timeout on the shared fd (a
+    // regression guard for the SO_RCVTIMEO-is-shared subtlety).
+    #[test]
+    fn version_probe_matches_real_daemon_and_manager_works_after() {
+        let socket = temp_socket("proto-match");
+        let _daemon = spawn_in_process(&socket).expect("daemon binds");
+
+        let stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect");
+        assert!(
+            matches!(probe_proto_version(&stream).expect("probe"), ProtoCheck::Match),
+            "a same-version daemon must match"
+        );
+        // Build the manager on the SAME stream (as `new` does after a Match) and drive it —
+        // proves no desync + blocking reads restored (the reader thread must not time out).
+        let (etx, mut rx) = unbounded_channel::<SessionEvent>();
+        let mgr = DaemonSessionManager::from_stream(stream, etx).expect("manager after probe");
+        mgr.create(SpawnOptions {
+            uid: "pm".into(),
+            shell: Some("/bin/sh".into()),
+            args: Some(vec!["-i".into()]),
+            ..Default::default()
+        })
+        .expect("create");
+        mgr.write("pm", "echo PROBE_OK\n");
+        assert!(
+            recv_event_until(&mut rx, Dur::from_secs(10), |e| {
+                matches!(e, SessionEvent::Data { uid, data } if uid == "pm" && data.contains("PROBE_OK"))
+            })
+            .is_some(),
+            "the manager must stream normally after the version probe"
+        );
+        mgr.kill("pm");
+    }
+
+    // A daemon that reports a DIFFERENT proto_ver makes the probe return Mismatch — the
+    // signal `new` uses to tear down + respawn. Stand up a one-shot fake listener that
+    // answers the client's Hello with a bumped version.
+    #[test]
+    fn version_probe_detects_a_mismatched_daemon() {
+        let socket = temp_socket("proto-mismatch");
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("fake bind");
+
+        // Fake daemon: accept one connection, read the client's Hello, reply with a version
+        // ONE GREATER than ours (a "newer daemon" a stale client would meet).
+        let server = std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let _ = read_frame::<_, ClientMsg>(&mut conn); // the client's Hello
+                let _ = write_frame(
+                    &mut conn,
+                    &DaemonMsg::Hello { proto_ver: PROTO_VER + 1, daemon_pid: 4242 },
+                );
+                // Keep the connection open briefly so the client reads the reply.
+                std::thread::sleep(Dur::from_millis(200));
+            }
+        });
+
+        let stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect fake");
+        let check = probe_proto_version(&stream).expect("probe");
+        assert!(
+            matches!(check, ProtoCheck::Mismatch { daemon_ver } if daemon_ver == PROTO_VER + 1),
+            "a different-version daemon must be a Mismatch carrying the daemon's version"
+        );
+        drop(stream);
+        let _ = server.join();
+    }
+
+    // tear_down_stale_daemon actually brings a running daemon down: after it returns, the
+    // socket is unlinked (the daemon exited) — the mechanism `new` relies on to clear the
+    // stale daemon before respawning a fresh one.
+    #[test]
+    fn tear_down_stale_daemon_shuts_a_running_daemon_down() {
+        let socket = temp_socket("teardown");
+        let daemon = spawn_in_process(&socket).expect("daemon binds");
+        assert!(socket.exists() && !daemon.is_shutting_down());
+
+        tear_down_stale_daemon(&socket, "salt-unused");
+
+        assert!(
+            wait_until(Dur::from_secs(3), || daemon.is_shutting_down()),
+            "tear_down_stale_daemon should shut the daemon down"
+        );
+        assert!(
+            wait_until(Dur::from_secs(1), || !socket.exists()),
+            "the torn-down daemon unlinks its socket"
+        );
+    }
+
+    // The manager-level shutdown_daemon() sends Shutdown and clears the local shadow, and the
+    // daemon tears down (the quit-vs-keep-alive "OFF" branch at the client surface).
+    #[test]
+    fn manager_shutdown_daemon_tears_the_daemon_down() {
+        let socket = temp_socket("mgr-shutdown");
+        let daemon = spawn_in_process(&socket).expect("daemon binds");
+        let (mgr, _rx) = connect_manager(&socket);
+
+        mgr.create(SpawnOptions {
+            uid: "s".into(),
+            shell: Some("/bin/sh".into()),
+            args: Some(vec!["-i".into()]),
+            ..Default::default()
+        })
+        .expect("create");
+        assert!(mgr.has("s"), "session present before shutdown");
+
+        mgr.shutdown_daemon();
+        assert!(!mgr.has("s"), "shutdown_daemon clears the local shadow");
+        assert!(
+            wait_until(Dur::from_secs(3), || daemon.is_shutting_down()),
+            "shutdown_daemon brings the daemon down"
+        );
     }
 }

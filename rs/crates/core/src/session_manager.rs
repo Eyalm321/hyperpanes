@@ -544,6 +544,22 @@ impl SessionManager {
             SessionManager::Daemon(d) => d.kill_all(),
         }
     }
+
+    /// Ask the session **daemon** to shut down (kill its sessions + exit), the
+    /// quit-vs-keep-alive "OFF" branch and `--kill-daemon` (`docs/session-daemon-plan.md` M3).
+    /// **Inert for the in-process backend** — there is no out-of-process daemon to stop; the
+    /// PTYs die with the GUI on exit anyway (the GUI's `main` already calls `kill_all` on the
+    /// way out). Returns whether a daemon shutdown was actually requested, so a caller can
+    /// distinguish "told the daemon to stop" from "nothing to do".
+    pub fn shutdown_daemon(&self) -> bool {
+        match self {
+            SessionManager::InProcess(_) => false,
+            SessionManager::Daemon(d) => {
+                d.shutdown_daemon();
+                true
+            }
+        }
+    }
 }
 
 // Build the resolved pty spec from spawn options — the port of the TS `Session`
@@ -1096,6 +1112,16 @@ mod tests {
         let (etx, _erx) = unbounded_channel::<SessionEvent>();
         let mgr = SessionManager::new(etx);
         assert!(!mgr.is_daemon(), "the in-process backend reports is_daemon() == false");
+    }
+
+    // shutdown_daemon is INERT for the in-process backend (session-daemon M3): there is no
+    // out-of-process daemon to stop, so it returns false and does nothing — the quit path
+    // distinguishes this from a daemon shutdown by the bool.
+    #[test]
+    fn in_process_shutdown_daemon_is_inert() {
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        assert!(!mgr.shutdown_daemon(), "in-process shutdown_daemon is a no-op returning false");
     }
 
     #[test]
