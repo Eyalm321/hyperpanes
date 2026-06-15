@@ -737,6 +737,12 @@ impl App {
                 }
                 0
             }
+            // OSC-133 / agent-state liveness markers: consumed by the control server for
+            // liveness, not relevant to the GUI render path. Ignore (0 bytes fed).
+            SessionEvent::CommandStart { .. }
+            | SessionEvent::CommandEnd { .. }
+            | SessionEvent::PromptReady { .. }
+            | SessionEvent::AgentState { .. } => 0,
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
                     let project = {

@@ -600,6 +600,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         SessionEvent::Exit { uid, code } => {
                             eprintln!("[demo] {uid} exited ({code})");
                         }
+                        // OSC-133 / agent-state liveness markers feed the control server's
+                        // liveness signals, not terminal rendering — ignore them in the demo.
+                        SessionEvent::CommandStart { .. }
+                        | SessionEvent::CommandEnd { .. }
+                        | SessionEvent::PromptReady { .. }
+                        | SessionEvent::AgentState { .. } => {}
                     }
                 }
             }
