@@ -41,15 +41,32 @@ impl PaneStatus {
 pub enum Activity {
     Busy,
     Idle,
+    /// Phase-4 precise state: a command finished / the shell is at a prompt, derived from
+    /// OSC-133 markers (not from output silence). For the FROZEN legacy `activity` frame +
+    /// `/state` field this DOWN-MAPS to `idle` (see [`Activity::legacy_str`]); the precise
+    /// value is exposed on the new `liveness` frame instead.
+    AwaitingInput,
     Exited,
 }
 
 impl Activity {
+    /// The precise wire string (used by the new `liveness` channel and internal logic).
     pub fn as_str(self) -> &'static str {
         match self {
             Activity::Busy => "busy",
             Activity::Idle => "idle",
+            Activity::AwaitingInput => "awaiting-input",
             Activity::Exited => "exited",
+        }
+    }
+
+    /// The LEGACY-frame string: `AwaitingInput` collapses to `idle` so the frozen
+    /// `activity` frame + `/state.activity` field keep their `busy|idle|exited` value set
+    /// and no existing client sees a novel value.
+    pub fn legacy_str(self) -> &'static str {
+        match self {
+            Activity::AwaitingInput => "idle",
+            other => other.as_str(),
         }
     }
 }
@@ -540,7 +557,9 @@ fn pane_out(p: &PaneInfo, activity: Activity) -> PaneOut {
         shell: p.shell.clone(),
         status: p.status.as_str(),
         exit_code: p.exit_code,
-        activity: activity.as_str(),
+        // Frozen legacy field: AwaitingInput down-maps to "idle" (the precise value rides
+        // the new `liveness` frame, not `/state`).
+        activity: activity.legacy_str(),
         meta: p.meta.clone(),
     }
 }

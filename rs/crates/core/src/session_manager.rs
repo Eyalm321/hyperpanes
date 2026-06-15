@@ -34,7 +34,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -79,6 +79,41 @@ pub enum SessionEvent {
     /// The child exited with this code. Emitted on a *natural* exit only — a manual
     /// `kill` / `kill_all` is silent (mirrors TS `destroy()` gating `onExit`).
     Exit { uid: String, code: i32 },
+    /// Phase-4 semantic markers (sniffed off the raw stream like cwd, then stripped).
+    /// Additive — they ride the daemon proto verbatim via serde, and consumers that only
+    /// care about output/cwd/exit ignore them.
+    ///
+    /// `133;C` — a command's output begins (a command is now running).
+    CommandStart { uid: String },
+    /// `133;D` / `133;D;<code>` — a command finished, optionally with its exit code.
+    CommandEnd { uid: String, code: Option<i32> },
+    /// `133;A` / `133;B` — the shell is at / drawing a prompt → ready for input.
+    PromptReady { uid: String },
+    /// `9;hp;state=…` — the program self-reports its liveness.
+    AgentState { uid: String, state: AgentLiveness, code: Option<i32> },
+}
+
+/// Serializable mirror of [`crate::session::osc133::AgentLiveness`] so the event can ride
+/// the daemon proto. Kept in lockstep with the parser's enum via [`From`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentLiveness {
+    Busy,
+    AwaitingInput,
+    Done,
+    Error,
+}
+
+impl From<crate::session::osc133::AgentLiveness> for AgentLiveness {
+    fn from(a: crate::session::osc133::AgentLiveness) -> Self {
+        use crate::session::osc133::AgentLiveness as P;
+        match a {
+            P::Busy => AgentLiveness::Busy,
+            P::AwaitingInput => AgentLiveness::AwaitingInput,
+            P::Done => AgentLiveness::Done,
+            P::Error => AgentLiveness::Error,
+        }
+    }
 }
 
 /// Resolved shell-integration inputs for an interactive spawn: extra leading args and
@@ -138,6 +173,29 @@ struct Shared {
     last_output_at: AtomicU64,
     /// Set by a manual kill so the natural-exit `Exit` event is suppressed.
     killed: AtomicBool,
+    /// Phase-4 liveness mirror, fed by the OSC-133 / OSC-9;hp sniff so the *pull-based*
+    /// activity ticker can read a pane's precise state cheaply (no per-tick scan). Gated
+    /// on `marker_seen`: until a marker is ever seen, the legacy silence heuristic owns
+    /// the activity, so an un-instrumented pane is byte-for-byte unchanged.
+    ///
+    /// `prompt_ready` — true after `133;A`/`133;D` or agent awaiting-input/done.
+    prompt_ready: AtomicBool,
+    /// `command_running` — true after `133;C` or agent busy; cleared by `133;D`/prompt.
+    command_running: AtomicBool,
+    /// Last `133;D` exit code (`i32::MIN` = none yet).
+    last_exit_code: AtomicI32,
+    /// Have we EVER seen a marker? Gates the fallback to the silence heuristic.
+    marker_seen: AtomicBool,
+}
+
+/// A cheap snapshot of a session's phase-4 liveness mirror (the pull side of the marker
+/// channel). `marker_seen == false` ⇒ the caller must fall back to the silence heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Liveness {
+    pub prompt_ready: bool,
+    pub command_running: bool,
+    pub last_exit_code: Option<i32>,
+    pub marker_seen: bool,
 }
 
 impl Shared {
@@ -155,6 +213,68 @@ impl Shared {
             std::mem::take(&mut *p)
         };
         self.screen.lock().unwrap().advance(&pending);
+    }
+
+    /// Fold one parsed [`Marker`](crate::session::osc133::Marker) into the liveness mirror.
+    /// Every marker flips `marker_seen`, which is what hands authority from the silence
+    /// heuristic to the precise state for this pane (gate in `control::server::activity_for`).
+    fn apply_marker(&self, m: &crate::session::osc133::Marker) {
+        use crate::session::osc133::{AgentLiveness as A, Marker};
+        self.marker_seen.store(true, Ordering::Relaxed);
+        match m {
+            Marker::CommandStart => {
+                self.command_running.store(true, Ordering::Relaxed);
+                self.prompt_ready.store(false, Ordering::Relaxed);
+            }
+            Marker::CommandEnd { code } => {
+                self.command_running.store(false, Ordering::Relaxed);
+                self.prompt_ready.store(true, Ordering::Relaxed);
+                if let Some(c) = code {
+                    self.last_exit_code.store(*c, Ordering::Relaxed);
+                }
+            }
+            Marker::PromptReady => {
+                self.command_running.store(false, Ordering::Relaxed);
+                self.prompt_ready.store(true, Ordering::Relaxed);
+            }
+            Marker::Agent { state, code } => match state {
+                A::Busy => {
+                    self.command_running.store(true, Ordering::Relaxed);
+                    self.prompt_ready.store(false, Ordering::Relaxed);
+                }
+                A::AwaitingInput | A::Done => {
+                    self.command_running.store(false, Ordering::Relaxed);
+                    self.prompt_ready.store(true, Ordering::Relaxed);
+                }
+                A::Error => {
+                    self.command_running.store(false, Ordering::Relaxed);
+                    self.prompt_ready.store(true, Ordering::Relaxed);
+                    if let Some(c) = code {
+                        self.last_exit_code.store(*c, Ordering::Relaxed);
+                    }
+                }
+            },
+        }
+    }
+
+    /// Snapshot the liveness mirror for the activity ticker.
+    fn liveness(&self) -> Liveness {
+        let raw = self.last_exit_code.load(Ordering::Relaxed);
+        Liveness {
+            prompt_ready: self.prompt_ready.load(Ordering::Relaxed),
+            command_running: self.command_running.load(Ordering::Relaxed),
+            last_exit_code: (raw != i32::MIN).then_some(raw),
+            marker_seen: self.marker_seen.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Input was just sent → optimistically clear `prompt_ready` so the busy edge is
+    /// reported without waiting for the next marker (tightens latency, never lies for
+    /// long — a real prompt re-asserts `prompt_ready` on its next `133;A`).
+    fn note_write(&self) {
+        if self.marker_seen.load(Ordering::Relaxed) {
+            self.prompt_ready.store(false, Ordering::Relaxed);
+        }
     }
 }
 
@@ -245,6 +365,10 @@ impl SessionRegistry {
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
             killed: AtomicBool::new(false),
+            prompt_ready: AtomicBool::new(false),
+            command_running: AtomicBool::new(false),
+            last_exit_code: AtomicI32::new(i32::MIN),
+            marker_seen: AtomicBool::new(false),
         });
 
         let pipeline = SessionPipeline::new(opts.uid.clone(), Arc::clone(&shared));
@@ -307,8 +431,17 @@ impl SessionRegistry {
     pub fn write(&self, uid: &str, data: &str) {
         let map = self.sessions.lock().unwrap();
         if let Some(s) = map.get(uid) {
+            // Phase 4: input was just sent → optimistically clear `prompt_ready` so the
+            // busy edge is reported immediately (a real prompt re-asserts it on its `133;A`).
+            s.shared.note_write();
             let _ = s.pty.write(data.as_bytes());
         }
+    }
+
+    /// Snapshot a session's phase-4 liveness mirror, or `None` if the uid is unknown.
+    pub fn liveness(&self, uid: &str) -> Option<Liveness> {
+        let map = self.sessions.lock().unwrap();
+        map.get(uid).map(|s| s.shared.liveness())
     }
 
     /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
@@ -520,6 +653,20 @@ impl SessionManager {
         }
     }
 
+    /// Snapshot a session's phase-4 liveness mirror (OSC-133 / OSC-9;hp), or `None`.
+    ///
+    /// The in-process backend reads the live mirror. The daemon backend has no shadow
+    /// of the marker mirror yet (the marker `SessionEvent`s do flow over the proto, but
+    /// the client doesn't fold them into a shadow), so it returns `None` → the activity
+    /// ticker keeps using the silence heuristic for daemon-backed panes. STUB: a later
+    /// pass can mirror markers into `daemon_client::Shadow` like `last_output_at`.
+    pub fn liveness(&self, uid: &str) -> Option<Liveness> {
+        match self {
+            SessionManager::InProcess(r) => r.liveness(uid),
+            SessionManager::Daemon(_) => None,
+        }
+    }
+
     /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
     pub fn resize(&self, uid: &str, cols: u16, rows: u16) {
         match self {
@@ -708,6 +855,9 @@ struct SessionPipeline {
     batcher: DataBatcher,
     /// Carry for an OSC cwd sequence split across pty chunks.
     osc_carry: String,
+    /// Carry for a phase-4 semantic marker (OSC 133 / OSC 9;hp) split across chunks —
+    /// independent of `osc_carry` so the two scanners never clobber each other's tail.
+    marker_carry: String,
     /// De-dupe: emit `Cwd` only when the directory actually changes.
     last_cwd: Option<String>,
     /// Carry for an incomplete trailing UTF-8 sequence split across pty reads.
@@ -722,6 +872,7 @@ impl SessionPipeline {
             uid,
             batcher: DataBatcher::new(),
             osc_carry: String::new(),
+            marker_carry: String::new(),
             last_cwd: None,
             utf8_carry: Vec::new(),
             ended: false,
@@ -753,6 +904,18 @@ impl SessionPipeline {
                 self.last_cwd = Some(cwd.clone());
                 out.push(SessionEvent::Cwd { uid: self.uid.clone(), cwd });
             }
+        }
+
+        // Phase 4: tap the same RAW chunk for semantic prompt markers (OSC 133 /
+        // OSC 9;hp), updating the liveness mirror and emitting per-marker events. The
+        // marker bytes are NOT stripped from the batched stream here — like the cwd OSC
+        // they are inert escape sequences the terminal grid ignores, so they never render
+        // visibly; this keeps the byte cursor / replay buffer faithful to what was sent.
+        let (markers, mcarry) = crate::session::osc133::parse_osc_markers(&self.marker_carry, raw);
+        self.marker_carry = mcarry;
+        for m in &markers {
+            self.shared.apply_marker(m);
+            out.push(marker_to_event(&self.uid, m));
         }
 
         if let Some(flushed) = self.batcher.write(raw, now_mono_ms) {
@@ -801,6 +964,19 @@ impl SessionPipeline {
         self.shared.output_bytes.fetch_add(n, Ordering::Relaxed);
         self.shared.last_output_at.store(now_epoch_ms, Ordering::Relaxed);
         out.push(SessionEvent::Data { uid: self.uid.clone(), data });
+    }
+}
+
+/// Map a parsed phase-4 [`Marker`](crate::session::osc133::Marker) to its `SessionEvent`.
+fn marker_to_event(uid: &str, m: &crate::session::osc133::Marker) -> SessionEvent {
+    use crate::session::osc133::Marker;
+    match m {
+        Marker::CommandStart => SessionEvent::CommandStart { uid: uid.to_string() },
+        Marker::CommandEnd { code } => SessionEvent::CommandEnd { uid: uid.to_string(), code: *code },
+        Marker::PromptReady => SessionEvent::PromptReady { uid: uid.to_string() },
+        Marker::Agent { state, code } => {
+            SessionEvent::AgentState { uid: uid.to_string(), state: (*state).into(), code: *code }
+        }
     }
 }
 
@@ -853,6 +1029,10 @@ mod tests {
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
             killed: AtomicBool::new(false),
+            prompt_ready: AtomicBool::new(false),
+            command_running: AtomicBool::new(false),
+            last_exit_code: AtomicI32::new(i32::MIN),
+            marker_seen: AtomicBool::new(false),
         })
     }
 
@@ -900,6 +1080,45 @@ mod tests {
         // Same cwd again → no Cwd event (the prompt re-emits its OSC each keystroke).
         let evs2 = p.on_data(seq, 1, 1001);
         assert!(!evs2.iter().any(|e| matches!(e, SessionEvent::Cwd { .. })));
+    }
+
+    // ---- pipeline: phase-4 marker sniff + liveness mirror ----
+
+    #[test]
+    fn pipeline_sniffs_osc133_markers_and_updates_the_liveness_mirror() {
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        // Before any marker the mirror reports marker_seen=false (silence heuristic owns it).
+        assert!(!sh.liveness().marker_seen);
+
+        // A command starts running: 133;C → CommandStart event + command_running mirror.
+        let evs = p.on_data("\u{1b}]133;C\u{07}", 0, 1000);
+        assert!(evs.iter().any(|e| matches!(e, SessionEvent::CommandStart { .. })));
+        let l = sh.liveness();
+        assert!(l.marker_seen && l.command_running && !l.prompt_ready);
+
+        // The command finishes with code 0, then the prompt returns: 133;D;0 then 133;A.
+        let evs2 = p.on_data("\u{1b}]133;D;0\u{07}\u{1b}]133;A\u{07}", 1, 1001);
+        assert!(evs2.iter().any(|e| matches!(e, SessionEvent::CommandEnd { code: Some(0), .. })));
+        assert!(evs2.iter().any(|e| matches!(e, SessionEvent::PromptReady { .. })));
+        let l2 = sh.liveness();
+        assert!(!l2.command_running && l2.prompt_ready);
+        assert_eq!(l2.last_exit_code, Some(0));
+    }
+
+    #[test]
+    fn pipeline_sniffs_agent_liveness_marker() {
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        let evs = p.on_data("\u{1b}]9;hp;state=busy\u{07}", 0, 1000);
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, SessionEvent::AgentState { state: AgentLiveness::Busy, .. })));
+        assert!(sh.liveness().command_running);
+        // awaiting-input flips the mirror to prompt_ready.
+        p.on_data("\u{1b}]9;hp;state=awaiting-input\u{07}", 1, 1001);
+        let l = sh.liveness();
+        assert!(l.prompt_ready && !l.command_running);
     }
 
     // ---- pipeline: flush → replay + counters + Data ----

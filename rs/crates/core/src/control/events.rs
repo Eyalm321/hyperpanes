@@ -53,6 +53,41 @@ pub enum ControlEvent {
         seq: u64,
         body: String,
     },
+    /// Phase-4: the precise, marker-derived pane liveness. Rides ALONGSIDE the frozen
+    /// `activity` frame (which stays `busy|idle|exited`), so legacy clients are unaffected
+    /// — they simply don't recognize this `type` and ignore it. `state` is one of
+    /// `working | awaiting-input | done | exited`; `exit_code` is the last `133;D` code.
+    #[serde(rename_all = "camelCase")]
+    Liveness {
+        pane_id: String,
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    /// Phase-4: a worker's per-command pass/fail edge (`133;C` start, `133;D;code` end),
+    /// so an orchestrator can watch a looping worker's commands WITHOUT the pane exiting.
+    #[serde(rename_all = "camelCase")]
+    Command {
+        pane_id: String,
+        phase: String, // "start" | "end"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+    },
+    /// Phase-5: a supervisor decision/transition for a supervised pane. `state` is one of
+    /// `restarting | restarted | completed | exhausted | crashed`.
+    #[serde(rename_all = "camelCase")]
+    Supervisor {
+        pane_id: String,
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delay_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+    },
     State,
 }
 
@@ -187,6 +222,65 @@ mod tests {
             r#"{"type":"message","to":"p1","from":"mgr","seq":7,"body":"go"}"#
         );
         assert_eq!(ControlEvent::State.to_json(), r#"{"type":"state"}"#);
+    }
+
+    #[test]
+    fn phase4_and_phase5_frames_serialize_with_camel_and_omitted_optionals() {
+        // liveness: exit_code omitted when None.
+        assert_eq!(
+            ControlEvent::Liveness {
+                pane_id: "p1".into(),
+                state: "working".into(),
+                exit_code: None,
+            }
+            .to_json(),
+            r#"{"type":"liveness","paneId":"p1","state":"working"}"#
+        );
+        assert_eq!(
+            ControlEvent::Liveness {
+                pane_id: "p1".into(),
+                state: "done".into(),
+                exit_code: Some(0),
+            }
+            .to_json(),
+            r#"{"type":"liveness","paneId":"p1","state":"done","exitCode":0}"#
+        );
+        // command: code omitted on a "start" edge.
+        assert_eq!(
+            ControlEvent::Command { pane_id: "p1".into(), phase: "start".into(), code: None }
+                .to_json(),
+            r#"{"type":"command","paneId":"p1","phase":"start"}"#
+        );
+        assert_eq!(
+            ControlEvent::Command { pane_id: "p1".into(), phase: "end".into(), code: Some(2) }
+                .to_json(),
+            r#"{"type":"command","paneId":"p1","phase":"end","code":2}"#
+        );
+        // supervisor: all optionals omitted-when-None, camelCase delay_ms.
+        assert_eq!(
+            ControlEvent::Supervisor {
+                pane_id: "p1".into(),
+                state: "restarting".into(),
+                attempt: Some(1),
+                max: Some(5),
+                delay_ms: Some(500),
+                code: Some(1),
+            }
+            .to_json(),
+            r#"{"type":"supervisor","paneId":"p1","state":"restarting","attempt":1,"max":5,"delayMs":500,"code":1}"#
+        );
+        assert_eq!(
+            ControlEvent::Supervisor {
+                pane_id: "p1".into(),
+                state: "completed".into(),
+                attempt: None,
+                max: None,
+                delay_ms: None,
+                code: Some(0),
+            }
+            .to_json(),
+            r#"{"type":"supervisor","paneId":"p1","state":"completed","code":0}"#
+        );
     }
 
     fn coords(pane: &str, tab: &str, window: i64) -> PaneCoords {

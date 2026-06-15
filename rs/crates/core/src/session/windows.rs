@@ -387,7 +387,13 @@ impl Daemon {
 
 fn event_uid(ev: &SessionEvent) -> &str {
     match ev {
-        SessionEvent::Data { uid, .. } | SessionEvent::Cwd { uid, .. } | SessionEvent::Exit { uid, .. } => uid,
+        SessionEvent::Data { uid, .. }
+        | SessionEvent::Cwd { uid, .. }
+        | SessionEvent::Exit { uid, .. }
+        | SessionEvent::CommandStart { uid }
+        | SessionEvent::CommandEnd { uid, .. }
+        | SessionEvent::PromptReady { uid }
+        | SessionEvent::AgentState { uid, .. } => uid,
     }
 }
 

@@ -27,6 +27,7 @@ use crate::control::inbox::MessageInbox;
 use crate::control::lock::PaneLocks;
 use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
 use crate::control::routes;
+use crate::control::supervisor::{Decision, Supervisor};
 use crate::control::tokens::{random_token, TokenStore};
 use crate::control::work::WorkQueue;
 use crate::session_manager::{SessionEvent, SessionManager};
@@ -55,6 +56,9 @@ pub struct Shared {
     /// swaps in `WorkQueue::open(paths::work_db())` + boot recovery (work.rs §3.3).
     pub work: Mutex<WorkQueue>,
     pub events: EventHub,
+    /// Phase-5 auto-restart supervisor: per-pane policy + retry ledger. Default-empty ⇒
+    /// every `Exit` runs the legacy path until a pane opts in via `hp.supervise` meta.
+    pub supervisor: Mutex<Supervisor>,
     pub sessions: Arc<SessionManager>,
     pub allow_input: AtomicBool,
     pub pid: u32,
@@ -86,6 +90,7 @@ impl Shared {
             locks: Mutex::new(PaneLocks::new()),
             work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
             events: EventHub::new(),
+            supervisor: Mutex::new(Supervisor::new()),
             sessions,
             allow_input: AtomicBool::new(allow_input),
             pid: std::process::id(),
@@ -127,6 +132,30 @@ impl Shared {
         self.allow_input.load(Ordering::SeqCst)
     }
 
+    /// Reconcile each live pane's supervisor policy from its `meta` map, and forget panes
+    /// that no longer exist. Called after every structural `/command` so a `setMeta` that
+    /// flips `hp.supervise`, or a `newPane` with a `meta.hp.supervise`, takes effect. Cheap
+    /// and idempotent — a disabled policy is recorded but yields `Decision::None`.
+    pub fn reconcile_policies(&self) {
+        use crate::control::supervisor::Policy;
+        let panes: Vec<(String, std::collections::BTreeMap<String, String>)> = {
+            let m = self.model.lock().unwrap();
+            m.panes()
+                .into_iter()
+                .map(|pr| {
+                    let meta = m.pane(&pr.pane_id).and_then(|p| p.meta.clone()).unwrap_or_default();
+                    (pr.pane_id, meta)
+                })
+                .collect()
+        };
+        let live: std::collections::HashSet<&str> = panes.iter().map(|(id, _)| id.as_str()).collect();
+        let mut sup = self.supervisor.lock().unwrap();
+        for (pane_id, meta) in &panes {
+            sup.set_policy(pane_id, Policy::from_meta(meta));
+        }
+        sup.retain_panes(&live);
+    }
+
     /// Resolve a pane's liveness from the session manager + the idle threshold. Mirrors the TS
     /// `status==='exited' ? 'exited' : idle ? 'idle' : 'busy'` with idle = "no output for the
     /// threshold"; a never-output pane reads `busy` (the renderer's `markActivity` only fires on
@@ -139,11 +168,51 @@ impl Shared {
         if status == PaneStatus::Exited {
             return Activity::Exited;
         }
+        // Phase 4: prefer the precise, marker-derived state. The gate is `marker_seen` —
+        // until a pane has EVER emitted a prompt marker, the legacy silence heuristic owns
+        // its activity, so an un-instrumented pane is byte-for-byte unchanged.
+        if let Some(l) = self.sessions.liveness(uid) {
+            if l.marker_seen {
+                // A command known to be running stays Busy THROUGH output silence — the
+                // whole fix. A returned prompt is a positive AwaitingInput edge.
+                return if l.command_running {
+                    Activity::Busy
+                } else if l.prompt_ready {
+                    Activity::AwaitingInput
+                } else {
+                    // Markers seen but neither flag set (e.g. right after a write cleared
+                    // prompt_ready): treat as Busy — the pane is mid-turn.
+                    Activity::Busy
+                };
+            }
+        }
+        // Fallback: the legacy 10s output-silence heuristic (labeled, unchanged).
         match self.sessions.last_output_at(uid) {
             Some(t) if now_ms() - (t as i64) >= self.idle_threshold_ms => Activity::Idle,
             _ => Activity::Busy,
         }
     }
+}
+
+/// Map a computed [`Activity`] + liveness snapshot into a `liveness` frame. The `state`
+/// string is `working | awaiting-input | done | exited`; `done` is used when the pane is
+/// awaiting input AND its last command exited cleanly (code 0), else `awaiting-input`.
+fn liveness_frame(
+    pane_id: &str,
+    act: Activity,
+    liveness: Option<crate::session_manager::Liveness>,
+) -> ControlEvent {
+    let exit_code = liveness.and_then(|l| l.last_exit_code);
+    let state = match act {
+        Activity::Busy => "working",
+        Activity::AwaitingInput => match exit_code {
+            Some(0) => "done",
+            _ => "awaiting-input",
+        },
+        Activity::Idle => "awaiting-input",
+        Activity::Exited => "exited",
+    };
+    ControlEvent::Liveness { pane_id: pane_id.to_string(), state: state.to_string(), exit_code }
 }
 
 /// Current epoch-ms (the TS `Date.now()`).
@@ -247,12 +316,18 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
             if prev != Some(act) {
                 // Only emit on a flip of an already-tracked pane while someone is streaming.
                 if prev.is_some() && shared.events.has_clients() {
+                    // Frozen legacy frame: `busy|idle|exited` (AwaitingInput → idle).
                     shared.events.broadcast_for_pane(
                         Some(&pr.coords),
                         &ControlEvent::Activity {
                             pane_id: pr.pane_id.clone(),
-                            activity: act.as_str().to_string(),
+                            activity: act.legacy_str().to_string(),
                         },
+                    );
+                    // Phase-4 precise frame, ignorable by legacy clients.
+                    shared.events.broadcast_for_pane(
+                        Some(&pr.coords),
+                        &liveness_frame(&pr.pane_id, act, shared.sessions.liveness(&pr.session_uid)),
                     );
                 }
                 last.insert(pr.pane_id.clone(), act);
@@ -285,7 +360,24 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
         SessionEvent::Cwd { uid, cwd } => {
             shared.model.lock().unwrap().set_cwd(&uid, &cwd);
         }
+        SessionEvent::CommandStart { uid } => {
+            emit_command_frame(shared, &uid, "start", None);
+            emit_marker_liveness(shared, &uid);
+        }
+        SessionEvent::CommandEnd { uid, code } => {
+            emit_command_frame(shared, &uid, "end", code);
+            emit_marker_liveness(shared, &uid);
+        }
+        SessionEvent::PromptReady { uid } => {
+            emit_marker_liveness(shared, &uid);
+        }
+        SessionEvent::AgentState { uid, .. } => {
+            emit_marker_liveness(shared, &uid);
+        }
         SessionEvent::Exit { uid, code } => {
+            // Always record the exit truthfully FIRST (mark_exited), then consult the
+            // supervisor — a supervised crash is restarted from here; everything else is
+            // byte-for-byte the legacy path (Decision::None for unsupervised panes).
             let marked = shared.model.lock().unwrap().mark_exited(&uid, code);
             match marked {
                 Some((pane_id, coords)) => {
@@ -299,9 +391,11 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
                     );
                     shared.events.broadcast_for_pane(
                         Some(&coords),
-                        &ControlEvent::Activity { pane_id, activity: "exited".to_string() },
+                        &ControlEvent::Activity { pane_id: pane_id.clone(), activity: "exited".to_string() },
                     );
                     notify_state(shared);
+                    // Phase-5 supervisor hook (no-op unless the pane opted in).
+                    supervise_exit(shared, &pane_id, code);
                 }
                 None => {
                     if shared.events.has_clients() {
@@ -314,6 +408,169 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
             }
         }
     }
+}
+
+/// Phase-5: apply the supervisor's decision for one exit. Emits a `supervisor` frame for
+/// every actionable outcome and, for a [`Decision::Restart`], schedules a delayed respawn
+/// via [`Shared::spawn_task`] (no lock held across the delay — schedule and return).
+fn supervise_exit(shared: &Arc<Shared>, pane_id: &str, code: i32) {
+    let decision = shared.supervisor.lock().unwrap().on_exit(pane_id, code);
+    match decision {
+        Decision::None => {}
+        Decision::Completed { code } => {
+            broadcast_supervisor(shared, pane_id, "completed", None, None, None, Some(code));
+        }
+        Decision::Exhausted { attempt, max, code } => {
+            broadcast_supervisor(
+                shared,
+                pane_id,
+                "exhausted",
+                Some(attempt),
+                Some(max),
+                None,
+                Some(code),
+            );
+        }
+        Decision::Restart { attempt, max, delay_ms, code } => {
+            broadcast_supervisor(
+                shared,
+                pane_id,
+                "restarting",
+                Some(attempt),
+                Some(max),
+                Some(delay_ms),
+                Some(code),
+            );
+            let shared = Arc::clone(shared);
+            let pane_id = pane_id.to_string();
+            shared.clone().spawn_task(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                do_restart(&shared, &pane_id, attempt, max, code);
+            });
+        }
+    }
+}
+
+/// Execute a scheduled restart: re-read the pane's spawn recipe, spawn a fresh session,
+/// and swap the read-model's uid. Aborts if the pane vanished during the backoff window
+/// (closed / manually restarted). Emits `restarted` on success or `crashed` on a respawn
+/// error. STUB: this respawns from the read-model's recorded recipe (shell/args/command/
+/// cwd) rather than a full spawn ledger, so it does not yet re-attach `env`/`integration`
+/// (the same lossy set `restartPane` had pre-supervisor). A later pass adds the ledger.
+fn do_restart(shared: &Arc<Shared>, pane_id: &str, attempt: u32, max: u32, code: i32) {
+    // Snapshot the spawn recipe under the model lock; abort if the pane is gone.
+    let recipe = {
+        let m = shared.model.lock().unwrap();
+        m.pane(pane_id).map(|p| {
+            (
+                p.shell.clone(),
+                p.args.clone(),
+                p.command.clone(),
+                p.cwd.clone(),
+            )
+        })
+    };
+    let Some((shell, args, command, cwd)) = recipe else {
+        return; // pane closed during backoff — drop the restart
+    };
+    let new_uid = uuid::Uuid::new_v4().to_string();
+    let opts = crate::session_manager::SpawnOptions {
+        uid: new_uid.clone(),
+        shell,
+        args,
+        command,
+        cwd,
+        env: None,
+        cols: None,
+        rows: None,
+        pane_id: Some(pane_id.to_string()),
+        integration: None,
+        control_file: Some(shared.control_file.to_string_lossy().to_string()),
+    };
+    match shared.sessions.create(opts) {
+        Ok(()) => {
+            shared.model.lock().unwrap().respawn_pane(pane_id, &new_uid);
+            let used = shared.supervisor.lock().unwrap().record_restart(pane_id);
+            broadcast_supervisor(shared, pane_id, "restarted", Some(used), Some(max), None, Some(code));
+            notify_state(shared);
+        }
+        Err(_) => {
+            broadcast_supervisor(shared, pane_id, "crashed", Some(attempt), Some(max), None, Some(code));
+        }
+    }
+}
+
+/// Fan out a `supervisor` frame (scope-filtered to the pane).
+fn broadcast_supervisor(
+    shared: &Arc<Shared>,
+    pane_id: &str,
+    state: &str,
+    attempt: Option<u32>,
+    max: Option<u32>,
+    delay_ms: Option<u64>,
+    code: Option<i32>,
+) {
+    if !shared.events.has_clients() {
+        return;
+    }
+    let coords = shared.model.lock().unwrap().coords_of(pane_id);
+    shared.events.broadcast_for_pane(
+        coords.as_ref(),
+        &ControlEvent::Supervisor {
+            pane_id: pane_id.to_string(),
+            state: state.to_string(),
+            attempt,
+            max,
+            delay_ms,
+            code,
+        },
+    );
+}
+
+/// Resolve a session uid to (pane_id, coords) under one model lock.
+fn pane_and_coords(shared: &Arc<Shared>, uid: &str) -> Option<(String, crate::control::scope::PaneCoords)> {
+    let m = shared.model.lock().unwrap();
+    let pid = m.uid_to_pane(uid)?;
+    let coords = m.coords_of(&pid)?;
+    Some((pid, coords))
+}
+
+/// Emit a phase-4 `command` frame (scope-filtered) for a per-command edge.
+fn emit_command_frame(shared: &Arc<Shared>, uid: &str, phase: &str, code: Option<i32>) {
+    if !shared.events.has_clients() {
+        return;
+    }
+    if let Some((pane_id, coords)) = pane_and_coords(shared, uid) {
+        shared.events.broadcast_for_pane(
+            Some(&coords),
+            &ControlEvent::Command { pane_id, phase: phase.to_string(), code },
+        );
+    }
+}
+
+/// Emit a phase-4 `liveness` frame (scope-filtered) computed from the live mirror — the
+/// instant a marker arrives, before the ticker's next 500ms tick.
+fn emit_marker_liveness(shared: &Arc<Shared>, uid: &str) {
+    if !shared.events.has_clients() {
+        return;
+    }
+    let (pane_id, coords, status) = {
+        let m = shared.model.lock().unwrap();
+        let Some(pid) = m.uid_to_pane(uid) else { return };
+        let Some(coords) = m.coords_of(&pid) else { return };
+        let status = m.pane(&pid).map(|p| p.status).unwrap_or(PaneStatus::Running);
+        (pid, coords, status)
+    };
+    let act = shared.activity_for(uid, status);
+    // Health signal for the supervisor: a prompt-ready / agent-done edge means the worker
+    // is healthy, so reset its backoff budget (no-op if the pane isn't supervised).
+    if matches!(act, Activity::AwaitingInput) {
+        shared.supervisor.lock().unwrap().note_healthy(&pane_id);
+    }
+    shared.events.broadcast_for_pane(
+        Some(&coords),
+        &liveness_frame(&pane_id, act, shared.sessions.liveness(uid)),
+    );
 }
 
 /// Drain the session-event channel forever, applying each event. (app.rs uses this when it has no
@@ -425,5 +682,86 @@ mod tests {
         assert!(f1.contains(r#""type":"exit""#) && f1.contains(r#""code":7"#));
         let f2 = rx.try_recv().unwrap();
         assert!(f2.contains(r#""type":"activity""#) && f2.contains(r#""activity":"exited""#));
+    }
+
+    // Set a pane's meta then reconcile so the supervisor picks up the policy.
+    fn supervise_p1(shared: &Arc<Shared>, pairs: &[(&str, &str)]) {
+        let mut patch = std::collections::BTreeMap::new();
+        for (k, v) in pairs {
+            patch.insert((*k).to_string(), Some((*v).to_string()));
+        }
+        shared.model.lock().unwrap().set_meta("p1", &patch);
+        shared.reconcile_policies();
+    }
+
+    #[test]
+    fn reconcile_policies_picks_up_supervise_meta() {
+        let (shared, _uid) = shared_with_pane();
+        assert!(!shared.supervisor.lock().unwrap().is_supervised("p1"));
+        supervise_p1(&shared, &[("hp.supervise", "on")]);
+        assert!(shared.supervisor.lock().unwrap().is_supervised("p1"));
+    }
+
+    #[tokio::test]
+    async fn unsupervised_exit_emits_no_supervisor_frame() {
+        let (shared, uid) = shared_with_pane();
+        let (_id, mut rx) = shared.events.add_client(None);
+        process_session_event(&shared, SessionEvent::Exit { uid, code: 1 });
+        // exit + activity:exited, but NO supervisor frame.
+        let mut frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            frames.push(f);
+        }
+        assert!(frames.iter().any(|f| f.contains(r#""type":"exit""#)));
+        assert!(!frames.iter().any(|f| f.contains(r#""type":"supervisor""#)));
+    }
+
+    #[tokio::test]
+    async fn supervised_clean_exit_emits_completed_and_does_not_restart() {
+        let (shared, uid) = shared_with_pane();
+        supervise_p1(&shared, &[("hp.supervise", "on")]); // restartOn=failure default
+        let (_id, mut rx) = shared.events.add_client(None);
+        process_session_event(&shared, SessionEvent::Exit { uid, code: 0 });
+        let mut frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            frames.push(f);
+        }
+        assert!(
+            frames.iter().any(|f| f.contains(r#""type":"supervisor""#) && f.contains(r#""state":"completed""#)),
+            "frames: {frames:?}"
+        );
+        // No restart scheduled → retry count stays 0 and the pane stays exited.
+        assert_eq!(shared.supervisor.lock().unwrap().retries_used("p1"), 0);
+        assert_eq!(shared.model.lock().unwrap().pane("p1").unwrap().status, PaneStatus::Exited);
+    }
+
+    #[tokio::test]
+    async fn supervised_crash_emits_a_restarting_frame_and_schedules_a_respawn() {
+        let (shared, uid) = shared_with_pane();
+        // A long backoff (above the default 30s cap): the synchronous "restarting" frame
+        // fires now; the actual respawn is deferred ~30s (capped), so this test asserts the
+        // decision/frame without spawning a real pty.
+        supervise_p1(&shared, &[("hp.supervise", "on"), ("hp.backoffMs", "60000")]);
+        let (_id, mut rx) = shared.events.add_client(None);
+        process_session_event(&shared, SessionEvent::Exit { uid, code: 1 });
+        let mut frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            frames.push(f);
+        }
+        // A non-success exit on a supervised pane → a "restarting" frame with attempt/max/delay
+        // (delay is capped to the default backoffCapMs = 30000).
+        assert!(
+            frames.iter().any(|f| {
+                f.contains(r#""type":"supervisor""#)
+                    && f.contains(r#""state":"restarting""#)
+                    && f.contains(r#""attempt":1"#)
+                    && f.contains(r#""delayMs":30000"#)
+            }),
+            "expected a restarting frame, got: {frames:?}"
+        );
+        // The respawn is still pending (long backoff) → retry count not yet bumped, pane
+        // still recorded as exited until the delayed task fires.
+        assert_eq!(shared.supervisor.lock().unwrap().retries_used("p1"), 0);
+        assert_eq!(shared.model.lock().unwrap().pane("p1").unwrap().status, PaneStatus::Exited);
     }
 }

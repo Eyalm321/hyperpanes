@@ -924,6 +924,9 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
         let mut m = shared.model.lock().unwrap();
         dispatch::handle_command(&mut m, &shared.sessions, control_file.as_deref(), info.scope.as_ref(), &cmd)
     };
+    // Phase-5: keep supervisor policies in lockstep with pane meta (setMeta flips
+    // hp.supervise; newPane carries meta; closePane removes a pane). Cheap + idempotent.
+    shared.reconcile_policies();
     if result.notify_state {
         notify_state(&shared);
     }

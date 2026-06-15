@@ -39,15 +39,45 @@ __hyperpanes_osc7() {
   printf '\033]7;file://%s\007' "$enc"
 }
 
+# 3) OSC 133 semantic prompt markers (phase 4) ------------------------------------
+# Tell the app, precisely, when the shell is at a prompt (ready for input), when a
+# command starts running, and what exit code each command produced — so a quietly
+# thinking command is NOT misread as "idle" after 10s of silence. Format:
+#   ESC ] 133 ; A BEL          prompt about to be drawn (ready for input)
+#   ESC ] 133 ; C BEL          command output begins (a command is now running)
+#   ESC ] 133 ; D ; <code> BEL command finished, with its exit code
+# Strictly additive: a compliant 133 terminal understands A/C/D; others ignore them.
+# precmd: emit D (for the command that just finished) then A. $? MUST be captured
+# FIRST, before anything else clobbers it.
+__hyperpanes_osc133_precmd() {
+  local code=$?
+  if [ -n "${__hp_ran:-}" ]; then printf '\033]133;D;%s\007' "$code"; fi
+  printf '\033]133;A\007'
+  __hp_ran=1
+}
+# preexec analogue: emit C right before a command runs.
+__hyperpanes_osc133_preexec() {
+  printf '\033]133;C\007'
+}
+
 if [ -n "$ZSH_VERSION" ]; then
   # zsh has no PROMPT_COMMAND — hook precmd instead. add-zsh-hook is idempotent;
   # fall back to a guarded precmd_functions append if it is unavailable.
   if autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __hyperpanes_osc7 2>/dev/null; then
-    :
+    add-zsh-hook precmd __hyperpanes_osc133_precmd 2>/dev/null
+    add-zsh-hook preexec __hyperpanes_osc133_preexec 2>/dev/null
   else
     case " ${precmd_functions[*]} " in
       *" __hyperpanes_osc7 "*) : ;;
       *) precmd_functions+=(__hyperpanes_osc7) ;;
+    esac
+    case " ${precmd_functions[*]} " in
+      *" __hyperpanes_osc133_precmd "*) : ;;
+      *) precmd_functions+=(__hyperpanes_osc133_precmd) ;;
+    esac
+    case " ${preexec_functions[*]} " in
+      *" __hyperpanes_osc133_preexec "*) : ;;
+      *) preexec_functions+=(__hyperpanes_osc133_preexec) ;;
     esac
   fi
 else
@@ -56,4 +86,22 @@ else
     *__hyperpanes_osc7*) : ;;
     *) PROMPT_COMMAND="__hyperpanes_osc7${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
   esac
+  case "$PROMPT_COMMAND" in
+    *__hyperpanes_osc133_precmd*) : ;;
+    *) PROMPT_COMMAND="__hyperpanes_osc133_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+  esac
+  # bash: the DEBUG trap is the preexec analogue. Chain idempotently, preserving any
+  # existing DEBUG trap, and only fire for an interactive command (skip the trap that
+  # runs for PROMPT_COMMAND itself by guarding on BASH_COMMAND not being the prompt cmd).
+  if [ -z "${__hp_debug_hooked:-}" ]; then
+    __hp_prev_debug_trap="$(trap -p DEBUG)"
+    __hyperpanes_debug_trap() {
+      case "$BASH_COMMAND" in
+        __hyperpanes_osc7*|__hyperpanes_osc133_precmd*) : ;;
+        *) __hyperpanes_osc133_preexec ;;
+      esac
+    }
+    trap '__hyperpanes_debug_trap' DEBUG
+    __hp_debug_hooked=1
+  fi
 fi
