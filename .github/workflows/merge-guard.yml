@@ -1,0 +1,243 @@
+name: merge-guard
+
+# REQUIRED status check (context name `merge-guard`) that makes agent-PR self-merge SAFE.
+# It is the quantitative / policy guardrail layer: every guardrail below must pass or the
+# check fails and auto-merge is held (the PR sits "pending auto-merge" until it passes or a
+# human intervenes). See docs/auto-merge.md for the full gate chain and the exact
+# branch-protection settings this feeds.
+#
+# Guardrails enforced (any one tripping fails the check with a clear ::error:: message):
+#   1. Kill switch         — vars.AUTOMERGE_ENABLED must be "true" (instant global stop).
+#   2. Agent label         — the PR must carry the `agent` label (the switch the whole
+#                            pipeline keys on; human PRs are never auto-merged).
+#   3. Protected paths      — the diff must touch NO CODEOWNERS-owned / risky path without a
+#                            human review. The authoritative stop is CODEOWNERS in branch
+#                            protection, but we fail here too so the PR is obviously parked
+#                            rather than silently stuck. Globs are kept in lockstep with
+#                            .github/CODEOWNERS (read at runtime — see the step).
+#   4. Diff-size cap        — total changed lines must be under vars.AUTOMERGE_MAX_DIFF_LINES
+#                            (default 400). A huge unattended diff is a smell; send to a human.
+#   5. Throttle            — at most vars.AUTOMERGE_PER_HOUR (default 6) auto-merges in the
+#                            trailing hour. Counted from `git log` commit timestamps on the
+#                            base branch (NO GitHub API), so a systematic bad pattern can only
+#                            flood trunk so fast before a human notices.
+#
+# Self-defense: triggers are `pull_request` + `merge_group` (base-repo context), so this
+# never executes PR code and a malicious PR cannot rewrite the guardrails. Everything is read
+# as data. Diffs are computed from git, labels/paths from the event payload + checked-out tree.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+  merge_group: # re-evaluated against the rebased merge-queue branch; "waiting" PRs drain as the window slides
+
+concurrency:
+  group: merge-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  merge-guard:
+    name: merge-guard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history so the throttle step can read commit timestamps on the base branch.
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------------------------
+      # Guardrail 1 — kill switch. Flip vars.AUTOMERGE_ENABLED=false to freeze EVERY pending
+      # auto-merge within one check cycle. No code deploy needed.
+      # ---------------------------------------------------------------------------------
+      - name: Kill switch
+        run: |
+          if [ "${AUTOMERGE_ENABLED}" != "true" ]; then
+            echo "::error::auto-merge globally disabled (vars.AUTOMERGE_ENABLED != 'true'); this PR is held"
+            exit 1
+          fi
+          echo "kill switch OK: auto-merge globally enabled"
+        env:
+          AUTOMERGE_ENABLED: ${{ vars.AUTOMERGE_ENABLED }}
+
+      # ---------------------------------------------------------------------------------
+      # In the merge queue there is no pull_request payload (no labels / no PR diff base).
+      # The queue only contains PRs that already passed merge-guard on the PR event, and the
+      # queue's own structural throttle (max_entries_to_merge) governs it there. So in a
+      # merge_group run we assert the kill switch only and pass the rest.
+      # ---------------------------------------------------------------------------------
+      - name: Skip PR-only guardrails inside merge queue
+        id: ctx
+        run: |
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            echo "merge_group event — PR-scoped guardrails already enforced at PR time; passing"
+            echo "pr_event=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr_event=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------------------------------------------------------------------------------
+      # Guardrail 2 — agent label. The `agent` label is the switch the whole pipeline keys
+      # on. Without it, this PR is not an unattended agent PR and must not auto-merge.
+      # ---------------------------------------------------------------------------------
+      - name: Require agent label
+        if: steps.ctx.outputs.pr_event == 'true'
+        run: |
+          if [ "${HAS_AGENT_LABEL}" != "true" ]; then
+            echo "::error::PR is missing the required 'agent' label — it will not be auto-merged"
+            exit 1
+          fi
+          echo "agent label present"
+        env:
+          HAS_AGENT_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'agent') }}
+
+      # ---------------------------------------------------------------------------------
+      # Guardrail 3 — protected / risky paths. Build a regex of risky path globs straight out
+      # of .github/CODEOWNERS (so the two never drift) and fail if the diff touches any of them
+      # without a human review. CODEOWNERS in branch protection is the authoritative stop; this
+      # makes the PR obviously parked instead of silently stuck "pending auto-merge".
+      # ---------------------------------------------------------------------------------
+      - name: Compute changed files
+        if: steps.ctx.outputs.pr_event == 'true'
+        id: diff
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          # Ensure both ends are present, then diff base...head (three-dot = merge-base diff).
+          git fetch --no-tags --depth=0 origin "$BASE_SHA" >/dev/null 2>&1 || true
+          CHANGED="$(git diff --name-only "$BASE_SHA"...."$HEAD_SHA" 2>/dev/null || git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          echo "changed files:"
+          echo "$CHANGED"
+          # Persist for later steps.
+          {
+            echo "files<<__EOF__"
+            echo "$CHANGED"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Block protected paths (from CODEOWNERS)
+        if: steps.ctx.outputs.pr_event == 'true'
+        env:
+          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+        run: |
+          set -euo pipefail
+          CODEOWNERS=".github/CODEOWNERS"
+          if [ ! -f "$CODEOWNERS" ]; then
+            echo "::error::.github/CODEOWNERS not found — refusing to auto-merge without the human-review backstop"
+            exit 1
+          fi
+
+          # Extract the path patterns (first field of each non-comment, non-blank line).
+          mapfile -t PATTERNS < <(grep -vE '^\s*#' "$CODEOWNERS" | grep -vE '^\s*$' | awk '{print $1}')
+          echo "CODEOWNERS protected patterns: ${PATTERNS[*]:-(none)}"
+
+          # Translate a CODEOWNERS glob into an ERE that we test each changed file against.
+          # Supported CODEOWNERS forms: leading '/', trailing '/', '**', '*'. Good enough for
+          # the risky-path globs we own; CODEOWNERS itself remains the authoritative matcher.
+          glob_to_ere() {
+            local g="$1" re
+            # '/foo/'    -> anchored prefix       ^foo/
+            # '/foo'     -> anchored exact-ish     ^foo(/|$)
+            # '**/bar'   -> any-depth suffix       (^|/)bar(/|$)
+            # '*.toml'   -> basename glob
+            re="$g"
+            re="${re//./\\.}"          # escape dots
+            re="${re//\*\*\//<ANY>}"   # '**/' -> any number of dirs
+            re="${re//\*\*/<ANY>}"     # bare '**'
+            re="${re//\*/[^/]*}"       # '*' -> any run of non-slash
+            re="${re//<ANY>/.*}"
+            if [[ "$g" == /* ]]; then
+              re="^${re#/}"            # leading slash -> anchor at repo root
+            else
+              re="(^|/)${re}"          # otherwise match on any path segment boundary
+            fi
+            if [[ "$g" == */ ]]; then
+              re="${re}.*"             # trailing slash -> a directory prefix
+            else
+              re="${re}(/|$)"
+            fi
+            printf '%s' "$re"
+          }
+
+          HIT=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            for pat in "${PATTERNS[@]}"; do
+              ere="$(glob_to_ere "$pat")"
+              if printf '%s\n' "$f" | grep -qE "$ere"; then
+                echo "::error::protected path touched: '$f' matches CODEOWNERS pattern '$pat' — needs a human code-owner review; not auto-mergeable"
+                HIT=1
+                break
+              fi
+            done
+          done <<< "$CHANGED_FILES"
+
+          if [ "$HIT" -ne 0 ]; then
+            echo "::error::PR touches CODEOWNERS-protected paths; route to a human (label it 'needs-human-review')"
+            exit 1
+          fi
+          echo "no protected paths touched"
+
+      # ---------------------------------------------------------------------------------
+      # Guardrail 4 — diff-size cap. An oversized unattended diff is a smell: harder for the
+      # LLM judge to vet, larger blast radius. Cap total changed lines.
+      # ---------------------------------------------------------------------------------
+      - name: Diff-size cap
+        if: steps.ctx.outputs.pr_event == 'true'
+        run: |
+          set -euo pipefail
+          CAP="${AUTOMERGE_MAX_DIFF_LINES:-400}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          # numstat: <added>\t<deleted>\t<path>; sum added+deleted, ignoring binary ('-').
+          TOTAL="$(git diff --numstat "$BASE_SHA"...."$HEAD_SHA" 2>/dev/null \
+                    | awk '$1 != "-" && $2 != "-" { s += $1 + $2 } END { print s + 0 }')"
+          echo "total changed lines: ${TOTAL} (cap ${CAP})"
+          if [ "$TOTAL" -gt "$CAP" ]; then
+            echo "::error::diff too large for unattended merge: ${TOTAL} changed lines > cap ${CAP}; split the PR or get a human review"
+            exit 1
+          fi
+          echo "diff size within cap"
+        env:
+          AUTOMERGE_MAX_DIFF_LINES: ${{ vars.AUTOMERGE_MAX_DIFF_LINES }}
+
+      # ---------------------------------------------------------------------------------
+      # Guardrail 5 — hourly throttle WITHOUT the GitHub API. Count merge commits on the base
+      # branch whose commit timestamp is within the trailing hour. squash+linear history (see
+      # docs/auto-merge.md) means one commit per merged PR, so this is an accurate proxy for
+      # "auto-merges in the last hour". When the budget is reached the check fails -> auto-merge
+      # stays pending -> the PR simply WAITS; it re-runs and drains as the window slides.
+      # ---------------------------------------------------------------------------------
+      - name: Hourly auto-merge throttle (git-log based, no API)
+        if: steps.ctx.outputs.pr_event == 'true'
+        run: |
+          set -euo pipefail
+          LIMIT="${AUTOMERGE_PER_HOUR:-6}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          # Prefer the named base ref if we have it; fall back to the base SHA we definitely have.
+          TIP="origin/${BASE_REF}"
+          if ! git rev-parse --verify --quiet "$TIP" >/dev/null; then
+            TIP="$BASE_SHA"
+          fi
+          # Count commits on the base branch tip authored within the last hour.
+          N="$(git log "$TIP" --since='1 hour ago' --no-merges --pretty=oneline 2>/dev/null | wc -l | tr -d ' ')"
+          # Also count merge commits, in case history isn't squash-linear yet.
+          M="$(git log "$TIP" --since='1 hour ago' --merges --pretty=oneline 2>/dev/null | wc -l | tr -d ' ')"
+          RECENT=$(( N + M ))
+          echo "commits on ${TIP} in the trailing hour: ${RECENT} (budget ${LIMIT})"
+          if [ "$RECENT" -ge "$LIMIT" ]; then
+            echo "::error::hourly auto-merge budget reached (${RECENT}/${LIMIT} in the last hour); this PR waits for the window to clear"
+            exit 1
+          fi
+          echo "throttle OK: under hourly budget"
+        env:
+          AUTOMERGE_PER_HOUR: ${{ vars.AUTOMERGE_PER_HOUR }}
+
+      - name: Guardrails passed
+        run: echo "all merge-guard guardrails passed"

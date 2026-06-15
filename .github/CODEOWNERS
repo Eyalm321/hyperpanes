@@ -11,11 +11,33 @@
 
 # Default: no owner -> agent path, gated only by the `verify` checks (this is intended).
 
-# CI/CD, the gates themselves, secret usage, this very file.
+# CI/CD, the gates themselves, secret usage, this very file. Includes the auto-merge
+# guardrail workflows (merge-guard, llm-review) — an agent must never weaken its own gates.
 /.github/                @Eyalm321
+
+# The LLM-judge gate script: a malicious edit here could rewrite the rubric / fail-open the
+# qualitative reviewer, so it is a hard human-review path even though it sits outside .github/.
+/scripts/llm-review.sh   @Eyalm321
 
 # GPU/GUI surface — heavy, hardware-dependent, not exercised by the per-PR test gate.
 /rs/crates/app/          @Eyalm321
+
+# Auth / token surface — minting and validating control-plane tokens. A bad change here can
+# hand out or accept forged credentials; never auto-merge it.
+/rs/crates/core/src/control/tokens.rs   @Eyalm321
+
+# The control server + its routing/scope/lock = the network-exposed control plane and its
+# authorization boundary. Risky enough to require a human.
+/rs/crates/core/src/control/server.rs   @Eyalm321
+/rs/crates/core/src/control/routes.rs   @Eyalm321
+/rs/crates/core/src/control/scope.rs    @Eyalm321
+
+# Session lifecycle: PTY spawn + the daemon transport run other processes with the user's
+# privileges. A subtle change is a privilege/RCE surface — human review required.
+/rs/crates/core/src/session/   @Eyalm321
+
+# Secret redaction for the AI/telemetry path. Weakening this can leak secrets off the box.
+/rs/crates/core/src/ai/redactor.rs   @Eyalm321
 
 # build.rs = arbitrary code execution at build time.
 **/build.rs              @Eyalm321

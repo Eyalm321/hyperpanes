@@ -1,0 +1,130 @@
+name: llm-review
+
+# OPTIONAL-but-required-as-a-status-check qualitative reviewer for unattended agent PRs.
+# "Optional" in the sense that it is a single advisory LLM judgment (not test/lint/build);
+# it becomes a HARD gate by being listed as a required status check named `llm-review` in
+# branch protection (see docs/auto-merge.md). A failing check holds auto-merge; it does NOT
+# consume the human "required review" slot reserved for CODEOWNERS on risky paths.
+#
+# This is the reviewer that test/lint/build cannot be: "does this diff actually do what the
+# issue asked? is it a plausible-but-wrong fix? does it delete/skip a test, add a backdoor,
+# or weaken auth/token handling?"
+#
+# Pass/fail contract (real and enforced here):
+#   * scripts/llm-review.sh consumes diff.patch + meta.json and MUST write verdict.json:
+#       { "verdict": "approve" | "block", "risk": <0-10 int>, "summary": "<text>" }
+#   * verdict == "approve"  -> this job exits 0 -> check `llm-review` passes.
+#   * verdict == "block"    -> this job exits 1 -> check fails -> auto-merge held.
+#   * FAIL-CLOSED: a missing/unparseable verdict.json, or any non-"approve" verdict, fails
+#     the check. An API error / timeout must never fail-open a gate.
+#
+# Self-defense: runs on `pull_request` / `merge_group` (base-repo context) and reads the diff
+# as DATA only — it never checks out or executes PR head code, so a malicious PR cannot
+# rewrite the rubric or exfiltrate the API key. Keep scripts/llm-review.sh CODEOWNER-protected
+# (it lives under a path owned in .github/CODEOWNERS-adjacent review — see that file).
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  merge_group: # also judge the rebased merge-queue branch
+
+concurrency:
+  group: llm-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  llm-review:
+    name: llm-review
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Collect the review context as plain data files. In a merge_group run there is no PR
+      # payload; we diff the merge-queue ref against the default branch instead.
+      - name: Collect context (diff + metadata)
+        id: ctx
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            BASE="${{ github.event.merge_group.base_sha }}"
+            HEAD="${{ github.event.merge_group.head_sha }}"
+            TITLE="merge-queue batch ${{ github.event.merge_group.head_ref }}"
+            BODY="Automated merge-queue verification of the rebased branch."
+          else
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+            TITLE="${{ github.event.pull_request.title }}"
+            BODY="${{ github.event.pull_request.body }}"
+          fi
+
+          git diff "$BASE"...."$HEAD" > diff.patch 2>/dev/null || git diff "$BASE" "$HEAD" > diff.patch
+          # Cap the diff so a giant PR can't blow the context / cost budget.
+          head -c 120000 diff.patch > diff.capped
+          mv diff.capped diff.patch
+
+          # Emit metadata as JSON (jq -n keeps the title/body safely escaped).
+          jq -n --arg t "$TITLE" --arg b "$BODY" '{title:$t, body:$b}' > meta.json
+          echo "wrote $(wc -l < diff.patch) lines of diff and meta.json"
+
+      # The real model call lives in scripts/llm-review.sh. The workflow plumbing here is
+      # real: it passes the model + diff/meta paths + output path and depends on the script's
+      # exit code as the pass/fail contract.
+      - name: Run LLM judge
+        id: judge
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Model routing knobs (overridable via repo variables). Defaults are a cost/quality
+          # sweet spot for a per-PR gate; raise for risky/large diffs in the script.
+          LLM_REVIEW_MODEL: ${{ vars.LLM_REVIEW_MODEL }}
+          LLM_REVIEW_DIFF: diff.patch
+          LLM_REVIEW_META: meta.json
+          LLM_REVIEW_OUT: verdict.json
+        run: |
+          chmod +x scripts/llm-review.sh
+          scripts/llm-review.sh
+
+      # Pass/fail contract: parse verdict.json, fail-closed on anything that isn't an explicit
+      # "approve". This step is the gate — its exit code is the `llm-review` check result.
+      - name: Enforce verdict (fail-closed)
+        run: |
+          set -euo pipefail
+          if [ ! -s verdict.json ]; then
+            echo "::error::llm-review produced no verdict.json — failing closed"
+            exit 1
+          fi
+          VERDICT="$(jq -r '.verdict // "block"' verdict.json)"
+          RISK="$(jq -r '.risk // "n/a"' verdict.json)"
+          SUMMARY="$(jq -r '.summary // "(no summary)"' verdict.json)"
+          echo "verdict=${VERDICT} risk=${RISK}"
+          {
+            echo "### 🤖 LLM review"
+            echo ""
+            echo "- **verdict:** \`${VERDICT}\`"
+            echo "- **risk:** \`${RISK}\`/10"
+            echo ""
+            echo "${SUMMARY}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VERDICT" = "approve" ]; then
+            echo "llm-review APPROVED"
+            exit 0
+          fi
+          echo "::error::llm-review BLOCKED (risk ${RISK}): ${SUMMARY}"
+          exit 1
+
+      # Determinism / auditability: keep the verdict as a workflow artifact so every
+      # unattended merge has a reviewable verdict trail.
+      - name: Upload verdict artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-review-verdict
+          path: verdict.json
+          if-no-files-found: warn
