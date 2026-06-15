@@ -299,6 +299,8 @@ async fn ai_loop(
                 Some(SessionEvent::Data { uid, data }) => ai.on_data(&uid, &data),
                 Some(SessionEvent::Cwd { uid, cwd }) => ai.on_cwd(&uid, &cwd, None),
                 Some(SessionEvent::Exit { uid, .. }) => ai.on_session_exit(&uid),
+                // Phase-4 semantic markers are not part of the AI tap's input model.
+                Some(_) => {}
                 None => break,
             },
             _ = ticker.tick() => {

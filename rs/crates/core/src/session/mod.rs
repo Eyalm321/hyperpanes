@@ -3,6 +3,7 @@
 //! **daemon** (M0): `proto` (the wire protocol) + `daemon` (a PTY-owning daemon over a
 //! UDS / named pipe, with a loopback client) — both headless-testable, no Slint.
 pub mod cwd;
+pub mod osc133;
 pub mod env;
 pub mod pty;
 pub mod spawn;

@@ -11,6 +11,7 @@ pub mod work;
 pub mod tokens;
 pub mod readmodel;
 pub mod events;
+pub mod supervisor;
 pub mod dispatch;
 pub mod routes;
 pub mod server;

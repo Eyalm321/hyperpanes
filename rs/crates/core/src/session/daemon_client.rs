@@ -435,6 +435,13 @@ fn apply_event_to_shadow(shadows: &Mutex<HashMap<String, Shadow>>, ev: &SessionE
         SessionEvent::Exit { uid, .. } => {
             shadows.remove(uid);
         }
+        // Phase-4 markers ride the proto but the client keeps no marker shadow yet
+        // (the in-process backend owns the live liveness mirror). Ignored here; the
+        // control server still receives the event stream verbatim for fan-out.
+        SessionEvent::CommandStart { .. }
+        | SessionEvent::CommandEnd { .. }
+        | SessionEvent::PromptReady { .. }
+        | SessionEvent::AgentState { .. } => {}
     }
 }
 
