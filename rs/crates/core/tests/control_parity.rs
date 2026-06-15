@@ -33,7 +33,7 @@ fn request(port: u16, method: &str, path: &str, token: Option<&str>, body: Optio
         .nth(1)
         .and_then(|s| s.parse().ok())
         .expect("status code");
-    let body = resp.splitn(2, "\r\n\r\n").nth(1).unwrap_or("").to_string();
+    let body = resp.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("").to_string();
     (status, body)
 }
 

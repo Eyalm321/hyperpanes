@@ -37,6 +37,8 @@ fn lerp_u8(b: u8, f: u8, cov: u8) -> u8 {
 /// (`x0`,`y0`) and the baseline at `y0 + ascent`. Shared by the normal glyph pass and the
 /// cursor's true-invert redraw so the two never drift. Clips to the `w`×`h` buffer.
 #[inline]
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::too_many_arguments)]
 fn blit_glyph(
     px: &mut [Rgba8Pixel],
     w: u32,
@@ -85,6 +87,12 @@ pub struct SoftwareRenderer {
     idx: usize,
     w: u32,
     h: u32,
+}
+
+impl Default for SoftwareRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SoftwareRenderer {

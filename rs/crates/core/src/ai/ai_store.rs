@@ -266,7 +266,7 @@ impl AiMemoryStore {
                 std::fs::create_dir_all(parent)?;
             }
             let json = serde_json::to_string_pretty(&self.data)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             std::fs::write(&tmp, json)?;
             std::fs::rename(&tmp, &self.file_path)?;
             Ok(())

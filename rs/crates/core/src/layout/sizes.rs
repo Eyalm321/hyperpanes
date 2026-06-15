@@ -35,7 +35,7 @@ pub fn is_equal_split(sizes: &[f64]) -> bool {
 
 /// Bound a fraction within `[MIN_SIZE, 1 - MIN_SIZE]`.
 pub fn clamp_fraction(f: f64) -> f64 {
-    f.max(MIN_SIZE).min(1.0 - MIN_SIZE)
+    f.clamp(MIN_SIZE, 1.0 - MIN_SIZE)
 }
 
 /// Insert a slot at `index`, shrinking the others proportionally (Hyper insertRebalance).

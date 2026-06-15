@@ -180,6 +180,8 @@ fn basename(path: &str) -> &str {
 
 /// What [`AiService::prepare_job`] decided for a uid: either a terminal
 /// [`JobResult`] (no network) or a runnable [`PreparedJob`].
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::large_enum_variant)]
 pub enum JobStep<S: Summarizer> {
     /// Skip/Fail/Ok decided synchronously — hand straight to `complete_job`.
     Done(JobResult),
@@ -241,6 +243,8 @@ pub struct AiService<S: Summarizer> {
 
     // wiring between the embedded scheduler's callbacks and this façade
     ready: Rc<RefCell<VecDeque<String>>>,
+    // pre-existing; deferred per repo lint policy (test.yml)
+    #[allow(clippy::type_complexity)]
     status_signal: Rc<RefCell<Option<(bool, Option<String>)>>>,
 }
 
@@ -254,6 +258,8 @@ impl<S: Summarizer> AiService<S> {
     ) -> Self {
         let defaults = AiSettings::default();
         let ready: Rc<RefCell<VecDeque<String>>> = Rc::new(RefCell::new(VecDeque::new()));
+        // pre-existing; deferred per repo lint policy (test.yml)
+        #[allow(clippy::type_complexity)]
         let status_signal: Rc<RefCell<Option<(bool, Option<String>)>>> =
             Rc::new(RefCell::new(None));
 
@@ -1013,7 +1019,7 @@ mod tests {
         publish(&mut svc, 1, "u1", "p1", false);
         svc.store.upsert_pane("p1", PanePatch::default());
         svc.on_session_exit("u1");
-        assert!(svc.ctx_by_uid.get("u1").is_none());
+        assert!(!svc.ctx_by_uid.contains_key("u1"));
         // a later publish with a different pane prunes the now-orphaned p1 record
         publish(&mut svc, 1, "u2", "p2", false);
         assert!(svc.store.get_pane("p1").is_none());

@@ -97,7 +97,7 @@ impl TaskState {
 
     /// Inverse of [`as_str`](Self::as_str); unknown text falls back to `Queued` (we fully
     /// control writes, so this only guards against a hand-edited DB).
-    pub fn from_str(s: &str) -> TaskState {
+    pub fn from_wire(s: &str) -> TaskState {
         match s {
             "claimed" => TaskState::Claimed,
             "done" => TaskState::Done,
@@ -238,6 +238,8 @@ pub struct Claim {
 /// Result of a lease-guarded op (`ack`/`nack`/`extend`). `Conflict` ⇒ HTTP 409 (stale
 /// lease / wrong state); `NotFound` ⇒ 404.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::large_enum_variant)]
 pub enum LeaseOutcome {
     Ok(Task),
     Conflict,
@@ -272,7 +274,7 @@ pub struct Counts {
 
 impl Counts {
     fn add(&mut self, state: &str, n: usize) {
-        match TaskState::from_str(state) {
+        match TaskState::from_wire(state) {
             TaskState::Queued => self.queued += n,
             TaskState::Claimed => self.claimed += n,
             TaskState::Done => self.done += n,
@@ -743,7 +745,7 @@ fn row_to_task(r: &Row) -> rusqlite::Result<Task> {
         seq: r.get::<_, i64>(2)? as u64,
         kind: r.get(3)?,
         title: r.get(4)?,
-        state: TaskState::from_str(&state),
+        state: TaskState::from_wire(&state),
         payload: r.get(6)?,
         priority: r.get(7)?,
         attempts: r.get::<_, i64>(8)? as u32,
@@ -795,14 +797,14 @@ mod tests {
             TaskState::Failed,
             TaskState::Dead,
         ] {
-            assert_eq!(TaskState::from_str(s.as_str()), s);
+            assert_eq!(TaskState::from_wire(s.as_str()), s);
         }
         assert!(!TaskState::Queued.is_terminal());
         assert!(!TaskState::Claimed.is_terminal());
         assert!(TaskState::Done.is_terminal());
         assert!(TaskState::Failed.is_terminal());
         assert!(TaskState::Dead.is_terminal());
-        assert_eq!(TaskState::from_str("garbage"), TaskState::Queued);
+        assert_eq!(TaskState::from_wire("garbage"), TaskState::Queued);
         assert!(should_dead_letter(5, 5));
         assert!(!should_dead_letter(4, 5));
     }

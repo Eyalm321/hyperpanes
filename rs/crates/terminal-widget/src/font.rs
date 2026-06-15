@@ -335,6 +335,20 @@ fn fallback_specs() -> Vec<FallbackSpec> {
     ];
 }
 
+/// Uniform shrink factor so this fallback's glyphs fit the primary cell height. Returns
+/// `None` if the bytes aren't a valid font (so the face is dropped from the chain).
+fn compute_fit(data: &[u8], px: f32, cell_h: u32) -> Option<f32> {
+    let font = FontRef::from_index(data, 0)?;
+    let m = font.metrics(&[]).scale(px);
+    let lh = m.ascent + m.descent + m.leading;
+    let fit = if lh > cell_h as f32 && lh > 0.0 {
+        cell_h as f32 / lh
+    } else {
+        1.0
+    };
+    Some(fit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,18 +387,4 @@ mod tests {
         let (font_id, gid) = f.resolve('😀');
         assert!(font_id > 0 && gid != 0, "emoji fell to ({font_id}, {gid})");
     }
-}
-
-/// Uniform shrink factor so this fallback's glyphs fit the primary cell height. Returns
-/// `None` if the bytes aren't a valid font (so the face is dropped from the chain).
-fn compute_fit(data: &[u8], px: f32, cell_h: u32) -> Option<f32> {
-    let font = FontRef::from_index(data, 0)?;
-    let m = font.metrics(&[]).scale(px);
-    let lh = m.ascent + m.descent + m.leading;
-    let fit = if lh > cell_h as f32 && lh > 0.0 {
-        cell_h as f32 / lh
-    } else {
-        1.0
-    };
-    Some(fit)
 }

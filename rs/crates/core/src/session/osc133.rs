@@ -128,11 +128,8 @@ pub fn parse_osc_markers(carry: &str, chunk: &str) -> (Vec<Marker>, String) {
     let buf = format!("{carry}{chunk}");
     let mut markers = Vec::new();
     let mut search_from = 0usize;
-    loop {
-        let start = match buf[search_from..].find(OSC_PREFIX) {
-            Some(i) => i + search_from,
-            None => break,
-        };
+    while let Some(i) = buf[search_from..].find(OSC_PREFIX) {
+        let start = i + search_from;
         let after_prefix = start + OSC_PREFIX.len();
         let bel_idx = buf[after_prefix..].find(BEL).map(|i| i + after_prefix);
         let st_idx = buf[after_prefix..].find(ST).map(|i| i + after_prefix);

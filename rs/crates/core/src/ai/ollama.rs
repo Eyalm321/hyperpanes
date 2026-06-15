@@ -162,10 +162,10 @@ mod tests {
             head.split("\r\n")
                 .skip(1)
                 .find(|l| l.to_ascii_lowercase().starts_with(&format!("{lname}:")))
-                .map(|l| l.splitn(2, ':').nth(1).unwrap().trim().to_string())
+                .map(|l| l.split_once(':').unwrap().1.trim().to_string())
         }
         fn body_json(&self) -> serde_json::Value {
-            let body = self.raw.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+            let body = self.raw.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("");
             serde_json::from_str(body).unwrap()
         }
     }

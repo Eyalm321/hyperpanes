@@ -714,11 +714,10 @@ fn writer_loop(
             match bus_rx.try_recv() {
                 Ok(ev) => {
                     let is_attached = attached.lock().unwrap().contains(event_uid(&ev));
-                    if is_attached {
-                        if write_frame(&mut write_half, &DaemonMsg::Event(ev)).is_err() {
+                    if is_attached
+                        && write_frame(&mut write_half, &DaemonMsg::Event(ev)).is_err() {
                             return;
                         }
-                    }
                 }
                 // Lagged: the bounded bus dropped events for this slow connection. It can
                 // re-Attach to reseed; just keep going.
@@ -791,16 +790,11 @@ impl DaemonClient {
             .name("hp-daemon-client-reader".into())
             .spawn(move || {
                 let mut r = read_half;
-                loop {
-                    match read_frame::<_, DaemonMsg>(&mut r) {
-                        Ok(Some(msg)) => {
-                            if tx.send(msg).is_err() {
-                                break; // client dropped
-                            }
-                        }
-                        // Clean EOF (peer closed) or a malformed-frame/socket error: the
-                        // connection is finished, so stop reading.
-                        Ok(None) | Err(_) => break,
+                // Loop until clean EOF (peer closed) or a malformed-frame/socket error:
+                // either means the connection is finished, so stop reading.
+                while let Ok(Some(msg)) = read_frame::<_, DaemonMsg>(&mut r) {
+                    if tx.send(msg).is_err() {
+                        break; // client dropped
                     }
                 }
             })?;

@@ -9,6 +9,7 @@
 //!  * a drag-selection's anchor press was lost, so the drag selected nothing — with
 //!    copy-on-select ON the release then re-copied a STALE selection and type-over
 //!    (#33) erased against it.
+//!
 //! Fixed by `focus-on-click: false` on the scope (`ta` calls `fs.focus()` on every down).
 //!
 //! `TerminalPane` inherits Rectangle (no generated Rust type), so the test drives the

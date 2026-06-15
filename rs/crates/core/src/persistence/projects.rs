@@ -138,9 +138,7 @@ pub fn repo_name_from_url(url: &str) -> Option<String> {
         return None;
     }
     // `u.split(/[\\/:]/).filter(Boolean)` → last non-empty segment.
-    u.split(|c| c == '\\' || c == '/' || c == ':')
-        .filter(|s| !s.is_empty())
-        .next_back()
+    u.split(['\\', '/', ':']).rfind(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
@@ -325,7 +323,7 @@ fn add_project_explicit_in(store: &Path, dir: &str) -> (Project, bool) {
 /// Newest-first by last-opened; the sidebar renders in this order.
 pub fn list_projects() -> Vec<Project> {
     let mut list = load_from(&paths::projects_json());
-    list.sort_by(|a, b| b.last_opened_at.unwrap_or(0).cmp(&a.last_opened_at.unwrap_or(0)));
+    list.sort_by_key(|b| std::cmp::Reverse(b.last_opened_at.unwrap_or(0)));
     list
 }
 

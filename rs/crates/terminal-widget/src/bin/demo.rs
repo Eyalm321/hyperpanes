@@ -491,7 +491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // ---------- lazy init (needs geometry for every pane + a wgpu device if any
             //            pane is GPU) ----------
             if state.borrow().is_none() {
-                let want_gpu = kinds.iter().any(|k| *k == Kind::Gpu);
+                let want_gpu = kinds.contains(&Kind::Gpu);
                 if want_gpu && gpu_slot.borrow().is_none() {
                     return; // wait for RenderingSetup
                 }

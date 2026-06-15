@@ -485,26 +485,26 @@ fn ensure_tab(
     }
 }
 
-fn win_mut<'a>(windows: &'a mut [CliWin], cur_win: Option<usize>) -> Option<&'a mut CliWin> {
+fn win_mut(windows: &mut [CliWin], cur_win: Option<usize>) -> Option<&mut CliWin> {
     cur_win.and_then(move |w| windows.get_mut(w))
 }
 
-fn tab_mut<'a>(
-    windows: &'a mut [CliWin],
+fn tab_mut(
+    windows: &mut [CliWin],
     cur_win: Option<usize>,
     cur_tab: Option<usize>,
-) -> Option<&'a mut CliTab> {
+) -> Option<&mut CliTab> {
     let w = cur_win?;
     let t = cur_tab?;
     windows.get_mut(w)?.tabs.get_mut(t)
 }
 
-fn pane_mut<'a>(
-    windows: &'a mut [CliWin],
+fn pane_mut(
+    windows: &mut [CliWin],
     cur_win: Option<usize>,
     cur_tab: Option<usize>,
     cur_pane: Option<usize>,
-) -> Option<&'a mut PaneSpec> {
+) -> Option<&mut PaneSpec> {
     let w = cur_win?;
     let t = cur_tab?;
     let p = cur_pane?;

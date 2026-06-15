@@ -11,6 +11,7 @@
 //!     tokens lazily — [`TokenStore::resolve`].
 //!   * `mintToken` registers a scoped token with an optional `Date.now()+ttlMs` expiry —
 //!     [`TokenStore::mint`].
+//!
 //! The no-escalation check itself is `scope::check_mintable`, applied by the routes layer
 //! against the live read-model.
 

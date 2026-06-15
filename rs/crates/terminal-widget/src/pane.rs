@@ -520,7 +520,7 @@ impl TerminalPane {
     /// True once the active selection has actually been dragged across cells (i.e. it's a real
     /// selection, not a stationary click). The caller uses this to choose copy-vs-click on release.
     pub fn selection_is_drag(&self) -> bool {
-        self.selection.map_or(false, |s| s.dragged)
+        self.selection.is_some_and(|s| s.dragged)
     }
 
     /// True when there's an active *dragged* selection lying entirely on the cursor's own viewport
@@ -819,6 +819,8 @@ impl TerminalPane {
     /// Highlight rectangles (logical px) for every match currently in the viewport, plus the
     /// active match's rect on its own (so the pane can draw it distinctly). Matches scrolled out
     /// of view are omitted.
+    // pre-existing; deferred per repo lint policy (test.yml)
+    #[allow(clippy::type_complexity)]
     pub fn search_view_rects(
         &self,
         surf_w: f32,

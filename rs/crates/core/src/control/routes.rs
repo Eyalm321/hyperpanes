@@ -11,6 +11,7 @@
 //!   POST /command                dispatch
 //!   GET  /events                 WS upgrade (token via header or ?token=)
 //!   + 401 unauthorized / 404 {error,path} / 405 method-not-allowed fallbacks
+//!
 //! Bearer via `Authorization: Bearer` or `?token=` (WS only). Every body shape matches the TS
 //! source (omit-when-unset; ordered structs where field order is observable).
 
@@ -91,6 +92,8 @@ fn bearer_header(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Resolve the presented bearer (HTTP header only — `?token=` is WS-only, per TS). 401 on failure.
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::result_large_err)]
 fn authorize(shared: &Arc<Shared>, headers: &HeaderMap) -> Result<TokenInfo, Response> {
     let token = bearer_header(headers);
     shared
@@ -106,6 +109,8 @@ struct FoundPane {
     uid: String,
 }
 
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::result_large_err)]
 fn find_pane_scoped(
     shared: &Arc<Shared>,
     scope: Option<&Scope>,
@@ -695,7 +700,7 @@ async fn tasks_list(
     // Only a state string that round-trips is a real filter (an unknown value is ignored,
     // never silently coerced to `queued`).
     let state = q.get("state").and_then(|s| {
-        let st = TaskState::from_str(s);
+        let st = TaskState::from_wire(s);
         (st.as_str() == s).then_some(st)
     });
     let wq = shared.work.lock().unwrap();
@@ -815,6 +820,8 @@ async fn task_get(
 
 /// Resolve `fencingToken` + the task's queue-scope for a lease op, or the error response.
 /// Returns `(fencing_token, body)` on success.
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::result_large_err)]
 fn lease_op_preamble(
     shared: &Arc<Shared>,
     info: &TokenInfo,

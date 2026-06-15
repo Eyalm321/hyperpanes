@@ -133,6 +133,8 @@ pub struct SessionMeta {
 /// A request from a client to the daemon. Fire-and-forget for mutators; request/response
 /// for `ListSessions` / `Attach` / `RenderScreen` / `Ping`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::large_enum_variant)]
 pub enum ClientMsg {
     /// Handshake: announce the client's protocol version. The daemon replies with
     /// [`DaemonMsg::Hello`].

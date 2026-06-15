@@ -88,7 +88,7 @@ pub fn next_poll_delay(
     // Aim for the quiet point, clamped to the poll band so we neither spin nor
     // sleep so long we lag a settle. But the deadline always wins — never sleep
     // past it (even below the band), so the wait returns its `timeout` on time.
-    let target = until_quiet.max(WAIT_POLL_MIN_MS).min(WAIT_POLL_MAX_MS);
+    let target = until_quiet.clamp(WAIT_POLL_MIN_MS, WAIT_POLL_MAX_MS);
     1.max(target.min(until_deadline))
 }
 

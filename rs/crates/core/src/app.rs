@@ -136,8 +136,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
         });
         return;
     }
-    let mut window_id = start_id;
-    for ws in windows {
+    for (window_id, ws) in (start_id..).zip(windows) {
         let groups = if ws.groups.is_empty() {
             vec![Default::default()]
         } else {
@@ -164,7 +163,6 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
             active_tab_id = tabs.first().map(|t| t.id.clone());
         }
         model.add_window(WindowInfo { window_id, active_tab_id, tabs });
-        window_id += 1;
     }
 }
 

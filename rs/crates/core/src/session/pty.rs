@@ -311,7 +311,7 @@ pub fn spawn_pty(
 
     // A killer cloned out before the child moves to the reader thread, so kill()
     // can signal independently of the thread blocked in `wait()`.
-    let mut child = child;
+    let child = child;
     let killer = child.clone_killer();
     let _ = child_tx.send(child);
 

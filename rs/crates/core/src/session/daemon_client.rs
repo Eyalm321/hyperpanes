@@ -878,7 +878,7 @@ mod tests {
         // replay() returns the client mirror (no round-trip) and includes the output.
         assert!(
             wait_until(Dur::from_secs(2), || {
-                mgr.replay("p1").map_or(false, |r| r.contains("HELLO_MARKER"))
+                mgr.replay("p1").is_some_and(|r| r.contains("HELLO_MARKER"))
             }),
             "replay() mirror should hold the streamed output, got {:?}",
             mgr.replay("p1")
@@ -947,7 +947,7 @@ mod tests {
 
         // render_screen() returns the serialized screen (a real round-trip), containing it.
         let screen = wait_until(Dur::from_secs(3), || {
-            mgr.render_screen("p1").map_or(false, |s| s.contains("SCREEN_MARKER"))
+            mgr.render_screen("p1").is_some_and(|s| s.contains("SCREEN_MARKER"))
         });
         assert!(screen, "render_screen should round-trip the screen incl. the marker");
 
@@ -998,7 +998,7 @@ mod tests {
         );
         assert!(
             wait_until(Dur::from_secs(3), || {
-                mgr2.replay("surv").map_or(false, |r| r.contains("SURVIVOR_MARKER"))
+                mgr2.replay("surv").is_some_and(|r| r.contains("SURVIVOR_MARKER"))
             }),
             "reconnect: replay() should re-seed from the Attach reply, got {:?}",
             mgr2.replay("surv")
@@ -1076,7 +1076,7 @@ mod tests {
         assert!(reattach_survivor, "restore would RE-ATTACH the surviving uid (no re-spawn)");
         assert!(
             wait_until(Dur::from_secs(3), || {
-                mgr2.replay(&recorded_uid).map_or(false, |r| r.contains("REATTACH_MARKER"))
+                mgr2.replay(&recorded_uid).is_some_and(|r| r.contains("REATTACH_MARKER"))
             }),
             "re-attach seeds the fresh grid from the survivor's replay, got {:?}",
             mgr2.replay(&recorded_uid)
