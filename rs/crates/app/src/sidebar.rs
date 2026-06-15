@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub use hyperpanes_core::persistence::projects::Project;
 use hyperpanes_core::claude_history;
 use hyperpanes_core::persistence::projects;
+pub use hyperpanes_core::persistence::projects::Project;
 
 /// The remembered projects, newest-first (the order the panel renders), self-healed:
 /// any project whose repo folder no longer exists on disk is forgotten (removed from
@@ -92,7 +92,10 @@ impl NoWindow for Command {
 
 /// Turn a `branch` porcelain value (`refs/heads/feature`) into a short display label.
 fn short_branch(refname: &str) -> String {
-    refname.strip_prefix("refs/heads/").unwrap_or(refname).to_string()
+    refname
+        .strip_prefix("refs/heads/")
+        .unwrap_or(refname)
+        .to_string()
 }
 
 /// Parse the `git worktree list --porcelain` output into rows. Records are separated by a
@@ -151,12 +154,30 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
     for line in out.lines() {
         let line = line.trim_end();
         if line.is_empty() {
-            flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut locked, &mut prunable, &mut rows);
+            flush(
+                &mut path,
+                &mut head,
+                &mut branch,
+                &mut detached,
+                &mut bare,
+                &mut locked,
+                &mut prunable,
+                &mut rows,
+            );
             continue;
         }
         if let Some(rest) = line.strip_prefix("worktree ") {
             // A new record begins — flush the previous one first.
-            flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut locked, &mut prunable, &mut rows);
+            flush(
+                &mut path,
+                &mut head,
+                &mut branch,
+                &mut detached,
+                &mut bare,
+                &mut locked,
+                &mut prunable,
+                &mut rows,
+            );
             path = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("HEAD ") {
             head = Some(rest.to_string());
@@ -174,7 +195,16 @@ fn parse_porcelain(out: &str) -> Vec<WorktreeRow> {
             prunable = true;
         }
     }
-    flush(&mut path, &mut head, &mut branch, &mut detached, &mut bare, &mut locked, &mut prunable, &mut rows);
+    flush(
+        &mut path,
+        &mut head,
+        &mut branch,
+        &mut detached,
+        &mut bare,
+        &mut locked,
+        &mut prunable,
+        &mut rows,
+    );
     rows
 }
 
@@ -214,7 +244,11 @@ pub fn remove_worktree(repo_path: &str, worktree_path: &str) -> Result<(), Strin
     }
     let err = String::from_utf8_lossy(&out.stderr);
     let msg = err.trim();
-    Err(if msg.is_empty() { "git worktree remove failed".to_string() } else { msg.to_string() })
+    Err(if msg.is_empty() {
+        "git worktree remove failed".to_string()
+    } else {
+        msg.to_string()
+    })
 }
 
 thread_local! {
@@ -346,7 +380,9 @@ fn short_id(id: &str) -> String {
 /// A compact relative-time label for `started_at` (epoch ms) vs `now` (epoch ms). Empty when
 /// the timestamp is unknown. Coarse buckets — minutes → hours → days → weeks → months → years.
 fn relative_time(started_at: Option<u64>, now: u64) -> String {
-    let Some(t) = started_at else { return String::new() };
+    let Some(t) = started_at else {
+        return String::new();
+    };
     let secs = now.saturating_sub(t) / 1000;
     if secs < 60 {
         return "just now".to_string();
@@ -423,13 +459,21 @@ pub fn claude_has_history(project_root: &str) -> bool {
 /// The per-project history-UI state: `(segment, query)` — segment 0 = Worktrees,
 /// 1 = History. Defaults to `(0, "")` for a project never touched.
 pub fn history_ui_for(project_root: &str) -> (i32, String) {
-    HIST_UI.with(|m| m.borrow().get(project_root).cloned().unwrap_or((0, String::new())))
+    HIST_UI.with(|m| {
+        m.borrow()
+            .get(project_root)
+            .cloned()
+            .unwrap_or((0, String::new()))
+    })
 }
 
 /// Record a history-UI edit for `project_root` (from the polled `HistoryUi` global).
 pub fn set_history_ui(project_root: &str, segment: i32, query: &str) {
     HIST_UI.with(|m| {
-        m.borrow_mut().insert(project_root.to_string(), (segment.clamp(0, 1), query.to_string()));
+        m.borrow_mut().insert(
+            project_root.to_string(),
+            (segment.clamp(0, 1), query.to_string()),
+        );
     });
 }
 

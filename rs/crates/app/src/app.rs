@@ -187,7 +187,9 @@ pub struct App {
     cadence_slow: Cell<bool>,
     /// Second-instance `{argv, cwd}` hand-offs from the single-instance server (the
     /// receiver end; the tokio-side handler sends). Drained on the UI thread each tick.
-    handoffs: RefCell<Option<std::sync::mpsc::Receiver<hyperpanes_core::single_instance::HandoffMessage>>>,
+    handoffs: RefCell<
+        Option<std::sync::mpsc::Receiver<hyperpanes_core::single_instance::HandoffMessage>>,
+    >,
     /// Crash-recovery autosave (#2): when we last wrote the session snapshot, and the JSON we
     /// wrote — so [`App::autosave_session`] throttles to a few seconds and skips unchanged writes.
     last_autosave: Cell<Option<std::time::Instant>>,
@@ -366,7 +368,8 @@ impl App {
 
         self.wire(&win);
         // The running build version is constant — push it once (the General panel's "About").
-        win.app.set_pref_app_version(crate::update::CURRENT_VERSION.into());
+        win.app
+            .set_pref_app_version(crate::update::CURRENT_VERSION.into());
         // NotifyOnly platforms relabel "Download update" → "View release" (opens GitHub).
         win.app.set_pref_update_notify_only(matches!(
             crate::update::apply_strategy(),
@@ -374,9 +377,11 @@ impl App {
         ));
         // Seed the auto-update toggle from the just-loaded settings (read-only borrow, no
         // command in flight, so the #18 borrow rule is moot here).
-        win.app.set_pref_auto_update(win.state.borrow().settings.auto_update);
+        win.app
+            .set_pref_auto_update(win.state.borrow().settings.auto_update);
         // Seed the keep-alive toggle (session-daemon M3) the same way.
-        win.app.set_pref_keep_alive(win.state.borrow().settings.keep_alive);
+        win.app
+            .set_pref_keep_alive(win.state.borrow().settings.keep_alive);
         // Cascade additional windows so they don't land exactly on top of each other.
         if id > 0 {
             let off = 36.0 * id as f32;
@@ -548,7 +553,8 @@ impl App {
         // Mirror the control-server status into every window's Preferences props.
         {
             let (enabled, allow_input, port) = self.control.status();
-            let status: slint::SharedString = control_status_line(enabled, allow_input, port).into();
+            let status: slint::SharedString =
+                control_status_line(enabled, allow_input, port).into();
             let cur = (enabled, allow_input, status);
             for w in &windows {
                 // Same idle-render guard as the maximized flag: only write when it changed.
@@ -567,7 +573,11 @@ impl App {
         //     polled each tick (cheap) but only written when something actually changed.
         {
             let snap = self.update.snapshot();
-            let cur = (snap.phase, slint::SharedString::from(snap.message), snap.progress);
+            let cur = (
+                snap.phase,
+                slint::SharedString::from(snap.message),
+                snap.progress,
+            );
             for w in &windows {
                 if w.last_update.borrow().as_ref() == Some(&cur) {
                     continue;
@@ -643,7 +653,9 @@ impl App {
                 if w.closing.get() {
                     last_session = Some(w.state.borrow().to_session_file());
                     // Tell the AI engine to forget this window's panes, and drop its context sig.
-                    self.ai.send(crate::ai::AiMsg::DropWindow { window_id: w.id as i64 });
+                    self.ai.send(crate::ai::AiMsg::DropWindow {
+                        window_id: w.id as i64,
+                    });
                     self.ai_ctx_sig.borrow_mut().remove(&w.id);
                     for uid in w.state.borrow().session_uids() {
                         self.ai_feed.borrow_mut().remove(&uid);
@@ -686,7 +698,14 @@ impl App {
         }
 
         if let Some(t) = t_tick {
-            crate::perf::tick(events, bytes, renders, drain_ns, render_ns, t.elapsed().as_nanos());
+            crate::perf::tick(
+                events,
+                bytes,
+                renders,
+                drain_ns,
+                render_ns,
+                t.elapsed().as_nanos(),
+            );
         }
     }
 
@@ -700,7 +719,9 @@ impl App {
                 // repainting TUI (e.g. an agent CLI) would drown the quiescence scheduler in
                 // noise. Instead `pump_ai` feeds each pane's *rendered screen text* on a
                 // cadence (what the user actually sees). See `App::pump_ai`.
-                let Some(w) = find_window(windows, &uid) else { return 0 };
+                let Some(w) = find_window(windows, &uid) else {
+                    return 0;
+                };
                 let mut st = w.state.borrow_mut();
                 let mut fed = 0;
                 if let Some((ti, pi)) = st.find_pane(&uid) {
@@ -930,22 +951,40 @@ impl App {
                     }
                     if let Some(which) = std::env::var_os("HYPERPANES_OPEN") {
                         match which.to_string_lossy().as_ref() {
-                            "palette" => { dispatch(st, Command::PaletteOpen, &self.mgr); }
-                            "prefs" => { dispatch(st, Command::PrefsOpen, &self.mgr); }
+                            "palette" => {
+                                dispatch(st, Command::PaletteOpen, &self.mgr);
+                            }
+                            "prefs" => {
+                                dispatch(st, Command::PrefsOpen, &self.mgr);
+                            }
                             // The rail is persistent; open its projects flyout so a
                             // screenshot exercises the full surface.
-                            "sidebar" => { dispatch(st, Command::ToggleProjects, &self.mgr); }
+                            "sidebar" => {
+                                dispatch(st, Command::ToggleProjects, &self.mgr);
+                            }
                             // Open a context menu at a fixed anchor (screenshot scaffold).
-                            "panemenu" => { dispatch(st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr); }
-                            "tabmenu" => { dispatch(st, Command::OpenTabContext(0, 90.0, 44.0), &self.mgr); }
+                            "panemenu" => {
+                                dispatch(st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr);
+                            }
+                            "tabmenu" => {
+                                dispatch(st, Command::OpenTabContext(0, 90.0, 44.0), &self.mgr);
+                            }
                             // Phase-5 chrome-parity scaffolds:
                             // the hamburger (application) menu, anchored under the button.
-                            "appmenu" => { dispatch(st, Command::OpenAppContext(10.0, 32.0), &self.mgr); }
+                            "appmenu" => {
+                                dispatch(st, Command::OpenAppContext(10.0, 32.0), &self.mgr);
+                            }
                             // three panes in the single preset → the bottom pane taskbar shows.
                             "taskbar" => {
                                 dispatch(st, Command::NewPane, &self.mgr);
                                 dispatch(st, Command::NewPane, &self.mgr);
-                                dispatch(st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
+                                dispatch(
+                                    st,
+                                    Command::SetLayout(
+                                        hyperpanes_core::layout::presets::Layout::Single,
+                                    ),
+                                    &self.mgr,
+                                );
                             }
                             // Track F smoke/screenshot scaffold: a second pane parked as a
                             // reminder due in ~10s (debug-only fast offset so the fired/
@@ -967,8 +1006,18 @@ impl App {
                             "taskbarmenu" => {
                                 dispatch(st, Command::NewPane, &self.mgr);
                                 dispatch(st, Command::NewPane, &self.mgr);
-                                dispatch(st, Command::SetLayout(hyperpanes_core::layout::presets::Layout::Single), &self.mgr);
-                                dispatch(st, Command::OpenTaskbarContext(0, 40.0, 805.0), &self.mgr);
+                                dispatch(
+                                    st,
+                                    Command::SetLayout(
+                                        hyperpanes_core::layout::presets::Layout::Single,
+                                    ),
+                                    &self.mgr,
+                                );
+                                dispatch(
+                                    st,
+                                    Command::OpenTaskbarContext(0, 40.0, 805.0),
+                                    &self.mgr,
+                                );
                             }
                             _ => {}
                         }
@@ -1005,7 +1054,10 @@ impl App {
         }
 
         if aw <= 1.0 || ah <= 1.0 {
-            return paneview::PumpResult { rendered: 0, active: false };
+            return paneview::PumpResult {
+                rendered: 0,
+                active: false,
+            };
         }
         let mut st = win.state.borrow_mut();
         paneview::pump(&win.app, &mut st, &win.ui, (aw, ah), scale, &self.mgr)
@@ -1033,7 +1085,8 @@ impl App {
         use hyperpanes_core::workspace::model::WorkspaceFile;
         crate::dbg_log(&format!("second-instance handoff argv={:?}", msg.argv));
         self.wake();
-        let si = hyperpanes_core::cli::routing::resolve_second_instance_windows(&msg.argv, &msg.cwd);
+        let si =
+            hyperpanes_core::cli::routing::resolve_second_instance_windows(&msg.argv, &msg.cwd);
         crate::dbg_log(&format!(
             "handoff resolved: windows={} routing={:?}",
             si.windows.len(),
@@ -1243,12 +1296,11 @@ impl App {
             let Some((pos, down)) = drag::global_pointer().poll() else {
                 return;
             };
-            crate::dbg_log(&format!("pane-grab win={} idx={} uid={}", win.id, pane_idx, uid));
-            let mut ds = DragState::new(
-                win.id,
-                DragKind::Pane { uid },
-                (pos.x, pos.y),
-            );
+            crate::dbg_log(&format!(
+                "pane-grab win={} idx={} uid={}",
+                win.id, pane_idx, uid
+            ));
+            let mut ds = DragState::new(win.id, DragKind::Pane { uid }, (pos.x, pos.y));
             // The button is down right now (this fires on pointer-down); arm immediately so
             // a click faster than one tick still resolves its release.
             ds.armed = down;
@@ -1271,11 +1323,7 @@ impl App {
         crate::dbg_log(&format!("tab-grab win={} idx={}", win.id, tab_idx));
         // Select the grabbed tab so it's visually distinct (active chip) while dragging.
         win.state.borrow_mut().switch_tab(tab_idx);
-        let mut ds = DragState::new(
-            win.id,
-            DragKind::Tab { index: tab_idx },
-            (pos.x, pos.y),
-        );
+        let mut ds = DragState::new(win.id, DragKind::Tab { index: tab_idx }, (pos.x, pos.y));
         ds.armed = down;
         *self.drag.borrow_mut() = Some(ds);
         self.wake();
@@ -1340,7 +1388,10 @@ impl App {
                 g.hide();
             }
             if self.drag_capture.replace(false) {
-                let raw = self.window_by_id(d.source_win).map(|w| w.hwnd.get()).unwrap_or(0);
+                let raw = self
+                    .window_by_id(d.source_win)
+                    .map(|w| w.hwnd.get())
+                    .unwrap_or(0);
                 window::end_drag_cursor(raw);
             }
             window::set_hover_cursor(false); // back to the normal cursor on release
@@ -1366,7 +1417,11 @@ impl App {
         if !is_pane && hover.win == Some(source_id) && hover.over_strip {
             if let Some(src) = self.window_by_id(source_id) {
                 let mut guard = self.drag.borrow_mut();
-                if let Some(DragState { kind: DragKind::Tab { index, .. }, .. }) = guard.as_mut() {
+                if let Some(DragState {
+                    kind: DragKind::Tab { index, .. },
+                    ..
+                }) = guard.as_mut()
+                {
                     let cur = *index;
                     let slot = hover.tab_slot;
                     let dest = if slot > cur { slot - 1 } else { slot };
@@ -1447,7 +1502,10 @@ impl App {
             let lx = (cursor.0 - l) as f32 / scale; // window-logical x
             let ly = (cursor.1 - t) as f32 / scale; // window-logical y (from window top)
 
-            let mut h = Hover { win: Some(w.id), ..Default::default() };
+            let mut h = Hover {
+                win: Some(w.id),
+                ..Default::default()
+            };
 
             // Over the top bar → a tab-strip target.
             if !fullscreen && ly < TOPBAR_H {
@@ -1587,7 +1645,13 @@ impl App {
     /// Resolve a completed drop: reorder in-window, stitch / dock cross-window, or spawn a
     /// new window for an empty-space drop. Re-host uses detach→adopt (replay-primed, no PTY
     /// restart); `State` was untouched until this moment.
-    fn apply_drop(self: &Rc<Self>, _windows: &[Rc<Window>], d: &DragState, hover: &Hover, cursor: (i32, i32)) {
+    fn apply_drop(
+        self: &Rc<Self>,
+        _windows: &[Rc<Window>],
+        d: &DragState,
+        hover: &Hover,
+        cursor: (i32, i32),
+    ) {
         match &d.kind {
             DragKind::Tab { index, .. } => {
                 if hover.win == Some(d.source_win) && hover.over_strip {
@@ -1639,9 +1703,11 @@ impl App {
                             } else {
                                 let det = src.state.borrow_mut().detach_uid(uid);
                                 if let Some((det, _alive)) = det {
-                                    src.state
-                                        .borrow_mut()
-                                        .adopt_pane_at(&self.mgr, det, hover.slot_index);
+                                    src.state.borrow_mut().adopt_pane_at(
+                                        &self.mgr,
+                                        det,
+                                        hover.slot_index,
+                                    );
                                 }
                             }
                         }
@@ -1663,9 +1729,11 @@ impl App {
                                         }
                                     }
                                 } else {
-                                    tgt.state
-                                        .borrow_mut()
-                                        .adopt_pane_at(&self.mgr, det, hover.slot_index);
+                                    tgt.state.borrow_mut().adopt_pane_at(
+                                        &self.mgr,
+                                        det,
+                                        hover.slot_index,
+                                    );
                                 }
                             }
                             if !alive {
@@ -1682,9 +1750,7 @@ impl App {
                                 let scale = src.app.window().scale_factor().max(1.0);
                                 let lx = cursor.0 as f32 / scale - 80.0;
                                 let ly = cursor.1 as f32 / scale - 16.0;
-                                nw.app
-                                    .window()
-                                    .set_position(LogicalPosition::new(lx, ly));
+                                nw.app.window().set_position(LogicalPosition::new(lx, ly));
                             }
                             if !alive {
                                 src.closing.set(true);
@@ -1709,8 +1775,7 @@ impl App {
 
             // Tab strip: dock-as-tab (pane drag) into any window, or a tab reorder in the
             // source window.
-            let strip_active =
-                is_target && hover.over_strip && (is_pane || w.id == source_id);
+            let strip_active = is_target && hover.over_strip && (is_pane || w.id == source_id);
             w.app.set_drop_strip_active(strip_active);
 
             // Spring-target highlight: the existing tab chip a dragged pane is hovering.
@@ -1741,8 +1806,7 @@ impl App {
             }
 
             // Pane tile slot highlight (stitch / reorder target).
-            let pane_active =
-                is_pane && is_target && !hover.over_strip && hover.pane_idx.is_some();
+            let pane_active = is_pane && is_target && !hover.over_strip && hover.pane_idx.is_some();
             if pane_active {
                 let (x, y, wd, ht) = hover.pane_rect;
                 w.app.set_drop_rect_x(x);
@@ -1820,25 +1884,26 @@ impl App {
         {
             let app = app.clone();
             let id = win.id;
-            win.app.on_submit_new_pane(move |label, color, frame, dot, command, cwd, shell_idx| {
-                if let Some(w) = app.window_by_id(id) {
-                    let shell = crate::prefs::SHELL_OPTIONS
-                        .get(shell_idx as usize)
-                        .map(|(_, tok)| (*tok).to_string())
-                        .unwrap_or_default();
-                    let opts = NewPaneOpts {
-                        label: Some(label.to_string()),
-                        cwd: Some(cwd.to_string()),
-                        command: Some(command.to_string()),
-                        shell: Some(shell),
-                        accent: Some(color),
-                        show_frame: Some(frame),
-                        show_dot: Some(dot),
-                        env: None,
-                    };
-                    app.run_command(&w, Command::SubmitNewPane(opts));
-                }
-            });
+            win.app
+                .on_submit_new_pane(move |label, color, frame, dot, command, cwd, shell_idx| {
+                    if let Some(w) = app.window_by_id(id) {
+                        let shell = crate::prefs::SHELL_OPTIONS
+                            .get(shell_idx as usize)
+                            .map(|(_, tok)| (*tok).to_string())
+                            .unwrap_or_default();
+                        let opts = NewPaneOpts {
+                            label: Some(label.to_string()),
+                            cwd: Some(cwd.to_string()),
+                            command: Some(command.to_string()),
+                            shell: Some(shell),
+                            accent: Some(color),
+                            show_frame: Some(frame),
+                            show_dot: Some(dot),
+                            env: None,
+                        };
+                        app.run_command(&w, Command::SubmitNewPane(opts));
+                    }
+                });
         }
         cb0!(on_close_focused, Command::CloseFocused);
         cb0!(on_toggle_zoom, Command::ToggleZoom);
@@ -1987,7 +2052,10 @@ impl App {
                 crate::dbg_log(&format!("on_pane_paste i={i}"));
                 if let Some(w) = app.window_by_id(id) {
                     // RefCell rule: the borrow ends at the statement, before run_command.
-                    let copied = w.state.borrow_mut().copy_selection_on_right_click(i as usize);
+                    let copied = w
+                        .state
+                        .borrow_mut()
+                        .copy_selection_on_right_click(i as usize);
                     crate::dbg_log(&format!("on_pane_paste i={i} copied={copied}"));
                     if !copied {
                         app.run_command(&w, Command::PastePane(i as usize));
@@ -2042,12 +2110,11 @@ impl App {
         {
             let app = app.clone();
             let id = win.id;
-            win.app
-                .on_rename_tab(move |i, t| {
-                    if let Some(w) = app.window_by_id(id) {
-                        app.run_command(&w, Command::RenameTab(i, t.to_string()));
-                    }
-                });
+            win.app.on_rename_tab(move |i, t| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::RenameTab(i, t.to_string()));
+                }
+            });
         }
 
         // multi-window
@@ -2356,7 +2423,9 @@ impl App {
             let app = app.clone();
             let id = win.id;
             win.app.on_open_project(move |code| {
-                let Some(w) = app.window_by_id(id) else { return };
+                let Some(w) = app.window_by_id(id) else {
+                    return;
+                };
                 let code = code as i64;
                 if code < DELETE_BASE {
                     app.run_command(&w, Command::OpenProject(code as usize));
@@ -2376,7 +2445,9 @@ impl App {
                         (p.path.clone(), row)
                     })
                 };
-                let Some((repo, Some(row))) = target else { return };
+                let Some((repo, Some(row))) = target else {
+                    return;
+                };
                 // Defense-in-depth: NEVER delete the main checkout (or a locked worktree) from
                 // code, regardless of git also refusing both without `--force`. The disabled
                 // trash in the UI is not a guarantee — re-check here before touching the
@@ -2448,7 +2519,9 @@ impl App {
             let app = app.clone();
             let id = win.id;
             win.app.on_resume_session(move |proj_idx, sid| {
-                let Some(w) = app.window_by_id(id) else { return };
+                let Some(w) = app.window_by_id(id) else {
+                    return;
+                };
                 let target = {
                     let st = w.state.borrow();
                     st.projects
@@ -2473,7 +2546,9 @@ impl App {
             let app = app.clone();
             let id = win.id;
             win.app.on_pref_action(move |kind, arg| {
-                let Some(w) = app.window_by_id(id) else { return };
+                let Some(w) = app.window_by_id(id) else {
+                    return;
+                };
                 // Font selection (kind 0) is its own command (handles presets + Custom… mode).
                 if kind == 0 {
                     app.run_command(&w, Command::FontSelect(arg.max(0) as usize));
@@ -2516,7 +2591,8 @@ impl App {
                         crate::update::ApplyStrategy::SilentInstaller => app.update.download(),
                         crate::update::ApplyStrategy::NotifyOnly => {
                             if let Err(e) = hyperpanes_core::paths::os_open(RELEASES_PAGE) {
-                                app.update.set_error(format!("Couldn't open releases page: {e}"));
+                                app.update
+                                    .set_error(format!("Couldn't open releases page: {e}"));
                             }
                         }
                     }
@@ -2527,7 +2603,8 @@ impl App {
                     // the same releases-page behavior as a defensive backstop.
                     if crate::update::apply_strategy() == crate::update::ApplyStrategy::NotifyOnly {
                         if let Err(e) = hyperpanes_core::paths::os_open(RELEASES_PAGE) {
-                            app.update.set_error(format!("Couldn't open releases page: {e}"));
+                            app.update
+                                .set_error(format!("Couldn't open releases page: {e}"));
                         }
                         return;
                     }
@@ -2538,11 +2615,13 @@ impl App {
                             Ok(()) => {
                                 let _ = slint::quit_event_loop();
                             }
-                            Err(e) => {
-                                app.update.set_error(format!("Couldn't launch installer: {e}"))
-                            }
+                            Err(e) => app
+                                .update
+                                .set_error(format!("Couldn't launch installer: {e}")),
                         },
-                        None => app.update.set_error("No downloaded installer to run".to_string()),
+                        None => app
+                            .update
+                            .set_error("No downloaded installer to run".to_string()),
                     }
                     return;
                 }
@@ -2591,7 +2670,9 @@ impl App {
             let app = app.clone();
             let id = win.id;
             win.app.on_pref_text(move |kind, value| {
-                let Some(w) = app.window_by_id(id) else { return };
+                let Some(w) = app.window_by_id(id) else {
+                    return;
+                };
                 // Custom font path (kind 8) is its own command; editor command (7) is a setting.
                 if kind == 8 {
                     app.run_command(&w, Command::FontCustomValue(value.to_string()));
@@ -2601,9 +2682,15 @@ impl App {
                 if kind == 13 || kind == 14 {
                     use hyperpanes_core::ai::service::AiSettingsPatch;
                     let patch = if kind == 13 {
-                        AiSettingsPatch { endpoint: Some(value.to_string()), ..Default::default() }
+                        AiSettingsPatch {
+                            endpoint: Some(value.to_string()),
+                            ..Default::default()
+                        }
                     } else {
-                        AiSettingsPatch { model: Some(value.to_string()), ..Default::default() }
+                        AiSettingsPatch {
+                            model: Some(value.to_string()),
+                            ..Default::default()
+                        }
                     };
                     app.ai.send(crate::ai::AiMsg::Configure(patch));
                     return;
@@ -2632,23 +2719,34 @@ impl App {
         {
             let app = app.clone();
             let id = win.id;
-            win.app.on_divider_drag(move |index, main, vertical, dx, dy| {
-                let Some(w) = app.window_by_id(id) else { return };
-                app.wake(); // dragging a divider is active input → keep the fast cadence (#3)
-                let (aw, ah) = w.area.get();
-                let delta = if vertical {
-                    if aw > 0.0 { (dx / aw) as f64 } else { 0.0 }
-                } else if ah > 0.0 {
-                    (dy / ah) as f64
-                } else {
-                    0.0
-                };
-                if delta == 0.0 {
-                    return;
-                }
-                let kind = if main { DividerKind::Main } else { DividerKind::Size };
-                app.run_command(&w, Command::ResizeDivider { kind, index, delta });
-            });
+            win.app
+                .on_divider_drag(move |index, main, vertical, dx, dy| {
+                    let Some(w) = app.window_by_id(id) else {
+                        return;
+                    };
+                    app.wake(); // dragging a divider is active input → keep the fast cadence (#3)
+                    let (aw, ah) = w.area.get();
+                    let delta = if vertical {
+                        if aw > 0.0 {
+                            (dx / aw) as f64
+                        } else {
+                            0.0
+                        }
+                    } else if ah > 0.0 {
+                        (dy / ah) as f64
+                    } else {
+                        0.0
+                    };
+                    if delta == 0.0 {
+                        return;
+                    }
+                    let kind = if main {
+                        DividerKind::Main
+                    } else {
+                        DividerKind::Size
+                    };
+                    app.run_command(&w, Command::ResizeDivider { kind, index, delta });
+                });
         }
         // key routing
         {
@@ -2746,7 +2844,11 @@ fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> S
     if !enabled {
         return "Off".to_string();
     }
-    let input = if allow_input { "input allowed" } else { "input blocked" };
+    let input = if allow_input {
+        "input allowed"
+    } else {
+        "input blocked"
+    };
     match port {
         Some(p) => format!("Running · http://127.0.0.1:{p} · {input}"),
         None => format!("Starting… · {input}"),

@@ -190,7 +190,11 @@ mod tests {
     #[test]
     fn serializes_each_frame_with_tag_first_and_camel_fields() {
         assert_eq!(
-            ControlEvent::Hello { pid: 42, version: "1.2.3".into() }.to_json(),
+            ControlEvent::Hello {
+                pid: 42,
+                version: "1.2.3".into()
+            }
+            .to_json(),
             r#"{"type":"hello","pid":42,"version":"1.2.3"}"#
         );
         assert_eq!(
@@ -204,11 +208,20 @@ mod tests {
         );
         // null paneId is preserved (older frames).
         assert_eq!(
-            ControlEvent::Exit { session_uid: "u1".into(), pane_id: None, code: 0 }.to_json(),
+            ControlEvent::Exit {
+                session_uid: "u1".into(),
+                pane_id: None,
+                code: 0
+            }
+            .to_json(),
             r#"{"type":"exit","sessionUid":"u1","paneId":null,"code":0}"#
         );
         assert_eq!(
-            ControlEvent::Activity { pane_id: "p1".into(), activity: "idle".into() }.to_json(),
+            ControlEvent::Activity {
+                pane_id: "p1".into(),
+                activity: "idle".into()
+            }
+            .to_json(),
             r#"{"type":"activity","paneId":"p1","activity":"idle"}"#
         );
         assert_eq!(
@@ -247,13 +260,21 @@ mod tests {
         );
         // command: code omitted on a "start" edge.
         assert_eq!(
-            ControlEvent::Command { pane_id: "p1".into(), phase: "start".into(), code: None }
-                .to_json(),
+            ControlEvent::Command {
+                pane_id: "p1".into(),
+                phase: "start".into(),
+                code: None
+            }
+            .to_json(),
             r#"{"type":"command","paneId":"p1","phase":"start"}"#
         );
         assert_eq!(
-            ControlEvent::Command { pane_id: "p1".into(), phase: "end".into(), code: Some(2) }
-                .to_json(),
+            ControlEvent::Command {
+                pane_id: "p1".into(),
+                phase: "end".into(),
+                code: Some(2)
+            }
+            .to_json(),
             r#"{"type":"command","paneId":"p1","phase":"end","code":2}"#
         );
         // supervisor: all optionals omitted-when-None, camelCase delay_ms.
@@ -284,7 +305,11 @@ mod tests {
     }
 
     fn coords(pane: &str, tab: &str, window: i64) -> PaneCoords {
-        PaneCoords { pane_id: pane.into(), tab_id: tab.into(), window_id: window }
+        PaneCoords {
+            pane_id: pane.into(),
+            tab_id: tab.into(),
+            window_id: window,
+        }
     }
 
     #[test]
@@ -325,7 +350,10 @@ mod tests {
         };
         hub.broadcast_for_pane(Some(&coords("p2", "t1", 1)), &sibling);
         assert!(master.try_recv().is_ok());
-        assert!(scoped.try_recv().is_err(), "scoped client must not see a sibling pane");
+        assert!(
+            scoped.try_recv().is_err(),
+            "scoped client must not see a sibling pane"
+        );
         // An unresolvable pane (None coords) is master-only.
         hub.broadcast_for_pane(None, &sibling);
         assert!(master.try_recv().is_ok());
@@ -353,7 +381,13 @@ mod tests {
         assert!(!hub.has_clients());
         // Both senders dropped ⇒ each receiver reports the channel closed (recv → None),
         // which is what makes the `handle_ws` loop break and the socket task exit.
-        assert!(matches!(ra.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
-        assert!(matches!(rb.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
+        assert!(matches!(
+            ra.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(matches!(
+            rb.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }

@@ -2,14 +2,14 @@
 //! (this wave): `pty` / `spawn` / `batcher` / `replay` / `screen`. Plus the session
 //! **daemon** (M0): `proto` (the wire protocol) + `daemon` (a PTY-owning daemon over a
 //! UDS / named pipe, with a loopback client) — both headless-testable, no Slint.
-pub mod cwd;
-pub mod osc133;
-pub mod env;
-pub mod pty;
-pub mod spawn;
 pub mod batcher;
-pub mod replay;
-pub mod screen;
-pub mod proto;
+pub mod cwd;
 pub mod daemon;
 pub mod daemon_client;
+pub mod env;
+pub mod osc133;
+pub mod proto;
+pub mod pty;
+pub mod replay;
+pub mod screen;
+pub mod spawn;

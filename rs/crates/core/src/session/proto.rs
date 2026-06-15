@@ -96,7 +96,10 @@ impl SpawnSpec {
         let integration = if self.integration_args.is_empty() && self.integration_env.is_empty() {
             None
         } else {
-            Some(Integration { args: self.integration_args, env: self.integration_env })
+            Some(Integration {
+                args: self.integration_args,
+                env: self.integration_env,
+            })
         };
         SpawnOptions {
             uid,
@@ -199,7 +202,10 @@ pub fn write_frame<W: Write>(w: &mut W, msg: &impl Serialize) -> io::Result<()> 
         .try_into()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame body exceeds u32"))?;
     if len > MAX_FRAME_LEN {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame body exceeds MAX_FRAME_LEN"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame body exceeds MAX_FRAME_LEN",
+        ));
     }
     w.write_all(&len.to_le_bytes())?;
     w.write_all(&body)?;
@@ -219,7 +225,10 @@ pub fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> io::Resul
     }
     let len = u32::from_le_bytes(len_buf);
     if len > MAX_FRAME_LEN {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame length exceeds MAX_FRAME_LEN"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame length exceeds MAX_FRAME_LEN",
+        ));
     }
     let mut body = vec![0u8; len as usize];
     r.read_exact(&mut body)?; // mid-body EOF → UnexpectedEof (a truncated frame is an error)
@@ -245,7 +254,10 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<ReadEof> 
                 return if filled == 0 {
                     Ok(ReadEof::Eof)
                 } else {
-                    Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF mid length prefix"))
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "EOF mid length prefix",
+                    ))
                 };
             }
             Ok(n) => filled += n,
@@ -262,7 +274,10 @@ mod tests {
     use std::io::Cursor;
 
     fn env(pairs: &[(&str, &str)]) -> EnvMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     // ---- SpawnSpec → SpawnOptions conversion ----
@@ -300,7 +315,10 @@ mod tests {
     fn spawn_spec_without_integration_yields_a_plain_shell() {
         let spec = SpawnSpec::default();
         let opts = spec.into_options("s1".into());
-        assert!(opts.integration.is_none(), "no integration fields → plain shell (no-op default)");
+        assert!(
+            opts.integration.is_none(),
+            "no integration fields → plain shell (no-op default)"
+        );
         assert_eq!(opts.uid, "s1");
     }
 
@@ -323,12 +341,24 @@ mod tests {
     #[test]
     fn every_client_msg_round_trips() {
         let msgs = [
-            ClientMsg::Hello { proto_ver: PROTO_VER },
+            ClientMsg::Hello {
+                proto_ver: PROTO_VER,
+            },
             ClientMsg::ListSessions,
             ClientMsg::Attach { uid: "s1".into() },
-            ClientMsg::Create(SpawnSpec { command: Some("echo hi".into()), ..Default::default() }),
-            ClientMsg::Write { uid: "s1".into(), data: "ls\n".into() },
-            ClientMsg::Resize { uid: "s1".into(), cols: 100, rows: 30 },
+            ClientMsg::Create(SpawnSpec {
+                command: Some("echo hi".into()),
+                ..Default::default()
+            }),
+            ClientMsg::Write {
+                uid: "s1".into(),
+                data: "ls\n".into(),
+            },
+            ClientMsg::Resize {
+                uid: "s1".into(),
+                cols: 100,
+                rows: 30,
+            },
             ClientMsg::Kill { uid: "s1".into() },
             ClientMsg::KillAll,
             ClientMsg::RenderScreen { uid: "s1".into() },
@@ -343,7 +373,10 @@ mod tests {
     #[test]
     fn every_daemon_msg_round_trips() {
         let msgs = [
-            DaemonMsg::Hello { proto_ver: PROTO_VER, daemon_pid: 4242 },
+            DaemonMsg::Hello {
+                proto_ver: PROTO_VER,
+                daemon_pid: 4242,
+            },
             DaemonMsg::Sessions(vec![SessionMeta {
                 uid: "s1".into(),
                 cwd: Some("/home/me".into()),
@@ -352,11 +385,26 @@ mod tests {
                 alive: true,
             }]),
             DaemonMsg::Created { uid: "s9".into() },
-            DaemonMsg::Replay { uid: "s1".into(), data: "recent output".into() },
-            DaemonMsg::Screen { uid: "s1".into(), text: Some("clean screen".into()) },
-            DaemonMsg::Event(SessionEvent::Data { uid: "s1".into(), data: "hi".into() }),
-            DaemonMsg::Event(SessionEvent::Cwd { uid: "s1".into(), cwd: "/tmp".into() }),
-            DaemonMsg::Event(SessionEvent::Exit { uid: "s1".into(), code: 0 }),
+            DaemonMsg::Replay {
+                uid: "s1".into(),
+                data: "recent output".into(),
+            },
+            DaemonMsg::Screen {
+                uid: "s1".into(),
+                text: Some("clean screen".into()),
+            },
+            DaemonMsg::Event(SessionEvent::Data {
+                uid: "s1".into(),
+                data: "hi".into(),
+            }),
+            DaemonMsg::Event(SessionEvent::Cwd {
+                uid: "s1".into(),
+                cwd: "/tmp".into(),
+            }),
+            DaemonMsg::Event(SessionEvent::Exit {
+                uid: "s1".into(),
+                code: 0,
+            }),
             DaemonMsg::Pong,
         ];
         for m in &msgs {
@@ -367,8 +415,13 @@ mod tests {
     #[test]
     fn the_hello_handshake_carries_the_version_field() {
         // The version must survive the wire so a client can detect a stale daemon.
-        let DaemonMsg::Hello { proto_ver, daemon_pid } =
-            roundtrip_daemon(&DaemonMsg::Hello { proto_ver: PROTO_VER, daemon_pid: 77 })
+        let DaemonMsg::Hello {
+            proto_ver,
+            daemon_pid,
+        } = roundtrip_daemon(&DaemonMsg::Hello {
+            proto_ver: PROTO_VER,
+            daemon_pid: 77,
+        })
         else {
             panic!("expected Hello");
         };
@@ -385,8 +438,14 @@ mod tests {
         write_frame(&mut buf, &ClientMsg::ListSessions).unwrap();
         write_frame(&mut buf, &ClientMsg::Kill { uid: "s2".into() }).unwrap();
         let mut cur = Cursor::new(buf);
-        assert_eq!(read_frame::<_, ClientMsg>(&mut cur).unwrap(), Some(ClientMsg::Ping));
-        assert_eq!(read_frame::<_, ClientMsg>(&mut cur).unwrap(), Some(ClientMsg::ListSessions));
+        assert_eq!(
+            read_frame::<_, ClientMsg>(&mut cur).unwrap(),
+            Some(ClientMsg::Ping)
+        );
+        assert_eq!(
+            read_frame::<_, ClientMsg>(&mut cur).unwrap(),
+            Some(ClientMsg::ListSessions)
+        );
         assert_eq!(
             read_frame::<_, ClientMsg>(&mut cur).unwrap(),
             Some(ClientMsg::Kill { uid: "s2".into() })
@@ -418,10 +477,17 @@ mod tests {
     #[test]
     fn read_frame_reassembles_across_partial_reads() {
         let mut buf = Vec::new();
-        let msg = DaemonMsg::Replay { uid: "s1".into(), data: "a".repeat(500) };
+        let msg = DaemonMsg::Replay {
+            uid: "s1".into(),
+            data: "a".repeat(500),
+        };
         write_frame(&mut buf, &msg).unwrap();
         // One byte at a time: the length prefix AND the body both arrive piecemeal.
-        let mut r = DribbleReader { data: buf, pos: 0, chunk: 1 };
+        let mut r = DribbleReader {
+            data: buf,
+            pos: 0,
+            chunk: 1,
+        };
         assert_eq!(read_frame::<_, DaemonMsg>(&mut r).unwrap(), Some(msg));
         // Stream exhausted → clean EOF.
         assert_eq!(read_frame::<_, DaemonMsg>(&mut r).unwrap(), None);

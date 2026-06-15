@@ -65,7 +65,11 @@ fn home_dir() -> PathBuf {
 /// relative value must be ignored), else `home/<rel>`. Pure core is [`pick_base`].
 #[cfg(not(any(windows, target_os = "macos")))]
 fn xdg_dir(var: &str, home_rel: &str) -> PathBuf {
-    pick_base(std::env::var_os(var).map(PathBuf::from), &home_dir(), home_rel)
+    pick_base(
+        std::env::var_os(var).map(PathBuf::from),
+        &home_dir(),
+        home_rel,
+    )
 }
 
 /// Pure XDG base-dir rule, split out for tests: an absolute, non-empty `env_value`
@@ -279,8 +283,7 @@ mod tests {
         // The live dirs honor the ambient env: compute the expectation from the same
         // env the code reads (no env mutation — tests run in parallel).
         fn expected(var: &str, rel: &str) -> PathBuf {
-            pick_base(std::env::var_os(var).map(PathBuf::from), &home_dir(), rel)
-                .join(PRODUCT_NAME)
+            pick_base(std::env::var_os(var).map(PathBuf::from), &home_dir(), rel).join(PRODUCT_NAME)
         }
 
         #[test]
@@ -299,12 +302,18 @@ mod tests {
         #[test]
         fn files_are_classified_config_data_state() {
             // Settings → config; durable data → data; session/runtime state → state.
-            assert_eq!(control_settings_json(), config_dir().join("control-settings.json"));
+            assert_eq!(
+                control_settings_json(),
+                config_dir().join("control-settings.json")
+            );
             assert_eq!(ai_settings_json(), config_dir().join("ai-settings.json"));
             assert_eq!(projects_json(), data_dir().join("projects.json"));
             assert_eq!(ai_memory_json(), data_dir().join("ai-memory.json"));
             assert_eq!(control_json(), state_dir().join("control.json"));
-            assert_eq!(last_workspace_json(), state_dir().join("last-workspace.json"));
+            assert_eq!(
+                last_workspace_json(),
+                state_dir().join("last-workspace.json")
+            );
         }
     }
 
@@ -341,8 +350,7 @@ mod tests {
 
     #[test]
     fn write_atomic_creates_dirs_and_replaces() {
-        let base =
-            std::env::temp_dir().join(format!("hp-paths-test-{}-{}", std::process::id(), 1));
+        let base = std::env::temp_dir().join(format!("hp-paths-test-{}-{}", std::process::id(), 1));
         let target = base.join("nested").join("file.json");
         write_atomic(&target, b"{\"a\":1}").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":1}");

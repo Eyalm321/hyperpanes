@@ -32,11 +32,11 @@ pub struct Tetris {
     board: [[u8; W as usize]; H as usize],
     rng: u64,
     kind: usize,
-    next: usize,    // the upcoming piece (shown in the HUD's NEXT)
+    next: usize,            // the upcoming piece (shown in the HUD's NEXT)
     cells: [(i32, i32); 4], // current piece's rotated cells (within its 4×4 box)
     x: i32,
-    y: i32,         // box offset on the board
-    target_x: i32,  // column the "AI" is sliding the piece toward
+    y: i32,        // box offset on the board
+    target_x: i32, // column the "AI" is sliding the piece toward
     score: u32,
     lines: u32,
 }
@@ -143,7 +143,12 @@ impl Tetris {
     }
 
     /// The board that would result from locking `cells` at `(ox, oy)`.
-    fn with_locked(&self, cells: &[(i32, i32); 4], ox: i32, oy: i32) -> [[u8; W as usize]; H as usize] {
+    fn with_locked(
+        &self,
+        cells: &[(i32, i32); 4],
+        ox: i32,
+        oy: i32,
+    ) -> [[u8; W as usize]; H as usize] {
         let mut b = self.board;
         for (cx, cy) in cells {
             let x = ox + cx;

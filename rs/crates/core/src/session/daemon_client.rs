@@ -54,9 +54,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[cfg(unix)]
-use crate::session::proto::{
-    read_frame, write_frame, ClientMsg, DaemonMsg, SpawnSpec, PROTO_VER,
-};
+use crate::session::proto::{read_frame, write_frame, ClientMsg, DaemonMsg, SpawnSpec, PROTO_VER};
 #[cfg(unix)]
 use crate::session::replay::Replay;
 #[cfg(unix)]
@@ -94,7 +92,12 @@ struct Shadow {
 #[cfg(unix)]
 impl Shadow {
     fn new() -> Self {
-        Self { replay: Replay::new(), output_bytes: 0, last_output_at: None, cwd: None }
+        Self {
+            replay: Replay::new(),
+            output_bytes: 0,
+            last_output_at: None,
+            cwd: None,
+        }
     }
 }
 
@@ -192,10 +195,15 @@ impl DaemonSessionManager {
 
         // Handshake (M1 transports the version; M3 enforces it) — drains the `Hello` reply
         // so it doesn't sit in front of a later request/response.
-        mgr.send(&ClientMsg::Hello { proto_ver: PROTO_VER })?;
-        let _ = mgr.request(ClientMsg::Hello { proto_ver: PROTO_VER }, |m| {
-            matches!(m, DaemonMsg::Hello { .. })
-        });
+        mgr.send(&ClientMsg::Hello {
+            proto_ver: PROTO_VER,
+        })?;
+        let _ = mgr.request(
+            ClientMsg::Hello {
+                proto_ver: PROTO_VER,
+            },
+            |m| matches!(m, DaemonMsg::Hello { .. }),
+        );
 
         // Seed the shadow from the daemon's live session set (the "+ one `ListSessions` on
         // connect" half of the has/uids strategy) AND re-attach each survivor so its replay
@@ -233,7 +241,7 @@ impl DaemonSessionManager {
             let remaining = deadline.checked_duration_since(Instant::now())?;
             match replies.recv_timeout(remaining) {
                 Ok(m) if want(&m) => return Some(m),
-                Ok(_) => continue, // not our reply kind — keep waiting
+                Ok(_) => continue,     // not our reply kind — keep waiting
                 Err(_) => return None, // timeout or disconnect
             }
         }
@@ -243,9 +251,9 @@ impl DaemonSessionManager {
     /// then `Attach` each so its replay mirror is (re)seeded from the daemon's buffer. Run
     /// once at connect; safe to call again (idempotent per uid).
     fn seed_from_daemon(&self) {
-        let Some(DaemonMsg::Sessions(metas)) =
-            self.request(ClientMsg::ListSessions, |m| matches!(m, DaemonMsg::Sessions(_)))
-        else {
+        let Some(DaemonMsg::Sessions(metas)) = self.request(ClientMsg::ListSessions, |m| {
+            matches!(m, DaemonMsg::Sessions(_))
+        }) else {
             return;
         };
         {
@@ -262,7 +270,9 @@ impl DaemonSessionManager {
         // Attach each survivor to (a) subscribe this connection to its live events and (b)
         // seed its replay mirror from the `Attach` reply ONCE (the reader applies it).
         for meta in &metas {
-            let _ = self.send(&ClientMsg::Attach { uid: meta.uid.clone() });
+            let _ = self.send(&ClientMsg::Attach {
+                uid: meta.uid.clone(),
+            });
         }
     }
 
@@ -275,7 +285,11 @@ impl DaemonSessionManager {
         let uid = opts.uid.clone();
         // Insert the shadow up front so a `has(uid)`/`replay(uid)` immediately after create
         // (before any event arrives) is consistent with the in-process path.
-        self.shadows.lock().unwrap().entry(uid.clone()).or_insert_with(Shadow::new);
+        self.shadows
+            .lock()
+            .unwrap()
+            .entry(uid.clone())
+            .or_insert_with(Shadow::new);
         let spec = spawn_spec_from(opts);
         self.send(&ClientMsg::Create(spec))?;
         Ok(())
@@ -306,27 +320,42 @@ impl DaemonSessionManager {
     /// Recent output for a re-attaching view — the client mirror buffer (no round-trip).
     /// `None` for an unknown uid, matching the in-process `replay`.
     pub fn replay(&self, uid: &str) -> Option<String> {
-        self.shadows.lock().unwrap().get(uid).map(|s| s.replay.get().to_string())
+        self.shadows
+            .lock()
+            .unwrap()
+            .get(uid)
+            .map(|s| s.replay.get().to_string())
     }
 
     /// Monotonic UTF-16 output cursor — from the shadow (no I/O).
     pub fn output_bytes(&self, uid: &str) -> Option<u64> {
-        self.shadows.lock().unwrap().get(uid).map(|s| s.output_bytes)
+        self.shadows
+            .lock()
+            .unwrap()
+            .get(uid)
+            .map(|s| s.output_bytes)
     }
 
     /// Epoch-ms of the last output flush — from the shadow (no I/O); `None` if nothing
     /// has flushed yet, mirroring the in-process accessor.
     pub fn last_output_at(&self, uid: &str) -> Option<u64> {
-        self.shadows.lock().unwrap().get(uid).and_then(|s| s.last_output_at)
+        self.shadows
+            .lock()
+            .unwrap()
+            .get(uid)
+            .and_then(|s| s.last_output_at)
     }
 
     /// Serialize the pane's current screen — a bounded `RenderScreen`/`Screen` round-trip
     /// (off the hot path). `None` on an unknown uid, a gone session, or a timeout.
     pub fn render_screen(&self, uid: &str) -> Option<String> {
         let want_uid = uid.to_string();
-        let reply = self.request(ClientMsg::RenderScreen { uid: uid.to_string() }, move |m| {
-            matches!(m, DaemonMsg::Screen { uid: u, .. } if *u == want_uid)
-        })?;
+        let reply = self.request(
+            ClientMsg::RenderScreen {
+                uid: uid.to_string(),
+            },
+            move |m| matches!(m, DaemonMsg::Screen { uid: u, .. } if *u == want_uid),
+        )?;
         match reply {
             DaemonMsg::Screen { text, .. } => text,
             _ => None,
@@ -335,12 +364,19 @@ impl DaemonSessionManager {
 
     /// Write input to the pane's pty — fire-and-forget.
     pub fn write(&self, uid: &str, data: &str) {
-        let _ = self.send(&ClientMsg::Write { uid: uid.to_string(), data: data.to_string() });
+        let _ = self.send(&ClientMsg::Write {
+            uid: uid.to_string(),
+            data: data.to_string(),
+        });
     }
 
     /// Resize the pane — fire-and-forget.
     pub fn resize(&self, uid: &str, cols: u16, rows: u16) {
-        let _ = self.send(&ClientMsg::Resize { uid: uid.to_string(), cols, rows });
+        let _ = self.send(&ClientMsg::Resize {
+            uid: uid.to_string(),
+            cols,
+            rows,
+        });
     }
 
     /// Kill the pane — fire-and-forget — and forget its shadow locally (the daemon
@@ -349,7 +385,9 @@ impl DaemonSessionManager {
     /// in-process `kill` which removes the session synchronously).
     pub fn kill(&self, uid: &str) {
         self.shadows.lock().unwrap().remove(uid);
-        let _ = self.send(&ClientMsg::Kill { uid: uid.to_string() });
+        let _ = self.send(&ClientMsg::Kill {
+            uid: uid.to_string(),
+        });
     }
 
     /// Kill every pane — fire-and-forget — and clear the local shadow.
@@ -451,7 +489,10 @@ fn apply_event_to_shadow(shadows: &Mutex<HashMap<String, Shadow>>, ev: &SessionE
 #[cfg(unix)]
 fn epoch_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Build the wire [`SpawnSpec`] from [`SpawnOptions`]: PIN the uid (the GUI owns it),
@@ -505,13 +546,20 @@ fn probe_proto_version(stream: &std::os::unix::net::UnixStream) -> io::Result<Pr
     // or the manager's reader thread would spuriously time out every 2s. We clear it on every
     // path below (`r.set_read_timeout(None)` on the shared socket).
     r.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let send = write_frame(&mut w, &ClientMsg::Hello { proto_ver: PROTO_VER });
+    let send = write_frame(
+        &mut w,
+        &ClientMsg::Hello {
+            proto_ver: PROTO_VER,
+        },
+    );
     let check = match send.and_then(|()| read_frame::<_, DaemonMsg>(&mut r)) {
         Ok(Some(DaemonMsg::Hello { proto_ver, .. })) => {
             if proto_ver == PROTO_VER {
                 ProtoCheck::Match
             } else {
-                ProtoCheck::Mismatch { daemon_ver: proto_ver }
+                ProtoCheck::Mismatch {
+                    daemon_ver: proto_ver,
+                }
             }
         }
         // Any non-Hello reply, EOF, or a (timed-out) read error: don't block launch over an
@@ -557,7 +605,11 @@ fn dbg(msg: &str) {
         return;
     }
     let path = std::env::temp_dir().join("hyperpanes-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "[daemon-client] {msg}");
     }
 }
@@ -713,7 +765,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn env(pairs: &[(&str, &str)]) -> crate::session::spawn::EnvMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -731,10 +786,17 @@ mod tests {
             ..Default::default()
         };
         let spec = spawn_spec_from(opts);
-        assert_eq!(spec.uid.as_deref(), Some("pane-9"), "the GUI's uid is pinned on the wire");
+        assert_eq!(
+            spec.uid.as_deref(),
+            Some("pane-9"),
+            "the GUI's uid is pinned on the wire"
+        );
         assert_eq!(spec.command.as_deref(), Some("ls"));
         assert_eq!(spec.integration_args, vec!["-i".to_string()]);
-        assert_eq!(spec.integration_env.get("HP").map(String::as_str), Some("1"));
+        assert_eq!(
+            spec.integration_env.get("HP").map(String::as_str),
+            Some("1")
+        );
         assert_eq!(spec.control_file.as_deref(), Some("/c.json"));
         // Round-trips back through into_options to the same uid (the daemon honors it).
         assert_eq!(spec.into_options("pane-9".into()).uid, "pane-9");
@@ -742,7 +804,10 @@ mod tests {
 
     #[test]
     fn spawn_spec_from_no_integration_is_a_plain_shell() {
-        let spec = spawn_spec_from(SpawnOptions { uid: "p1".into(), ..Default::default() });
+        let spec = spawn_spec_from(SpawnOptions {
+            uid: "p1".into(),
+            ..Default::default()
+        });
         assert!(spec.integration_args.is_empty());
         assert!(spec.integration_env.is_empty());
         assert!(spec.into_options("p1".into()).integration.is_none());
@@ -757,8 +822,20 @@ mod tests {
     #[test]
     fn data_event_grows_mirror_and_counters() {
         let s = shadows();
-        apply_event_to_shadow(&s, &SessionEvent::Data { uid: "u1".into(), data: "ab".into() });
-        apply_event_to_shadow(&s, &SessionEvent::Data { uid: "u1".into(), data: "😀".into() });
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Data {
+                uid: "u1".into(),
+                data: "ab".into(),
+            },
+        );
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Data {
+                uid: "u1".into(),
+                data: "😀".into(),
+            },
+        );
         let g = s.lock().unwrap();
         let sh = g.get("u1").unwrap();
         assert_eq!(sh.replay.get(), "ab😀");
@@ -769,17 +846,41 @@ mod tests {
     #[test]
     fn cwd_event_updates_shadow_cwd() {
         let s = shadows();
-        apply_event_to_shadow(&s, &SessionEvent::Cwd { uid: "u1".into(), cwd: "/tmp".into() });
-        assert_eq!(s.lock().unwrap().get("u1").unwrap().cwd.as_deref(), Some("/tmp"));
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Cwd {
+                uid: "u1".into(),
+                cwd: "/tmp".into(),
+            },
+        );
+        assert_eq!(
+            s.lock().unwrap().get("u1").unwrap().cwd.as_deref(),
+            Some("/tmp")
+        );
     }
 
     #[test]
     fn exit_event_drops_the_shadow() {
         let s = shadows();
-        apply_event_to_shadow(&s, &SessionEvent::Data { uid: "u1".into(), data: "x".into() });
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Data {
+                uid: "u1".into(),
+                data: "x".into(),
+            },
+        );
         assert!(s.lock().unwrap().contains_key("u1"));
-        apply_event_to_shadow(&s, &SessionEvent::Exit { uid: "u1".into(), code: 0 });
-        assert!(!s.lock().unwrap().contains_key("u1"), "Exit drops the session shadow");
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Exit {
+                uid: "u1".into(),
+                code: 0,
+            },
+        );
+        assert!(
+            !s.lock().unwrap().contains_key("u1"),
+            "Exit drops the session shadow"
+        );
     }
 
     // ---- end-to-end: DaemonSessionManager against a REAL in-process daemon ----
@@ -837,9 +938,7 @@ mod tests {
         cond()
     }
 
-    fn connect_manager(
-        socket: &Path,
-    ) -> (DaemonSessionManager, UnboundedReceiver<SessionEvent>) {
+    fn connect_manager(socket: &Path) -> (DaemonSessionManager, UnboundedReceiver<SessionEvent>) {
         let stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
         let (etx, erx) = unbounded_channel::<SessionEvent>();
         let mgr = DaemonSessionManager::from_stream(stream, etx).expect("manager");
@@ -870,10 +969,15 @@ mod tests {
 
         // Drive a marker; its echo streams back as Data on the GUI channel.
         mgr.write("p1", "echo HELLO_MARKER\n");
-        let data = recv_event_until(&mut rx, Dur::from_secs(10), |e| {
-            matches!(e, SessionEvent::Data { uid, data } if uid == "p1" && data.contains("HELLO_MARKER"))
-        });
-        assert!(data.is_some(), "expected Data{{HELLO_MARKER}} on the GUI channel");
+        let data = recv_event_until(
+            &mut rx,
+            Dur::from_secs(10),
+            |e| matches!(e, SessionEvent::Data { uid, data } if uid == "p1" && data.contains("HELLO_MARKER")),
+        );
+        assert!(
+            data.is_some(),
+            "expected Data{{HELLO_MARKER}} on the GUI channel"
+        );
 
         // replay() returns the client mirror (no round-trip) and includes the output.
         assert!(
@@ -884,8 +988,14 @@ mod tests {
             mgr.replay("p1")
         );
         // output_bytes / last_output_at shadow advanced.
-        assert!(mgr.output_bytes("p1").unwrap_or(0) > 0, "output_bytes shadow advanced");
-        assert!(mgr.last_output_at("p1").is_some(), "last_output_at shadow set");
+        assert!(
+            mgr.output_bytes("p1").unwrap_or(0) > 0,
+            "output_bytes shadow advanced"
+        );
+        assert!(
+            mgr.last_output_at("p1").is_some(),
+            "last_output_at shadow set"
+        );
 
         // kill() drops the shadow synchronously (deliberate kill is silent — no Exit event).
         mgr.kill("p1");
@@ -911,16 +1021,23 @@ mod tests {
         })
         .expect("create");
 
-        let data = recv_event_until(&mut rx, Dur::from_secs(10), |e| {
-            matches!(e, SessionEvent::Data { uid, data } if uid == "q1" && data.contains("hi"))
-        });
+        let data = recv_event_until(
+            &mut rx,
+            Dur::from_secs(10),
+            |e| matches!(e, SessionEvent::Data { uid, data } if uid == "q1" && data.contains("hi")),
+        );
         assert!(data.is_some(), "expected Data{{hi}} on the GUI channel");
 
-        let exit = recv_event_until(&mut rx, Dur::from_secs(10), |e| {
-            matches!(e, SessionEvent::Exit { uid, code } if uid == "q1" && *code == 0)
-        });
+        let exit = recv_event_until(
+            &mut rx,
+            Dur::from_secs(10),
+            |e| matches!(e, SessionEvent::Exit { uid, code } if uid == "q1" && *code == 0),
+        );
         assert!(exit.is_some(), "expected Exit{{0}} on the GUI channel");
-        assert!(wait_until(Dur::from_secs(2), || !mgr.has("q1")), "natural exit drops the shadow");
+        assert!(
+            wait_until(Dur::from_secs(2), || !mgr.has("q1")),
+            "natural exit drops the shadow"
+        );
     }
 
     // render_screen() round-trips to the daemon (a bounded request/response).
@@ -940,16 +1057,22 @@ mod tests {
 
         // Drive a marker and wait for it to stream so the daemon's screen has content.
         mgr.write("p1", "echo SCREEN_MARKER\n");
-        let saw = recv_event_until(&mut rx, Dur::from_secs(10), |e| {
-            matches!(e, SessionEvent::Data { uid, data } if uid == "p1" && data.contains("SCREEN_MARKER"))
-        });
+        let saw = recv_event_until(
+            &mut rx,
+            Dur::from_secs(10),
+            |e| matches!(e, SessionEvent::Data { uid, data } if uid == "p1" && data.contains("SCREEN_MARKER")),
+        );
         assert!(saw.is_some(), "marker should stream");
 
         // render_screen() returns the serialized screen (a real round-trip), containing it.
         let screen = wait_until(Dur::from_secs(3), || {
-            mgr.render_screen("p1").is_some_and(|s| s.contains("SCREEN_MARKER"))
+            mgr.render_screen("p1")
+                .is_some_and(|s| s.contains("SCREEN_MARKER"))
         });
-        assert!(screen, "render_screen should round-trip the screen incl. the marker");
+        assert!(
+            screen,
+            "render_screen should round-trip the screen incl. the marker"
+        );
 
         // An unknown uid renders to None (gone session / never existed).
         assert_eq!(mgr.render_screen("nope"), None);
@@ -992,13 +1115,16 @@ mod tests {
         // and the Attach it issues re-seeds the replay mirror from the daemon's buffer.
         let (mgr2, _rx2) = connect_manager(&socket);
         assert!(
-            wait_until(Dur::from_secs(2), || mgr2.uids().contains(&"surv".to_string())),
+            wait_until(Dur::from_secs(2), || mgr2
+                .uids()
+                .contains(&"surv".to_string())),
             "reconnect: uids() should show the survivor, got {:?}",
             mgr2.uids()
         );
         assert!(
             wait_until(Dur::from_secs(3), || {
-                mgr2.replay("surv").is_some_and(|r| r.contains("SURVIVOR_MARKER"))
+                mgr2.replay("surv")
+                    .is_some_and(|r| r.contains("SURVIVOR_MARKER"))
             }),
             "reconnect: replay() should re-seed from the Attach reply, got {:?}",
             mgr2.replay("surv")
@@ -1042,7 +1168,10 @@ mod tests {
             // A GUI pane would mint this via `mgr.fresh_uid()` (a UUID on the daemon backend);
             // a literal uid is fine for the test — the point is it's PINNED + recorded.
             let uid = mgr1.fresh_uid();
-            assert!(uid.starts_with("pane-"), "daemon fresh_uid is a pane-<uuid>, got {uid}");
+            assert!(
+                uid.starts_with("pane-"),
+                "daemon fresh_uid is a pane-<uuid>, got {uid}"
+            );
             mgr1.create(SpawnOptions {
                 uid: uid.clone(),
                 shell: Some("/bin/sh".into()),
@@ -1073,10 +1202,14 @@ mod tests {
             mgr2.uids()
         );
         let reattach_survivor = mgr2.is_daemon() && mgr2.has(&recorded_uid);
-        assert!(reattach_survivor, "restore would RE-ATTACH the surviving uid (no re-spawn)");
+        assert!(
+            reattach_survivor,
+            "restore would RE-ATTACH the surviving uid (no re-spawn)"
+        );
         assert!(
             wait_until(Dur::from_secs(3), || {
-                mgr2.replay(&recorded_uid).is_some_and(|r| r.contains("REATTACH_MARKER"))
+                mgr2.replay(&recorded_uid)
+                    .is_some_and(|r| r.contains("REATTACH_MARKER"))
             }),
             "re-attach seeds the fresh grid from the survivor's replay, got {:?}",
             mgr2.replay(&recorded_uid)
@@ -1086,7 +1219,10 @@ mod tests {
         //     falls back to a fresh spawn from spec.command/args/shell.
         let dead_uid = "pane-00000000-dead-dead-dead-000000000000";
         let reattach_dead = mgr2.is_daemon() && mgr2.has(dead_uid);
-        assert!(!reattach_dead, "an unknown/dead uid does NOT re-attach → restore re-spawns it");
+        assert!(
+            !reattach_dead,
+            "an unknown/dead uid does NOT re-attach → restore re-spawns it"
+        );
 
         mgr2.kill(&recorded_uid);
     }
@@ -1113,7 +1249,11 @@ mod tests {
         all.extend(batch2.clone());
         all.sort();
         all.dedup();
-        assert_eq!(all.len(), batch1.len() + batch2.len(), "fresh_uid never collides across runs");
+        assert_eq!(
+            all.len(),
+            batch1.len() + batch2.len(),
+            "fresh_uid never collides across runs"
+        );
         drop((runa, runb, _ra, _rb));
 
         // And the same uid a run minted is exactly the one a survivor would be re-attached by:
@@ -1121,13 +1261,14 @@ mod tests {
         // snapshot→reattach relies on).
         let (run_a, mut rx_a) = daemon_manager(&socket);
         let surv = run_a.fresh_uid();
-        run_a.create(SpawnOptions {
-            uid: surv.clone(),
-            shell: Some("/bin/sh".into()),
-            args: Some(vec!["-i".into()]),
-            ..Default::default()
-        })
-        .expect("create");
+        run_a
+            .create(SpawnOptions {
+                uid: surv.clone(),
+                shell: Some("/bin/sh".into()),
+                args: Some(vec!["-i".into()]),
+                ..Default::default()
+            })
+            .expect("create");
         // Drive a marker and wait for its echo so the session is CONFIRMED registered + live
         // daemon-side before we drop (mirrors the reconnect test — without this the daemon may
         // not have finished spawning the pty when ListSessions runs on the next connect).
@@ -1207,8 +1348,14 @@ mod tests {
         };
 
         println!("\n=== keystroke->echo latency ({ITERS} iters, {WARMUP} warmup) ===");
-        println!("  in-process : mean {:>7.1}us  p50 {:>7.1}us  max {:>7.1}us", inproc.0, inproc.1, inproc.2);
-        println!("  daemon     : mean {:>7.1}us  p50 {:>7.1}us  max {:>7.1}us", daemon.0, daemon.1, daemon.2);
+        println!(
+            "  in-process : mean {:>7.1}us  p50 {:>7.1}us  max {:>7.1}us",
+            inproc.0, inproc.1, inproc.2
+        );
+        println!(
+            "  daemon     : mean {:>7.1}us  p50 {:>7.1}us  max {:>7.1}us",
+            daemon.0, daemon.1, daemon.2
+        );
         println!("  daemon overhead (mean): {:+.1}us\n", daemon.0 - inproc.0);
     }
 
@@ -1242,9 +1389,11 @@ mod tests {
             let t0 = Instant::now();
             mgr.write(uid, &format!("echo {marker}\n"));
             // Wait for the echoed marker to come back as Data.
-            let got = recv_event_until(rx, Dur::from_secs(5), |e| {
-                matches!(e, SessionEvent::Data { uid: u, data } if u == uid && data.contains(&marker))
-            });
+            let got = recv_event_until(
+                rx,
+                Dur::from_secs(5),
+                |e| matches!(e, SessionEvent::Data { uid: u, data } if u == uid && data.contains(&marker)),
+            );
             let dt = t0.elapsed();
             assert!(got.is_some(), "echo {marker} timed out");
             if i >= warmup {
@@ -1278,11 +1427,19 @@ mod tests {
         .expect("create request sends");
 
         // The daemon injects an Exit for the uid on spawn failure; the client reflects it.
-        let exit = recv_event_until(&mut rx, Dur::from_secs(5), |e| {
-            matches!(e, SessionEvent::Exit { uid, .. } if uid == "bad")
-        });
-        assert!(exit.is_some(), "a spawn failure should surface as an Exit, not a hang");
-        assert!(wait_until(Dur::from_secs(2), || !mgr.has("bad")), "the failed session is dropped");
+        let exit = recv_event_until(
+            &mut rx,
+            Dur::from_secs(5),
+            |e| matches!(e, SessionEvent::Exit { uid, .. } if uid == "bad"),
+        );
+        assert!(
+            exit.is_some(),
+            "a spawn failure should surface as an Exit, not a hang"
+        );
+        assert!(
+            wait_until(Dur::from_secs(2), || !mgr.has("bad")),
+            "the failed session is dropped"
+        );
     }
 
     // ====================== M3 proto-version handshake + shutdown ======================
@@ -1298,7 +1455,10 @@ mod tests {
 
         let stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect");
         assert!(
-            matches!(probe_proto_version(&stream).expect("probe"), ProtoCheck::Match),
+            matches!(
+                probe_proto_version(&stream).expect("probe"),
+                ProtoCheck::Match
+            ),
             "a same-version daemon must match"
         );
         // Build the manager on the SAME stream (as `new` does after a Match) and drive it —
@@ -1339,7 +1499,10 @@ mod tests {
                 let _ = read_frame::<_, ClientMsg>(&mut conn); // the client's Hello
                 let _ = write_frame(
                     &mut conn,
-                    &DaemonMsg::Hello { proto_ver: PROTO_VER + 1, daemon_pid: 4242 },
+                    &DaemonMsg::Hello {
+                        proto_ver: PROTO_VER + 1,
+                        daemon_pid: 4242,
+                    },
                 );
                 // Keep the connection open briefly so the client reads the reply.
                 std::thread::sleep(Dur::from_millis(200));

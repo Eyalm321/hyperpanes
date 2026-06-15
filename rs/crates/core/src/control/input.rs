@@ -180,20 +180,29 @@ mod tests {
     fn concatenates_a_sequence_of_keys_into_one_byte_string() {
         assert_eq!(
             keys_to_bytes(&["escape", "enter"]),
-            KeysResult::Ok { bytes: "\x1b\r".to_string() }
+            KeysResult::Ok {
+                bytes: "\x1b\r".to_string()
+            }
         );
     }
 
     #[test]
     fn treats_an_empty_list_as_a_valid_no_op_write() {
-        assert_eq!(keys_to_bytes(&[]), KeysResult::Ok { bytes: String::new() });
+        assert_eq!(
+            keys_to_bytes(&[]),
+            KeysResult::Ok {
+                bytes: String::new()
+            }
+        );
     }
 
     #[test]
     fn reports_every_unknown_key_not_just_the_first() {
         assert_eq!(
             keys_to_bytes(&["enter", "nope", "also-bad"]),
-            KeysResult::Err { unknown: vec!["nope".to_string(), "also-bad".to_string()] }
+            KeysResult::Err {
+                unknown: vec!["nope".to_string(), "also-bad".to_string()]
+            }
         );
     }
 }

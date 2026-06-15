@@ -157,13 +157,18 @@ impl AiMemoryStore {
     /// existing record. Stamps `summary_updated_at` whenever the summary is touched.
     /// Stores by the caller-supplied key verbatim (no path canonicalization).
     pub fn upsert_project(&mut self, path: &str, patch: ProjectPatch) -> ProjectMemory {
-        let mut merged = self.data.projects.get(path).cloned().unwrap_or(ProjectMemory {
-            path: path.to_string(),
-            name: String::new(),
-            summary: String::new(),
-            summary_updated_at: 0,
-            timeline: Vec::new(),
-        });
+        let mut merged = self
+            .data
+            .projects
+            .get(path)
+            .cloned()
+            .unwrap_or(ProjectMemory {
+                path: path.to_string(),
+                name: String::new(),
+                summary: String::new(),
+                summary_updated_at: 0,
+                timeline: Vec::new(),
+            });
         if let Some(name) = patch.name {
             merged.name = name;
         }
@@ -265,8 +270,7 @@ impl AiMemoryStore {
             if let Some(parent) = self.file_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let json = serde_json::to_string_pretty(&self.data)
-                .map_err(std::io::Error::other)?;
+            let json = serde_json::to_string_pretty(&self.data).map_err(std::io::Error::other)?;
             std::fs::write(&tmp, json)?;
             std::fs::rename(&tmp, &self.file_path)?;
             Ok(())

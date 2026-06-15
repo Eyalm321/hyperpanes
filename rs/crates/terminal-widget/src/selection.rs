@@ -28,7 +28,11 @@ pub struct Selection {
 impl Selection {
     /// Begin a selection anchored at `anchor` (head starts coincident, not yet dragged).
     pub fn new(anchor: Cell) -> Self {
-        Self { anchor, head: anchor, dragged: false }
+        Self {
+            anchor,
+            head: anchor,
+            dragged: false,
+        }
     }
 
     /// Move the head to `head`; marks the selection `dragged` once it leaves the anchor cell.

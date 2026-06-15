@@ -54,7 +54,10 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/command", post(command))
         .route("/panes/{id}/output", get(output))
         .route("/panes/{id}/input", post(input))
-        .route("/panes/{id}/messages", get(messages_get).post(messages_post))
+        .route(
+            "/panes/{id}/messages",
+            get(messages_get).post(messages_post),
+        )
         .route("/panes/{id}/lock", post(lock_post).delete(lock_delete))
         // ---- work queue (worker-pool phase-2/3) ----
         .route("/queues", get(queues_list))
@@ -74,7 +77,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
 // ---- response helpers ---------------------------------------------------------------------
 
 fn jstatus(code: u16, body: Value) -> Response {
-    (StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), Json(body)).into_response()
+    (
+        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(body),
+    )
+        .into_response()
 }
 
 fn ok_json<T: Serialize>(body: T) -> Response {
@@ -118,12 +125,21 @@ fn find_pane_scoped(
 ) -> Result<FoundPane, Response> {
     let m = shared.model.lock().unwrap();
     match m.coords_of(pane_id) {
-        None => Err(jstatus(404, json!({ "error": "no such pane", "paneId": pane_id }))),
+        None => Err(jstatus(
+            404,
+            json!({ "error": "no such pane", "paneId": pane_id }),
+        )),
         Some(coords) => {
             if !pane_in_scope(scope, &coords) {
-                return Err(jstatus(403, json!({ "error": "pane out of scope", "paneId": pane_id })));
+                return Err(jstatus(
+                    403,
+                    json!({ "error": "pane out of scope", "paneId": pane_id }),
+                ));
             }
-            let uid = m.pane(pane_id).map(|p| p.session_uid.clone()).unwrap_or_default();
+            let uid = m
+                .pane(pane_id)
+                .map(|p| p.session_uid.clone())
+                .unwrap_or_default();
             Ok(FoundPane { uid })
         }
     }
@@ -209,14 +225,25 @@ async fn tokens(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Byt
         .and_then(|b| b.get("ttlMs"))
         .and_then(Value::as_i64)
         .filter(|&t| t > 0);
-    let (token, expires_at) = shared.tokens.lock().unwrap().mint(requested.clone(), ttl, now_ms());
+    let (token, expires_at) = shared
+        .tokens
+        .lock()
+        .unwrap()
+        .mint(requested.clone(), ttl, now_ms());
     let port = shared.port();
     let (port_field, events) = if port != 0 {
         (Some(port), Value::String(events_url(port, &token)))
     } else {
         (None, Value::Null)
     };
-    ok_json(MintOut { ok: true, token, scope: requested, expires_at, port: port_field, events })
+    ok_json(MintOut {
+        ok: true,
+        token,
+        scope: requested,
+        expires_at,
+        port: port_field,
+        events,
+    })
 }
 
 // ---- /panes/{id}/output -------------------------------------------------------------------
@@ -263,7 +290,12 @@ fn pane_status_str(shared: &Arc<Shared>, pane_id: &str) -> &'static str {
         .unwrap_or(PaneStatus::Exited.as_str())
 }
 
-fn build_output_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<String, String>) -> Value {
+fn build_output_body(
+    shared: &Arc<Shared>,
+    pane_id: &str,
+    uid: &str,
+    q: &HashMap<String, String>,
+) -> Value {
     if q.get("mode").map(|m| m == "screen").unwrap_or(false) {
         build_screen_body(shared, pane_id, uid, q)
     } else {
@@ -271,7 +303,12 @@ fn build_output_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap
     }
 }
 
-fn read_output_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<String, String>) -> Value {
+fn read_output_body(
+    shared: &Arc<Shared>,
+    pane_id: &str,
+    uid: &str,
+    q: &HashMap<String, String>,
+) -> Value {
     let raw = shared.sessions.replay(uid).unwrap_or_default();
     let total = shared
         .sessions
@@ -312,8 +349,17 @@ fn read_output_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<
     body
 }
 
-fn build_screen_body(shared: &Arc<Shared>, pane_id: &str, uid: &str, q: &HashMap<String, String>) -> Value {
-    let cursor = shared.sessions.output_bytes(uid).map(|b| b as i64).unwrap_or(0);
+fn build_screen_body(
+    shared: &Arc<Shared>,
+    pane_id: &str,
+    uid: &str,
+    q: &HashMap<String, String>,
+) -> Value {
+    let cursor = shared
+        .sessions
+        .output_bytes(uid)
+        .map(|b| b as i64)
+        .unwrap_or(0);
     match shared.sessions.render_screen(uid) {
         Some(full) => {
             // Prompt detection runs on the FULL screen so a clipping `tail` can't hide a blocked
@@ -357,7 +403,11 @@ async fn wait_for_quiet(
     loop {
         let now = now_ms();
         let last = shared.sessions.last_output_at(uid).map(|t| t as i64);
-        let total = shared.sessions.output_bytes(uid).map(|b| b as i64).unwrap_or(0);
+        let total = shared
+            .sessions
+            .output_bytes(uid)
+            .map(|b| b as i64)
+            .unwrap_or(0);
         match wait_decision(last, total, since, now, start, settle_ms, timeout_ms) {
             WaitVerdict::Settled => return (true, false),
             WaitVerdict::Timeout => return (false, true),
@@ -392,7 +442,10 @@ async fn input(
     let has_data = b.get("data").and_then(Value::as_str).is_some();
     let has_keys = b.get("keys").map(Value::is_array).unwrap_or(false);
     if !has_data && !has_keys {
-        return jstatus(400, json!({ "error": "expected { data: string } or { keys: string[] }" }));
+        return jstatus(
+            400,
+            json!({ "error": "expected { data: string } or { keys: string[] }" }),
+        );
     }
     // Advisory write lock (H): if someone else holds it, refuse.
     let owner = b.get("owner").and_then(Value::as_str);
@@ -408,7 +461,11 @@ async fn input(
         let keys: Vec<String> = b
             .get("keys")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         return match keys_to_bytes(&refs) {
@@ -416,15 +473,18 @@ async fn input(
                 shared.sessions.write(&uid, &bytes);
                 jstatus(200, json!({ "ok": true, "keys": keys }))
             }
-            KeysResult::Err { unknown } => {
-                jstatus(400, json!({ "error": "unknown key(s)", "unknown": unknown }))
-            }
+            KeysResult::Err { unknown } => jstatus(
+                400,
+                json!({ "error": "unknown key(s)", "unknown": unknown }),
+            ),
         };
     }
 
     let data = b.get("data").and_then(Value::as_str).unwrap_or("");
     let platform = if cfg!(windows) { "win32" } else { "linux" };
-    shared.sessions.write(&uid, &submit_newlines(data, platform));
+    shared
+        .sessions
+        .write(&uid, &submit_newlines(data, platform));
     // submit (A1): a bare CR as a SEPARATE pty write a beat later, so bracketed-paste TUIs read it
     // as Enter, not pasted content.
     if b.get("submit").and_then(Value::as_bool) == Some(true) {
@@ -468,7 +528,10 @@ async fn messages_get(
     if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
         return e;
     }
-    let after = non_neg_num(q.get("after")).filter(|&a| a > 0).map(|a| a as u64).unwrap_or(0);
+    let after = non_neg_num(q.get("after"))
+        .filter(|&a| a > 0)
+        .map(|a| a as u64)
+        .unwrap_or(0);
     let inbox = shared.inbox.lock().unwrap();
     let out = MessagesOut {
         messages: inbox.read(&id, after),
@@ -493,17 +556,30 @@ async fn messages_post(
         return e;
     }
     let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let from = b.get("from").and_then(Value::as_str).unwrap_or("unknown").to_string();
+    let from = b
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
     let msg_body = match b.get("body").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None => return jstatus(400, json!({ "error": "expected { from?, body: string }" })),
     };
-    let msg = shared.inbox.lock().unwrap().post(&id, &from, &msg_body, now_ms());
+    let msg = shared
+        .inbox
+        .lock()
+        .unwrap()
+        .post(&id, &from, &msg_body, now_ms());
     // Nudge live, in-scope clients (the durable read remains the source of truth).
     let coords = shared.model.lock().unwrap().coords_of(&id);
     shared.events.broadcast_for_pane(
         coords.as_ref(),
-        &ControlEvent::Message { to: id, from, seq: msg.seq, body: msg_body },
+        &ControlEvent::Message {
+            to: id,
+            from,
+            seq: msg.seq,
+            body: msg_body,
+        },
     );
     jstatus(200, json!({ "ok": true, "seq": msg.seq }))
 }
@@ -526,14 +602,33 @@ async fn lock_post(
     let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let owner = match b.get("owner").and_then(Value::as_str) {
         Some(o) => o,
-        None => return jstatus(400, json!({ "error": "expected { owner: string, ttlMs? }" })),
+        None => {
+            return jstatus(
+                400,
+                json!({ "error": "expected { owner: string, ttlMs? }" }),
+            )
+        }
     };
-    let ttl = b.get("ttlMs").and_then(Value::as_i64).filter(|&t| t > 0).unwrap_or(30_000);
-    let r = shared.locks.lock().unwrap().acquire(&id, owner, now_ms(), ttl);
+    let ttl = b
+        .get("ttlMs")
+        .and_then(Value::as_i64)
+        .filter(|&t| t > 0)
+        .unwrap_or(30_000);
+    let r = shared
+        .locks
+        .lock()
+        .unwrap()
+        .acquire(&id, owner, now_ms(), ttl);
     if r.ok {
-        jstatus(200, json!({ "ok": true, "owner": r.owner, "expiresAt": r.expires_at }))
+        jstatus(
+            200,
+            json!({ "ok": true, "owner": r.owner, "expiresAt": r.expires_at }),
+        )
     } else {
-        jstatus(423, json!({ "ok": false, "owner": r.owner, "expiresAt": r.expires_at, "error": "held" }))
+        jstatus(
+            423,
+            json!({ "ok": false, "owner": r.owner, "expiresAt": r.expires_at, "error": "held" }),
+        )
     }
 }
 
@@ -606,15 +701,15 @@ struct QueuesOut {
 /// Map a lease-guarded outcome (`ack`/`nack`/`extend`) to the byte-exact response: the
 /// `ok_body` closure builds the 200 body from the resulting task; `Conflict → 409` (stale
 /// `fencingToken`); `NotFound → 404`.
-fn lease_response(outcome: LeaseOutcome, id: &str, ok_body: impl FnOnce(&Task) -> Value) -> Response {
+fn lease_response(
+    outcome: LeaseOutcome,
+    id: &str,
+    ok_body: impl FnOnce(&Task) -> Value,
+) -> Response {
     match outcome {
         LeaseOutcome::Ok(task) => jstatus(200, ok_body(&task)),
-        LeaseOutcome::Conflict => {
-            jstatus(409, json!({ "error": "stale lease", "taskId": id }))
-        }
-        LeaseOutcome::NotFound => {
-            jstatus(404, json!({ "error": "no such task", "taskId": id }))
-        }
+        LeaseOutcome::Conflict => jstatus(409, json!({ "error": "stale lease", "taskId": id })),
+        LeaseOutcome::NotFound => jstatus(404, json!({ "error": "no such task", "taskId": id })),
     }
 }
 
@@ -623,7 +718,10 @@ fn queue_scope_gate(scope: Option<&Scope>, queue: &str) -> Option<Response> {
     if queue_in_scope(scope, queue) {
         None
     } else {
-        Some(jstatus(403, json!({ "error": "queue out of scope", "queue": queue })))
+        Some(jstatus(
+            403,
+            json!({ "error": "queue out of scope", "queue": queue }),
+        ))
     }
 }
 
@@ -661,10 +759,18 @@ async fn task_enqueue(
     if let Some(p) = b.get("priority").and_then(Value::as_i64) {
         opts.priority = p;
     }
-    if let Some(m) = b.get("maxAttempts").and_then(Value::as_i64).filter(|&m| m > 0) {
+    if let Some(m) = b
+        .get("maxAttempts")
+        .and_then(Value::as_i64)
+        .filter(|&m| m > 0)
+    {
         opts.max_attempts = m as u32;
     }
-    if let Some(v) = b.get("visibilityTimeoutMs").and_then(Value::as_i64).filter(|&v| v > 0) {
+    if let Some(v) = b
+        .get("visibilityTimeoutMs")
+        .and_then(Value::as_i64)
+        .filter(|&v| v > 0)
+    {
         opts.visibility_timeout_ms = v;
     }
     let now = now_ms();
@@ -677,8 +783,16 @@ async fn task_enqueue(
     if let Some(k) = b.get("dedupeKey").and_then(Value::as_str) {
         opts.dedupe_key = Some(k.to_string());
     }
-    let task = shared.work.lock().unwrap().enqueue(&queue, &payload, opts, now);
-    ok_json(EnqueueOut { ok: true, id: task.id, seq: task.seq })
+    let task = shared
+        .work
+        .lock()
+        .unwrap()
+        .enqueue(&queue, &payload, opts, now);
+    ok_json(EnqueueOut {
+        ok: true,
+        id: task.id,
+        seq: task.seq,
+    })
 }
 
 // GET /queues/{queue}/tasks — list/inspect (cursor `after`, optional `state`, `limit`)
@@ -695,7 +809,10 @@ async fn tasks_list(
     if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
         return e;
     }
-    let after = non_neg_num(q.get("after")).filter(|&a| a > 0).map(|a| a as u64).unwrap_or(0);
+    let after = non_neg_num(q.get("after"))
+        .filter(|&a| a > 0)
+        .map(|a| a as u64)
+        .unwrap_or(0);
     let limit = pos_num(q.get("limit")).unwrap_or(100).min(1000) as usize;
     // Only a state string that round-trips is a real filter (an unknown value is ignored,
     // never silently coerced to `queued`).
@@ -707,7 +824,12 @@ async fn tasks_list(
     let tasks = wq.list(&queue, ListFilter { state }, after, limit);
     let counts = wq.counts(&queue);
     let latest_seq = tasks.iter().map(|t| t.seq).max().unwrap_or(after);
-    ok_json(TasksListOut { queue, tasks, counts, latest_seq })
+    ok_json(TasksListOut {
+        queue,
+        tasks,
+        counts,
+        latest_seq,
+    })
 }
 
 // POST /queues/{queue}/claim — claim the next task(s) (competing consumers)
@@ -725,14 +847,25 @@ async fn task_claim(
         return e;
     }
     let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let worker = match b.get("worker").and_then(Value::as_str).filter(|w| !w.is_empty()) {
+    let worker = match b
+        .get("worker")
+        .and_then(Value::as_str)
+        .filter(|w| !w.is_empty())
+    {
         Some(w) => w.to_string(),
         None => {
-            return jstatus(400, json!({ "error": "expected { worker: string, leaseMs?, count? }" }))
+            return jstatus(
+                400,
+                json!({ "error": "expected { worker: string, leaseMs?, count? }" }),
+            )
         }
     };
     // `leaseMs <= 0` ⇒ the queue falls back to the task's own visibility timeout.
-    let lease_ms = b.get("leaseMs").and_then(Value::as_i64).filter(|&v| v > 0).unwrap_or(0);
+    let lease_ms = b
+        .get("leaseMs")
+        .and_then(Value::as_i64)
+        .filter(|&v| v > 0)
+        .unwrap_or(0);
     let count = b
         .get("count")
         .and_then(Value::as_i64)
@@ -832,13 +965,21 @@ fn lease_op_preamble(
     let token = match b.get("fencingToken").and_then(Value::as_u64) {
         Some(t) => t,
         None => {
-            return Err(jstatus(400, json!({ "error": "expected { fencingToken: number, … }" })))
+            return Err(jstatus(
+                400,
+                json!({ "error": "expected { fencingToken: number, … }" }),
+            ))
         }
     };
     // Resolve the task → its queue for the scope gate; 404 if it's gone.
     let queue = match shared.work.lock().unwrap().get(id) {
         Some(t) => t.queue,
-        None => return Err(jstatus(404, json!({ "error": "no such task", "taskId": id }))),
+        None => {
+            return Err(jstatus(
+                404,
+                json!({ "error": "no such task", "taskId": id }),
+            ))
+        }
     };
     if let Some(e) = queue_scope_gate(info.scope.as_ref(), &queue) {
         return Err(e);
@@ -862,8 +1003,16 @@ async fn task_ack(
         Err(e) => return e,
     };
     let result = b.get("result").and_then(Value::as_str);
-    let outcome = shared.work.lock().unwrap().ack(&id, token, result, now_ms());
-    lease_response(outcome, &id, |t| json!({ "ok": true, "state": t.state.as_str() }))
+    let outcome = shared
+        .work
+        .lock()
+        .unwrap()
+        .ack(&id, token, result, now_ms());
+    lease_response(
+        outcome,
+        &id,
+        |t| json!({ "ok": true, "state": t.state.as_str() }),
+    )
 }
 
 // POST /tasks/{id}/nack — fail/retry a claimed task (lease-guarded)
@@ -888,7 +1037,11 @@ async fn task_nack(
         delay_ms: b.get("delayMs").and_then(Value::as_i64),
     };
     let outcome = shared.work.lock().unwrap().nack(&id, token, opts, now_ms());
-    lease_response(outcome, &id, |t| json!({ "ok": true, "state": t.state.as_str() }))
+    lease_response(
+        outcome,
+        &id,
+        |t| json!({ "ok": true, "state": t.state.as_str() }),
+    )
 }
 
 // POST /tasks/{id}/extend — heartbeat: extend the lease (lease-guarded)
@@ -909,13 +1062,22 @@ async fn task_extend(
     let extra_ms = match b.get("extraMs").and_then(Value::as_i64).filter(|&x| x > 0) {
         Some(x) => x,
         None => {
-            return jstatus(400, json!({ "error": "expected { fencingToken: number, extraMs: number }" }))
+            return jstatus(
+                400,
+                json!({ "error": "expected { fencingToken: number, extraMs: number }" }),
+            )
         }
     };
-    let outcome = shared.work.lock().unwrap().extend(&id, token, extra_ms, now_ms());
-    lease_response(outcome, &id, |t| {
-        json!({ "ok": true, "visibilityDeadline": t.visibility_deadline })
-    })
+    let outcome = shared
+        .work
+        .lock()
+        .unwrap()
+        .extend(&id, token, extra_ms, now_ms());
+    lease_response(
+        outcome,
+        &id,
+        |t| json!({ "ok": true, "visibilityDeadline": t.visibility_deadline }),
+    )
 }
 
 // ---- /command -----------------------------------------------------------------------------
@@ -929,7 +1091,13 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
     let control_file = shared.control_file.to_str().map(str::to_string);
     let result = {
         let mut m = shared.model.lock().unwrap();
-        dispatch::handle_command(&mut m, &shared.sessions, control_file.as_deref(), info.scope.as_ref(), &cmd)
+        dispatch::handle_command(
+            &mut m,
+            &shared.sessions,
+            control_file.as_deref(),
+            info.scope.as_ref(),
+            &cmd,
+        )
     };
     // Phase-5: keep supervisor policies in lockstep with pane meta (setMeta flips
     // hp.supervise; newPane carries meta; closePane removes a pane). Cheap + idempotent.
@@ -950,7 +1118,11 @@ async fn events_ws(
 ) -> Response {
     // Token from the `?token=` query (WS clients can't set Authorization reliably) or a Bearer header.
     let token = q.get("token").cloned().or_else(|| bearer_header(&headers));
-    let info = shared.tokens.lock().unwrap().resolve(token.as_deref(), now_ms());
+    let info = shared
+        .tokens
+        .lock()
+        .unwrap()
+        .resolve(token.as_deref(), now_ms());
     let Some(info) = info else {
         return (StatusCode::UNAUTHORIZED, "").into_response();
     };
@@ -964,7 +1136,10 @@ async fn handle_ws(shared: Arc<Shared>, mut socket: WebSocket, scope: Option<Sco
     // Greet first (this frame is queued ahead of any fan-out).
     shared.events.send_to(
         id,
-        &ControlEvent::Hello { pid: shared.pid, version: shared.version.clone() },
+        &ControlEvent::Hello {
+            pid: shared.pid,
+            version: shared.version.clone(),
+        },
     );
     loop {
         tokio::select! {
@@ -1072,16 +1247,27 @@ mod golden {
         shared.model.lock().unwrap().add_window(WindowInfo {
             window_id: 1,
             active_tab_id: Some("t1".into()),
-            tabs: vec![TabInfo { id: "t1".into(), title: "Tab 1".into(), layout: "auto".into(), panes: vec![] }],
+            tabs: vec![TabInfo {
+                id: "t1".into(),
+                title: "Tab 1".into(),
+                layout: "auto".into(),
+                panes: vec![],
+            }],
         });
         let token = "tok-master".to_string();
         shared.tokens.lock().unwrap().set_master(token.clone());
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         shared.port.store(port, Ordering::SeqCst);
         let app = router(Arc::clone(&shared));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Server { shared, base: format!("http://127.0.0.1:{port}"), token }
+        Server {
+            shared,
+            base: format!("http://127.0.0.1:{port}"),
+            token,
+        }
     }
 
     fn pane(id: &str, uid: &str) -> PaneInfo {
@@ -1119,14 +1305,20 @@ mod golden {
         let pid = std::process::id();
         assert_eq!(
             body,
-            format!(r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true}}"#)
+            format!(
+                r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true}}"#
+            )
         );
     }
 
     #[tokio::test]
     async fn health_needs_no_auth() {
         let s = boot(false).await;
-        let r = client().get(format!("{}/health", s.base)).send().await.unwrap();
+        let r = client()
+            .get(format!("{}/health", s.base))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status().as_u16(), 200);
         assert!(r.text().await.unwrap().contains(r#""allowInput":false"#));
     }
@@ -1150,7 +1342,11 @@ mod golden {
     #[tokio::test]
     async fn state_with_pane_omits_unset_optionals_and_keeps_field_order() {
         let s = boot(true).await;
-        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
         let body = client()
             .get(format!("{}/state", s.base))
             .header("authorization", format!("Bearer {}", s.token))
@@ -1169,7 +1365,11 @@ mod golden {
     #[tokio::test]
     async fn unauthorized_is_401_exact() {
         let s = boot(true).await;
-        let r = client().get(format!("{}/state", s.base)).send().await.unwrap();
+        let r = client()
+            .get(format!("{}/state", s.base))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(r.status().as_u16(), 401);
         assert_eq!(r.text().await.unwrap(), r#"{"error":"unauthorized"}"#);
     }
@@ -1184,7 +1384,10 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(r.status().as_u16(), 404);
-        assert_eq!(r.text().await.unwrap(), r#"{"error":"no such pane","paneId":"ghost"}"#);
+        assert_eq!(
+            r.text().await.unwrap(),
+            r#"{"error":"no such pane","paneId":"ghost"}"#
+        );
     }
 
     #[tokio::test]
@@ -1197,13 +1400,20 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(r.status().as_u16(), 404);
-        assert_eq!(r.text().await.unwrap(), r#"{"error":"not found","path":"/nope"}"#);
+        assert_eq!(
+            r.text().await.unwrap(),
+            r#"{"error":"not found","path":"/nope"}"#
+        );
     }
 
     #[tokio::test]
     async fn output_of_a_sessionless_pane_is_byte_exact() {
         let s = boot(true).await;
-        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
         let r = client()
             .get(format!("{}/panes/p1/output", s.base))
             .header("authorization", format!("Bearer {}", s.token))
@@ -1221,7 +1431,11 @@ mod golden {
     #[tokio::test]
     async fn input_blocked_when_allow_input_off_is_403() {
         let s = boot(false).await;
-        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
         let r = client()
             .post(format!("{}/panes/p1/input", s.base))
             .header("authorization", format!("Bearer {}", s.token))
@@ -1237,7 +1451,11 @@ mod golden {
     #[tokio::test]
     async fn messages_post_then_get_roundtrip() {
         let s = boot(true).await;
-        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
         let post = client()
             .post(format!("{}/panes/p1/messages", s.base))
             .header("authorization", format!("Bearer {}", s.token))
@@ -1271,7 +1489,11 @@ mod golden {
     #[tokio::test]
     async fn lock_acquire_then_nonowner_input_is_423() {
         let s = boot(true).await;
-        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
         let lock: serde_json::Value = client()
             .post(format!("{}/panes/p1/lock", s.base))
             .header("authorization", format!("Bearer {}", s.token))
@@ -1296,13 +1518,20 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(blocked.status().as_u16(), 423);
-        assert_eq!(blocked.text().await.unwrap(), r#"{"error":"pane locked","owner":"mgrA"}"#);
+        assert_eq!(
+            blocked.text().await.unwrap(),
+            r#"{"error":"pane locked","owner":"mgrA"}"#
+        );
     }
 
     #[tokio::test]
     async fn tokens_mint_and_no_escalation() {
         let s = boot(true).await;
-        s.shared.model.lock().unwrap().insert_pane(1, pane("p1", "u1"));
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
         // Master mints a pane-scoped token.
         let minted: serde_json::Value = client()
             .post(format!("{}/tokens", s.base))
@@ -1319,7 +1548,10 @@ mod golden {
         let scoped = minted["token"].as_str().unwrap().to_string();
         assert_eq!(minted["token"].as_str().unwrap().len(), 64);
         assert_eq!(minted["scope"], serde_json::json!({ "paneIds": ["p1"] }));
-        assert!(minted["events"].as_str().unwrap().contains("/events?token="));
+        assert!(minted["events"]
+            .as_str()
+            .unwrap()
+            .contains("/events?token="));
         // The scoped token cannot escalate to the whole window → 403.
         let esc = client()
             .post(format!("{}/tokens", s.base))
@@ -1330,7 +1562,11 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(esc.status().as_u16(), 403);
-        assert!(esc.text().await.unwrap().contains("outside the minting token's scope"));
+        assert!(esc
+            .text()
+            .await
+            .unwrap()
+            .contains("outside the minting token's scope"));
     }
 
     #[tokio::test]
@@ -1340,7 +1576,9 @@ mod golden {
             .post(format!("{}/command", s.base))
             .header("authorization", format!("Bearer {}", s.token))
             .header("content-type", "application/json")
-            .body(r#"{"type":"newPane","windowId":1,"pane":{"label":"worker","command":"echo hi"}}"#)
+            .body(
+                r#"{"type":"newPane","windowId":1,"pane":{"label":"worker","command":"echo hi"}}"#,
+            )
             .send()
             .await
             .unwrap()
@@ -1388,11 +1626,16 @@ mod golden {
 
     /// Enqueue one task into `queue` and claim it as `worker`; return `(id, fencingToken)`.
     async fn enqueue_and_claim(s: &Server, queue: &str, worker: &str) -> (String, u64) {
-        let enq: Value = post(s, &format!("/queues/{queue}/tasks"), &s.token, r#"{"payload":"{}"}"#)
-            .await
-            .json()
-            .await
-            .unwrap();
+        let enq: Value = post(
+            s,
+            &format!("/queues/{queue}/tasks"),
+            &s.token,
+            r#"{"payload":"{}"}"#,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
         let id = enq["id"].as_str().unwrap().to_string();
         let claim: Value = post(
             s,
@@ -1567,11 +1810,16 @@ mod golden {
     async fn queue_scoped_token_is_gated_to_its_queue() {
         let s = boot(true).await;
         // master mints a token scoped to queue "build" only
-        let minted: Value = post(&s, "/tokens", &s.token, r#"{"scope":{"queueIds":["build"]}}"#)
-            .await
-            .json()
-            .await
-            .unwrap();
+        let minted: Value = post(
+            &s,
+            "/tokens",
+            &s.token,
+            r#"{"scope":{"queueIds":["build"]}}"#,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
         assert_eq!(minted["ok"], json!(true));
         assert_eq!(minted["scope"], json!({ "queueIds": ["build"] }));
         let scoped = minted["token"].as_str().unwrap().to_string();

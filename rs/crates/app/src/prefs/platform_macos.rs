@@ -66,7 +66,9 @@ pub fn font_dirs() -> Vec<std::path::PathBuf> {
     dirs.push(std::path::PathBuf::from("/Library/Fonts"));
     dirs.push(std::path::PathBuf::from("/System/Library/Fonts"));
     // Where the classic cross-platform fonts (Courier New, etc.) live on modern macOS.
-    dirs.push(std::path::PathBuf::from("/System/Library/Fonts/Supplemental"));
+    dirs.push(std::path::PathBuf::from(
+        "/System/Library/Fonts/Supplemental",
+    ));
     dirs.push(super::bundled_font_dir());
     dirs
 }
@@ -87,7 +89,9 @@ mod tests {
     fn font_dirs_end_with_the_bundled_dir() {
         let dirs = font_dirs();
         assert_eq!(dirs.last(), Some(&super::super::bundled_font_dir()));
-        assert!(dirs.iter().any(|d| d == std::path::Path::new("/System/Library/Fonts")));
+        assert!(dirs
+            .iter()
+            .any(|d| d == std::path::Path::new("/System/Library/Fonts")));
     }
 
     #[test]
@@ -109,6 +113,9 @@ mod tests {
         // Monaco always ships with macOS, so the empty "System default" value must
         // resolve to an actually-existing file on any Mac.
         let p = super::super::resolve_or_default("");
-        assert!(std::path::Path::new(&p).exists(), "unresolved default font: {p}");
+        assert!(
+            std::path::Path::new(&p).exists(),
+            "unresolved default font: {p}"
+        );
     }
 }

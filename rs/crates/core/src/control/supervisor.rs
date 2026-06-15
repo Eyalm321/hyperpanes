@@ -82,7 +82,10 @@ impl Policy {
     pub fn from_meta(meta: &BTreeMap<String, String>) -> Policy {
         let mut p = Policy::default();
         if let Some(v) = meta.get("hp.supervise") {
-            p.enabled = matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes");
+            p.enabled = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "on" | "true" | "1" | "yes"
+            );
         }
         if let Some(v) = meta.get("hp.restartOn") {
             p.restart_on = match v.trim().to_ascii_lowercase().as_str() {
@@ -92,18 +95,30 @@ impl Policy {
             };
         }
         if let Some(v) = meta.get("hp.successCodes") {
-            let codes: Vec<i32> = v.split(',').filter_map(|s| s.trim().parse::<i32>().ok()).collect();
+            let codes: Vec<i32> = v
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+                .collect();
             if !codes.is_empty() {
                 p.success_codes = codes;
             }
         }
-        if let Some(v) = meta.get("hp.maxRetries").and_then(|v| v.trim().parse::<u32>().ok()) {
+        if let Some(v) = meta
+            .get("hp.maxRetries")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+        {
             p.max_retries = v;
         }
-        if let Some(v) = meta.get("hp.backoffMs").and_then(|v| v.trim().parse::<u64>().ok()) {
+        if let Some(v) = meta
+            .get("hp.backoffMs")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
             p.backoff_ms = v;
         }
-        if let Some(v) = meta.get("hp.backoffCapMs").and_then(|v| v.trim().parse::<u64>().ok()) {
+        if let Some(v) = meta
+            .get("hp.backoffCapMs")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
             p.backoff_cap_ms = v;
         }
         if let Some(v) = meta.get("hp.backoff") {
@@ -147,7 +162,12 @@ pub enum Decision {
     Exhausted { attempt: u32, max: u32, code: i32 },
     /// Restart after `delay_ms`. `attempt` is 1-based (the Nth restart). The caller
     /// schedules the respawn and, on success, calls [`Supervisor::record_restart`].
-    Restart { attempt: u32, max: u32, delay_ms: u64, code: i32 },
+    Restart {
+        attempt: u32,
+        max: u32,
+        delay_ms: u64,
+        code: i32,
+    },
 }
 
 /// Per-pane supervision state (the ledger entry). The full spawn recipe lives in the
@@ -173,10 +193,13 @@ impl Supervisor {
     /// Register / update a pane's policy (called at spawn and on `setMeta`). A disabled
     /// policy is still recorded so a later `setMeta` enabling it starts from a clean count.
     pub fn set_policy(&mut self, pane_id: &str, policy: Policy) {
-        let entry = self.panes.entry(pane_id.to_string()).or_insert_with(|| Entry {
-            policy: policy.clone(),
-            retries_used: 0,
-        });
+        let entry = self
+            .panes
+            .entry(pane_id.to_string())
+            .or_insert_with(|| Entry {
+                policy: policy.clone(),
+                retries_used: 0,
+            });
         entry.policy = policy;
     }
 
@@ -222,13 +245,21 @@ impl Supervisor {
                 if p.is_success(code) {
                     Decision::Completed { code }
                 } else {
-                    Decision::Exhausted { attempt: e.retries_used, max: p.max_retries, code }
+                    Decision::Exhausted {
+                        attempt: e.retries_used,
+                        max: p.max_retries,
+                        code,
+                    }
                 }
             }
             RestartOn::Failure if p.is_success(code) => Decision::Completed { code },
             RestartOn::Failure | RestartOn::Always => {
                 if e.retries_used >= p.max_retries {
-                    Decision::Exhausted { attempt: e.retries_used, max: p.max_retries, code }
+                    Decision::Exhausted {
+                        attempt: e.retries_used,
+                        max: p.max_retries,
+                        code,
+                    }
                 } else {
                     Decision::Restart {
                         attempt: e.retries_used + 1,
@@ -264,7 +295,10 @@ mod tests {
     use super::*;
 
     fn meta(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn enabled_policy() -> Policy {
@@ -318,13 +352,17 @@ mod tests {
         assert_eq!(p.delay_for(3), 4000);
         assert_eq!(p.delay_for(6), 30_000); // 500<<6=32000 -> capped to 30000
         assert_eq!(p.delay_for(10), 30_000); // capped
-        // Huge attempt must not overflow/panic — saturates to the cap.
+                                             // Huge attempt must not overflow/panic — saturates to the cap.
         assert_eq!(p.delay_for(1000), 30_000);
     }
 
     #[test]
     fn fixed_backoff_is_constant() {
-        let p = Policy { backoff_ms: 250, backoff: Backoff::Fixed, ..Policy::default() };
+        let p = Policy {
+            backoff_ms: 250,
+            backoff: Backoff::Fixed,
+            ..Policy::default()
+        };
         assert_eq!(p.delay_for(0), 250);
         assert_eq!(p.delay_for(5), 250);
     }
@@ -350,24 +388,35 @@ mod tests {
     fn crash_is_restarted_with_backoff() {
         let mut s = Supervisor::new();
         s.set_policy("p1", enabled_policy()); // base 500, exp
-        // First crash → attempt 1, delay 500 (500 << 0).
+                                              // First crash → attempt 1, delay 500 (500 << 0).
         assert_eq!(
             s.on_exit("p1", 1),
-            Decision::Restart { attempt: 1, max: 5, delay_ms: 500, code: 1 }
+            Decision::Restart {
+                attempt: 1,
+                max: 5,
+                delay_ms: 500,
+                code: 1
+            }
         );
     }
 
     #[test]
     fn restart_on_always_restarts_even_on_clean_exit() {
         let mut s = Supervisor::new();
-        s.set_policy("p1", Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.restartOn", "always")])));
+        s.set_policy(
+            "p1",
+            Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.restartOn", "always")])),
+        );
         assert!(matches!(s.on_exit("p1", 0), Decision::Restart { .. }));
     }
 
     #[test]
     fn restart_on_never_completes_clean_and_exhausts_crash() {
         let mut s = Supervisor::new();
-        s.set_policy("p1", Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.restartOn", "never")])));
+        s.set_policy(
+            "p1",
+            Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.restartOn", "never")])),
+        );
         assert_eq!(s.on_exit("p1", 0), Decision::Completed { code: 0 });
         assert!(matches!(s.on_exit("p1", 9), Decision::Exhausted { .. }));
     }
@@ -375,7 +424,10 @@ mod tests {
     #[test]
     fn success_codes_list_is_respected() {
         let mut s = Supervisor::new();
-        s.set_policy("p1", Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.successCodes", "0,2")])));
+        s.set_policy(
+            "p1",
+            Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.successCodes", "0,2")])),
+        );
         // 2 is a "success" → completion, not a restart.
         assert_eq!(s.on_exit("p1", 2), Decision::Completed { code: 2 });
         // 1 is not → restart.
@@ -389,24 +441,42 @@ mod tests {
         let mut s = Supervisor::new();
         s.set_policy(
             "p1",
-            Policy::from_meta(&meta(&[("hp.supervise", "on"), ("hp.maxRetries", "2"), ("hp.backoffMs", "10")])),
+            Policy::from_meta(&meta(&[
+                ("hp.supervise", "on"),
+                ("hp.maxRetries", "2"),
+                ("hp.backoffMs", "10"),
+            ])),
         );
         // Crash 1: attempt 1, delay 10<<0=10. Caller respawns → record.
         assert_eq!(
             s.on_exit("p1", 1),
-            Decision::Restart { attempt: 1, max: 2, delay_ms: 10, code: 1 }
+            Decision::Restart {
+                attempt: 1,
+                max: 2,
+                delay_ms: 10,
+                code: 1
+            }
         );
         assert_eq!(s.record_restart("p1"), 1);
         // Crash 2: attempt 2, delay 10<<1=20.
         assert_eq!(
             s.on_exit("p1", 1),
-            Decision::Restart { attempt: 2, max: 2, delay_ms: 20, code: 1 }
+            Decision::Restart {
+                attempt: 2,
+                max: 2,
+                delay_ms: 20,
+                code: 1
+            }
         );
         assert_eq!(s.record_restart("p1"), 2);
         // Crash 3: retries_used (2) >= max (2) → exhausted.
         assert_eq!(
             s.on_exit("p1", 1),
-            Decision::Exhausted { attempt: 2, max: 2, code: 1 }
+            Decision::Exhausted {
+                attempt: 2,
+                max: 2,
+                code: 1
+            }
         );
     }
 

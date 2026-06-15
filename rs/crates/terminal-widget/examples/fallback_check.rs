@@ -82,13 +82,23 @@ fn main() -> anyhow::Result<()> {
 
     // BEFORE: primary-only (font_id 0, primary gid → .notdef where unmapped).
     for (i, &gid) in primary_gids.iter().enumerate() {
-        let key = GlyphKey { font_id: 0, gid, bold: false, italic: false };
+        let key = GlyphKey {
+            font_id: 0,
+            gid,
+            bold: false,
+            italic: false,
+        };
         blit(&mut font, key, &mut buf, w, h, i as u32 * cw, 0);
     }
     // AFTER: the real fallback chain.
     for (i, &c) in line.iter().enumerate() {
         let (font_id, gid) = font.resolve(c);
-        let key = GlyphKey { font_id, gid, bold: false, italic: false };
+        let key = GlyphKey {
+            font_id,
+            gid,
+            bold: false,
+            italic: false,
+        };
         blit(&mut font, key, &mut buf, w, h, i as u32 * cw, ch + GAP);
     }
 

@@ -171,7 +171,11 @@ pub fn compute_tiles(
             let rows = ((n as f64) / (cols as f64)).ceil() as usize;
             for i in 0..n {
                 let r = i / cols;
-                let items_in_row = if r < rows - 1 { cols } else { n - cols * (rows - 1) };
+                let items_in_row = if r < rows - 1 {
+                    cols
+                } else {
+                    n - cols * (rows - 1)
+                };
                 let c = i - r * cols;
                 tiles.push(Tile {
                     index: i,

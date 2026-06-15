@@ -15,9 +15,7 @@
 //!
 //! Run: `cargo run --example cursor_underline_check` → writes `target/cursor_underline_check.png`.
 
-use hyperpanes_terminal_widget::{
-    PaneRenderer, RenderOpts, SoftwareRenderer, TermGrid,
-};
+use hyperpanes_terminal_widget::{PaneRenderer, RenderOpts, SoftwareRenderer, TermGrid};
 
 const GAP: u32 = 8;
 
@@ -29,7 +27,9 @@ fn render_bytes(
 ) -> (Vec<u8>, u32, u32) {
     let snap = grid.snapshot();
     let img = r.render(&snap, font, &RenderOpts { cursor_on });
-    let pb = img.to_rgba8().expect("software renderer must yield an rgba8 image");
+    let pb = img
+        .to_rgba8()
+        .expect("software renderer must yield an rgba8 image");
     (pb.as_bytes().to_vec(), pb.width(), pb.height())
 }
 
@@ -89,7 +89,9 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let off = ((ypix * w + xpix) * 4) as usize;
-                if buf[off] != cell_fg[0] || buf[off + 1] != cell_fg[1] || buf[off + 2] != cell_fg[2]
+                if buf[off] != cell_fg[0]
+                    || buf[off + 1] != cell_fg[1]
+                    || buf[off + 2] != cell_fg[2]
                 {
                     n += 1;
                 }
@@ -121,12 +123,17 @@ fn main() -> anyhow::Result<()> {
     blit(&mut out, &before, 0);
     blit(&mut out, &after, h + GAP);
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/target/cursor_underline_check.png");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/target/cursor_underline_check.png"
+    );
     let file = std::fs::File::create(path)?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, oh);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()?.write_image_data(&out)?;
-    eprintln!("wrote {path}  (top=BEFORE: char erased · bottom=AFTER: char visible + underline in-cell)");
+    eprintln!(
+        "wrote {path}  (top=BEFORE: char erased · bottom=AFTER: char visible + underline in-cell)"
+    );
     Ok(())
 }

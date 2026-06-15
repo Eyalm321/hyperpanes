@@ -71,8 +71,8 @@ pub struct SummaryScheduler {
     last_summary_at: HashMap<String, i64>,
 
     backoff_ms: i64,
-    backoff_timer: Option<i64>,    // fire time
-    staleness_timer: Option<i64>,  // next tick fire time
+    backoff_timer: Option<i64>,   // fire time
+    staleness_timer: Option<i64>, // next tick fire time
     last_online: Option<bool>,
     running: bool,
 

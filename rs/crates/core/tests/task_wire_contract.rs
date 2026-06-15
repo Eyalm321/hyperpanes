@@ -32,10 +32,8 @@ fn golden_deserializes_and_round_trips() {
 
     // Re-serializing must round-trip to the SAME JSON value as the golden (ignoring
     // only whitespace — `Value` comparison is structural).
-    let from_golden: serde_json::Value =
-        serde_json::from_str(GOLDEN).expect("golden as Value");
-    let reserialized: serde_json::Value =
-        serde_json::to_value(&task).expect("Task to Value");
+    let from_golden: serde_json::Value = serde_json::from_str(GOLDEN).expect("golden as Value");
+    let reserialized: serde_json::Value = serde_json::to_value(&task).expect("Task to Value");
     assert_eq!(
         reserialized, from_golden,
         "re-serializing the parsed Task must reproduce the golden JSON exactly"
@@ -58,7 +56,10 @@ fn golden_uses_exact_camelcase_keys_and_no_snake_case() {
         "updatedAt",
         "dedupeKey",
     ] {
-        assert!(obj.contains_key(key), "golden must contain camelCase key `{key}`");
+        assert!(
+            obj.contains_key(key),
+            "golden must contain camelCase key `{key}`"
+        );
     }
 
     // And NO snake_case variant may appear — that would mean the wire drifted.
@@ -72,11 +73,19 @@ fn golden_uses_exact_camelcase_keys_and_no_snake_case() {
         "updated_at",
         "dedupe_key",
     ] {
-        assert!(!obj.contains_key(bad), "golden must NOT contain snake_case key `{bad}`");
+        assert!(
+            !obj.contains_key(bad),
+            "golden must NOT contain snake_case key `{bad}`"
+        );
     }
 
     // Timestamps are NUMBERs (epoch ms), not strings.
-    for ts in ["availableAt", "visibilityDeadline", "createdAt", "updatedAt"] {
+    for ts in [
+        "availableAt",
+        "visibilityDeadline",
+        "createdAt",
+        "updatedAt",
+    ] {
         assert!(
             obj.get(ts).map(|x| x.is_number()).unwrap_or(false),
             "`{ts}` must be a JSON number (epoch ms)"

@@ -91,7 +91,10 @@ fn in_memory_serde_round_trip_is_lossless() {
     assert!(json.starts_with('{'));
     assert!(json.contains("\"fontSize\": 18"));
     assert!(json.contains("\"mainFraction\": 0.6"));
-    assert!(!json.contains("null"), "unset optionals must be omitted, never null");
+    assert!(
+        !json.contains("null"),
+        "unset optionals must be omitted, never null"
+    );
 }
 
 #[test]
@@ -139,7 +142,10 @@ fn group_split_state_survives_disk_round_trip() {
             title: Some("t".into()),
             layout: Some("columns".into()),
             panes: vec![
-                PaneSpec { font_size: Some(22), ..Default::default() },
+                PaneSpec {
+                    font_size: Some(22),
+                    ..Default::default()
+                },
                 PaneSpec::default(),
             ],
             sizes: Some(vec![0.25, 0.75]),
@@ -169,12 +175,18 @@ fn windows_of_normalises_each_round_tripped_shape_identically() {
     let shapes = [
         WorkspaceFile {
             name: Some("p".into()),
-            panes: Some(vec![PaneSpec { label: Some("a".into()), ..Default::default() }]),
+            panes: Some(vec![PaneSpec {
+                label: Some("a".into()),
+                ..Default::default()
+            }]),
             ..Default::default()
         },
         WorkspaceFile {
             groups: Some(vec![GroupSpec {
-                panes: vec![PaneSpec { label: Some("b".into()), ..Default::default() }],
+                panes: vec![PaneSpec {
+                    label: Some("b".into()),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }]),
             ..Default::default()

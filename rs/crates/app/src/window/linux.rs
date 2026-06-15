@@ -68,7 +68,12 @@ pub(crate) struct PointerTrack {
 
 impl PointerTrack {
     const fn new() -> Self {
-        PointerTrack { raw: 0, pos: (0, 0), inside: false, left_down: false }
+        PointerTrack {
+            raw: 0,
+            pos: (0, 0),
+            inside: false,
+            left_down: false,
+        }
     }
 }
 
@@ -85,9 +90,7 @@ static WAYLAND: OnceLock<bool> = OnceLock::new();
 /// selection rule — Wayland whenever `WAYLAND_DISPLAY` is set (WSLg sets both
 /// `WAYLAND_DISPLAY` and `DISPLAY`; force X11 by clearing the former).
 pub(crate) fn is_wayland() -> bool {
-    *WAYLAND.get_or_init(|| {
-        std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
-    })
+    *WAYLAND.get_or_init(|| std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()))
 }
 
 /// Run `f` against the winit window `raw` encodes; `None` for 0 / unknown / dead
@@ -158,7 +161,11 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
             None
         } else {
             let frameless = std::rc::Rc::new(Cell::new(false));
-            r.push(Entry { raw, win: Arc::downgrade(&w), frameless: frameless.clone() });
+            r.push(Entry {
+                raw,
+                win: Arc::downgrade(&w),
+                frameless: frameless.clone(),
+            });
             Some(frameless)
         }
     });
@@ -200,7 +207,11 @@ pub fn hwnd_of(win: &slint::Window) -> isize {
                             t.inside = false;
                         }
                     }
-                    WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                    WindowEvent::MouseInput {
+                        state,
+                        button: MouseButton::Left,
+                        ..
+                    } => {
                         t.raw = raw;
                         t.left_down = *state == ElementState::Pressed;
                         if t.left_down {
@@ -269,7 +280,11 @@ pub fn set_hover_cursor(on: bool) {
     if was == on {
         return;
     }
-    let icon = if on { CursorIcon::Grab } else { CursorIcon::Default };
+    let icon = if on {
+        CursorIcon::Grab
+    } else {
+        CursorIcon::Default
+    };
     for_each_window(|w| w.set_cursor(icon));
 }
 

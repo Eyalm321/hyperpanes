@@ -72,7 +72,10 @@ impl super::GlobalPointer for PlatformPointer {
             let x = x11()?;
             let r = x.conn.query_pointer(x.root).ok()?.reply().ok()?;
             let down = u16::from(r.mask) & u16::from(KeyButMask::BUTTON1) != 0;
-            Some((slint::PhysicalPosition::new(r.root_x as i32, r.root_y as i32), down))
+            Some((
+                slint::PhysicalPosition::new(r.root_x as i32, r.root_y as i32),
+                down,
+            ))
         }
     }
 
@@ -121,7 +124,10 @@ const GHOST_H: u16 = 44;
 
 impl Ghost {
     pub fn new() -> Ghost {
-        Ghost { win: Cell::new(None), mapped: Cell::new(false) }
+        Ghost {
+            win: Cell::new(None),
+            mapped: Cell::new(false),
+        }
     }
 
     /// Move + show, offset a little below/right of the cursor hotspot (root coords).
@@ -133,7 +139,9 @@ impl Ghost {
                 let Ok(id) = x.conn.generate_id() else { return };
                 // Brand green (#5ee08f); override-redirect keeps the WM (and input)
                 // entirely out of it.
-                let aux = CreateWindowAux::new().override_redirect(1).background_pixel(0x005e_e08f);
+                let aux = CreateWindowAux::new()
+                    .override_redirect(1)
+                    .background_pixel(0x005e_e08f);
                 let _ = x.conn.create_window(
                     x11rb::COPY_DEPTH_FROM_PARENT,
                     id,
@@ -151,8 +159,10 @@ impl Ghost {
                 id
             }
         };
-        let aux =
-            ConfigureWindowAux::new().x(p.0 + 14).y(p.1 + 16).stack_mode(StackMode::ABOVE);
+        let aux = ConfigureWindowAux::new()
+            .x(p.0 + 14)
+            .y(p.1 + 16)
+            .stack_mode(StackMode::ABOVE);
         let _ = x.conn.configure_window(id, &aux);
         if !self.mapped.replace(true) {
             let _ = x.conn.map_window(id);

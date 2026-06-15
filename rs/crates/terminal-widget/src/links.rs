@@ -111,7 +111,11 @@ fn parse_quote_suffix(rest: &[char]) -> Option<(u32, Option<u32>, usize)> {
     if idx == line_start {
         return None; // need ≥1 digit
     }
-    let line: u32 = rest[line_start..idx].iter().collect::<String>().parse().ok()?;
+    let line: u32 = rest[line_start..idx]
+        .iter()
+        .collect::<String>()
+        .parse()
+        .ok()?;
     let mut col = None;
     if idx < rest.len() && rest[idx] == ':' {
         let csave = idx;
@@ -123,7 +127,13 @@ fn parse_quote_suffix(rest: &[char]) -> Option<(u32, Option<u32>, usize)> {
         if idx == col_start {
             idx = csave; // bare ':' with no digits → optional group doesn't match
         } else {
-            col = Some(rest[col_start..idx].iter().collect::<String>().parse().ok()?);
+            col = Some(
+                rest[col_start..idx]
+                    .iter()
+                    .collect::<String>()
+                    .parse()
+                    .ok()?,
+            );
         }
     }
     Some((line, col, idx))
@@ -444,7 +454,10 @@ mod tests {
 
     #[test]
     fn finds_multiple_paths_on_one_line() {
-        assert_eq!(paths("moved src/a.ts -> dist/a.js"), vec!["src/a.ts", "dist/a.js"]);
+        assert_eq!(
+            paths("moved src/a.ts -> dist/a.js"),
+            vec!["src/a.ts", "dist/a.js"]
+        );
     }
 
     #[test]
@@ -456,7 +469,10 @@ mod tests {
 
     // ---- extractUrlCandidates ----
     fn urls(line: &str) -> Vec<String> {
-        extract_url_candidates(line).into_iter().map(|c| c.url).collect()
+        extract_url_candidates(line)
+            .into_iter()
+            .map(|c| c.url)
+            .collect()
     }
     /// The substring of `line` covered by URL candidate `c`'s [start, end) column range.
     fn url_slice(line: &str, c: &UrlCandidate) -> String {
@@ -508,7 +524,10 @@ mod tests {
             urls("https://a.com/search?q=rust&page=2#results"),
             vec!["https://a.com/search?q=rust&page=2#results"]
         );
-        assert_eq!(urls("http://localhost:3000/api"), vec!["http://localhost:3000/api"]);
+        assert_eq!(
+            urls("http://localhost:3000/api"),
+            vec!["http://localhost:3000/api"]
+        );
         // The trailing slash is part of the URL, not punctuation.
         assert_eq!(urls("https://a.com/dir/"), vec!["https://a.com/dir/"]);
     }

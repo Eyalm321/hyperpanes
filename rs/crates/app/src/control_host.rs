@@ -149,7 +149,9 @@ impl ControlHost {
         // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.
         shared.set_runtime(self.runtime.clone());
         let task = self.runtime.spawn(server::run_server(Arc::clone(&shared)));
-        let ticker = self.runtime.spawn(server::run_activity_ticker(Arc::clone(&shared)));
+        let ticker = self
+            .runtime
+            .spawn(server::run_activity_ticker(Arc::clone(&shared)));
         *self.shared.borrow_mut() = Some(shared);
         *self.task.borrow_mut() = Some(task);
         *self.ticker.borrow_mut() = Some(ticker);
@@ -212,7 +214,12 @@ impl ControlHost {
 
     /// `(enabled, allow_input, port-if-running)` for the Preferences status line.
     pub fn status(&self) -> (bool, bool, Option<u16>) {
-        let port = self.shared.borrow().as_ref().map(|s| s.port()).filter(|p| *p != 0);
+        let port = self
+            .shared
+            .borrow()
+            .as_ref()
+            .map(|s| s.port())
+            .filter(|p| *p != 0);
         (self.enabled.get(), self.allow_input.get(), port)
     }
 
@@ -292,9 +299,11 @@ impl ControlHost {
         for w in windows {
             let wid = w.id as i64;
             let at = model.active_tab_id(wid);
-            let rep = at
-                .as_ref()
-                .and_then(|tid| cur.iter().find(|(_, m)| &m.tab_id == tid).map(|(u, _)| u.clone()));
+            let rep = at.as_ref().and_then(|tid| {
+                cur.iter()
+                    .find(|(_, m)| &m.tab_id == tid)
+                    .map(|(u, _)| u.clone())
+            });
             active.insert(wid, at);
             focus_uid.insert(wid, rep);
         }
@@ -355,7 +364,9 @@ impl ControlHost {
                         // Adopt the already-live session into the tab the MODEL placed it in
                         // (replay-primed, no PTY restart).
                         self.adopt_control_pane(windows, mgr, uid, c, cur, &mut created_tabs);
-                        self.pane_ids.borrow_mut().insert(uid.clone(), c.pane_id.clone());
+                        self.pane_ids
+                            .borrow_mut()
+                            .insert(uid.clone(), c.pane_id.clone());
                     }
                 }
                 structural = true;
@@ -384,7 +395,9 @@ impl ControlHost {
             if prev_active.get(wid).map(|a| a.as_deref()) == Some(act.as_deref()) {
                 continue;
             }
-            let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) else { continue };
+            let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) else {
+                continue;
+            };
             if act.is_none() {
                 continue;
             }
@@ -402,7 +415,9 @@ impl ControlHost {
         // Prune side-store entries for panes that no longer exist in the GUI.
         let live = gui_uids(windows);
         ctl.retain(|uid, _| live.contains(uid));
-        self.pane_ids.borrow_mut().retain(|uid, _| live.contains(uid));
+        self.pane_ids
+            .borrow_mut()
+            .retain(|uid, _| live.contains(uid));
         structural
     }
 
@@ -502,7 +517,11 @@ impl ControlHost {
                     panes,
                 });
             }
-            model.add_window(WindowInfo { window_id: wid, active_tab_id, tabs });
+            model.add_window(WindowInfo {
+                window_id: wid,
+                active_tab_id,
+                tabs,
+            });
         }
         drop(model);
 
@@ -510,8 +529,8 @@ impl ControlHost {
         let structural = {
             let old = self.prev.borrow();
             let old_active = self.prev_active.borrow();
-            let panes_changed = old.len() != new_prev.len()
-                || new_prev.keys().any(|uid| !old.contains_key(uid));
+            let panes_changed =
+                old.len() != new_prev.len() || new_prev.keys().any(|uid| !old.contains_key(uid));
             panes_changed || *old_active != new_active
         };
 
@@ -647,7 +666,10 @@ fn gui_uid_for_pane_id(
     pane_id: &str,
 ) -> Option<String> {
     for uid in gui_uids(windows) {
-        let effective = pane_ids.get(&uid).map(String::as_str).unwrap_or(uid.as_str());
+        let effective = pane_ids
+            .get(&uid)
+            .map(String::as_str)
+            .unwrap_or(uid.as_str());
         if effective == pane_id {
             return Some(uid);
         }

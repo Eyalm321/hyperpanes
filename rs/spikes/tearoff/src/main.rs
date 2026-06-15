@@ -102,7 +102,9 @@ mod win32 {
     use core::ffi::c_void;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::core::w;
-    use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Foundation::{
+        COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    };
     use windows::Win32::Graphics::Gdi::CreateSolidBrush;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
@@ -239,7 +241,7 @@ mod win32 {
 }
 
 struct Drag {
-    from: usize,      // window index the card was grabbed from
+    from: usize, // window index the card was grabbed from
     label: SharedString,
 }
 
@@ -282,8 +284,10 @@ impl AppState {
     fn tick(st: &Rc<RefCell<AppState>>) {
         let mut s = st.borrow_mut();
         s.ensure_hwnds();
-        let Some(drag) = s.drag.as_ref().map(|d| Drag { from: d.from, label: d.label.clone() })
-        else {
+        let Some(drag) = s.drag.as_ref().map(|d| Drag {
+            from: d.from,
+            label: d.label.clone(),
+        }) else {
             return;
         };
 

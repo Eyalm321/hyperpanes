@@ -92,7 +92,12 @@ impl Pty for PortablePty {
         self.master
             .lock()
             .unwrap()
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| io::Error::other(e.to_string()))
     }
 
@@ -142,7 +147,13 @@ struct StartupQueryFilter {
 #[cfg(windows)]
 impl StartupQueryFilter {
     fn new(writer: Arc<Mutex<Box<dyn Write + Send>>>) -> Self {
-        StartupQueryFilter { writer, want_dsr: true, want_da: true, scanned: 0, carry: Vec::new() }
+        StartupQueryFilter {
+            writer,
+            want_dsr: true,
+            want_da: true,
+            scanned: 0,
+            carry: Vec::new(),
+        }
     }
 
     /// Process one read chunk, returning the bytes to forward to the sink now (a
@@ -343,7 +354,11 @@ mod tests {
             Arc::new(Mutex::new(Box::new(std::io::sink())));
         let mut f = StartupQueryFilter::new(writer);
         let chunk = b"\x1b[6n\x1b[chello";
-        assert_eq!(f.process(chunk), chunk.to_vec(), "DSR/DA must pass through verbatim");
+        assert_eq!(
+            f.process(chunk),
+            chunk.to_vec(),
+            "DSR/DA must pass through verbatim"
+        );
         // And a split query is never held back across reads either.
         assert_eq!(f.process(b"\x1b["), b"\x1b[".to_vec());
         assert!(f.flush().is_empty());
@@ -357,9 +372,23 @@ mod tests {
     fn interactive_spec() -> PtySpec {
         let env: EnvMap = std::env::vars().collect();
         if cfg!(windows) {
-            PtySpec { file: "cmd.exe".into(), args: vec![], cwd: None, env, cols: 80, rows: 24 }
+            PtySpec {
+                file: "cmd.exe".into(),
+                args: vec![],
+                cwd: None,
+                env,
+                cols: 80,
+                rows: 24,
+            }
         } else {
-            PtySpec { file: "/bin/sh".into(), args: vec!["-i".into()], cwd: None, env, cols: 80, rows: 24 }
+            PtySpec {
+                file: "/bin/sh".into(),
+                args: vec!["-i".into()],
+                cwd: None,
+                env,
+                cols: 80,
+                rows: 24,
+            }
         }
     }
 
@@ -411,11 +440,17 @@ mod tests {
         let (out, _) = drain_until(&rx, Duration::from_secs(10), |o| {
             o.matches("HYPERPANES_PTY_OK").count() >= 2 || o.contains("HYPERPANES_PTY_OK\r\n")
         });
-        assert!(out.contains("HYPERPANES_PTY_OK"), "marker missing; got: {out:?}");
+        assert!(
+            out.contains("HYPERPANES_PTY_OK"),
+            "marker missing; got: {out:?}"
+        );
 
         pty.write(b"exit\r\n").expect("write exit");
         let (_, exit) = drain_until(&rx, Duration::from_secs(10), |_| false);
-        assert!(exit.is_some(), "expected an Exit event after the shell exited");
+        assert!(
+            exit.is_some(),
+            "expected an Exit event after the shell exited"
+        );
     }
 
     /// resize + write + kill against a long-lived interactive shell, then confirm a

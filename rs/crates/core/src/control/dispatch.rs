@@ -33,14 +33,22 @@ pub struct DispatchResult {
 
 impl DispatchResult {
     fn err(status: u16, message: &str) -> Self {
-        DispatchResult { status, body: json!({ "error": message }), notify_state: false }
+        DispatchResult {
+            status,
+            body: json!({ "error": message }),
+            notify_state: false,
+        }
     }
     fn ok(result: Option<Value>, notify_state: bool) -> Self {
         let body = match result {
             Some(r) => json!({ "ok": true, "result": r }),
             None => json!({ "ok": true }),
         };
-        DispatchResult { status: 200, body, notify_state }
+        DispatchResult {
+            status: 200,
+            body,
+            notify_state,
+        }
     }
 }
 
@@ -65,14 +73,11 @@ pub fn handle_command(
     }
 
     // Resolve a target window: explicit windowId, else the pane's window.
-    let window_id = cmd
-        .get("windowId")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            cmd.get("paneId")
-                .and_then(Value::as_str)
-                .and_then(|p| model.coords_of(p).map(|c| c.window_id))
-        });
+    let window_id = cmd.get("windowId").and_then(Value::as_i64).or_else(|| {
+        cmd.get("paneId")
+            .and_then(Value::as_str)
+            .and_then(|p| model.coords_of(p).map(|c| c.window_id))
+    });
     if window_id.is_none() {
         return DispatchResult::err(400, "command needs a paneId or windowId");
     }
@@ -106,7 +111,11 @@ fn exec(
         }
         "attach" => {
             let unit = cmd.get("as").and_then(Value::as_str).unwrap_or("tab");
-            let groups = cmd.get("groups").and_then(Value::as_array).cloned().unwrap_or_default();
+            let groups = cmd
+                .get("groups")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if unit == "panes" {
                 let mut pane_ids = Vec::new();
                 for g in &groups {
@@ -125,15 +134,28 @@ fn exec(
                 let mut tab_ids = Vec::new();
                 for g in &groups {
                     let tab_id = new_id();
-                    let title = g.get("title").and_then(Value::as_str).unwrap_or("Tab").to_string();
-                    let layout = g.get("layout").and_then(Value::as_str).unwrap_or("auto").to_string();
+                    let title = g
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Tab")
+                        .to_string();
+                    let layout = g
+                        .get("layout")
+                        .and_then(Value::as_str)
+                        .unwrap_or("auto")
+                        .to_string();
                     let mut panes = Vec::new();
                     if let Some(specs) = g.get("panes").and_then(Value::as_array) {
                         for ps in specs {
                             panes.push(spawn_pane(sessions, control_file, ps)?);
                         }
                     }
-                    let tab = TabInfo { id: tab_id.clone(), title, layout, panes };
+                    let tab = TabInfo {
+                        id: tab_id.clone(),
+                        title,
+                        layout,
+                        panes,
+                    };
                     if !model.insert_tab(window_id, tab) {
                         return Err(format!("window not found: {window_id}"));
                     }
@@ -151,7 +173,9 @@ fn exec(
         }
         "restartPane" => {
             let pane_id = str_field(cmd, "paneId")?;
-            let pane = model.pane(&pane_id).ok_or_else(|| format!("no such pane: {pane_id}"))?;
+            let pane = model
+                .pane(&pane_id)
+                .ok_or_else(|| format!("no such pane: {pane_id}"))?;
             let old_uid = pane.session_uid.clone();
             let new_uid = new_id();
             let opts = SpawnOptions {
@@ -215,8 +239,10 @@ fn exec(
             // pane yields no result (→ MCP set_meta reads it as {}).
             match model.set_meta(&pane_id, &patch) {
                 Some(merged) => {
-                    let obj: serde_json::Map<String, Value> =
-                        merged.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+                    let obj: serde_json::Map<String, Value> = merged
+                        .into_iter()
+                        .map(|(k, v)| (k, Value::String(v)))
+                        .collect();
                     Ok((Some(Value::Object(obj)), false))
                 }
                 None => Ok((None, false)),
@@ -229,7 +255,9 @@ fn exec(
         }
         "readScreen" => {
             let pane_id = str_field(cmd, "paneId")?;
-            let pane = model.pane(&pane_id).ok_or_else(|| format!("no such pane: {pane_id}"))?;
+            let pane = model
+                .pane(&pane_id)
+                .ok_or_else(|| format!("no such pane: {pane_id}"))?;
             match sessions.render_screen(&pane.session_uid) {
                 Some(text) => Ok((Some(Value::String(text)), false)),
                 None => Err("screen unavailable".to_string()),
@@ -248,14 +276,24 @@ fn spawn_pane(
 ) -> Result<PaneInfo, String> {
     let pane_id = new_id();
     let session_uid = new_id();
-    let command = spec.get("command").and_then(Value::as_str).map(str::to_string);
+    let command = spec
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let args = spec
         .get("args")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
         .filter(|a| !a.is_empty());
     let cwd = spec.get("cwd").and_then(Value::as_str).map(str::to_string);
-    let shell = spec.get("shell").and_then(Value::as_str).map(str::to_string);
+    let shell = spec
+        .get("shell")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     // Reject an over-long explicit label — callers should send a short title, not a whole command
     // line. Returning Err fails the newPane so the MCP/control surfaces the error (#21/#22).
     const MAX_LABEL_LEN: usize = 80;
@@ -271,7 +309,12 @@ fn spawn_pane(
         .map(str::to_string)
         // No explicit label → default to the command's FIRST TOKEN (e.g. "claude"), never the whole
         // command line (mirrors the CLI's `command.trim().split_whitespace()[0]` default).
-        .or_else(|| command.as_deref().and_then(|c| c.split_whitespace().next()).map(str::to_string))
+        .or_else(|| {
+            command
+                .as_deref()
+                .and_then(|c| c.split_whitespace().next())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "shell".to_string());
     let color = spec
         .get("color")
@@ -293,20 +336,22 @@ fn spawn_pane(
     // (cwd OSC → project tint / clickable paths; zsh needs the bundled ZDOTDIR). The
     // TS app applied this inside the Session constructor, so dispatch passing `None`
     // here silently no-op'd integration for every control-API pane.
-    let integration = command.is_none().then(|| {
-        let shell_path = shell
-            .clone()
-            .unwrap_or_else(crate::session::spawn::default_shell);
-        crate::shell_integration::integration_for(
-            &shell_path,
-            &crate::shell_integration::shell_integration_dir(),
-        )
-        .map(|si| crate::session_manager::Integration {
-            args: si.args,
-            env: si.env.into_iter().collect(),
+    let integration = command
+        .is_none()
+        .then(|| {
+            let shell_path = shell
+                .clone()
+                .unwrap_or_else(crate::session::spawn::default_shell);
+            crate::shell_integration::integration_for(
+                &shell_path,
+                &crate::shell_integration::shell_integration_dir(),
+            )
+            .map(|si| crate::session_manager::Integration {
+                args: si.args,
+                env: si.env.into_iter().collect(),
+            })
         })
-    })
-    .flatten();
+        .flatten();
     let opts = SpawnOptions {
         uid: session_uid.clone(),
         shell: shell.clone(),
@@ -340,7 +385,11 @@ fn spawn_pane(
 
 /// Whether a scoped token may run `cmd` against its target (pane > tab > window). Mirrors TS
 /// `commandScopeError` exactly, including the active-tab exception for window-targeted spawns.
-pub fn command_scope_error(scope: Option<&Scope>, cmd: &Value, model: &ReadModel) -> Option<String> {
+pub fn command_scope_error(
+    scope: Option<&Scope>,
+    cmd: &Value,
+    model: &ReadModel,
+) -> Option<String> {
     let scope = scope?; // master: anything
     if let Some(pane_id) = cmd.get("paneId").and_then(Value::as_str) {
         return match model.coords_of(pane_id) {
@@ -443,7 +492,8 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let cmd = json!({ "type": "setMeta", "paneId": id, "meta": { "role": "worker", "task": "x" } });
+        let cmd =
+            json!({ "type": "setMeta", "paneId": id, "meta": { "role": "worker", "task": "x" } });
         let r = handle_command(&mut m, &s, None, None, &cmd);
         assert_eq!(r.status, 200);
         assert_eq!(r.body["result"]["role"], json!("worker"));
@@ -468,7 +518,13 @@ mod tests {
     fn no_target_is_400() {
         let mut m = model_one_window();
         let s = sessions();
-        let r = handle_command(&mut m, &s, None, None, &json!({ "type": "setLayout", "layout": "grid" }));
+        let r = handle_command(
+            &mut m,
+            &s,
+            None,
+            None,
+            &json!({ "type": "setLayout", "layout": "grid" }),
+        );
         assert_eq!(r.status, 400);
         assert_eq!(r.body["error"], json!("command needs a paneId or windowId"));
     }
@@ -477,7 +533,10 @@ mod tests {
     fn scope_gate_rejects_out_of_scope_window() {
         let mut m = model_one_window();
         let s = sessions();
-        let scope = Scope { window_ids: Some(vec![999]), ..Default::default() };
+        let scope = Scope {
+            window_ids: Some(vec![999]),
+            ..Default::default()
+        };
         let cmd = json!({ "type": "newPane", "windowId": 1, "pane": {} });
         let r = handle_command(&mut m, &s, None, Some(&scope), &cmd);
         assert_eq!(r.status, 403);
@@ -490,7 +549,10 @@ mod tests {
         // unknown paneId
         assert_eq!(
             command_scope_error(
-                Some(&Scope { pane_ids: Some(vec!["p1".into()]), ..Default::default() }),
+                Some(&Scope {
+                    pane_ids: Some(vec!["p1".into()]),
+                    ..Default::default()
+                }),
                 &json!({ "type": "closePane", "paneId": "ghost" }),
                 &m,
             ),

@@ -64,7 +64,10 @@ pub fn pane_in_scope(scope: Option<&Scope>, c: &PaneCoords) -> bool {
         .pane_ids
         .as_ref()
         .is_some_and(|v| v.contains(&c.pane_id))
-        || scope.tab_ids.as_ref().is_some_and(|v| v.contains(&c.tab_id))
+        || scope
+            .tab_ids
+            .as_ref()
+            .is_some_and(|v| v.contains(&c.tab_id))
         || scope
             .window_ids
             .as_ref()
@@ -168,7 +171,9 @@ pub fn check_mintable(
         || child.pane_ids.as_ref().is_some_and(|v| !v.is_empty())
         || child.queue_ids.as_ref().is_some_and(|v| !v.is_empty());
     if !has_any {
-        return Some("scope must name at least one windowId, tabId, paneId, or queueId".to_string());
+        return Some(
+            "scope must name at least one windowId, tabId, paneId, or queueId".to_string(),
+        );
     }
     None
 }
@@ -264,11 +269,26 @@ mod tests {
 
     #[test]
     fn pane_in_scope_matches_on_pane_tab_or_window_level() {
-        assert!(pane_in_scope(Some(&scope_panes(&["p1"])), &coords("p1", "t", 1)));
-        assert!(pane_in_scope(Some(&scope_tabs(&["t1"])), &coords("p9", "t1", 1)));
-        assert!(pane_in_scope(Some(&scope_windows(&[2])), &coords("p9", "t9", 2)));
-        assert!(!pane_in_scope(Some(&scope_panes(&["p1"])), &coords("p2", "t", 1)));
-        assert!(!pane_in_scope(Some(&scope_tabs(&["t1"])), &coords("p", "t2", 1)));
+        assert!(pane_in_scope(
+            Some(&scope_panes(&["p1"])),
+            &coords("p1", "t", 1)
+        ));
+        assert!(pane_in_scope(
+            Some(&scope_tabs(&["t1"])),
+            &coords("p9", "t1", 1)
+        ));
+        assert!(pane_in_scope(
+            Some(&scope_windows(&[2])),
+            &coords("p9", "t9", 2)
+        ));
+        assert!(!pane_in_scope(
+            Some(&scope_panes(&["p1"])),
+            &coords("p2", "t", 1)
+        ));
+        assert!(!pane_in_scope(
+            Some(&scope_tabs(&["t1"])),
+            &coords("p", "t2", 1)
+        ));
     }
 
     #[test]
@@ -356,7 +376,9 @@ mod tests {
     #[test]
     fn coerce_keeps_well_typed_arrays_drops_junk_returns_none_when_empty() {
         assert_eq!(
-            coerce_scope(&json!({ "paneIds": ["a", 1, "b"], "tabIds": "x", "windowIds": [2, "3"] })),
+            coerce_scope(
+                &json!({ "paneIds": ["a", 1, "b"], "tabIds": "x", "windowIds": [2, "3"] })
+            ),
             Some(Scope {
                 pane_ids: Some(vec!["a".to_string(), "b".to_string()]),
                 window_ids: Some(vec![2]),
@@ -398,15 +420,20 @@ mod tests {
     #[test]
     fn check_mintable_allows_queue_only_and_blocks_escalation() {
         // master may mint any queue scope (queues need no existence check)
-        assert_eq!(check_mintable(None, &scope_queues(&["build"]), &TestTree), None);
+        assert_eq!(
+            check_mintable(None, &scope_queues(&["build"]), &TestTree),
+            None
+        );
         // a queue-scoped parent may narrow to its own queue but not another
         let parent = scope_queues(&["build"]);
         assert_eq!(
             check_mintable(Some(&parent), &scope_queues(&["build"]), &TestTree),
             None
         );
-        assert!(check_mintable(Some(&parent), &scope_queues(&["deploy"]), &TestTree)
-            .unwrap()
-            .contains("outside"));
+        assert!(
+            check_mintable(Some(&parent), &scope_queues(&["deploy"]), &TestTree)
+                .unwrap()
+                .contains("outside")
+        );
     }
 }

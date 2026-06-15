@@ -143,12 +143,16 @@ impl Shared {
             m.panes()
                 .into_iter()
                 .map(|pr| {
-                    let meta = m.pane(&pr.pane_id).and_then(|p| p.meta.clone()).unwrap_or_default();
+                    let meta = m
+                        .pane(&pr.pane_id)
+                        .and_then(|p| p.meta.clone())
+                        .unwrap_or_default();
                     (pr.pane_id, meta)
                 })
                 .collect()
         };
-        let live: std::collections::HashSet<&str> = panes.iter().map(|(id, _)| id.as_str()).collect();
+        let live: std::collections::HashSet<&str> =
+            panes.iter().map(|(id, _)| id.as_str()).collect();
         let mut sup = self.supervisor.lock().unwrap();
         for (pane_id, meta) in &panes {
             sup.set_policy(pane_id, Policy::from_meta(meta));
@@ -212,7 +216,11 @@ fn liveness_frame(
         Activity::Idle => "awaiting-input",
         Activity::Exited => "exited",
     };
-    ControlEvent::Liveness { pane_id: pane_id.to_string(), state: state.to_string(), exit_code }
+    ControlEvent::Liveness {
+        pane_id: pane_id.to_string(),
+        state: state.to_string(),
+        exit_code,
+    }
 }
 
 /// Current epoch-ms (the TS `Date.now()`).
@@ -327,7 +335,11 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
                     // Phase-4 precise frame, ignorable by legacy clients.
                     shared.events.broadcast_for_pane(
                         Some(&pr.coords),
-                        &liveness_frame(&pr.pane_id, act, shared.sessions.liveness(&pr.session_uid)),
+                        &liveness_frame(
+                            &pr.pane_id,
+                            act,
+                            shared.sessions.liveness(&pr.session_uid),
+                        ),
                     );
                 }
                 last.insert(pr.pane_id.clone(), act);
@@ -354,7 +366,11 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
             };
             shared.events.broadcast_for_pane(
                 coords.as_ref(),
-                &ControlEvent::Output { session_uid: uid, pane_id, data },
+                &ControlEvent::Output {
+                    session_uid: uid,
+                    pane_id,
+                    data,
+                },
             );
         }
         SessionEvent::Cwd { uid, cwd } => {
@@ -391,7 +407,10 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
                     );
                     shared.events.broadcast_for_pane(
                         Some(&coords),
-                        &ControlEvent::Activity { pane_id: pane_id.clone(), activity: "exited".to_string() },
+                        &ControlEvent::Activity {
+                            pane_id: pane_id.clone(),
+                            activity: "exited".to_string(),
+                        },
                     );
                     notify_state(shared);
                     // Phase-5 supervisor hook (no-op unless the pane opted in).
@@ -401,7 +420,11 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
                     if shared.events.has_clients() {
                         shared.events.broadcast_for_pane(
                             None,
-                            &ControlEvent::Exit { session_uid: uid, pane_id: None, code },
+                            &ControlEvent::Exit {
+                                session_uid: uid,
+                                pane_id: None,
+                                code,
+                            },
                         );
                     }
                 }
@@ -431,7 +454,12 @@ fn supervise_exit(shared: &Arc<Shared>, pane_id: &str, code: i32) {
                 Some(code),
             );
         }
-        Decision::Restart { attempt, max, delay_ms, code } => {
+        Decision::Restart {
+            attempt,
+            max,
+            delay_ms,
+            code,
+        } => {
             broadcast_supervisor(
                 shared,
                 pane_id,
@@ -491,11 +519,27 @@ fn do_restart(shared: &Arc<Shared>, pane_id: &str, attempt: u32, max: u32, code:
         Ok(()) => {
             shared.model.lock().unwrap().respawn_pane(pane_id, &new_uid);
             let used = shared.supervisor.lock().unwrap().record_restart(pane_id);
-            broadcast_supervisor(shared, pane_id, "restarted", Some(used), Some(max), None, Some(code));
+            broadcast_supervisor(
+                shared,
+                pane_id,
+                "restarted",
+                Some(used),
+                Some(max),
+                None,
+                Some(code),
+            );
             notify_state(shared);
         }
         Err(_) => {
-            broadcast_supervisor(shared, pane_id, "crashed", Some(attempt), Some(max), None, Some(code));
+            broadcast_supervisor(
+                shared,
+                pane_id,
+                "crashed",
+                Some(attempt),
+                Some(max),
+                None,
+                Some(code),
+            );
         }
     }
 }
@@ -528,7 +572,10 @@ fn broadcast_supervisor(
 }
 
 /// Resolve a session uid to (pane_id, coords) under one model lock.
-fn pane_and_coords(shared: &Arc<Shared>, uid: &str) -> Option<(String, crate::control::scope::PaneCoords)> {
+fn pane_and_coords(
+    shared: &Arc<Shared>,
+    uid: &str,
+) -> Option<(String, crate::control::scope::PaneCoords)> {
     let m = shared.model.lock().unwrap();
     let pid = m.uid_to_pane(uid)?;
     let coords = m.coords_of(&pid)?;
@@ -543,7 +590,11 @@ fn emit_command_frame(shared: &Arc<Shared>, uid: &str, phase: &str, code: Option
     if let Some((pane_id, coords)) = pane_and_coords(shared, uid) {
         shared.events.broadcast_for_pane(
             Some(&coords),
-            &ControlEvent::Command { pane_id, phase: phase.to_string(), code },
+            &ControlEvent::Command {
+                pane_id,
+                phase: phase.to_string(),
+                code,
+            },
         );
     }
 }
@@ -556,9 +607,16 @@ fn emit_marker_liveness(shared: &Arc<Shared>, uid: &str) {
     }
     let (pane_id, coords, status) = {
         let m = shared.model.lock().unwrap();
-        let Some(pid) = m.uid_to_pane(uid) else { return };
-        let Some(coords) = m.coords_of(&pid) else { return };
-        let status = m.pane(&pid).map(|p| p.status).unwrap_or(PaneStatus::Running);
+        let Some(pid) = m.uid_to_pane(uid) else {
+            return;
+        };
+        let Some(coords) = m.coords_of(&pid) else {
+            return;
+        };
+        let status = m
+            .pane(&pid)
+            .map(|p| p.status)
+            .unwrap_or(PaneStatus::Running);
         (pid, coords, status)
     };
     let act = shared.activity_for(uid, status);
@@ -593,8 +651,17 @@ pub fn serve_for_test(
 ) -> io::Result<(Arc<Shared>, u16)> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
     let sessions = Arc::new(SessionManager::new(tx));
-    let shared = Shared::new(sessions, allow_input, env!("CARGO_PKG_VERSION"), control_file);
-    shared.tokens.lock().unwrap().set_master(master_token.to_string());
+    let shared = Shared::new(
+        sessions,
+        allow_input,
+        env!("CARGO_PKG_VERSION"),
+        control_file,
+    );
+    shared
+        .tokens
+        .lock()
+        .unwrap()
+        .set_master(master_token.to_string());
 
     let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = std_listener.local_addr()?.port();
@@ -604,7 +671,10 @@ pub fn serve_for_test(
     std::thread::Builder::new()
         .name("control-test-server".to_string())
         .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
                 return;
             };
             rt.block_on(async move {
@@ -631,7 +701,12 @@ mod tests {
     fn shared_with_pane() -> (Arc<Shared>, String) {
         let (tx, _rx) = unbounded_channel();
         let sm = Arc::new(SessionManager::new(tx));
-        let shared = Shared::new(sm, true, "0.0.0-test", std::env::temp_dir().join("control-test.json"));
+        let shared = Shared::new(
+            sm,
+            true,
+            "0.0.0-test",
+            std::env::temp_dir().join("control-test.json"),
+        );
         let pane = PaneInfo {
             id: "p1".into(),
             session_uid: "u1".into(),
@@ -649,7 +724,12 @@ mod tests {
         shared.model.lock().unwrap().add_window(WindowInfo {
             window_id: 1,
             active_tab_id: Some("t1".into()),
-            tabs: vec![TabInfo { id: "t1".into(), title: "Tab".into(), layout: "auto".into(), panes: vec![pane] }],
+            tabs: vec![TabInfo {
+                id: "t1".into(),
+                title: "Tab".into(),
+                layout: "auto".into(),
+                panes: vec![pane],
+            }],
         });
         (shared, "u1".to_string())
     }
@@ -674,9 +754,18 @@ mod tests {
     async fn exit_event_marks_pane_and_fans_out() {
         let (shared, uid) = shared_with_pane();
         let (_id, mut rx) = shared.events.add_client(None);
-        process_session_event(&shared, SessionEvent::Exit { uid: uid.clone(), code: 7 });
+        process_session_event(
+            &shared,
+            SessionEvent::Exit {
+                uid: uid.clone(),
+                code: 7,
+            },
+        );
         // The pane is now exited in the model.
-        assert_eq!(shared.model.lock().unwrap().pane("p1").unwrap().status, PaneStatus::Exited);
+        assert_eq!(
+            shared.model.lock().unwrap().pane("p1").unwrap().status,
+            PaneStatus::Exited
+        );
         // Two pane-addressed frames went out: exit then activity:exited.
         let f1 = rx.try_recv().unwrap();
         assert!(f1.contains(r#""type":"exit""#) && f1.contains(r#""code":7"#));
@@ -727,12 +816,18 @@ mod tests {
             frames.push(f);
         }
         assert!(
-            frames.iter().any(|f| f.contains(r#""type":"supervisor""#) && f.contains(r#""state":"completed""#)),
+            frames
+                .iter()
+                .any(|f| f.contains(r#""type":"supervisor""#)
+                    && f.contains(r#""state":"completed""#)),
             "frames: {frames:?}"
         );
         // No restart scheduled → retry count stays 0 and the pane stays exited.
         assert_eq!(shared.supervisor.lock().unwrap().retries_used("p1"), 0);
-        assert_eq!(shared.model.lock().unwrap().pane("p1").unwrap().status, PaneStatus::Exited);
+        assert_eq!(
+            shared.model.lock().unwrap().pane("p1").unwrap().status,
+            PaneStatus::Exited
+        );
     }
 
     #[tokio::test]
@@ -741,7 +836,10 @@ mod tests {
         // A long backoff (above the default 30s cap): the synchronous "restarting" frame
         // fires now; the actual respawn is deferred ~30s (capped), so this test asserts the
         // decision/frame without spawning a real pty.
-        supervise_p1(&shared, &[("hp.supervise", "on"), ("hp.backoffMs", "60000")]);
+        supervise_p1(
+            &shared,
+            &[("hp.supervise", "on"), ("hp.backoffMs", "60000")],
+        );
         let (_id, mut rx) = shared.events.add_client(None);
         process_session_event(&shared, SessionEvent::Exit { uid, code: 1 });
         let mut frames = Vec::new();
@@ -762,6 +860,9 @@ mod tests {
         // The respawn is still pending (long backoff) → retry count not yet bumped, pane
         // still recorded as exited until the delayed task fires.
         assert_eq!(shared.supervisor.lock().unwrap().retries_used("p1"), 0);
-        assert_eq!(shared.model.lock().unwrap().pane("p1").unwrap().status, PaneStatus::Exited);
+        assert_eq!(
+            shared.model.lock().unwrap().pane("p1").unwrap().status,
+            PaneStatus::Exited
+        );
     }
 }

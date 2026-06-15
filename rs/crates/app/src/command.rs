@@ -211,10 +211,16 @@ pub enum Effect {
     NewWindow,
     /// Re-host `det` in a new OS window; `source_alive` is `false` when detaching it
     /// emptied this window (so the controller closes it).
-    MoveToNewWindow { det: DetachedPane, source_alive: bool },
+    MoveToNewWindow {
+        det: DetachedPane,
+        source_alive: bool,
+    },
     /// Re-host a whole tab (its panes, title + layout) in a new OS window. `source_alive`
     /// is `false` when moving it emptied this window.
-    MoveTabToNewWindow { tab: DetachedTab, source_alive: bool },
+    MoveTabToNewWindow {
+        tab: DetachedTab,
+        source_alive: bool,
+    },
 }
 
 /// The keyboard layout-cycle order (skips `single`, which the menu still offers).
@@ -230,9 +236,7 @@ const LAYOUT_CYCLE: [Layout; 5] = [
 pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect {
     // Any action other than renaming itself cancels an in-progress tab rename,
     // so the inline edit box never lingers when you interact elsewhere.
-    if state.editing_tab != -1
-        && !matches!(cmd, Command::BeginRename(_) | Command::RenameTab(..))
-    {
+    if state.editing_tab != -1 && !matches!(cmd, Command::BeginRename(_) | Command::RenameTab(..)) {
         state.editing_tab = -1;
         state.dirty = true;
     }

@@ -106,7 +106,11 @@ pub fn session_matches(session: &ClaudeSession, query: &str) -> bool {
 /// Filter `sessions` down to those matching `query` (see [`session_matches`]), preserving
 /// order. An empty/blank query returns the full list.
 pub fn filter_sessions(sessions: &[ClaudeSession], query: &str) -> Vec<ClaudeSession> {
-    sessions.iter().filter(|s| session_matches(s, query)).cloned().collect()
+    sessions
+        .iter()
+        .filter(|s| session_matches(s, query))
+        .cloned()
+        .collect()
 }
 
 /// Encode an absolute project path the way Claude Code names its per-project transcript
@@ -171,7 +175,10 @@ pub fn sessions_in_dir(session_dir: &Path) -> Vec<ClaudeSession> {
 /// `None` for non-`.jsonl` paths or a stem-less filename — the per-file seam shared by
 /// [`sessions_in_dir`] and the incremental [`SessionCache`].
 pub fn read_session_file(path: &Path) -> Option<ClaudeSession> {
-    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"))
+    {
         return None;
     }
     let id = path.file_stem().map(|s| s.to_string_lossy().into_owned())?;
@@ -203,7 +210,11 @@ fn file_fingerprint(path: &Path) -> Option<(u64, u64)> {
 /// Order sessions newest-first by `started_at`, breaking ties by id (descending) so the
 /// result is deterministic even when mtimes are equal.
 fn sort_newest_first(v: &mut [ClaudeSession]) {
-    v.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| b.id.cmp(&a.id)));
+    v.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
 }
 
 /// Read `path` once: count every record (cheaply) and, within a bounded prefix, recover
@@ -266,7 +277,12 @@ fn summarize_file(path: &Path) -> (String, String, String, usize) {
     }
 
     let first_user = first_user.unwrap_or_default();
-    (summary.unwrap_or_else(|| first_user.clone()), first_user, full, count)
+    (
+        summary.unwrap_or_else(|| first_user.clone()),
+        first_user,
+        full,
+        count,
+    )
 }
 
 /// Append one message's text to the accumulated full-text extract: whitespace-collapsed,
@@ -281,7 +297,11 @@ fn push_full_text(full: &mut String, text: &str) {
     if !full.is_empty() {
         full.push(' ');
     }
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let collapsed = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     if collapsed.len() <= remaining {
         full.push_str(&collapsed);
     } else {
@@ -390,7 +410,10 @@ impl SessionCache {
         if let Ok(entries) = fs::read_dir(session_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
+                if !path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"))
+                {
                     continue;
                 }
                 let fp = file_fingerprint(&path);
@@ -404,7 +427,14 @@ impl SessionCache {
                     };
                     self.last_scan_parsed += 1;
                     let (mtime_ms, size) = fp.unwrap_or((0, 0));
-                    self.files.insert(path.clone(), CachedFile { mtime_ms, size, session });
+                    self.files.insert(
+                        path.clone(),
+                        CachedFile {
+                            mtime_ms,
+                            size,
+                            session,
+                        },
+                    );
                 }
                 if let Some(c) = self.files.get(&path) {
                     out.push(c.session.clone());
@@ -441,7 +471,10 @@ mod tests {
             "C--canora--claude-worktrees-festive-swartz-147488"
         );
         // Forward slashes / underscores / spaces all map to `-` as well.
-        assert_eq!(encode_path_str("/home/me/my_repo dir"), "-home-me-my-repo-dir");
+        assert_eq!(
+            encode_path_str("/home/me/my_repo dir"),
+            "-home-me-my-repo-dir"
+        );
     }
 
     #[test]
@@ -511,7 +544,7 @@ mod tests {
 
         let b = by_id["bbbb"];
         assert_eq!(b.summary, "Ported the worktree tree"); // summary record beats user msg
-        // …but the opening prompt is still captured separately, for search (#25).
+                                                           // …but the opening prompt is still captured separately, for search (#25).
         assert_eq!(b.first_user, "ignored because summary wins");
         assert_eq!(b.message_count, 2);
 
@@ -587,7 +620,10 @@ mod tests {
 
     #[test]
     fn empty_or_blank_query_matches_everything() {
-        let v = vec![sess("a", None, "Fix the sidebar", ""), sess("b", None, "", "")];
+        let v = vec![
+            sess("a", None, "Fix the sidebar", ""),
+            sess("b", None, "", ""),
+        ];
         assert_eq!(filter_sessions(&v, "").len(), 2);
         assert_eq!(filter_sessions(&v, "   ").len(), 2);
     }
@@ -595,7 +631,12 @@ mod tests {
     #[test]
     fn filter_is_case_insensitive_substring_over_summary() {
         let v = vec![
-            sess("a", None, "Fix the Sidebar layout", "fix the sidebar layout"),
+            sess(
+                "a",
+                None,
+                "Fix the Sidebar layout",
+                "fix the sidebar layout",
+            ),
             sess("b", None, "Port the worktree tree", "port it"),
         ];
         let hits = filter_sessions(&v, "SIDEBAR");
@@ -608,7 +649,12 @@ mod tests {
     #[test]
     fn filter_matches_first_user_when_summary_record_won() {
         // Summary came from a `summary` record; the opening prompt only lives in first_user.
-        let v = vec![sess("a", None, "Ported the worktree tree", "please refactor the parser")];
+        let v = vec![sess(
+            "a",
+            None,
+            "Ported the worktree tree",
+            "please refactor the parser",
+        )];
         assert_eq!(filter_sessions(&v, "refactor the parser").len(), 1);
         assert!(filter_sessions(&v, "missing").is_empty());
     }
@@ -620,7 +666,10 @@ mod tests {
             sess("second", Some(200), "beta gamma", ""),
             sess("third", Some(100), "gamma alpha", ""),
         ];
-        let ids: Vec<String> = filter_sessions(&v, "alpha").into_iter().map(|s| s.id).collect();
+        let ids: Vec<String> = filter_sessions(&v, "alpha")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         assert_eq!(ids, vec!["first", "third"]);
     }
 
@@ -649,11 +698,20 @@ mod tests {
         // Fast path still works (summary / opening prompt).
         assert!(session_matches(s, "sidebar"));
         // Assistant text, mid-conversation — only reachable via full_text (#1).
-        assert!(session_matches(s, "RefCell REBORROW"), "assistant text should match");
+        assert!(
+            session_matches(s, "RefCell REBORROW"),
+            "assistant text should match"
+        );
         // A later user message, past the first one.
-        assert!(session_matches(s, "zanzibar"), "later user text should match");
+        assert!(
+            session_matches(s, "zanzibar"),
+            "later user text should match"
+        );
         // Miss: not in the conversation at all.
-        assert!(!session_matches(s, "kubernetes"), "absent term must not match");
+        assert!(
+            !session_matches(s, "kubernetes"),
+            "absent term must not match"
+        );
         // Tool traffic (tool_result content) is NOT searchable text.
         assert!(!session_matches(s, "secret-tool-output"));
 
@@ -696,31 +754,53 @@ mod tests {
         // Unchanged: a re-scan parses nothing and returns the same rows.
         let second = cache.scan_dir(&dir);
         assert_eq!(second, first);
-        assert_eq!(cache.last_scan_parsed(), 0, "warm scan must reuse the cache");
+        assert_eq!(
+            cache.last_scan_parsed(),
+            0,
+            "warm scan must reuse the cache"
+        );
 
         // Touch one file: append a record AND bump its mtime well past the original
         // (size + mtime both move — either alone must invalidate, jointly they must).
         let b = dir.join("b.jsonl");
         let mut content = std::fs::read_to_string(&b).unwrap();
-        content.push_str("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"again\"}}\n");
+        content.push_str(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"again\"}}\n",
+        );
         std::fs::write(&b, content).unwrap();
         let f = std::fs::File::options().write(true).open(&b).unwrap();
-        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
         drop(f);
 
         let third = cache.scan_dir(&dir);
-        assert_eq!(cache.last_scan_parsed(), 1, "only the changed file re-parses");
+        assert_eq!(
+            cache.last_scan_parsed(),
+            1,
+            "only the changed file re-parses"
+        );
         let b_row = third.iter().find(|s| s.id == "b").unwrap();
-        assert_eq!(b_row.message_count, 2, "the re-parse saw the appended record");
-        assert!(session_matches(b_row, "again"), "new text is searchable after the bump");
+        assert_eq!(
+            b_row.message_count, 2,
+            "the re-parse saw the appended record"
+        );
+        assert!(
+            session_matches(b_row, "again"),
+            "new text is searchable after the bump"
+        );
 
         // mtime bump alone (same size, same content) also invalidates.
         let a = dir.join("a.jsonl");
         let f = std::fs::File::options().write(true).open(&a).unwrap();
-        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
         drop(f);
         cache.scan_dir(&dir);
-        assert_eq!(cache.last_scan_parsed(), 1, "an mtime-only bump re-parses that file");
+        assert_eq!(
+            cache.last_scan_parsed(),
+            1,
+            "an mtime-only bump re-parses that file"
+        );
 
         // Deleting a file drops it from the next scan.
         std::fs::remove_file(&b).unwrap();

@@ -11,6 +11,7 @@
 
 use std::time::Instant;
 
+use hyperpanes_core::ai::service::AiProjectRef;
 use hyperpanes_core::layout::navigate::{neighbor_index, Direction};
 use hyperpanes_core::layout::presets::{
     compute_dividers, compute_tiles, effective_layout, DividerKind, Layout,
@@ -18,7 +19,6 @@ use hyperpanes_core::layout::presets::{
 use hyperpanes_core::layout::sizes::{
     clamp_fraction, equal_sizes, insert_size, remove_size, resize_at,
 };
-use hyperpanes_core::ai::service::AiProjectRef;
 use hyperpanes_core::persistence::projects;
 use hyperpanes_core::session_manager::{SessionManager, SpawnOptions};
 use hyperpanes_core::workspace::io::{read_workspace, windows_of, write_workspace};
@@ -344,7 +344,12 @@ pub fn spawn_done() -> &'static std::sync::Mutex<Vec<String>> {
 /// with a trailing `.exe` stripped. An empty/whitespace program yields "".
 fn shell_label(program: &str) -> String {
     // basename after the last path separator (handles full paths like COMSPEC's cmd.exe).
-    let base = program.trim().rsplit(['\\', '/']).next().unwrap_or("").trim();
+    let base = program
+        .trim()
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .trim();
     // strip a trailing ".exe" (case-insensitive) for a tidy badge. The lowercased `ends_with`
     // keeps the byte index a valid char boundary even for a non-ASCII basename.
     let stem = if base.to_ascii_lowercase().ends_with(".exe") {
@@ -406,7 +411,9 @@ impl Tab {
     /// "title" bug). The color VALUE stays assigned even on a clean (frame-off) pane.
     fn relabel(&mut self, palette: usize) {
         for (i, p) in self.panes.iter_mut().enumerate() {
-            p.accent = p.pinned_accent.unwrap_or_else(|| theme::accent_for(i, palette));
+            p.accent = p
+                .pinned_accent
+                .unwrap_or_else(|| theme::accent_for(i, palette));
         }
     }
 
@@ -641,8 +648,16 @@ impl State {
     /// pump while Preferences is open; `scale` is the window DPI scale.
     pub fn render_preview(&mut self, scale: f32, cursor_on: bool) -> Option<Image> {
         let (font_path, px, theme_idx) = match &self.prefs_draft {
-            Some(d) => (prefs::resolve_or_default(&d.font_family), d.font_px, d.terminal_theme),
-            None => (self.settings.font_path(), self.settings.font_px, self.settings.terminal_theme),
+            Some(d) => (
+                prefs::resolve_or_default(&d.font_family),
+                d.font_px,
+                d.terminal_theme,
+            ),
+            None => (
+                self.settings.font_path(),
+                self.settings.font_px,
+                self.settings.terminal_theme,
+            ),
         };
         let key = (font_path.clone(), px, scale);
         let mut changed = false;
@@ -652,7 +667,8 @@ impl State {
             changed = true;
         }
         if self.preview_theme != theme_idx as i32 {
-            self.preview_pane.set_palette(theme::terminal_theme(theme_idx));
+            self.preview_pane
+                .set_palette(theme::terminal_theme(theme_idx));
             self.preview_theme = theme_idx as i32;
             changed = true;
         }
@@ -689,7 +705,11 @@ impl State {
     fn preview_frame(&self) -> String {
         let (palette_idx, px, font_value) = match &self.prefs_draft {
             Some(d) => (d.frame_palette, d.font_px, d.font_family.as_str()),
-            None => (self.settings.frame_palette, self.settings.font_px, self.settings.font_family.as_str()),
+            None => (
+                self.settings.frame_palette,
+                self.settings.font_px,
+                self.settings.font_family.as_str(),
+            ),
         };
         let colors = theme::frame_palette(palette_idx);
         let (ar, ag, ab) = colors[0]; // accent = the palette's first slot
@@ -705,7 +725,7 @@ impl State {
 
         let mut s = String::with_capacity(2400);
         s.push_str("\x1b[H\x1b[?25l"); // home + hide cursor (it's an animation, not a prompt)
-        // top HUD: score (accent) + level/lines
+                                       // top HUD: score (accent) + level/lines
         s.push_str(&accent);
         s.push_str(&format!("SCORE {:06}", t.score()));
         s.push_str(reset);
@@ -723,7 +743,10 @@ impl State {
         s.push_str(reset);
         s.push_str(&format!(
             "\x1b[38;2;{};{};{}m{} \u{2588}\u{2588}\x1b[0m",
-            nr, ng, nb, t.next_letter()
+            nr,
+            ng,
+            nb,
+            t.next_letter()
         ));
         s.push_str("\x1b[K\r\n");
         s.push_str(dim);
@@ -798,12 +821,16 @@ impl State {
     /// only ever grow from there, and the first render pump corrects it.
     fn spawn_cells(&self) -> (u16, u16) {
         let tab = self.active_tab();
-        match tab.panes.get(tab.focused.min(tab.panes.len().saturating_sub(1))) {
+        match tab
+            .panes
+            .get(tab.focused.min(tab.panes.len().saturating_sub(1)))
+        {
             // `applied` starts as the spawn default and only becomes meaningful once the
             // pump has laid the pane out (rect set) — don't propagate a pre-layout value.
-            Some(p) if p.rect.2 > 0.0 => {
-                ((p.applied.0.clamp(2, 500)) as u16, (p.applied.1.clamp(1, 300)) as u16)
-            }
+            Some(p) if p.rect.2 > 0.0 => (
+                (p.applied.0.clamp(2, 500)) as u16,
+                (p.applied.1.clamp(1, 300)) as u16,
+            ),
             _ => (80, 24),
         }
     }
@@ -839,33 +866,42 @@ impl State {
             .unwrap_or_else(hyperpanes_core::session::spawn::default_shell);
         // Integration applies to the interactive branch only; a one-off `command` pane is
         // not an interactive shell, so skip it there (core would ignore it anyway).
-        let integration = command.is_none().then(|| {
-            hyperpanes_core::shell_integration::integration_for(
-                &shell_path,
-                &hyperpanes_core::shell_integration::shell_integration_dir(),
-            )
-            .map(|si| hyperpanes_core::session_manager::Integration {
-                args: si.args,
-                env: si.env.into_iter().collect(),
+        let integration = command
+            .is_none()
+            .then(|| {
+                hyperpanes_core::shell_integration::integration_for(
+                    &shell_path,
+                    &hyperpanes_core::shell_integration::shell_integration_dir(),
+                )
+                .map(|si| hyperpanes_core::session_manager::Integration {
+                    args: si.args,
+                    env: si.env.into_iter().collect(),
+                })
             })
-        }).flatten();
+            .flatten();
         let (cols, rows) = self.spawn_cells();
-        Self::spawn_session_async(mgr, SpawnOptions {
-            uid: uid.clone(),
-            cols: Some(cols),
-            rows: Some(rows),
-            pane_id: Some(uid.clone()),
-            cwd,
-            // Cloned so the resolved spawn spec is also kept on the PaneState (below) for the
-            // relaunch snapshot.
-            shell: shell.clone(),
-            command: command.clone(),
-            env: opts.env.clone(),
-            integration,
-            ..Default::default()
-        });
-        let mut pane =
-            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        Self::spawn_session_async(
+            mgr,
+            SpawnOptions {
+                uid: uid.clone(),
+                cols: Some(cols),
+                rows: Some(rows),
+                pane_id: Some(uid.clone()),
+                cwd,
+                // Cloned so the resolved spawn spec is also kept on the PaneState (below) for the
+                // relaunch snapshot.
+                shell: shell.clone(),
+                command: command.clone(),
+                env: opts.env.clone(),
+                integration,
+                ..Default::default()
+            },
+        );
+        let mut pane = TerminalPane::new(
+            cols as usize,
+            rows as usize,
+            Box::new(SoftwareRenderer::new()),
+        );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         let glow = Glow::new(crate::glow::seed_from(&uid));
         // A pane spawned WITH an accent is a project/dialog pane: by default tint it on. A
@@ -932,8 +968,20 @@ impl State {
 
     /// Spawn a new pane in the active tab with an optional working directory + accent
     /// (used to open a sidebar project cd'd into its repo), and focus it.
-    pub fn add_pane_cwd(&mut self, mgr: &SessionManager, cwd: Option<String>, accent: Option<Color>) {
-        self.add_pane_opts(mgr, NewPaneOpts { cwd, accent, ..Default::default() });
+    pub fn add_pane_cwd(
+        &mut self,
+        mgr: &SessionManager,
+        cwd: Option<String>,
+        accent: Option<Color>,
+    ) {
+        self.add_pane_opts(
+            mgr,
+            NewPaneOpts {
+                cwd,
+                accent,
+                ..Default::default()
+            },
+        );
     }
 
     /// Spawn a new pane in the active tab from the full [`NewPaneOpts`] (the New Pane
@@ -1066,8 +1114,11 @@ impl State {
     pub fn adopt_pane_at(&mut self, mgr: &SessionManager, det: DetachedPane, at: usize) {
         let palette = self.settings.frame_palette;
         let (cols, rows) = (80u16, 24u16);
-        let mut pane =
-            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        let mut pane = TerminalPane::new(
+            cols as usize,
+            rows as usize,
+            Box::new(SoftwareRenderer::new()),
+        );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         // Replay the rolling buffer so the re-hosted pane shows recent output instantly.
         if let Some(replay) = mgr.replay(&det.uid) {
@@ -1081,7 +1132,9 @@ impl State {
             subtitle: det.subtitle,
             show_frame: det.show_frame,
             show_dot: det.show_dot,
-            accent: det.pinned_accent.unwrap_or_else(|| theme::accent_for(at, palette)),
+            accent: det
+                .pinned_accent
+                .unwrap_or_else(|| theme::accent_for(at, palette)),
             pane,
             applied: (cols as usize, rows as usize),
             surface: Image::default(),
@@ -1741,7 +1794,9 @@ impl State {
     /// Font picker: select option `idx` from `prefs::FONT_OPTIONS`, or enter "Custom…" mode
     /// when `idx` is the trailing Custom entry (== `FONT_OPTIONS.len()`). Edits the draft.
     pub fn font_select(&mut self, idx: usize) {
-        let Some(d) = self.prefs_draft.as_mut() else { return };
+        let Some(d) = self.prefs_draft.as_mut() else {
+            return;
+        };
         if let Some((_, value)) = prefs::FONT_OPTIONS.get(idx) {
             d.font_family = value.to_string();
             self.font_custom = false;
@@ -1791,7 +1846,9 @@ impl State {
     /// Edit the appearance **draft** (no live change). Used for the appearance settings while
     /// the dialog is open; a no-op if there's no draft or `s` isn't an appearance setting.
     pub fn draft_setting(&mut self, s: Setting) {
-        let Some(d) = self.prefs_draft.as_mut() else { return };
+        let Some(d) = self.prefs_draft.as_mut() else {
+            return;
+        };
         match s {
             Setting::FontFamily(path) => d.font_family = path,
             Setting::FramePalette(idx) => d.frame_palette = idx,
@@ -1868,8 +1925,8 @@ impl State {
                 self.prefs_confirm = false;
                 self.dirty = true;
             }
-            1 => self.close_overlay_now(),       // discard the draft
-            2 => self.prefs_done(),              // commit the draft
+            1 => self.close_overlay_now(), // discard the draft
+            2 => self.prefs_done(),        // commit the draft
             _ => {}
         }
     }
@@ -1937,8 +1994,10 @@ impl State {
                 // snaps any odd persisted value onto the grid.
                 let step = prefs::IDLE_STEP_SECONDS as i32;
                 let cur = self.settings.idle_alert_seconds as i32;
-                let steps = (cur / step + d)
-                    .clamp(prefs::MIN_IDLE_SECONDS as i32 / step, prefs::MAX_IDLE_SECONDS as i32 / step);
+                let steps = (cur / step + d).clamp(
+                    prefs::MIN_IDLE_SECONDS as i32 / step,
+                    prefs::MAX_IDLE_SECONDS as i32 / step,
+                );
                 self.settings.idle_alert_seconds = (steps * step) as u32;
             }
             Setting::AutoUpdate(on) => self.settings.auto_update = on,
@@ -1982,7 +2041,12 @@ impl State {
         let Some(key) = crate::key_tok_from_text(text, ctrl) else {
             return;
         };
-        let chord = crate::keybindings::Chord { ctrl, alt, shift, key };
+        let chord = crate::keybindings::Chord {
+            ctrl,
+            alt,
+            shift,
+            key,
+        };
         // Steal the chord from its current owner (if any) — that binding becomes unbound.
         if let Some(other) = self.keymap.owner_of(chord, &id) {
             self.keymap.unbind(other);
@@ -2150,8 +2214,12 @@ impl State {
     /// must not be left on the stale accent) — EXCEPT panes the user explicitly recolored
     /// to something other than the project tint, whose pin wins (see [`Self::recolor_pane`]).
     pub fn set_project_color(&mut self, idx: usize, swatch: usize) {
-        let Some(p) = self.projects.get(idx) else { return };
-        let Some(color) = projects::PROJECT_COLORS.get(swatch) else { return };
+        let Some(p) = self.projects.get(idx) else {
+            return;
+        };
+        let Some(color) = projects::PROJECT_COLORS.get(swatch) else {
+            return;
+        };
         let project_path = p.path.clone();
         let old = parse_hex(&p.color);
         let new = parse_hex(color);
@@ -2161,7 +2229,11 @@ impl State {
         // (`note_pane_cwd`): pane cwd → enclosing git root → the store's path key.
         for tab in &mut self.tabs {
             for pane in &mut tab.panes {
-                if !pane.cwd.as_deref().is_some_and(|cwd| cwd_in_project(cwd, &project_path)) {
+                if !pane
+                    .cwd
+                    .as_deref()
+                    .is_some_and(|cwd| cwd_in_project(cwd, &project_path))
+                {
                     continue;
                 }
                 if !follows_project_tint(pane.pinned_accent, old) {
@@ -2179,7 +2251,9 @@ impl State {
     /// Rename project at flyout row `idx` (no-op on an empty/unchanged name).
     pub fn rename_project(&mut self, idx: usize, name: &str) {
         let name = name.trim();
-        let Some(p) = self.projects.get(idx) else { return };
+        let Some(p) = self.projects.get(idx) else {
+            return;
+        };
         if name.is_empty() || name == p.name {
             return;
         }
@@ -2191,7 +2265,9 @@ impl State {
 
     /// Forget project at flyout row `idx`.
     pub fn remove_project(&mut self, idx: usize) {
-        let Some(p) = self.projects.get(idx) else { return };
+        let Some(p) = self.projects.get(idx) else {
+            return;
+        };
         projects::remove_project(&p.id);
         self.projects = sidebar::list();
         self.dirty = true;
@@ -2261,7 +2337,9 @@ impl State {
         }
         if self.fullscreen
             && !self.esc_fired
-            && self.esc_hold_start.is_some_and(|s| now.duration_since(s) >= HOLD)
+            && self
+                .esc_hold_start
+                .is_some_and(|s| now.duration_since(s) >= HOLD)
         {
             self.esc_fired = true;
             self.esc_holding = false;
@@ -2409,7 +2487,11 @@ impl State {
             return;
         }
         t.focused = idx;
-        t.zoomed = if t.zoomed == Some(idx) { None } else { Some(idx) };
+        t.zoomed = if t.zoomed == Some(idx) {
+            None
+        } else {
+            Some(idx)
+        };
         self.dirty = true;
     }
 
@@ -2668,8 +2750,11 @@ impl State {
             eprintln!("[hyperpanes] failed to restart {uid}: {e}");
             return;
         }
-        let mut newgrid =
-            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        let mut newgrid = TerminalPane::new(
+            cols as usize,
+            rows as usize,
+            Box::new(SoftwareRenderer::new()),
+        );
         newgrid.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             let old = std::mem::replace(&mut p.uid, uid);
@@ -2724,8 +2809,11 @@ impl State {
         }
         let palette = self.settings.frame_palette;
         let (cols, rows) = (80u16, 24u16);
-        let mut pane =
-            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        let mut pane = TerminalPane::new(
+            cols as usize,
+            rows as usize,
+            Box::new(SoftwareRenderer::new()),
+        );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         if let Some(replay) = mgr.replay(&det.uid) {
             pane.feed(&replay);
@@ -3305,7 +3393,11 @@ impl State {
                 format!("term {}", self.tab_seq).into()
             }
         };
-        let layout = g.layout.as_deref().map(layout_from_name).unwrap_or(Layout::Auto);
+        let layout = g
+            .layout
+            .as_deref()
+            .map(layout_from_name)
+            .unwrap_or(Layout::Auto);
         let mut tab = Tab::empty(title);
         tab.layout = layout;
         for (i, spec) in g.panes.iter().enumerate() {
@@ -3365,8 +3457,7 @@ impl State {
         // fresh grid. Otherwise (in-process backend, no recorded uid, or a dead/unknown uid —
         // the program had exited) we fall back to today's behaviour: re-spawn from the spec
         // (Prep made the spec re-run the original program, not a bare shell).
-        let reattach = mgr.is_daemon()
-            && spec.uid.as_deref().map(|u| mgr.has(u)).unwrap_or(false);
+        let reattach = mgr.is_daemon() && spec.uid.as_deref().map(|u| mgr.has(u)).unwrap_or(false);
         // The restored pane keeps its snapshot uid when re-attaching (so it identifies the
         // surviving session); a fresh spawn mints a new backend-appropriate uid.
         let uid = match (&reattach, &spec.uid) {
@@ -3374,8 +3465,11 @@ impl State {
             _ => mgr.fresh_uid(),
         };
 
-        let mut pane =
-            TerminalPane::new(cols as usize, rows as usize, Box::new(SoftwareRenderer::new()));
+        let mut pane = TerminalPane::new(
+            cols as usize,
+            rows as usize,
+            Box::new(SoftwareRenderer::new()),
+        );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         if reattach {
             // Re-host the survivor: seed the fresh grid from the daemon's retained replay (the
@@ -3385,20 +3479,23 @@ impl State {
                 pane.feed(&replay);
             }
         } else {
-            Self::spawn_session_async(mgr, SpawnOptions {
-                uid: uid.clone(),
-                cols: Some(cols),
-                rows: Some(rows),
-                pane_id: Some(uid.clone()),
-                cwd: spec.cwd.clone(),
-                // Cloned so the resolved shell is also kept on the PaneState (below) for a
-                // subsequent relaunch snapshot.
-                shell: shell.clone(),
-                command: spec.command.clone(),
-                args: spec.args.clone(),
-                integration,
-                ..Default::default()
-            });
+            Self::spawn_session_async(
+                mgr,
+                SpawnOptions {
+                    uid: uid.clone(),
+                    cols: Some(cols),
+                    rows: Some(rows),
+                    pane_id: Some(uid.clone()),
+                    cwd: spec.cwd.clone(),
+                    // Cloned so the resolved shell is also kept on the PaneState (below) for a
+                    // subsequent relaunch snapshot.
+                    shell: shell.clone(),
+                    command: spec.command.clone(),
+                    args: spec.args.clone(),
+                    integration,
+                    ..Default::default()
+                },
+            );
         }
         let glow = Glow::new(crate::glow::seed_from(&uid));
         let pinned = spec.color.as_deref().map(parse_hex);
@@ -3666,8 +3763,8 @@ mod project_recolor_tests {
     /// A unique throwaway dir that LOOKS like a git repo (`<tmp>/<name>/.git/`), so
     /// `git_root_of`'s `.git`-exists walk resolves it. Cleaned up by the OS temp policy.
     fn fake_repo(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir()
-            .join(format!("hp_recolor_test_{}_{}", std::process::id(), name));
+        let root =
+            std::env::temp_dir().join(format!("hp_recolor_test_{}_{}", std::process::id(), name));
         std::fs::create_dir_all(root.join(".git")).expect("create fake repo");
         root
     }
@@ -3677,18 +3774,30 @@ mod project_recolor_tests {
         let repo = fake_repo("inside");
         let sub = repo.join("src").join("deep");
         std::fs::create_dir_all(&sub).unwrap();
-        assert!(cwd_in_project(&sub.to_string_lossy(), &repo.to_string_lossy()));
+        assert!(cwd_in_project(
+            &sub.to_string_lossy(),
+            &repo.to_string_lossy()
+        ));
         // The root itself counts too.
-        assert!(cwd_in_project(&repo.to_string_lossy(), &repo.to_string_lossy()));
+        assert!(cwd_in_project(
+            &repo.to_string_lossy(),
+            &repo.to_string_lossy()
+        ));
     }
 
     #[test]
     fn rejects_a_cwd_outside_the_repo_or_in_a_sibling_repo() {
         let repo = fake_repo("mine");
         let other = fake_repo("other");
-        assert!(!cwd_in_project(&other.to_string_lossy(), &repo.to_string_lossy()));
+        assert!(!cwd_in_project(
+            &other.to_string_lossy(),
+            &repo.to_string_lossy()
+        ));
         // A non-repo cwd never matches (git_root_of walks up to nothing relevant).
-        assert!(!cwd_in_project(&std::env::temp_dir().to_string_lossy(), &repo.to_string_lossy()));
+        assert!(!cwd_in_project(
+            &std::env::temp_dir().to_string_lossy(),
+            &repo.to_string_lossy()
+        ));
     }
 
     #[cfg(windows)]
@@ -3940,8 +4049,15 @@ mod session_file_tests {
         let file = st.to_session_file();
         let groups = file.groups.expect("one group per tab");
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].panes[0].font_size, Some(20), "zoomed pane carries its px");
-        assert_eq!(groups[0].panes[1].font_size, None, "base pane omits font_size");
+        assert_eq!(
+            groups[0].panes[0].font_size,
+            Some(20),
+            "zoomed pane carries its px"
+        );
+        assert_eq!(
+            groups[0].panes[1].font_size, None,
+            "base pane omits font_size"
+        );
     }
 
     #[test]
@@ -3989,7 +4105,9 @@ mod session_file_tests {
     fn session_snapshot_round_trips_uid_and_command() {
         // `load_workspace` fires an async pty spawn that grabs the current Tokio handle, so
         // hold a runtime context for the duration of this test (the app always runs inside one).
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _guard = rt.enter();
         let mut st = fresh();
         let m = mgr();
@@ -4011,16 +4129,26 @@ mod session_file_tests {
         // The loaded pane remembers what it was spawned with.
         let live = &st.active_tab().panes[0];
         assert_eq!(live.spawn_command.as_deref(), Some("claude"));
-        assert_eq!(live.spawn_args.as_deref(), Some(&["--model".into(), "opus".into()][..]));
+        assert_eq!(
+            live.spawn_args.as_deref(),
+            Some(&["--model".into(), "opus".into()][..])
+        );
         assert_eq!(live.spawn_shell.as_deref(), Some("pwsh"));
         let live_uid = live.uid.clone();
 
         // Snapshot: the live uid + the spawn command/args/shell are recorded.
         let snap = st.to_session_file();
         let pane = &snap.groups.as_ref().unwrap()[0].panes[0];
-        assert_eq!(pane.uid.as_deref(), Some(live_uid.as_str()), "live uid recorded");
+        assert_eq!(
+            pane.uid.as_deref(),
+            Some(live_uid.as_str()),
+            "live uid recorded"
+        );
         assert_eq!(pane.command.as_deref(), Some("claude"));
-        assert_eq!(pane.args.as_deref(), Some(&["--model".into(), "opus".into()][..]));
+        assert_eq!(
+            pane.args.as_deref(),
+            Some(&["--model".into(), "opus".into()][..])
+        );
         assert_eq!(pane.shell.as_deref(), Some("pwsh"));
 
         // Re-load the snapshot into a fresh window: the command survives, so restore re-runs
@@ -4039,11 +4167,16 @@ mod session_file_tests {
     /// the pane starts unstarted (a fresh shell coming up, not a replay-primed survivor).
     #[test]
     fn in_process_restore_respawns_with_a_fresh_uid_not_the_recorded_one() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _guard = rt.enter();
         let mut st = fresh();
         let m = mgr(); // in-process backend
-        assert!(!m.is_daemon(), "this test exercises the in-process (re-spawn) path");
+        assert!(
+            !m.is_daemon(),
+            "this test exercises the in-process (re-spawn) path"
+        );
         let snap = WorkspaceFile {
             groups: Some(vec![GroupSpec {
                 panes: vec![PaneSpec {
@@ -4065,7 +4198,10 @@ mod session_file_tests {
             "in-process restore mints a fresh uid (no re-attach), got {}",
             restored.uid
         );
-        assert!(!restored.started, "a re-spawned pane starts unstarted (fresh shell coming up)");
+        assert!(
+            !restored.started,
+            "a re-spawned pane starts unstarted (fresh shell coming up)"
+        );
         // The original program is still re-run from the spec (Prep's re-spawn-the-program fix).
         assert_eq!(restored.spawn_command.as_deref(), Some("htop"));
     }
@@ -4080,7 +4216,10 @@ mod session_file_tests {
         let m = mgr();
         st.adopt_pane(&m, det("only", 14.0));
         assert!(!st.close_pane(0, &m), "workspace emptied → caller quits");
-        assert!(st.active_tab().panes.is_empty(), "empty tab left while closing");
+        assert!(
+            st.active_tab().panes.is_empty(),
+            "empty tab left while closing"
+        );
         let file = st.to_session_file();
         assert_eq!(file.groups.as_deref().map(|g| g.len()), Some(0));
         assert_eq!(file.active, Some(0));
@@ -4094,14 +4233,18 @@ mod session_file_tests {
         let mut st = fresh();
         let m = mgr();
         st.adopt_pane(&m, det("a", 14.0)); // tab 0
-        // Manufacture an empty tab before it (defensive: no normal flow keeps one).
+                                           // Manufacture an empty tab before it (defensive: no normal flow keeps one).
         st.tabs.insert(0, Tab::empty("ghost".into()));
         st.active = 1; // the real tab
         let file = st.to_session_file();
         let groups = file.groups.unwrap();
         assert_eq!(groups.len(), 1, "empty tab dropped");
         assert_eq!(groups[0].panes.len(), 1);
-        assert_eq!(file.active, Some(0), "active remapped to the filtered index");
+        assert_eq!(
+            file.active,
+            Some(0),
+            "active remapped to the filtered index"
+        );
         // The surviving pane still carries its uid through the empty-tab filtering, so a
         // session-daemon relaunch can match it.
         assert_eq!(groups[0].panes[0].uid.as_deref(), Some("a"));
@@ -4135,7 +4278,10 @@ mod session_file_tests {
         let m = mgr();
         st.adopt_pane(&m, det("keep", 14.0));
         let file = WorkspaceFile {
-            groups: Some(vec![GroupSpec { panes: vec![], ..Default::default() }]),
+            groups: Some(vec![GroupSpec {
+                panes: vec![],
+                ..Default::default()
+            }]),
             active: Some(0),
             ..Default::default()
         };
@@ -4174,7 +4320,10 @@ mod shell_label_tests {
     fn strips_a_full_path_to_the_basename() {
         // COMSPEC is a full path; the badge uses the basename only.
         assert_eq!(shell_label("C:\\Windows\\system32\\cmd.exe"), "cmd");
-        assert_eq!(shell_label("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "pwsh");
+        assert_eq!(
+            shell_label("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+            "pwsh"
+        );
         assert_eq!(shell_label("C:\\Program Files\\Git\\bin\\bash.exe"), "bash");
     }
 
@@ -4346,7 +4495,10 @@ mod reminder_tests {
     #[test]
     fn due_labels_roll_over_midnight() {
         // noon + 15m → same day.
-        assert_eq!(due_for(12 * 3600, ReminderOffset::Min15), (900_000, "12:15".into()));
+        assert_eq!(
+            due_for(12 * 3600, ReminderOffset::Min15),
+            (900_000, "12:15".into())
+        );
         // 23:50 + 15m → tomorrow 00:05.
         let (d, l) = due_for(23 * 3600 + 50 * 60, ReminderOffset::Min15);
         assert_eq!((d, l.as_str()), (900_000, "tomorrow 00:05"));

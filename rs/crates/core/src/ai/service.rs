@@ -30,7 +30,8 @@ use crate::ai::pane_buffer::PaneTailBuffer;
 use crate::ai::redactor::redact;
 use crate::ai::scheduler::{JobResult, JobStart, SchedulerConfig, SummaryScheduler};
 
-const SYSTEM_PROMPT: &str = "You label what a developer is doing in one terse present-tense phrase \
+const SYSTEM_PROMPT: &str =
+    "You label what a developer is doing in one terse present-tense phrase \
 (max 8 words). No trailing punctuation. Never include secrets, paths, or code. \
 If unclear, answer 'working'.";
 
@@ -162,10 +163,7 @@ fn fingerprint(text: &str) -> String {
     let mut h: i32 = 5381;
     let mut len = 0usize;
     for c in text.chars() {
-        h = h
-            .wrapping_shl(5)
-            .wrapping_add(h)
-            .wrapping_add(c as i32);
+        h = h.wrapping_shl(5).wrapping_add(h).wrapping_add(c as i32);
         len += 1;
     }
     format!("{len}:{h}")
@@ -405,7 +403,13 @@ impl<S: Summarizer> AiService<S> {
             let is_new = prev.is_none();
             let was_muted = prev.map(|c| c.muted).unwrap_or(false);
             let (cwd, project_path, project_name) = prev
-                .map(|c| (c.cwd.clone(), c.project_path.clone(), c.project_name.clone()))
+                .map(|c| {
+                    (
+                        c.cwd.clone(),
+                        c.project_path.clone(),
+                        c.project_name.clone(),
+                    )
+                })
                 .unwrap_or_default();
             self.ctx_by_uid.insert(
                 p.session_uid.clone(),
@@ -585,7 +589,8 @@ impl<S: Summarizer> AiService<S> {
             }
         };
         let ctx = &outcome.ctx;
-        self.last_hash.insert(outcome.uid.clone(), outcome.hash.clone());
+        self.last_hash
+            .insert(outcome.uid.clone(), outcome.hash.clone());
         (self.push_meta)(
             ctx.window_id,
             &ctx.pane_id,
@@ -935,7 +940,13 @@ mod tests {
         let last = m.last().unwrap();
         assert_eq!(last.0, 7);
         assert_eq!(last.1, "p1");
-        assert_eq!(last.2, vec![("ai.subtitle".to_string(), "building the project".to_string())]);
+        assert_eq!(
+            last.2,
+            vec![(
+                "ai.subtitle".to_string(),
+                "building the project".to_string()
+            )]
+        );
 
         // prompt was built with label + directory basename
         let c = calls.borrow();
@@ -945,7 +956,10 @@ mod tests {
         assert!(prompt.contains("Recent terminal output:"));
 
         // persisted into pane + project memory
-        assert_eq!(svc.store.get_pane("p1").unwrap().summary, "building the project");
+        assert_eq!(
+            svc.store.get_pane("p1").unwrap().summary,
+            "building the project"
+        );
         assert_eq!(
             svc.store.get_project("/home/dev/myrepo").unwrap().summary,
             "building the project"
@@ -961,7 +975,10 @@ mod tests {
         publish(&mut svc, 1, "u1", "p1", false);
         svc.on_data("u1", "some real output here\n");
         assert_eq!(svc.run_job("u1").await, JobResult::Fail);
-        assert_eq!(svc.status().last_error.as_deref(), Some("connection refused"));
+        assert_eq!(
+            svc.status().last_error.as_deref(),
+            Some("connection refused")
+        );
     }
 
     #[tokio::test]
@@ -989,8 +1006,14 @@ mod tests {
 
         let c = calls.borrow();
         let (_system, prompt) = c.last().unwrap();
-        assert!(prompt.contains("Pane label: API_KEY=[REDACTED]"), "got: {prompt}");
-        assert!(prompt.contains("Directory: SECRET=[REDACTED]"), "got: {prompt}");
+        assert!(
+            prompt.contains("Pane label: API_KEY=[REDACTED]"),
+            "got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Directory: SECRET=[REDACTED]"),
+            "got: {prompt}"
+        );
         assert!(!prompt.contains("abc123"));
         assert!(!prompt.contains("hunter2"));
     }

@@ -35,7 +35,11 @@ impl Replay {
 
     /// A replay buffer with an explicit UTF-16 cap (used by tests).
     pub fn with_capacity(cap: usize) -> Self {
-        Self { buf: String::new(), len_u16: 0, cap }
+        Self {
+            buf: String::new(),
+            len_u16: 0,
+            cap,
+        }
     }
 
     /// Append a flushed chunk, evicting oldest output so the retained length stays at

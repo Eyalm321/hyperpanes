@@ -30,7 +30,10 @@ fn first_press_reaches_touch_area_without_prior_focus() {
     i_slint_backend_testing::init_no_event_loop();
 
     let win = DemoWindow::new().unwrap();
-    let panes = Rc::new(slint::VecModel::from(vec![PaneVisual::default(), PaneVisual::default()]));
+    let panes = Rc::new(slint::VecModel::from(vec![
+        PaneVisual::default(),
+        PaneVisual::default(),
+    ]));
     assert_eq!(panes.row_count(), 2);
     win.set_panes(panes.into());
     win.window().set_size(slint::PhysicalSize::new(800, 600));
@@ -58,11 +61,16 @@ fn first_press_reaches_touch_area_without_prior_focus() {
     let in_pane1 = LogicalPosition::new(600.0, 300.0);
 
     // ---- right button into pane 1, no pane has Slint focus yet (the #32 paste path) ----
-    win.window().dispatch_event(WindowEvent::PointerMoved { position: in_pane1 });
     win.window()
-        .dispatch_event(WindowEvent::PointerPressed { position: in_pane1, button: PointerEventButton::Right });
-    win.window()
-        .dispatch_event(WindowEvent::PointerReleased { position: in_pane1, button: PointerEventButton::Right });
+        .dispatch_event(WindowEvent::PointerMoved { position: in_pane1 });
+    win.window().dispatch_event(WindowEvent::PointerPressed {
+        position: in_pane1,
+        button: PointerEventButton::Right,
+    });
+    win.window().dispatch_event(WindowEvent::PointerReleased {
+        position: in_pane1,
+        button: PointerEventButton::Right,
+    });
 
     assert_eq!(
         *pasted.borrow(),
@@ -70,14 +78,23 @@ fn first_press_reaches_touch_area_without_prior_focus() {
         "the FIRST right-press into a pane with no prior Slint focus must reach the \
          TouchArea and request a paste (the FocusScope must not consume it)"
     );
-    assert_eq!(*focused.borrow(), vec![1], "the same press must fire the frozen focus-requested contract");
+    assert_eq!(
+        *focused.borrow(),
+        vec![1],
+        "the same press must fire the frozen focus-requested contract"
+    );
 
     // ---- left button into pane 0, whose scope is NOT the focused one (the #33 drag anchor) ----
-    win.window().dispatch_event(WindowEvent::PointerMoved { position: in_pane0 });
     win.window()
-        .dispatch_event(WindowEvent::PointerPressed { position: in_pane0, button: PointerEventButton::Left });
-    win.window()
-        .dispatch_event(WindowEvent::PointerReleased { position: in_pane0, button: PointerEventButton::Left });
+        .dispatch_event(WindowEvent::PointerMoved { position: in_pane0 });
+    win.window().dispatch_event(WindowEvent::PointerPressed {
+        position: in_pane0,
+        button: PointerEventButton::Left,
+    });
+    win.window().dispatch_event(WindowEvent::PointerReleased {
+        position: in_pane0,
+        button: PointerEventButton::Left,
+    });
 
     assert_eq!(
         *begun.borrow(),

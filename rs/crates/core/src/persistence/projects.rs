@@ -119,12 +119,12 @@ fn color_for_path(p: &str) -> String {
 pub fn repo_name_from_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     // `.replace(/\.git$/i, '')` — strip a case-insensitive trailing `.git`.
-    let without_git = if trimmed.len() >= 4 && trimmed[trimmed.len() - 4..].eq_ignore_ascii_case(".git")
-    {
-        &trimmed[..trimmed.len() - 4]
-    } else {
-        trimmed
-    };
+    let without_git =
+        if trimmed.len() >= 4 && trimmed[trimmed.len() - 4..].eq_ignore_ascii_case(".git") {
+            &trimmed[..trimmed.len() - 4]
+        } else {
+            trimmed
+        };
     // `.replace(/[\\/]+$/, '')` — strip trailing separators.
     let mut u = without_git;
     while let Some(last) = u.as_bytes().last() {
@@ -138,7 +138,8 @@ pub fn repo_name_from_url(url: &str) -> Option<String> {
         return None;
     }
     // `u.split(/[\\/:]/).filter(Boolean)` → last non-empty segment.
-    u.split(['\\', '/', ':']).rfind(|s| !s.is_empty())
+    u.split(['\\', '/', ':'])
+        .rfind(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
@@ -269,7 +270,7 @@ fn upsert_project_by_root_in(store: &Path, root: &str) -> Project {
     if let Some(idx) = list.iter().position(|p| path_key(&p.path) == key) {
         list[idx].last_opened_at = Some(now_ms());
         list[idx].path = path.clone(); // canonicalize a legacy-stored path
-        // Heal a folder-name title to the real repo name, but never a user rename.
+                                       // Heal a folder-name title to the real repo name, but never a user rename.
         if let Some(r) = &repo {
             if list[idx].name == basename(&path) && &list[idx].name != r {
                 list[idx].name = r.clone();
@@ -283,8 +284,7 @@ fn upsert_project_by_root_in(store: &Path, root: &str) -> Project {
     let base = basename(&path);
     let project = Project {
         id: uuid::Uuid::new_v4().to_string(),
-        name: repo
-            .unwrap_or_else(|| if base.is_empty() { path.clone() } else { base }),
+        name: repo.unwrap_or_else(|| if base.is_empty() { path.clone() } else { base }),
         color: color_for_path(&path),
         last_opened_at: Some(now_ms()),
         path,
@@ -436,7 +436,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn makes_cmd_and_pwsh_paths_identical() {
-        assert_eq!(canonical_path("c:\\hyperpanes"), canonical_path("C:\\hyperpanes"));
+        assert_eq!(
+            canonical_path("c:\\hyperpanes"),
+            canonical_path("C:\\hyperpanes")
+        );
     }
 
     // ---- extra coverage: color stability + upsert round-trip ----
@@ -446,7 +449,10 @@ mod tests {
         let c = color_for_path("/home/me/project");
         assert!(PROJECT_COLORS.contains(&c.as_str()));
         // Same canonical key → same color regardless of trailing separator / casing.
-        assert_eq!(color_for_path("/home/me/project"), color_for_path("/home/me/project/"));
+        assert_eq!(
+            color_for_path("/home/me/project"),
+            color_for_path("/home/me/project/")
+        );
     }
 
     #[cfg(windows)]
@@ -558,7 +564,9 @@ mod tests {
             Some("https://github.com/owner/cool-repo.git")
         );
         assert_eq!(
-            parse_origin_url(cfg).and_then(|u| repo_name_from_url(&u)).as_deref(),
+            parse_origin_url(cfg)
+                .and_then(|u| repo_name_from_url(&u))
+                .as_deref(),
             Some("cool-repo")
         );
         // No origin section → None.

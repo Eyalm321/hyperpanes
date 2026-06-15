@@ -12,14 +12,23 @@ use hyperpanes_core::control::server::serve_for_test;
 
 /// Minimal HTTP/1.1 request over loopback. `Connection: close` lets us read the whole response to
 /// EOF, then split status + body. Returns (status_code, body).
-fn request(port: u16, method: &str, path: &str, token: Option<&str>, body: Option<&str>) -> (u16, String) {
+fn request(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
     if let Some(t) = token {
         req.push_str(&format!("Authorization: Bearer {t}\r\n"));
     }
     if let Some(b) = body {
-        req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", b.len()));
+        req.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            b.len()
+        ));
     }
     req.push_str("\r\n");
     if let Some(b) = body {
@@ -33,12 +42,17 @@ fn request(port: u16, method: &str, path: &str, token: Option<&str>, body: Optio
         .nth(1)
         .and_then(|s| s.parse().ok())
         .expect("status code");
-    let body = resp.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("").to_string();
+    let body = resp
+        .split_once("\r\n\r\n")
+        .map(|x| x.1)
+        .unwrap_or("")
+        .to_string();
     (status, body)
 }
 
 fn boot() -> u16 {
-    let control_file = std::env::temp_dir().join(format!("hp-parity-it-{}.json", std::process::id()));
+    let control_file =
+        std::env::temp_dir().join(format!("hp-parity-it-{}.json", std::process::id()));
     let token = "it-master-token";
     let (shared, port) = serve_for_test(control_file, true, token).expect("serve");
     // Seed one window with one pane through the public read-model API.

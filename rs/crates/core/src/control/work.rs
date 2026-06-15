@@ -377,17 +377,25 @@ impl WorkQueue {
         let versioned: i64 =
             conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))?;
         if versioned == 0 {
-            conn.execute("INSERT INTO schema_version (v) VALUES (?1)", params![SCHEMA_VERSION])?;
+            conn.execute(
+                "INSERT INTO schema_version (v) VALUES (?1)",
+                params![SCHEMA_VERSION],
+            )?;
         }
         // Resume the monotonic counters. `seq` survives on every row; `fencing_token` is
         // never nulled on requeue (only overwritten by the next claim), so MAX never regresses.
-        let seq: i64 = conn.query_row("SELECT COALESCE(MAX(seq),0) FROM tasks", [], |r| r.get(0))?;
+        let seq: i64 =
+            conn.query_row("SELECT COALESCE(MAX(seq),0) FROM tasks", [], |r| r.get(0))?;
         let fence: i64 = conn.query_row(
             "SELECT COALESCE(MAX(fencing_token),0) FROM tasks",
             [],
             |r| r.get(0),
         )?;
-        Ok(WorkQueue { conn, seq: seq as u64, fence: fence as u64 })
+        Ok(WorkQueue {
+            conn,
+            seq: seq as u64,
+            fence: fence as u64,
+        })
     }
 
     // --- writes -----------------------------------------------------------
@@ -458,7 +466,11 @@ impl WorkQueue {
             .optional()
             .ok()?;
         let (id, default_lease) = picked?; // None ⇒ tx dropped (rolled back), no token spent
-        let lease = if lease_ms > 0 { lease_ms } else { default_lease };
+        let lease = if lease_ms > 0 {
+            lease_ms
+        } else {
+            default_lease
+        };
         let deadline = now + lease;
         tx.execute(
             "UPDATE tasks SET state='claimed', claimed_by=?2, fencing_token=?3,
@@ -470,13 +482,22 @@ impl WorkQueue {
         let task = Self::fetch(&tx, &id).ok().flatten()?;
         tx.commit().ok()?;
         self.fence = next_fence;
-        Some(Claim { task, fencing_token: next_fence })
+        Some(Claim {
+            task,
+            fencing_token: next_fence,
+        })
     }
 
     /// Complete a claimed task (`Claimed → Done`), recording `result`. Lease-guarded.
     /// Re-acking an already-`Done` task with the **same** token is idempotent success (a
     /// worker retrying a lost 200); any other state / token mismatch is `Conflict`.
-    pub fn ack(&mut self, id: &str, fencing_token: u64, result: Option<&str>, now: i64) -> LeaseOutcome {
+    pub fn ack(
+        &mut self,
+        id: &str,
+        fencing_token: u64,
+        result: Option<&str>,
+        now: i64,
+    ) -> LeaseOutcome {
         let Some(task) = Self::fetch(&self.conn, id).ok().flatten() else {
             return LeaseOutcome::NotFound;
         };
@@ -495,7 +516,12 @@ impl WorkQueue {
              WHERE id=?1",
             params![id, result, now],
         );
-        LeaseOutcome::Ok(Self::fetch(&self.conn, id).ok().flatten().expect("acked row"))
+        LeaseOutcome::Ok(
+            Self::fetch(&self.conn, id)
+                .ok()
+                .flatten()
+                .expect("acked row"),
+        )
     }
 
     /// Fail/retry a claimed task. Lease-guarded. `requeue=true` & `attempts < max_attempts`
@@ -529,12 +555,23 @@ impl WorkQueue {
                 params![id, next, opts.error, now],
             );
         }
-        LeaseOutcome::Ok(Self::fetch(&self.conn, id).ok().flatten().expect("nacked row"))
+        LeaseOutcome::Ok(
+            Self::fetch(&self.conn, id)
+                .ok()
+                .flatten()
+                .expect("nacked row"),
+        )
     }
 
     /// Heartbeat for a long task: extend the current lease by `extra_ms` (from the existing
     /// deadline — never shortens it). Lease-guarded.
-    pub fn extend(&mut self, id: &str, fencing_token: u64, extra_ms: i64, now: i64) -> LeaseOutcome {
+    pub fn extend(
+        &mut self,
+        id: &str,
+        fencing_token: u64,
+        extra_ms: i64,
+        now: i64,
+    ) -> LeaseOutcome {
         let Some(task) = Self::fetch(&self.conn, id).ok().flatten() else {
             return LeaseOutcome::NotFound;
         };
@@ -546,7 +583,12 @@ impl WorkQueue {
             "UPDATE tasks SET visibility_deadline=?2, updated_at=?3 WHERE id=?1",
             params![id, new_deadline, now],
         );
-        LeaseOutcome::Ok(Self::fetch(&self.conn, id).ok().flatten().expect("extended row"))
+        LeaseOutcome::Ok(
+            Self::fetch(&self.conn, id)
+                .ok()
+                .flatten()
+                .expect("extended row"),
+        )
     }
 
     // --- reaping ----------------------------------------------------------
@@ -576,7 +618,11 @@ impl WorkQueue {
     /// in-flight tasks re-run (the at-least-once contract).
     pub fn recover_in_flight(&mut self, now: i64) -> Vec<Reaped> {
         let ids = self.claimed_ids("1 = 1", []);
-        self.requeue_or_dead_letter(ids, now, "control server restarted: in-flight task recovered")
+        self.requeue_or_dead_letter(
+            ids,
+            now,
+            "control server restarted: in-flight task recovered",
+        )
     }
 
     /// Collect ids of `claimed` rows matching an extra predicate.
@@ -618,7 +664,10 @@ impl WorkQueue {
                 Disposition::Requeued
             };
             if let Some(updated) = Self::fetch(&self.conn, &id).ok().flatten() {
-                out.push(Reaped { task: updated, disposition });
+                out.push(Reaped {
+                    task: updated,
+                    disposition,
+                });
             }
         }
         out
@@ -866,12 +915,42 @@ mod tests {
     #[test]
     fn claim_order_is_priority_then_fifo() {
         let mut wq = q();
-        wq.enqueue("build", "low", EnqueueOpts { priority: 1, ..Default::default() }, 0);
-        wq.enqueue("build", "high-a", EnqueueOpts { priority: 9, ..Default::default() }, 0);
-        wq.enqueue("build", "high-b", EnqueueOpts { priority: 9, ..Default::default() }, 0);
+        wq.enqueue(
+            "build",
+            "low",
+            EnqueueOpts {
+                priority: 1,
+                ..Default::default()
+            },
+            0,
+        );
+        wq.enqueue(
+            "build",
+            "high-a",
+            EnqueueOpts {
+                priority: 9,
+                ..Default::default()
+            },
+            0,
+        );
+        wq.enqueue(
+            "build",
+            "high-b",
+            EnqueueOpts {
+                priority: 9,
+                ..Default::default()
+            },
+            0,
+        );
         // Highest priority first; ties broken by enqueue order (seq).
-        assert_eq!(wq.claim("build", "w", 1000, 1).unwrap().task.payload, "high-a");
-        assert_eq!(wq.claim("build", "w", 1000, 2).unwrap().task.payload, "high-b");
+        assert_eq!(
+            wq.claim("build", "w", 1000, 1).unwrap().task.payload,
+            "high-a"
+        );
+        assert_eq!(
+            wq.claim("build", "w", 1000, 2).unwrap().task.payload,
+            "high-b"
+        );
         assert_eq!(wq.claim("build", "w", 1000, 3).unwrap().task.payload, "low");
     }
 
@@ -881,7 +960,10 @@ mod tests {
         wq.enqueue(
             "build",
             "later",
-            EnqueueOpts { available_at: Some(5000), ..Default::default() },
+            EnqueueOpts {
+                available_at: Some(5000),
+                ..Default::default()
+            },
             1000,
         );
         assert!(wq.claim("build", "w", 1000, 1000).is_none()); // not yet available
@@ -895,7 +977,10 @@ mod tests {
         wq.enqueue(
             "build",
             "j",
-            EnqueueOpts { visibility_timeout_ms: 1234, ..Default::default() },
+            EnqueueOpts {
+                visibility_timeout_ms: 1234,
+                ..Default::default()
+            },
             0,
         );
         let c = wq.claim("build", "w", 0, 100).unwrap(); // lease_ms <= 0 ⇒ use task default
@@ -933,7 +1018,7 @@ mod tests {
         let mut wq = q();
         enq(&mut wq, "build", "j", 0);
         let a = wq.claim("build", "A", 100, 1000).unwrap(); // token 1, deadline 1100
-        // A stalls; reaper requeues past the deadline.
+                                                            // A stalls; reaper requeues past the deadline.
         let reaped = wq.reap_expired(1200);
         assert_eq!(reaped.len(), 1);
         assert_eq!(reaped[0].disposition, Disposition::Requeued);
@@ -945,7 +1030,10 @@ mod tests {
         assert_eq!(b.task.attempts, 2);
 
         // A wakes and tries to ack with its STALE token ⇒ Conflict; B's token wins.
-        assert_eq!(wq.ack(&a.task.id, a.fencing_token, None, 1500), LeaseOutcome::Conflict);
+        assert_eq!(
+            wq.ack(&a.task.id, a.fencing_token, None, 1500),
+            LeaseOutcome::Conflict
+        );
         assert!(matches!(
             wq.ack(&b.task.id, b.fencing_token, None, 1500),
             LeaseOutcome::Ok(_)
@@ -955,13 +1043,25 @@ mod tests {
     #[test]
     fn nack_requeues_with_backoff_then_dead_letters_when_exhausted() {
         let mut wq = q();
-        wq.enqueue("build", "j", EnqueueOpts { max_attempts: 2, ..Default::default() }, 0);
+        wq.enqueue(
+            "build",
+            "j",
+            EnqueueOpts {
+                max_attempts: 2,
+                ..Default::default()
+            },
+            0,
+        );
 
         let c1 = wq.claim("build", "w", 1000, 100).unwrap(); // attempts 1
         let out1 = wq.nack(
             &c1.task.id,
             c1.fencing_token,
-            NackOpts { requeue: true, error: Some("boom".into()), delay_ms: None },
+            NackOpts {
+                requeue: true,
+                error: Some("boom".into()),
+                delay_ms: None,
+            },
             200,
         );
         match out1 {
@@ -980,7 +1080,10 @@ mod tests {
         let out2 = wq.nack(
             &c2.task.id,
             c2.fencing_token,
-            NackOpts { requeue: true, ..Default::default() },
+            NackOpts {
+                requeue: true,
+                ..Default::default()
+            },
             6000,
         );
         match out2 {
@@ -998,7 +1101,11 @@ mod tests {
         let out = wq.nack(
             &c.task.id,
             c.fencing_token,
-            NackOpts { requeue: false, error: Some("give up".into()), delay_ms: None },
+            NackOpts {
+                requeue: false,
+                error: Some("give up".into()),
+                delay_ms: None,
+            },
             20,
         );
         match out {
@@ -1033,7 +1140,15 @@ mod tests {
     #[test]
     fn reaper_dead_letters_when_no_retries_remain() {
         let mut wq = q();
-        wq.enqueue("build", "j", EnqueueOpts { max_attempts: 1, ..Default::default() }, 0);
+        wq.enqueue(
+            "build",
+            "j",
+            EnqueueOpts {
+                max_attempts: 1,
+                ..Default::default()
+            },
+            0,
+        );
         let _c = wq.claim("build", "w", 100, 1000).unwrap(); // attempts 1 == max
         let reaped = wq.reap_expired(2000);
         assert_eq!(reaped.len(), 1);
@@ -1049,7 +1164,7 @@ mod tests {
         enq(&mut wq, "build", "j", 0);
         let c = wq.claim("build", "w", 1000, 100).unwrap(); // deadline 1100
         assert!(wq.reap_expired(1000).is_empty()); // not yet expired
-        // Still claimed; an ack with the original token still works.
+                                                   // Still claimed; an ack with the original token still works.
         assert!(matches!(
             wq.ack(&c.task.id, c.fencing_token, None, 1050),
             LeaseOutcome::Ok(_)
@@ -1115,14 +1230,20 @@ mod tests {
         let first = wq.enqueue(
             "build",
             "v1",
-            EnqueueOpts { dedupe_key: Some("k".into()), ..Default::default() },
+            EnqueueOpts {
+                dedupe_key: Some("k".into()),
+                ..Default::default()
+            },
             0,
         );
         // Second enqueue with the same key while live ⇒ returns the SAME task, no insert.
         let dup = wq.enqueue(
             "build",
             "v2-ignored",
-            EnqueueOpts { dedupe_key: Some("k".into()), ..Default::default() },
+            EnqueueOpts {
+                dedupe_key: Some("k".into()),
+                ..Default::default()
+            },
             1,
         );
         assert_eq!(dup.id, first.id);
@@ -1135,7 +1256,10 @@ mod tests {
         let third = wq.enqueue(
             "build",
             "v3",
-            EnqueueOpts { dedupe_key: Some("k".into()), ..Default::default() },
+            EnqueueOpts {
+                dedupe_key: Some("k".into()),
+                ..Default::default()
+            },
             30,
         );
         assert_ne!(third.id, first.id); // a fresh task now that the key is free
@@ -1152,7 +1276,10 @@ mod tests {
         enq(&mut wq, "other", "x", 0); // a different queue is excluded
 
         let all = wq.list("build", ListFilter::default(), 0, 100);
-        assert_eq!(all.iter().map(|t| t.payload.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            all.iter().map(|t| t.payload.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
 
         // Cursor: only tasks after a.seq.
         let after = wq.list("build", ListFilter::default(), a.seq, 100);
@@ -1161,9 +1288,23 @@ mod tests {
 
         // State filter: claim one, then filter by state.
         wq.claim("build", "w", 1000, 1);
-        let claimed = wq.list("build", ListFilter { state: Some(TaskState::Claimed) }, 0, 100);
+        let claimed = wq.list(
+            "build",
+            ListFilter {
+                state: Some(TaskState::Claimed),
+            },
+            0,
+            100,
+        );
         assert_eq!(claimed.len(), 1);
-        let queued = wq.list("build", ListFilter { state: Some(TaskState::Queued) }, 0, 100);
+        let queued = wq.list(
+            "build",
+            ListFilter {
+                state: Some(TaskState::Queued),
+            },
+            0,
+            100,
+        );
         assert_eq!(queued.len(), 1);
     }
 
@@ -1194,8 +1335,24 @@ mod tests {
         // A low-priority keeper that is never claimed (so it stays Queued); the two
         // high-priority tasks are claimed first and driven to Done at different times.
         enq(&mut wq, "build", "stays-queued", 0); // priority 0
-        wq.enqueue("build", "old", EnqueueOpts { priority: 5, ..Default::default() }, 0);
-        wq.enqueue("build", "new", EnqueueOpts { priority: 5, ..Default::default() }, 0);
+        wq.enqueue(
+            "build",
+            "old",
+            EnqueueOpts {
+                priority: 5,
+                ..Default::default()
+            },
+            0,
+        );
+        wq.enqueue(
+            "build",
+            "new",
+            EnqueueOpts {
+                priority: 5,
+                ..Default::default()
+            },
+            0,
+        );
 
         let c1 = wq.claim("build", "w", 1000, 1).unwrap();
         assert_eq!(c1.task.payload, "old"); // higher priority claimed before the keeper

@@ -62,7 +62,10 @@ pub enum Marker {
     /// `133;D` or `133;D;<code>` — the command finished, optionally with its exit code.
     CommandEnd { code: Option<i32> },
     /// `9;hp;state=…` — the program self-reports its liveness.
-    Agent { state: AgentLiveness, code: Option<i32> },
+    Agent {
+        state: AgentLiveness,
+        code: Option<i32>,
+    },
 }
 
 // Interpret one OSC payload (the bytes between `ESC]` and its terminator) as a marker.
@@ -151,7 +154,11 @@ pub fn parse_osc_markers(carry: &str, chunk: &str) -> (Vec<Marker>, String) {
         let complete = buf[after..].contains(BEL) || buf[after..].contains(ST);
         if !complete {
             let tail = &buf[last_start..];
-            next_carry = if tail.len() > OSC_MAX { String::new() } else { tail.to_string() };
+            next_carry = if tail.len() > OSC_MAX {
+                String::new()
+            } else {
+                tail.to_string()
+            };
         }
     } else if buf.ends_with('\u{1b}') {
         // The 2-char prefix may be split: a lone trailing ESC starts the next OSC.
@@ -231,17 +238,41 @@ mod tests {
     #[test]
     fn agent_busy_awaiting_done() {
         let (m1, _) = parse_osc_markers("", &osc("9;hp;state=busy"));
-        assert_eq!(m1, vec![Marker::Agent { state: AgentLiveness::Busy, code: None }]);
+        assert_eq!(
+            m1,
+            vec![Marker::Agent {
+                state: AgentLiveness::Busy,
+                code: None
+            }]
+        );
         let (m2, _) = parse_osc_markers("", &osc("9;hp;state=awaiting-input"));
-        assert_eq!(m2, vec![Marker::Agent { state: AgentLiveness::AwaitingInput, code: None }]);
+        assert_eq!(
+            m2,
+            vec![Marker::Agent {
+                state: AgentLiveness::AwaitingInput,
+                code: None
+            }]
+        );
         let (m3, _) = parse_osc_markers("", &osc("9;hp;state=done"));
-        assert_eq!(m3, vec![Marker::Agent { state: AgentLiveness::Done, code: None }]);
+        assert_eq!(
+            m3,
+            vec![Marker::Agent {
+                state: AgentLiveness::Done,
+                code: None
+            }]
+        );
     }
 
     #[test]
     fn agent_error_with_code() {
         let (m, _) = parse_osc_markers("", &osc("9;hp;state=error;code=2"));
-        assert_eq!(m, vec![Marker::Agent { state: AgentLiveness::Error, code: Some(2) }]);
+        assert_eq!(
+            m,
+            vec![Marker::Agent {
+                state: AgentLiveness::Error,
+                code: Some(2)
+            }]
+        );
     }
 
     #[test]

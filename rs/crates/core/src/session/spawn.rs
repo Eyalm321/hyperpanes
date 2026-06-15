@@ -109,7 +109,13 @@ pub fn resolve_windows_command_with(
         .split(';')
         .map(|e| e.trim().to_ascii_lowercase())
         .filter(|e| !e.is_empty())
-        .map(|e| if e.starts_with('.') { e } else { format!(".{e}") })
+        .map(|e| {
+            if e.starts_with('.') {
+                e
+            } else {
+                format!(".{e}")
+            }
+        })
         .collect();
 
     let find_executable = |base_path: &str| -> Option<String> {
@@ -241,7 +247,10 @@ pub fn resolve_spawn_with(
             } else {
                 command.to_string()
             };
-            return Spawn { file, args: args.to_vec() };
+            return Spawn {
+                file,
+                args: args.to_vec(),
+            };
         }
     }
     Spawn {
@@ -305,9 +314,10 @@ pub fn build_env(inputs: &EnvInputs<'_>) -> EnvMap {
     env.insert("COLORTERM".into(), "truecolor".into());
 
     // Electron injects a default GOOGLE_API_KEY; don't leak it to the shell.
-    if let (Some(cur), Some(base)) =
-        (env.get("GOOGLE_API_KEY").cloned(), inputs.process_env.get("GOOGLE_API_KEY"))
-    {
+    if let (Some(cur), Some(base)) = (
+        env.get("GOOGLE_API_KEY").cloned(),
+        inputs.process_env.get("GOOGLE_API_KEY"),
+    ) {
         if &cur == base {
             env.remove("GOOGLE_API_KEY");
         }
@@ -321,7 +331,10 @@ pub fn build_env(inputs: &EnvInputs<'_>) -> EnvMap {
     // NOT also be able to read the master token from control.json — so only point at
     // the discovery file when no scoped token was injected.
     if !env.contains_key("HYPERPANES_CONTROL_TOKEN") {
-        env.insert("HYPERPANES_CONTROL_FILE".into(), inputs.control_file.to_string());
+        env.insert(
+            "HYPERPANES_CONTROL_FILE".into(),
+            inputs.control_file.to_string(),
+        );
     }
 
     env
@@ -332,7 +345,10 @@ mod tests {
     use super::*;
 
     fn map(pairs: &[(&str, &str)]) -> EnvMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn argv(items: &[&str]) -> Vec<String> {
@@ -355,7 +371,10 @@ mod tests {
 
     #[test]
     fn wraps_a_command_for_posix_shells_with_dash_c() {
-        assert_eq!(build_args("/bin/bash", Some("ls -la"), None), argv(&["-c", "ls -la"]));
+        assert_eq!(
+            build_args("/bin/bash", Some("ls -la"), None),
+            argv(&["-c", "ls -la"])
+        );
         assert_eq!(build_args("zsh", Some("ls"), None), argv(&["-c", "ls"]));
         assert_eq!(
             build_args("C:\\Program Files\\Git\\bin\\bash.exe", Some("ls"), None),
@@ -366,7 +385,10 @@ mod tests {
     #[test]
     fn returns_bare_base_args_for_an_interactive_shell() {
         assert_eq!(build_args("pwsh", None, None), Vec::<String>::new());
-        assert_eq!(build_args("bash", None, Some(&argv(&["-l"]))), argv(&["-l"]));
+        assert_eq!(
+            build_args("bash", None, Some(&argv(&["-l"]))),
+            argv(&["-l"])
+        );
     }
 
     // ---- resolveSpawn (P4a) ---- (is_file always-false mirrors statSync throwing)
@@ -379,8 +401,19 @@ mod tests {
     fn command_plus_args_spawns_directly_verbatim_argv() {
         let args = argv(&["--append-system-prompt", "be a pirate, matey"]);
         assert_eq!(
-            resolve_spawn_with("powershell.exe", Some("claude"), Some(&args), None, None, true, &no_files),
-            Spawn { file: "claude".into(), args }
+            resolve_spawn_with(
+                "powershell.exe",
+                Some("claude"),
+                Some(&args),
+                None,
+                None,
+                true,
+                &no_files
+            ),
+            Spawn {
+                file: "claude".into(),
+                args
+            }
         );
     }
 
@@ -388,20 +421,53 @@ mod tests {
     fn preserves_an_arg_with_spaces_and_quotes_as_one_element() {
         let args = argv(&["--msg", "hello \"world\" of panes"]);
         assert_eq!(
-            resolve_spawn_with("cmd.exe", Some("mytool"), Some(&args), None, None, true, &no_files),
-            Spawn { file: "mytool".into(), args }
+            resolve_spawn_with(
+                "cmd.exe",
+                Some("mytool"),
+                Some(&args),
+                None,
+                None,
+                true,
+                &no_files
+            ),
+            Spawn {
+                file: "mytool".into(),
+                args
+            }
         );
     }
 
     #[test]
     fn command_no_args_runs_through_the_shell() {
         assert_eq!(
-            resolve_spawn_with("pwsh", Some("npm run dev"), None, None, None, true, &no_files),
-            Spawn { file: "pwsh".into(), args: argv(&["-NoLogo", "-Command", "npm run dev"]) }
+            resolve_spawn_with(
+                "pwsh",
+                Some("npm run dev"),
+                None,
+                None,
+                None,
+                true,
+                &no_files
+            ),
+            Spawn {
+                file: "pwsh".into(),
+                args: argv(&["-NoLogo", "-Command", "npm run dev"])
+            }
         );
         assert_eq!(
-            resolve_spawn_with("/bin/bash", Some("ls -la"), None, None, None, false, &no_files),
-            Spawn { file: "/bin/bash".into(), args: argv(&["-c", "ls -la"]) }
+            resolve_spawn_with(
+                "/bin/bash",
+                Some("ls -la"),
+                None,
+                None,
+                None,
+                false,
+                &no_files
+            ),
+            Spawn {
+                file: "/bin/bash".into(),
+                args: argv(&["-c", "ls -la"])
+            }
         );
     }
 
@@ -409,8 +475,19 @@ mod tests {
     fn empty_args_array_is_treated_as_no_args() {
         let empty: Vec<String> = vec![];
         assert_eq!(
-            resolve_spawn_with("pwsh", Some("top"), Some(&empty), None, None, true, &no_files),
-            Spawn { file: "pwsh".into(), args: argv(&["-NoLogo", "-Command", "top"]) }
+            resolve_spawn_with(
+                "pwsh",
+                Some("top"),
+                Some(&empty),
+                None,
+                None,
+                true,
+                &no_files
+            ),
+            Spawn {
+                file: "pwsh".into(),
+                args: argv(&["-NoLogo", "-Command", "top"])
+            }
         );
     }
 
@@ -418,11 +495,25 @@ mod tests {
     fn no_command_spawns_the_interactive_shell() {
         assert_eq!(
             resolve_spawn_with("pwsh", None, None, None, None, true, &no_files),
-            Spawn { file: "pwsh".into(), args: vec![] }
+            Spawn {
+                file: "pwsh".into(),
+                args: vec![]
+            }
         );
         assert_eq!(
-            resolve_spawn_with("/bin/bash", None, Some(&argv(&["-l"])), None, None, false, &no_files),
-            Spawn { file: "/bin/bash".into(), args: argv(&["-l"]) }
+            resolve_spawn_with(
+                "/bin/bash",
+                None,
+                Some(&argv(&["-l"])),
+                None,
+                None,
+                false,
+                &no_files
+            ),
+            Spawn {
+                file: "/bin/bash".into(),
+                args: argv(&["-l"])
+            }
         );
     }
 
@@ -451,7 +542,10 @@ mod tests {
 
     #[test]
     fn searches_cwd_first_then_path() {
-        let env = map(&[("PATH", "C:\\bin;C:\\Windows\\system32"), ("PATHEXT", ".EXE;.CMD")]);
+        let env = map(&[
+            ("PATH", "C:\\bin;C:\\Windows\\system32"),
+            ("PATHEXT", ".EXE;.CMD"),
+        ]);
 
         // Case 1: exists in cwd
         let is_file1 = |p: &str| p == "C:\\myproj\\tool.cmd";
@@ -490,8 +584,14 @@ mod tests {
             pane_id: Some("pane-7"),
             control_file: "/data/control.json",
         });
-        assert_eq!(env.get("HYPERPANES_CONTROL_FILE").map(String::as_str), Some("/data/control.json"));
-        assert_eq!(env.get("HYPERPANES_PANE_ID").map(String::as_str), Some("pane-7"));
+        assert_eq!(
+            env.get("HYPERPANES_CONTROL_FILE").map(String::as_str),
+            Some("/data/control.json")
+        );
+        assert_eq!(
+            env.get("HYPERPANES_PANE_ID").map(String::as_str),
+            Some("pane-7")
+        );
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
     }
@@ -508,7 +608,10 @@ mod tests {
             pane_id: None,
             control_file: "/data/control.json",
         });
-        assert_eq!(env.get("HYPERPANES_CONTROL_TOKEN").map(String::as_str), Some("scoped-abc"));
+        assert_eq!(
+            env.get("HYPERPANES_CONTROL_TOKEN").map(String::as_str),
+            Some("scoped-abc")
+        );
         assert!(!env.contains_key("HYPERPANES_CONTROL_FILE"));
     }
 
@@ -539,7 +642,10 @@ mod tests {
             pane_id: None,
             control_file: "/data/control.json",
         });
-        assert_eq!(env.get("GOOGLE_API_KEY").map(String::as_str), Some("real-user-key"));
+        assert_eq!(
+            env.get("GOOGLE_API_KEY").map(String::as_str),
+            Some("real-user-key")
+        );
     }
 
     #[test]

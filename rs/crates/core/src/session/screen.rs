@@ -37,9 +37,17 @@ impl Screen {
         let cols = (cols as usize).max(1);
         let rows = (rows as usize).max(1);
         // Scrollback disabled: screen reads only serialize the visible viewport.
-        let config = Config { scrolling_history: 0, ..Config::default() };
+        let config = Config {
+            scrolling_history: 0,
+            ..Config::default()
+        };
         let term = Term::new(config, &TermSize::new(cols, rows), VoidListener);
-        Self { term, parser: Processor::new(), cols, rows }
+        Self {
+            term,
+            parser: Processor::new(),
+            cols,
+            rows,
+        }
     }
 
     /// Feed a raw output chunk (same bytes the renderer's terminal would receive).
@@ -110,7 +118,10 @@ mod tests {
 
     #[test]
     fn handles_crlf_line_breaks() {
-        assert_eq!(render_bytes(20, 5, b"line one\r\nline two"), "line one\nline two");
+        assert_eq!(
+            render_bytes(20, 5, b"line one\r\nline two"),
+            "line one\nline two"
+        );
     }
 
     #[test]
@@ -145,7 +156,10 @@ mod tests {
 
     #[test]
     fn strips_sgr_styling_sequences() {
-        assert_eq!(render_bytes(40, 3, b"\x1b[1;32mgreen bold\x1b[0m text"), "green bold text");
+        assert_eq!(
+            render_bytes(40, 3, b"\x1b[1;32mgreen bold\x1b[0m text"),
+            "green bold text"
+        );
     }
 
     #[test]

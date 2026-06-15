@@ -244,7 +244,10 @@ mod tests {
     #[test]
     fn strips_ansi_via_shared_strip_ansi() {
         let mut buf = PaneTailBuffer::new();
-        buf.append("a", &format!("{ESC}[31mred{ESC}[0m and {ESC}[1mbold{ESC}[0m\n"));
+        buf.append(
+            "a",
+            &format!("{ESC}[31mred{ESC}[0m and {ESC}[1mbold{ESC}[0m\n"),
+        );
         assert_eq!(buf.snapshot("a").text, "red and bold");
     }
 

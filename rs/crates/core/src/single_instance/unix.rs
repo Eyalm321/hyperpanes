@@ -236,7 +236,10 @@ mod unix_tests {
     fn second_acquire_is_secondary_and_lock_frees_on_drop() {
         let salt = test_salt("detect");
         let first = acquire(&salt).unwrap();
-        assert!(matches!(first, Instance::Primary(_)), "first acquire must be primary");
+        assert!(
+            matches!(first, Instance::Primary(_)),
+            "first acquire must be primary"
+        );
         let second = acquire(&salt).unwrap();
         assert!(
             matches!(second, Instance::Secondary(_)),

@@ -371,7 +371,11 @@ impl ReadModel {
                 }
             }
         }
-        p.meta = if merged.is_empty() { None } else { Some(merged.clone()) };
+        p.meta = if merged.is_empty() {
+            None
+        } else {
+            Some(merged.clone())
+        };
         Some(merged)
     }
 
@@ -634,7 +638,8 @@ mod tests {
             p.status = PaneStatus::Exited;
         }
         let out = m.state_for_scope(None, &|_p| Activity::Exited);
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
         let pane = &v["windows"][0]["tabs"][0]["panes"][0];
         assert_eq!(pane["subtitle"], json!("sub"));
         assert_eq!(pane["command"], json!("claude"));
@@ -649,10 +654,7 @@ mod tests {
     #[test]
     fn scope_filters_to_in_scope_panes_dropping_empty_tabs_and_windows() {
         let mut m = seeded();
-        m.insert_pane(
-            1,
-            pane("p2", "u2"),
-        );
+        m.insert_pane(1, pane("p2", "u2"));
         // Add a second window with its own pane.
         m.add_window(WindowInfo {
             window_id: 2,

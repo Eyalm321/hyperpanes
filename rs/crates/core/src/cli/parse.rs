@@ -42,7 +42,10 @@ pub enum AttachAs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchRouting {
     NewWindow,
-    Attach { target: RoutingTarget, as_: AttachAs },
+    Attach {
+        target: RoutingTarget,
+        as_: AttachAs,
+    },
 }
 
 /// The result of parsing a launch command line.
@@ -564,7 +567,15 @@ mod tests {
     #[test]
     fn attaches_label_and_color_to_the_most_recent_command() {
         let r = parse_cli(&argv(&[
-            "-c", "npm run dev", "-l", "server", "--color", "#e5484d", "-c", "psql", "--label",
+            "-c",
+            "npm run dev",
+            "-l",
+            "server",
+            "--color",
+            "#e5484d",
+            "-c",
+            "psql",
+            "--label",
             "db",
         ]));
         assert_eq!(
@@ -588,7 +599,14 @@ mod tests {
     #[test]
     fn reads_layout_name_and_applies_cwd_to_panes_without_one() {
         let r = parse_cli(&argv(&[
-            "--name", "dev", "--layout", "main-stack", "--cwd", "/work", "-c", "bash",
+            "--name",
+            "dev",
+            "--layout",
+            "main-stack",
+            "--cwd",
+            "/work",
+            "-c",
+            "bash",
         ]));
         assert_eq!(
             r.workspace.unwrap(),
@@ -608,7 +626,14 @@ mod tests {
 
     #[test]
     fn applies_shell_as_a_launch_wide_default() {
-        let r = parse_cli(&argv(&["--shell", "pwsh", "-c", "npm run dev", "-c", "top"]));
+        let r = parse_cli(&argv(&[
+            "--shell",
+            "pwsh",
+            "-c",
+            "npm run dev",
+            "-c",
+            "top",
+        ]));
         assert_eq!(
             r.workspace.unwrap().panes.unwrap(),
             vec![
@@ -666,7 +691,16 @@ mod tests {
     #[test]
     fn attaches_per_pane_cwd_shell_font_to_the_most_recent_c() {
         let r = parse_cli(&argv(&[
-            "-c", "npm run dev", "--cwd", "/app", "--shell", "pwsh", "--font", "14", "-c", "top",
+            "-c",
+            "npm run dev",
+            "--cwd",
+            "/app",
+            "--shell",
+            "pwsh",
+            "--font",
+            "14",
+            "-c",
+            "top",
         ]));
         assert_eq!(
             r.workspace.unwrap().panes.unwrap(),
@@ -686,7 +720,9 @@ mod tests {
 
     #[test]
     fn keeps_cwd_shell_before_any_c_as_launch_wide_defaults() {
-        let r = parse_cli(&argv(&["--cwd", "/work", "-c", "a", "-c", "b", "--cwd", "/b"]));
+        let r = parse_cli(&argv(&[
+            "--cwd", "/work", "-c", "a", "-c", "b", "--cwd", "/b",
+        ]));
         assert_eq!(
             r.workspace.unwrap().panes.unwrap(),
             vec![
@@ -849,7 +885,13 @@ mod tests {
 
     #[test]
     fn does_not_let_a_routing_flag_leak_into_the_parsed_panes() {
-        let r = parse_cli(&argv(&["--new-window", "--as", "panes", "-c", "npm run dev"]));
+        let r = parse_cli(&argv(&[
+            "--new-window",
+            "--as",
+            "panes",
+            "-c",
+            "npm run dev",
+        ]));
         assert_eq!(
             r.workspace.unwrap().panes.unwrap(),
             vec![pane("npm run dev", "npm")]

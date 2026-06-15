@@ -91,8 +91,22 @@ mod tests {
     fn finds_case_insensitive_matches_with_columns() {
         let m = find_matches(&lines(), "fox");
         assert_eq!(m.len(), 2);
-        assert_eq!(m[0], Match { line: -2, start: 16, end: 19 });
-        assert_eq!(m[1], Match { line: -1, start: 0, end: 3 });
+        assert_eq!(
+            m[0],
+            Match {
+                line: -2,
+                start: 16,
+                end: 19
+            }
+        );
+        assert_eq!(
+            m[1],
+            Match {
+                line: -1,
+                start: 0,
+                end: 3
+            }
+        );
     }
 
     #[test]

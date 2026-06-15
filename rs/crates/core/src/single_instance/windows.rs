@@ -134,9 +134,7 @@ impl SecondaryInstance {
 
 // Open the client pipe, tolerating the brief ERROR_PIPE_BUSY window between server
 // instances.
-async fn open_client(
-    pipe: &str,
-) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+async fn open_client(pipe: &str) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
     const PIPE_BUSY: i32 = ERROR_PIPE_BUSY.0 as i32;
     for _ in 0..50 {
         match ClientOptions::new().open(pipe) {

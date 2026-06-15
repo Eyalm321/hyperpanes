@@ -16,9 +16,9 @@ use std::sync::OnceLock;
 /// opens these as text just fine (`.js`/`.ps1` are source). Mirrors `EXECUTABLE_EXTS` in
 /// `paths.ts`.
 pub const EXECUTABLE_EXTS: &[&str] = &[
-    ".exe", ".bat", ".cmd", ".com", ".scr", ".msi", ".msp", ".ps1", ".psm1", ".vbs", ".vbe",
-    ".js", ".jse", ".wsf", ".wsh", ".hta", ".cpl", ".jar", ".reg", ".lnk", ".pif", ".sh",
-    ".bash", ".zsh", ".fish", ".command", ".app",
+    ".exe", ".bat", ".cmd", ".com", ".scr", ".msi", ".msp", ".ps1", ".psm1", ".vbs", ".vbe", ".js",
+    ".jse", ".wsf", ".wsh", ".hta", ".cpl", ".jar", ".reg", ".lnk", ".pif", ".sh", ".bash", ".zsh",
+    ".fish", ".command", ".app",
 ];
 
 /// True when `abs_path`'s (lowercased) extension is one we refuse to OS-open.
@@ -153,13 +153,25 @@ pub struct OpenResult {
 
 impl OpenResult {
     fn ok() -> Self {
-        OpenResult { ok: true, blocked: false, error: None }
+        OpenResult {
+            ok: true,
+            blocked: false,
+            error: None,
+        }
     }
     fn err(msg: impl Into<String>) -> Self {
-        OpenResult { ok: false, blocked: false, error: Some(msg.into()) }
+        OpenResult {
+            ok: false,
+            blocked: false,
+            error: Some(msg.into()),
+        }
     }
     fn blocked(ext: impl Into<String>) -> Self {
-        OpenResult { ok: false, blocked: true, error: Some(ext.into()) }
+        OpenResult {
+            ok: false,
+            blocked: true,
+            error: Some(ext.into()),
+        }
     }
 }
 
@@ -335,7 +347,10 @@ pub fn os_open(path: &str) -> Result<(), String> {
     let spawn = if cfg!(windows) {
         // `start` is a cmd builtin; the empty "" is the window title arg so a quoted path
         // isn't consumed as the title.
-        Command::new("cmd").args(["/C", "start", "", path]).no_window().spawn()
+        Command::new("cmd")
+            .args(["/C", "start", "", path])
+            .no_window()
+            .spawn()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(path).spawn()
     } else {
@@ -437,7 +452,10 @@ mod tests {
     fn editor_template_keeps_spaced_path_as_one_arg() {
         let cmd = editor_command_line("subl {path}:{line}:{col}", "/a b/c.ts", Some(12), Some(4));
         // The path+suffix is one quoted argument; `subl` is the other.
-        assert_eq!(cmd, format!("{} {}", quote("subl"), quote("/a b/c.ts:12:4")));
+        assert_eq!(
+            cmd,
+            format!("{} {}", quote("subl"), quote("/a b/c.ts:12:4"))
+        );
     }
 
     #[test]
@@ -474,7 +492,10 @@ mod tests {
 
         let res = open_resolved_path(&p, None, None, "");
         if detect_vscode().is_none() {
-            assert!(res.blocked, "an .exe must be blocked on the OS-default branch");
+            assert!(
+                res.blocked,
+                "an .exe must be blocked on the OS-default branch"
+            );
             assert_eq!(res.error.as_deref(), Some(".exe"));
         }
         let _ = std::fs::remove_dir_all(&sub);

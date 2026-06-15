@@ -89,11 +89,24 @@ struct Build {
 
 impl Build {
     fn new() -> Self {
-        Build { entries: Vec::new(), commands: Vec::new() }
+        Build {
+            entries: Vec::new(),
+            commands: Vec::new(),
+        }
     }
     /// A plain action row.
     fn item(&mut self, label: &str, cmd: Command) -> &mut Self {
-        self.row(label, "", 0, false, false, false, false, sub::NONE, Some(cmd))
+        self.row(
+            label,
+            "",
+            0,
+            false,
+            false,
+            false,
+            false,
+            sub::NONE,
+            Some(cmd),
+        )
     }
     /// A row carrying every optional flag.
     #[allow(clippy::too_many_arguments)]
@@ -136,7 +149,14 @@ impl Build {
         self
     }
     fn finish(self, kind: CtxKind, target: usize, x: f32, y: f32) -> CtxMenu {
-        CtxMenu { kind, target, x, y, entries: self.entries, commands: self.commands }
+        CtxMenu {
+            kind,
+            target,
+            x,
+            y,
+            entries: self.entries,
+            commands: self.commands,
+        }
     }
 }
 
@@ -166,8 +186,14 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
     let n = t.panes.len();
     let others = state.tabs.len() > 1;
 
-    let zoom_sc = state.keymap.label_for("pane.toggleZoom").unwrap_or_default();
-    let full_sc = state.keymap.label_for("pane.toggleFullscreen").unwrap_or_default();
+    let zoom_sc = state
+        .keymap
+        .label_for("pane.toggleZoom")
+        .unwrap_or_default();
+    let full_sc = state
+        .keymap
+        .label_for("pane.toggleFullscreen")
+        .unwrap_or_default();
 
     // Taskbar variant: a leading "Show" row (focus → the single preset shows it) + separator.
     if in_taskbar {
@@ -177,31 +203,109 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
 
     b.item("New Pane…", Command::OpenNewPane);
     b.item("Rename…", Command::BeginRenamePane(idx as i32));
-    b.row("Change Color", "", 0,false, false, false, false, sub::COLOR, None);
-    b.row("Show Frame", "", 0,frame_on, true, false, false, sub::NONE, Some(Command::SetPaneFrame(idx, !frame_on)));
-    b.row("Show Dot", "", 0,dot_on, true, false, false, sub::NONE, Some(Command::SetPaneDot(idx, !dot_on)));
-    b.row("Mute AI Summary", "", 0,muted, true, false, false, sub::NONE, Some(Command::ToggleMuteAi(idx)));
+    b.row(
+        "Change Color",
+        "",
+        0,
+        false,
+        false,
+        false,
+        false,
+        sub::COLOR,
+        None,
+    );
+    b.row(
+        "Show Frame",
+        "",
+        0,
+        frame_on,
+        true,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::SetPaneFrame(idx, !frame_on)),
+    );
+    b.row(
+        "Show Dot",
+        "",
+        0,
+        dot_on,
+        true,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::SetPaneDot(idx, !dot_on)),
+    );
+    b.row(
+        "Mute AI Summary",
+        "",
+        0,
+        muted,
+        true,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::ToggleMuteAi(idx)),
+    );
     b.sep();
     // Maximize is meaningless on the taskbar's single surface, so it's dropped there.
     if !in_taskbar {
         b.row(
             if zoomed { "Restore" } else { "Maximize" },
-            &zoom_sc, 0, false, false, false, false, sub::NONE, Some(Command::ZoomPane(idx)),
+            &zoom_sc,
+            0,
+            false,
+            false,
+            false,
+            false,
+            sub::NONE,
+            Some(Command::ZoomPane(idx)),
         );
     }
     b.row(
-        if fullscreen { "Exit Fullscreen" } else { "Fullscreen" },
-        &full_sc, 0, false, false, false, false, sub::NONE, Some(Command::FullscreenPane(idx)),
+        if fullscreen {
+            "Exit Fullscreen"
+        } else {
+            "Fullscreen"
+        },
+        &full_sc,
+        0,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::FullscreenPane(idx)),
     );
     // The widget's in-pane search shortcut, shown with the platform modifier label
     // (Slint's control slot is Cmd on macOS).
     let search_sc = format!("{}+F", crate::keybindings::CTRL_LABEL);
-    b.row("Search…", &search_sc, 0, false, false, false, false, sub::NONE, Some(Command::SearchPane(idx)));
+    b.row(
+        "Search…",
+        &search_sc,
+        0,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::SearchPane(idx)),
+    );
     b.item("Restart", Command::RestartPane(idx));
     b.item("Refresh Env", Command::RefreshEnvPane(idx));
     b.item("Open Folder", Command::RevealPaneCwd(idx));
     b.sep();
-    b.row("Copy", "", 0,false, false, !has_sel, false, sub::NONE, Some(Command::CopyPane(idx)));
+    b.row(
+        "Copy",
+        "",
+        0,
+        false,
+        false,
+        !has_sel,
+        false,
+        sub::NONE,
+        Some(Command::CopyPane(idx)),
+    );
     b.item("Paste", Command::PastePane(idx));
     b.item("Select All", Command::SelectAllPane(idx));
     b.item("Clear", Command::ClearPane(idx));
@@ -211,14 +315,54 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
     // Disabled when this is the only pane of the only tab (parking it would empty the
     // window). Offsets resolve against the LOCAL clock at click time.
     let cant_park = state.tabs.len() <= 1 && n < 2;
-    b.row("Reminder", "", 0,false, false, cant_park, false, sub::REMINDER, None);
+    b.row(
+        "Reminder",
+        "",
+        0,
+        false,
+        false,
+        cant_park,
+        false,
+        sub::REMINDER,
+        None,
+    );
     b.sep();
-    b.row("Move to New Tab", "", 0,false, false, n < 2, false, sub::NONE, Some(Command::MovePaneToNewTab(idx)));
+    b.row(
+        "Move to New Tab",
+        "",
+        0,
+        false,
+        false,
+        n < 2,
+        false,
+        sub::NONE,
+        Some(Command::MovePaneToNewTab(idx)),
+    );
     if others {
-        b.row("Move to Tab", "", 0,false, false, false, false, sub::MOVE_TO_TAB, None);
+        b.row(
+            "Move to Tab",
+            "",
+            0,
+            false,
+            false,
+            false,
+            false,
+            sub::MOVE_TO_TAB,
+            None,
+        );
     }
     b.sep();
-    b.row("Close Pane", "", 0,false, false, false, true, sub::NONE, Some(Command::ClosePane(idx)));
+    b.row(
+        "Close Pane",
+        "",
+        0,
+        false,
+        false,
+        false,
+        true,
+        sub::NONE,
+        Some(Command::ClosePane(idx)),
+    );
 
     // The Reminder flyout's quick offsets, in hidden slots past the visible rows (the
     // Slint flyout dispatches `pick(entries.length + j)` — order must match its rows).
@@ -241,17 +385,77 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
 
     let new_sc = state.keymap.label_for("tab.new").unwrap_or_default();
 
-    b.row("New Tab", &new_sc, 0, false, false, false, false, sub::NONE, Some(Command::NewTab));
+    b.row(
+        "New Tab",
+        &new_sc,
+        0,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::NewTab),
+    );
     b.item("Rename…", Command::BeginRename(idx as i32));
     b.item("Duplicate Tab", Command::DuplicateTab(idx));
-    b.row("Move to New Window", "", 0,false, false, only, false, sub::NONE, Some(Command::MoveTabToNewWindow(idx)));
+    b.row(
+        "Move to New Window",
+        "",
+        0,
+        false,
+        false,
+        only,
+        false,
+        sub::NONE,
+        Some(Command::MoveTabToNewWindow(idx)),
+    );
     b.sep();
     b.item("Close Tab", Command::CloseTab(idx));
-    b.row("Close Other Tabs", "", 0,false, false, only, false, sub::NONE, Some(Command::CloseOtherTabs(idx)));
-    b.row("Close Tabs to the Right", "", 0,false, false, is_last, false, sub::NONE, Some(Command::CloseTabsToRight(idx)));
-    b.row("Reopen Closed Tab", "", 0,false, false, no_closed, false, sub::NONE, Some(Command::ReopenClosedTab));
+    b.row(
+        "Close Other Tabs",
+        "",
+        0,
+        false,
+        false,
+        only,
+        false,
+        sub::NONE,
+        Some(Command::CloseOtherTabs(idx)),
+    );
+    b.row(
+        "Close Tabs to the Right",
+        "",
+        0,
+        false,
+        false,
+        is_last,
+        false,
+        sub::NONE,
+        Some(Command::CloseTabsToRight(idx)),
+    );
+    b.row(
+        "Reopen Closed Tab",
+        "",
+        0,
+        false,
+        false,
+        no_closed,
+        false,
+        sub::NONE,
+        Some(Command::ReopenClosedTab),
+    );
     b.sep();
-    b.row("Layout", "", 0,false, false, false, false, sub::LAYOUT, None);
+    b.row(
+        "Layout",
+        "",
+        0,
+        false,
+        false,
+        false,
+        false,
+        sub::LAYOUT,
+        None,
+    );
 
     b.finish(CtxKind::Tab, idx, x, y)
 }
@@ -268,12 +472,26 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
     let palette_sc = state.keymap.label_for("palette.toggle").unwrap_or_default();
 
     b.row(
-        "New pane…", "", crate::theme::menu_icon::NEW_PANE,
-        false, false, false, false, sub::NONE, Some(Command::OpenNewPane),
+        "New pane…",
+        "",
+        crate::theme::menu_icon::NEW_PANE,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::OpenNewPane),
     );
     b.row(
-        "Command palette", &palette_sc, crate::theme::menu_icon::COMMAND_PALETTE,
-        false, false, false, false, sub::NONE, Some(Command::PaletteOpen),
+        "Command palette",
+        &palette_sc,
+        crate::theme::menu_icon::COMMAND_PALETTE,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::PaletteOpen),
     );
     b.sep();
     // Layout submenu header: drawn icon + label of the CURRENT layout (the submenu lists
@@ -283,21 +501,47 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
         "Layout",
         crate::theme::layout_label(cur),
         crate::theme::layout_icon_kind(cur),
-        false, false, false, false, sub::LAYOUT, None,
+        false,
+        false,
+        false,
+        false,
+        sub::LAYOUT,
+        None,
     );
     b.sep();
     b.row(
-        "Open workspace…", "", crate::theme::menu_icon::OPEN_WORKSPACE,
-        false, false, false, false, sub::NONE, Some(Command::OpenWorkspace),
+        "Open workspace…",
+        "",
+        crate::theme::menu_icon::OPEN_WORKSPACE,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::OpenWorkspace),
     );
     b.row(
-        "Save workspace…", "", crate::theme::menu_icon::SAVE_WORKSPACE,
-        false, false, false, false, sub::NONE, Some(Command::SaveWorkspace),
+        "Save workspace…",
+        "",
+        crate::theme::menu_icon::SAVE_WORKSPACE,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::SaveWorkspace),
     );
     b.sep();
     b.row(
-        "Preferences…", "", crate::theme::menu_icon::PREFERENCES,
-        false, false, false, false, sub::NONE, Some(Command::PrefsOpen),
+        "Preferences…",
+        "",
+        crate::theme::menu_icon::PREFERENCES,
+        false,
+        false,
+        false,
+        false,
+        sub::NONE,
+        Some(Command::PrefsOpen),
     );
 
     // Target = the active tab, so the Layout submenu (which routes through `ctx_target` →
@@ -327,14 +571,22 @@ pub fn parse_custom_duration(s: &str, now_secs_since_midnight: u64) -> Option<u3
         }
         let target = (h * 3_600 + m * 60) as u64;
         let now = now_secs_since_midnight;
-        let delta = if target > now { target - now } else { target + 86_400 - now };
+        let delta = if target > now {
+            target - now
+        } else {
+            target + 86_400 - now
+        };
         return Some((((delta + 59) / 60) as u32).max(1));
     }
     // NhM / Nh — hours with optional trailing minutes (the `m` suffix optional there too).
     if let Some((hh, rest)) = s.split_once('h') {
         let h: u32 = hh.parse().ok()?;
         let rest = rest.strip_suffix('m').unwrap_or(rest);
-        let m: u32 = if rest.is_empty() { 0 } else { rest.parse().ok()? };
+        let m: u32 = if rest.is_empty() {
+            0
+        } else {
+            rest.parse().ok()?
+        };
         if m >= 60 {
             return None;
         }
@@ -390,9 +642,15 @@ mod tests {
 
     #[test]
     fn garbage_zero_and_out_of_range_are_rejected() {
-        for bad in ["", "  ", "0", "0m", "0h", "abc", "1d", "h30", ":30", "25:00",
-                    "12:60", "1h60", "-5", "1441", "25h"] {
-            assert_eq!(parse_custom_duration(bad, NOON), None, "{bad:?} must not parse");
+        for bad in [
+            "", "  ", "0", "0m", "0h", "abc", "1d", "h30", ":30", "25:00", "12:60", "1h60", "-5",
+            "1441", "25h",
+        ] {
+            assert_eq!(
+                parse_custom_duration(bad, NOON),
+                None,
+                "{bad:?} must not parse"
+            );
         }
     }
 }

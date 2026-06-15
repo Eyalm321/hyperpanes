@@ -60,7 +60,11 @@ impl EnvCache {
         Self(Mutex::new(None))
     }
 
-    fn get_or_capture(&self, shell: &str, capture: impl FnOnce() -> Option<EnvMap>) -> Option<EnvMap> {
+    fn get_or_capture(
+        &self,
+        shell: &str,
+        capture: impl FnOnce() -> Option<EnvMap>,
+    ) -> Option<EnvMap> {
         // Hold the lock across the capture so concurrent spawns coalesce into ONE
         // login shell instead of a thundering herd (capture is timeout-bounded).
         let mut slot = self.0.lock().unwrap();
@@ -191,7 +195,10 @@ mod unix_tests {
     use std::path::PathBuf;
 
     fn map(pairs: &[(&str, &str)]) -> EnvMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     /// Write an executable fake-shell script and return its path.
@@ -218,9 +225,14 @@ mod unix_tests {
 
     #[test]
     fn parses_a_newline_dump_and_folds_continuations() {
-        let env = parse_env_dump(b"rc noise line\nPATH=/login/bin\nMULTI=a\nstill the value\nHOME=/home/me\n");
+        let env = parse_env_dump(
+            b"rc noise line\nPATH=/login/bin\nMULTI=a\nstill the value\nHOME=/home/me\n",
+        );
         assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
-        assert_eq!(env.get("MULTI").map(String::as_str), Some("a\nstill the value"));
+        assert_eq!(
+            env.get("MULTI").map(String::as_str),
+            Some("a\nstill the value")
+        );
         assert_eq!(env.get("HOME").map(String::as_str), Some("/home/me"));
         // pre-dump noise (no valid NAME=) is dropped, not attached anywhere
         assert_eq!(env.len(), 3);
@@ -245,7 +257,10 @@ mod unix_tests {
         let env = (0..5)
             .find_map(|_| login_shell_env(shell.to_str().unwrap(), Duration::from_secs(5)))
             .expect("login-shell capture should succeed within a few tries");
-        assert_eq!(env.get("FRESH_ONLY").map(String::as_str), Some("from-login"));
+        assert_eq!(
+            env.get("FRESH_ONLY").map(String::as_str),
+            Some("from-login")
+        );
         assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
         let _ = std::fs::remove_file(&shell);
     }
@@ -281,14 +296,14 @@ mod unix_tests {
     #[test]
     fn fresh_wins_and_process_only_vars_are_layered_in() {
         let fresh = map(&[("PATH", "/login/bin"), ("LANG", "en_US.UTF-8")]);
-        let process = map(&[
-            ("PATH", "/stale/bin"),
-            ("HYPERPANES_CONTROL_TOKEN", "tok"),
-        ]);
+        let process = map(&[("PATH", "/stale/bin"), ("HYPERPANES_CONTROL_TOKEN", "tok")]);
         let env = layer_process_only(fresh, process);
         assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
         assert_eq!(env.get("LANG").map(String::as_str), Some("en_US.UTF-8"));
-        assert_eq!(env.get("HYPERPANES_CONTROL_TOKEN").map(String::as_str), Some("tok"));
+        assert_eq!(
+            env.get("HYPERPANES_CONTROL_TOKEN").map(String::as_str),
+            Some("tok")
+        );
     }
 
     #[test]
@@ -350,7 +365,10 @@ mod unix_tests {
         let env = PlatformEnv.fresh_env_with_process(process.clone());
         assert_eq!(env.get("FROM_LOGIN").map(String::as_str), Some("1"));
         assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
-        assert_eq!(env.get("HYPERPANES_PANE_ID").map(String::as_str), Some("p1"));
+        assert_eq!(
+            env.get("HYPERPANES_PANE_ID").map(String::as_str),
+            Some("p1")
+        );
         let _ = std::fs::remove_file(&shell);
 
         // A broken $SHELL → the process env passes through unchanged.

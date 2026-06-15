@@ -95,11 +95,21 @@ pub fn shell_integration_dir() -> PathBuf {
         // /proc/self/exe through any /usr/bin symlink to the real install directory.
         exe_dir
             .parent()
-            .map(|p| p.join("share").join("hyperpanes").join("resources").join("shell-integration"))
+            .map(|p| {
+                p.join("share")
+                    .join("hyperpanes")
+                    .join("resources")
+                    .join("shell-integration")
+            })
             .unwrap_or_else(|| exe_dir.join("shell-integration")),
         exe_dir
             .parent()
-            .map(|p| p.join("lib").join("hyperpanes").join("resources").join("shell-integration"))
+            .map(|p| {
+                p.join("lib")
+                    .join("hyperpanes")
+                    .join("resources")
+                    .join("shell-integration")
+            })
             .unwrap_or_else(|| exe_dir.join("shell-integration")),
     ];
     for c in &candidates {
@@ -254,7 +264,10 @@ mod tests {
 
     // A unique temp dir per test so parallel runs don't collide.
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hp-shellint-{tag}-{:?}", std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "hp-shellint-{tag}-{:?}",
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -300,7 +313,10 @@ mod tests {
         let r = integration_for("C:\\Program Files\\Git\\bin\\bash.exe", &dir)
             .expect("script exists → integration");
         assert_eq!(r.args[0], "--rcfile");
-        assert!(!r.args[1].contains('\\'), "bash rcfile path must be posix-slashed");
+        assert!(
+            !r.args[1].contains('\\'),
+            "bash rcfile path must be posix-slashed"
+        );
         assert!(r.args[1].ends_with("hp-init.sh"));
         assert_eq!(r.args[2], "-i");
         let _ = fs::remove_dir_all(&dir);

@@ -73,7 +73,9 @@ impl KeyTok {
             _ => {
                 let mut chars = s.chars();
                 match (chars.next(), chars.next()) {
-                    (Some(c), None) if is_printable(c) => Some(KeyTok::Char(c.to_ascii_lowercase())),
+                    (Some(c), None) if is_printable(c) => {
+                        Some(KeyTok::Char(c.to_ascii_lowercase()))
+                    }
                     _ => None,
                 }
             }
@@ -109,7 +111,11 @@ fn is_printable(c: char) -> bool {
 /// (control → Command, meta → Control — i_slint_core::input), so the `ctrl` chord slot
 /// IS the Command key there: show it as "Cmd" so the Preferences list matches what the
 /// user actually presses (Cmd+Shift+P opens the palette on a Mac).
-pub const CTRL_LABEL: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+pub const CTRL_LABEL: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
 
 /// A modifier+key combo. `ctrl`/`alt`/`shift` must match exactly.
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +128,12 @@ pub struct Chord {
 
 impl Chord {
     const fn new(ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Self {
-        Chord { ctrl, alt, shift, key }
+        Chord {
+            ctrl,
+            alt,
+            shift,
+            key,
+        }
     }
     fn matches(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> bool {
         self.ctrl == ctrl && self.alt == alt && self.shift == shift && self.key == key
@@ -180,7 +191,12 @@ impl ChordRepr {
 
 impl From<Chord> for ChordRepr {
     fn from(c: Chord) -> Self {
-        ChordRepr { ctrl: c.ctrl, alt: c.alt, shift: c.shift, key: c.key.token() }
+        ChordRepr {
+            ctrl: c.ctrl,
+            alt: c.alt,
+            shift: c.shift,
+            key: c.key.token(),
+        }
     }
 }
 
@@ -216,36 +232,198 @@ pub fn default_bindings() -> Vec<Binding> {
     };
     vec![
         // General
-        b("palette.toggle", true, false, true, Char('p'), "General", "Command palette", Command::PaletteOpen),
+        b(
+            "palette.toggle",
+            true,
+            false,
+            true,
+            Char('p'),
+            "General",
+            "Command palette",
+            Command::PaletteOpen,
+        ),
         // Tabs
-        b("tab.new", true, false, false, Char('t'), "Tabs", "New tab", Command::NewTab),
-        b("tab.next", true, false, false, Tab, "Tabs", "Next tab", Command::NextTab),
-        b("tab.prev", true, false, true, Tab, "Tabs", "Previous tab", Command::PrevTab),
-        b("tab.reopen", true, false, true, Char('t'), "Tabs", "Reopen closed tab", Command::ReopenClosedTab),
+        b(
+            "tab.new",
+            true,
+            false,
+            false,
+            Char('t'),
+            "Tabs",
+            "New tab",
+            Command::NewTab,
+        ),
+        b(
+            "tab.next",
+            true,
+            false,
+            false,
+            Tab,
+            "Tabs",
+            "Next tab",
+            Command::NextTab,
+        ),
+        b(
+            "tab.prev",
+            true,
+            false,
+            true,
+            Tab,
+            "Tabs",
+            "Previous tab",
+            Command::PrevTab,
+        ),
+        b(
+            "tab.reopen",
+            true,
+            false,
+            true,
+            Char('t'),
+            "Tabs",
+            "Reopen closed tab",
+            Command::ReopenClosedTab,
+        ),
         // Panes
-        b("pane.focusLeft", false, true, false, Left, "Panes", "Focus pane left", Command::FocusDir(Direction::Left)),
-        b("pane.focusRight", false, true, false, Right, "Panes", "Focus pane right", Command::FocusDir(Direction::Right)),
-        b("pane.focusUp", false, true, false, Up, "Panes", "Focus pane up", Command::FocusDir(Direction::Up)),
-        b("pane.focusDown", false, true, false, Down, "Panes", "Focus pane down", Command::FocusDir(Direction::Down)),
-        b("pane.toggleZoom", false, true, false, Char('z'), "Panes", "Zoom / unzoom pane", Command::ToggleZoom),
-        b("pane.toggleFullscreen", false, false, false, F11, "Panes", "Fullscreen pane", Command::ToggleFullscreen),
-        b("pane.search", true, false, false, Char('f'), "Panes", "Search in pane", Command::SearchFocused),
+        b(
+            "pane.focusLeft",
+            false,
+            true,
+            false,
+            Left,
+            "Panes",
+            "Focus pane left",
+            Command::FocusDir(Direction::Left),
+        ),
+        b(
+            "pane.focusRight",
+            false,
+            true,
+            false,
+            Right,
+            "Panes",
+            "Focus pane right",
+            Command::FocusDir(Direction::Right),
+        ),
+        b(
+            "pane.focusUp",
+            false,
+            true,
+            false,
+            Up,
+            "Panes",
+            "Focus pane up",
+            Command::FocusDir(Direction::Up),
+        ),
+        b(
+            "pane.focusDown",
+            false,
+            true,
+            false,
+            Down,
+            "Panes",
+            "Focus pane down",
+            Command::FocusDir(Direction::Down),
+        ),
+        b(
+            "pane.toggleZoom",
+            false,
+            true,
+            false,
+            Char('z'),
+            "Panes",
+            "Zoom / unzoom pane",
+            Command::ToggleZoom,
+        ),
+        b(
+            "pane.toggleFullscreen",
+            false,
+            false,
+            false,
+            F11,
+            "Panes",
+            "Fullscreen pane",
+            Command::ToggleFullscreen,
+        ),
+        b(
+            "pane.search",
+            true,
+            false,
+            false,
+            Char('f'),
+            "Panes",
+            "Search in pane",
+            Command::SearchFocused,
+        ),
         // Ctrl+V pastes via the app (fresh OS-clipboard read + bracketed paste), matching
         // Windows Terminal. Unbind it to forward a literal 0x16 to the shell instead (#9).
-        b("pane.paste", true, false, false, Char('v'), "Panes", "Paste", Command::PasteFocused),
+        b(
+            "pane.paste",
+            true,
+            false,
+            false,
+            Char('v'),
+            "Panes",
+            "Paste",
+            Command::PasteFocused,
+        ),
         // Alt+V forwards a literal Ctrl+V (0x16) to the focused pane so an in-pane TUI that reads
         // the OS clipboard itself — Claude Code's image paste — can pull a clipboard IMAGE that
         // the text-only app paste above can't carry through the pty. Alt+V is the shortcut Claude
         // Code documents for "your terminal intercepts Ctrl+V" (which `pane.paste` does). The
         // natural Ctrl+V also auto-forwards when the clipboard holds an image, not text.
-        b("pane.pasteImage", false, true, false, Char('v'), "Panes", "Paste image (Alt+V)", Command::PasteImageFocused),
+        b(
+            "pane.pasteImage",
+            false,
+            true,
+            false,
+            Char('v'),
+            "Panes",
+            "Paste image (Alt+V)",
+            Command::PasteImageFocused,
+        ),
         // Ctrl+Shift+C copies the selection — the explicit copy gesture now that copy-on-select
         // defaults off (Ctrl+C stays the shell interrupt).
-        b("pane.copy", true, false, true, Char('c'), "Panes", "Copy selection", Command::CopyFocused),
+        b(
+            "pane.copy",
+            true,
+            false,
+            true,
+            Char('c'),
+            "Panes",
+            "Copy selection",
+            Command::CopyFocused,
+        ),
         // Zoom (font)
-        b("zoom.in", true, false, false, Char('='), "Zoom", "Zoom in (font)", Command::FontZoom(1)),
-        b("zoom.out", true, false, false, Char('-'), "Zoom", "Zoom out (font)", Command::FontZoom(-1)),
-        b("zoom.reset", true, false, false, Char('0'), "Zoom", "Reset zoom (font)", Command::FontReset),
+        b(
+            "zoom.in",
+            true,
+            false,
+            false,
+            Char('='),
+            "Zoom",
+            "Zoom in (font)",
+            Command::FontZoom(1),
+        ),
+        b(
+            "zoom.out",
+            true,
+            false,
+            false,
+            Char('-'),
+            "Zoom",
+            "Zoom out (font)",
+            Command::FontZoom(-1),
+        ),
+        b(
+            "zoom.reset",
+            true,
+            false,
+            false,
+            Char('0'),
+            "Zoom",
+            "Reset zoom (font)",
+            Command::FontReset,
+        ),
     ]
 }
 
@@ -285,7 +463,9 @@ impl Keymap {
     /// read the developer's real `native-keybindings.json` and make tests env-dependent.
     #[cfg(test)]
     pub(crate) fn default_for_tests() -> Self {
-        Keymap { overrides: BTreeMap::new() }
+        Keymap {
+            overrides: BTreeMap::new(),
+        }
     }
 
     /// Load the persisted overrides (an empty map on a missing/corrupt file). Unknown ids are
@@ -324,8 +504,11 @@ impl Keymap {
     /// An unbound binding serializes as `null`.
     fn save(&self) {
         let path = paths::user_data_dir().join("native-keybindings.json");
-        let map: BTreeMap<&String, Option<ChordRepr>> =
-            self.overrides.iter().map(|(id, c)| (id, c.map(ChordRepr::from))).collect();
+        let map: BTreeMap<&String, Option<ChordRepr>> = self
+            .overrides
+            .iter()
+            .map(|(id, c)| (id, c.map(ChordRepr::from)))
+            .collect();
         match serde_json::to_string_pretty(&map) {
             Ok(json) => {
                 if let Err(e) = paths::write_atomic(&path, json.as_bytes()) {
@@ -469,7 +652,9 @@ mod tests {
     use super::*;
 
     fn empty_keymap() -> Keymap {
-        Keymap { overrides: BTreeMap::new() }
+        Keymap {
+            overrides: BTreeMap::new(),
+        }
     }
 
     #[test]
@@ -494,18 +679,39 @@ mod tests {
     fn tab_cycle_and_reopen_resolve() {
         let km = empty_keymap();
         // Ctrl+T = new tab, Ctrl+Tab = next, Ctrl+Shift+Tab = prev, Ctrl+Shift+T = reopen.
-        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('t')), Some(Command::NewTab)));
-        assert!(matches!(km.match_chord(true, false, false, KeyTok::Tab), Some(Command::NextTab)));
-        assert!(matches!(km.match_chord(true, false, true, KeyTok::Tab), Some(Command::PrevTab)));
-        assert!(matches!(km.match_chord(true, false, true, KeyTok::Char('t')), Some(Command::ReopenClosedTab)));
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('t')),
+            Some(Command::NewTab)
+        ));
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Tab),
+            Some(Command::NextTab)
+        ));
+        assert!(matches!(
+            km.match_chord(true, false, true, KeyTok::Tab),
+            Some(Command::PrevTab)
+        ));
+        assert!(matches!(
+            km.match_chord(true, false, true, KeyTok::Char('t')),
+            Some(Command::ReopenClosedTab)
+        ));
     }
 
     #[test]
     fn font_zoom_chords_resolve() {
         let km = empty_keymap();
-        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('=')), Some(Command::FontZoom(1))));
-        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('-')), Some(Command::FontZoom(-1))));
-        assert!(matches!(km.match_chord(true, false, false, KeyTok::Char('0')), Some(Command::FontReset)));
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('=')),
+            Some(Command::FontZoom(1))
+        ));
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('-')),
+            Some(Command::FontZoom(-1))
+        ));
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('0')),
+            Some(Command::FontReset)
+        ));
     }
 
     #[test]
@@ -513,15 +719,22 @@ mod tests {
         let km = empty_keymap();
         // Ctrl+Shift+= (and Ctrl++ via key_tok_from_text normalizing "+"→"=") still zoom in,
         // for layouts where "+" needs Shift. The unshifted Ctrl+= keeps working too.
-        assert!(matches!(km.match_chord(true, false, true, KeyTok::Char('=')), Some(Command::FontZoom(1))));
+        assert!(matches!(
+            km.match_chord(true, false, true, KeyTok::Char('=')),
+            Some(Command::FontZoom(1))
+        ));
         // Shift-tolerance is scoped to "=": Shift+other keys aren't silently coerced.
-        assert!(km.match_chord(true, false, true, KeyTok::Char('-')).is_none());
+        assert!(km
+            .match_chord(true, false, true, KeyTok::Char('-'))
+            .is_none());
     }
 
     #[test]
     fn unbound_combo_is_none() {
         let km = empty_keymap();
-        assert!(km.match_chord(false, false, false, KeyTok::Char('q')).is_none());
+        assert!(km
+            .match_chord(false, false, false, KeyTok::Char('q'))
+            .is_none());
     }
 
     #[test]
@@ -532,7 +745,9 @@ mod tests {
             "palette.toggle".into(),
             Some(Chord::new(true, false, false, KeyTok::Char('j'))),
         );
-        assert!(km.match_chord(true, false, true, KeyTok::Char('p')).is_none());
+        assert!(km
+            .match_chord(true, false, true, KeyTok::Char('p'))
+            .is_none());
         assert!(matches!(
             km.match_chord(true, false, false, KeyTok::Char('j')),
             Some(Command::PaletteOpen)
@@ -548,9 +763,15 @@ mod tests {
             Some("palette.toggle")
         );
         // A free chord has no owner; the holder doesn't count itself.
-        assert_eq!(km.owner_of(Chord::new(true, false, false, KeyTok::Char('j')), "tab.new"), None);
         assert_eq!(
-            km.owner_of(Chord::new(true, false, true, KeyTok::Char('p')), "palette.toggle"),
+            km.owner_of(Chord::new(true, false, false, KeyTok::Char('j')), "tab.new"),
+            None
+        );
+        assert_eq!(
+            km.owner_of(
+                Chord::new(true, false, true, KeyTok::Char('p')),
+                "palette.toggle"
+            ),
             None
         );
     }
@@ -560,8 +781,14 @@ mod tests {
         let mut km = empty_keymap();
         km.overrides.insert("palette.toggle".into(), None);
         // The default chord no longer fires, and the row reports unbound.
-        assert!(km.match_chord(true, false, true, KeyTok::Char('p')).is_none());
-        let row = km.rows().into_iter().find(|r| r.id == "palette.toggle").unwrap();
+        assert!(km
+            .match_chord(true, false, true, KeyTok::Char('p'))
+            .is_none());
+        let row = km
+            .rows()
+            .into_iter()
+            .find(|r| r.id == "palette.toggle")
+            .unwrap();
         assert!(row.unbound);
         assert!(row.parts.is_empty());
         assert!(km.label_for("palette.toggle").is_none());
@@ -588,10 +815,19 @@ mod tests {
             Chord::new(true, false, true, KeyTok::Char('p')).label(),
             format!("{CTRL_LABEL}+Shift+P")
         );
-        assert_eq!(Chord::new(false, true, false, KeyTok::Left).label(), "Alt+←");
+        assert_eq!(
+            Chord::new(false, true, false, KeyTok::Left).label(),
+            "Alt+←"
+        );
         assert_eq!(Chord::new(false, false, false, KeyTok::F11).label(), "F11");
-        assert_eq!(Chord::new(true, false, true, KeyTok::Tab).label(), format!("{CTRL_LABEL}+Shift+Tab"));
-        assert_eq!(Chord::new(true, false, false, KeyTok::Char('=')).label(), format!("{CTRL_LABEL}+="));
+        assert_eq!(
+            Chord::new(true, false, true, KeyTok::Tab).label(),
+            format!("{CTRL_LABEL}+Shift+Tab")
+        );
+        assert_eq!(
+            Chord::new(true, false, false, KeyTok::Char('=')).label(),
+            format!("{CTRL_LABEL}+=")
+        );
     }
 
     #[test]
@@ -623,7 +859,9 @@ mod tests {
         let rows = km.rows();
         assert_eq!(rows.len(), default_bindings().len());
         // Every row has an id, a label + at least one chord chip, and starts un-overridden.
-        assert!(rows.iter().all(|r| !r.id.is_empty() && !r.label.is_empty() && !r.parts.is_empty()));
+        assert!(rows
+            .iter()
+            .all(|r| !r.id.is_empty() && !r.label.is_empty() && !r.parts.is_empty()));
         assert!(rows.iter().all(|r| !r.overridden));
         // The palette row renders as Ctrl / Shift / P chips under General.
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
@@ -633,7 +871,11 @@ mod tests {
         let mut seen: Vec<&str> = Vec::new();
         for r in &rows {
             if seen.last() != Some(&r.category) {
-                assert!(!seen.contains(&r.category), "category {} not contiguous", r.category);
+                assert!(
+                    !seen.contains(&r.category),
+                    "category {} not contiguous",
+                    r.category
+                );
                 seen.push(r.category);
             }
         }
@@ -665,7 +907,9 @@ mod tests {
         // on_key falls through to encode_key, which forwards the control char to the pty).
         let mut km = empty_keymap();
         km.overrides.insert("pane.paste".into(), None);
-        assert!(km.match_chord(true, false, false, KeyTok::Char('v')).is_none());
+        assert!(km
+            .match_chord(true, false, false, KeyTok::Char('v'))
+            .is_none());
     }
 
     #[test]
@@ -685,8 +929,12 @@ mod tests {
             Some(Command::PasteFocused)
         ));
         // Bare V and Shift+V are ordinary text, never the image forward.
-        assert!(km.match_chord(false, false, false, KeyTok::Char('v')).is_none());
-        assert!(km.match_chord(false, false, true, KeyTok::Char('v')).is_none());
+        assert!(km
+            .match_chord(false, false, false, KeyTok::Char('v'))
+            .is_none());
+        assert!(km
+            .match_chord(false, false, true, KeyTok::Char('v'))
+            .is_none());
     }
 
     #[test]
@@ -698,14 +946,20 @@ mod tests {
             km.match_chord(true, false, true, KeyTok::Char('c')),
             Some(Command::CopyFocused)
         ));
-        assert!(km.match_chord(true, false, false, KeyTok::Char('c')).is_none());
+        assert!(km
+            .match_chord(true, false, false, KeyTok::Char('c'))
+            .is_none());
     }
 
     #[test]
     fn exact_modifier_match_required() {
         let km = empty_keymap();
         // Ctrl+Shift+T reopens a closed tab; plain T is not bound.
-        assert!(km.match_chord(true, false, true, KeyTok::Char('t')).is_some());
-        assert!(km.match_chord(false, false, false, KeyTok::Char('t')).is_none());
+        assert!(km
+            .match_chord(true, false, true, KeyTok::Char('t'))
+            .is_some());
+        assert!(km
+            .match_chord(false, false, false, KeyTok::Char('t'))
+            .is_none());
     }
 }
