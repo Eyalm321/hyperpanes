@@ -657,6 +657,54 @@ impl DaemonSessionManager {
             "the session daemon transport is unix-only in M1 (Windows named pipes are M3)",
         ))
     }
+
+    // `new` above only ever returns `Err`, and the struct holds an `Infallible`, so a value
+    // of this type can never exist on non-unix. These methods mirror the `#[cfg(unix)]` impl's
+    // signatures purely so the `SessionManager::Daemon(_) => d.method(..)` match arms in
+    // `session_manager` type-check on Windows; they are statically unreachable.
+    pub fn create(&self, _opts: crate::session_manager::SpawnOptions) -> io::Result<()> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn create_with(
+        &self,
+        _opts: crate::session_manager::SpawnOptions,
+        _factory: crate::session_manager::SpawnFn,
+    ) -> io::Result<()> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn has(&self, _uid: &str) -> bool {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn uids(&self) -> Vec<String> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn replay(&self, _uid: &str) -> Option<String> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn output_bytes(&self, _uid: &str) -> Option<u64> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn last_output_at(&self, _uid: &str) -> Option<u64> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn render_screen(&self, _uid: &str) -> Option<String> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn write(&self, _uid: &str, _data: &str) {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn resize(&self, _uid: &str, _cols: u16, _rows: u16) {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn kill(&self, _uid: &str) {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn kill_all(&self) {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn shutdown_daemon(&self) {
+        unreachable!("daemon backend is unix-only")
+    }
 }
 
 #[cfg(all(unix, test))]

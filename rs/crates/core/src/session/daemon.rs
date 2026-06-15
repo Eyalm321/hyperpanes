@@ -953,12 +953,25 @@ mod tests {
     // A unique temp socket path per test AND per run (pid + thread id), so parallel and
     // repeated runs never collide on the bind path.
     fn temp_socket(tag: &str) -> PathBuf {
-        let dir = runtime_dir();
-        dir.join(format!(
-            "hp-daemon-test-{tag}-{}-{:?}.sock",
+        // Unix-socket paths (`sun_path`) are capped: 108 bytes on Linux but only **104 on
+        // macOS/BSD** -- which is shorter than the macOS per-user temp dir
+        // (`/var/folders/.../T/`) plus a descriptive name, so a long `tag` overflows and
+        // `bind` fails with EINVAL. (In CI this showed up as `.expect("binds")` panicking
+        // only on macOS, and only for the longest tags.) Build a compact name and fall back
+        // to a short dir when the runtime-dir path would overflow.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let name = format!(
+            "hp-{}-{}-{tag}.sock",
             std::process::id(),
-            std::thread::current().id()
-        ))
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let candidate = runtime_dir().join(&name);
+        // 104 = macOS/BSD sun_path cap (incl. trailing NUL); keep margin.
+        if candidate.as_os_str().len() < 100 {
+            candidate
+        } else {
+            std::path::Path::new("/tmp").join(&name)
+        }
     }
 
     // Drain a client's inbox until `pred` matches one message or the deadline passes.
