@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "hyperpanes"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "arboard",
  "hyperpanes-core",
