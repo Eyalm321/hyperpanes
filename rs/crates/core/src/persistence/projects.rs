@@ -332,6 +332,28 @@ pub fn upsert_project_by_root(root: &str) -> Project {
     upsert_project_by_root_in(&paths::projects_json(), root)
 }
 
+/// Resolve a remembered project from a handle: an exact `id` match first, then an exact
+/// `name` match (newest-opened wins on a name collision, since the list is sorted
+/// newest-first). Used by the control plane's `newPane { project }` to turn a project handle
+/// into its directory. `None` when nothing matches.
+pub fn resolve(id_or_name: &str) -> Option<Project> {
+    let mut list = load_from(&paths::projects_json());
+    list.sort_by(|a, b| {
+        b.last_opened_at
+            .unwrap_or(0)
+            .cmp(&a.last_opened_at.unwrap_or(0))
+    });
+    resolve_in(&list, id_or_name)
+}
+
+/// Pure resolution over an already-loaded (newest-first) list — split out for tests.
+fn resolve_in(list: &[Project], id_or_name: &str) -> Option<Project> {
+    list.iter()
+        .find(|p| p.id == id_or_name)
+        .or_else(|| list.iter().find(|p| p.name == id_or_name))
+        .cloned()
+}
+
 /// Explicitly add a directory as a project (git repo not required); duplicate adds are a
 /// strict no-op. Returns `(project, added)` — `added` is `false` for a known dir.
 pub fn add_project_explicit(dir: &str) -> (Project, bool) {
@@ -544,6 +566,33 @@ mod tests {
 
         let _ = std::fs::remove_file(&store);
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    #[test]
+    fn resolve_prefers_id_then_name_newest_first() {
+        // Newest-first list (as `resolve` sorts it): two projects share a name; the
+        // newer one wins a name lookup, but an exact id always wins outright.
+        let newer = Project {
+            id: "id-new".into(),
+            path: "/repo/new".into(),
+            name: "dup".into(),
+            color: PROJECT_COLORS[0].into(),
+            last_opened_at: Some(200),
+        };
+        let older = Project {
+            id: "id-old".into(),
+            path: "/repo/old".into(),
+            name: "dup".into(),
+            color: PROJECT_COLORS[1].into(),
+            last_opened_at: Some(100),
+        };
+        let list = vec![newer.clone(), older.clone()];
+        // Exact id → that exact project (even the older one).
+        assert_eq!(resolve_in(&list, "id-old").as_ref(), Some(&older));
+        // Name collision → newest-opened (first in the newest-first list).
+        assert_eq!(resolve_in(&list, "dup").as_ref(), Some(&newer));
+        // No match → None.
+        assert_eq!(resolve_in(&list, "nope"), None);
     }
 
     #[test]

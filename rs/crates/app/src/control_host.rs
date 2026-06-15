@@ -257,6 +257,16 @@ impl ControlHost {
         if reconciled || republished {
             notify_state(&shared);
         }
+
+        // 5. The control plane changed the project registry off-thread (an MCP add_project /
+        //    rename / recolor / remove, or a project-opening newPane bumping recency). Reload
+        //    every window's cached sidebar rail so it updates live, not just on the next
+        //    flyout-open. Cheap: the flag is only set on an actual registry write.
+        if shared.take_projects_dirty() {
+            for w in windows {
+                w.state.borrow_mut().refresh_projects();
+            }
+        }
     }
 
     /// Read every pane the read-model currently holds (keyed by session uid), each GUI window's

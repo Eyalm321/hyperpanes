@@ -67,6 +67,11 @@ pub struct Shared {
     pub idle_threshold_ms: i64,
     pub control_file: PathBuf,
     state_scheduled: AtomicBool,
+    /// Set by the `/projects` routes (and a project-opening `newPane`) when they mutate the
+    /// `projects.json` registry off the UI thread. The GUI host clears it each tick (see
+    /// `ControlHost::sync`) to reload the sidebar rail live; in the headless bin it is simply
+    /// never read. A plain flag, not coalesced — the UI tick polls it cheaply.
+    projects_dirty: AtomicBool,
     /// The runtime to spawn background tasks on (the coalescer in [`notify_state`]). Set once by
     /// an embedder that wants spawns bound to an explicit runtime rather than the ambient
     /// thread-local — the GUI host sets this so a `notify_state` from the UI thread can never
@@ -99,8 +104,21 @@ impl Shared {
             idle_threshold_ms: IDLE_THRESHOLD_MS,
             control_file,
             state_scheduled: AtomicBool::new(false),
+            projects_dirty: AtomicBool::new(false),
             runtime: OnceLock::new(),
         })
+    }
+
+    /// Flag that the project registry changed off-thread (a `/projects` write or a
+    /// project-opening `newPane`), so the GUI host reloads the sidebar rail next tick.
+    pub fn mark_projects_dirty(&self) {
+        self.projects_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Atomically read-and-clear the project-registry dirty flag. The GUI host calls this
+    /// once per UI tick; returns `true` exactly once per batch of changes.
+    pub fn take_projects_dirty(&self) -> bool {
+        self.projects_dirty.swap(false, Ordering::SeqCst)
     }
 
     /// Bind background-task spawns (the `notify_state` coalescer) to an explicit runtime handle.

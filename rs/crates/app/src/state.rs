@@ -2190,6 +2190,15 @@ impl State {
         self.dirty = true;
     }
 
+    /// Reload the cached project rail from core after the control plane changed
+    /// `projects.json` off the UI thread (an MCP `add_project` / rename / recolor / remove,
+    /// or a project-opening pane bumping recency). Same refresh seam the in-app project
+    /// mutations use; the dirty signal is driven by [`crate::control_host::ControlHost::sync`].
+    pub fn refresh_projects(&mut self) {
+        self.projects = sidebar::list();
+        self.dirty = true;
+    }
+
     /// The cached project rows as `(name, color)` for the flyout.
     pub fn project_rows(&self) -> Vec<(SharedString, Color)> {
         self.projects
