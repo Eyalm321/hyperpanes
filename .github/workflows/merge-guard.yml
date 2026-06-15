@@ -41,6 +41,10 @@ permissions:
 jobs:
   merge-guard:
     name: merge-guard
+    # Only runs once auto-merge is ARMED. Until vars.AUTOMERGE_ENABLED == "true" the whole job
+    # SKIPS (a neutral check), instead of sitting RED on every PR via the kill-switch step
+    # before auto-merge is even turned on. When armed, all guardrails below run as before.
+    if: ${{ vars.AUTOMERGE_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:

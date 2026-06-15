@@ -43,9 +43,14 @@ permissions:
 jobs:
   llm-review:
     name: llm-review
-    # SELF-HOSTED: the judge runs Claude Code (`claude -p`, subscription-billed), so it needs
-    # a runner with Claude Code installed AND logged in. Label that runner `claude`. A cloud
+    # Only runs once auto-merge is ARMED (vars.AUTOMERGE_ENABLED == "true"); otherwise the job
+    # SKIPS — so it never sits QUEUED forever waiting on a self-hosted runner that isn't
+    # registered. The PRIMARY review path is the LOCAL controller gate (review.ts); this CI
+    # check is only for a private-repo + a registered `claude` runner.
+    # SELF-HOSTED: when it does run, the judge is Claude Code (`claude -p`, subscription-billed),
+    # so it needs a runner with Claude Code installed AND logged in (label it `claude`). A cloud
     # github-hosted runner has no Claude Code session → the gate fails closed.
+    if: ${{ vars.AUTOMERGE_ENABLED == 'true' }}
     runs-on: [self-hosted, claude]
     defaults:
       run:
