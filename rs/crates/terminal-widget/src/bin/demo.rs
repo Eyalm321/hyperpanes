@@ -491,7 +491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // ---------- lazy init (needs geometry for every pane + a wgpu device if any
             //            pane is GPU) ----------
             if state.borrow().is_none() {
-                let want_gpu = kinds.iter().any(|k| *k == Kind::Gpu);
+                let want_gpu = kinds.contains(&Kind::Gpu);
                 if want_gpu && gpu_slot.borrow().is_none() {
                     return; // wait for RenderingSetup
                 }
@@ -501,12 +501,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let px = (14.0 * scale).round().max(8.0);
-                let font_path = if std::path::Path::new("C:/Windows/Fonts/CascadiaMono.ttf").exists()
-                {
-                    "C:/Windows/Fonts/CascadiaMono.ttf"
-                } else {
-                    "C:/Windows/Fonts/consola.ttf"
-                };
+                let font_path =
+                    if std::path::Path::new("C:/Windows/Fonts/CascadiaMono.ttf").exists() {
+                        "C:/Windows/Fonts/CascadiaMono.ttf"
+                    } else {
+                        "C:/Windows/Fonts/consola.ttf"
+                    };
                 let font = Font::from_path(font_path, px).expect("font load");
                 let (cw, ch) = (font.cell_w, font.cell_h);
 
@@ -548,7 +548,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         started: false,
                         startup: Some(format!(
                             "echo hyperpanes terminal-widget [{}]\r",
-                            if kinds[i] == Kind::Gpu { "GPU" } else { "software" }
+                            if kinds[i] == Kind::Gpu {
+                                "GPU"
+                            } else {
+                                "software"
+                            }
                         )),
                     });
                     applied.push((cols, rows));
@@ -600,6 +604,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         SessionEvent::Exit { uid, code } => {
                             eprintln!("[demo] {uid} exited ({code})");
                         }
+                        // OSC-133 / agent-state liveness markers feed the control server's
+                        // liveness signals, not terminal rendering — ignore them in the demo.
+                        SessionEvent::CommandStart { .. }
+                        | SessionEvent::CommandEnd { .. }
+                        | SessionEvent::PromptReady { .. }
+                        | SessionEvent::AgentState { .. } => {}
                     }
                 }
             }
@@ -705,10 +715,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // ---------- HUD ----------
             if st.last_hud.elapsed() >= Duration::from_millis(500) {
                 let fps = st.frames as f32 / st.last_hud.elapsed().as_secs_f32();
-                let names: Vec<&str> = st.panes.iter().map(|p| match p.kind {
-                    Kind::Gpu => "GPU",
-                    Kind::Software => "SW",
-                }).collect();
+                let names: Vec<&str> = st
+                    .panes
+                    .iter()
+                    .map(|p| match p.kind {
+                        Kind::Gpu => "GPU",
+                        Kind::Software => "SW",
+                    })
+                    .collect();
                 app.set_hud(format!("{:.0} fps · {}", fps, names.join(" + ")).into());
                 st.frames = 0;
                 st.last_hud = Instant::now();

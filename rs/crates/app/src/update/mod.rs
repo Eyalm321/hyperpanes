@@ -120,7 +120,9 @@ pub struct Updater {
 
 impl Default for Updater {
     fn default() -> Self {
-        Updater { inner: Arc::new(Mutex::new(Inner::default())) }
+        Updater {
+            inner: Arc::new(Mutex::new(Inner::default())),
+        }
     }
 }
 
@@ -138,7 +140,11 @@ impl Updater {
     /// A snapshot for the per-tick UI mirror.
     pub fn snapshot(&self) -> Snapshot {
         let g = guard(&self.inner);
-        Snapshot { phase: g.phase as i32, message: g.message.clone(), progress: g.progress }
+        Snapshot {
+            phase: g.phase as i32,
+            message: g.message.clone(),
+            progress: g.progress,
+        }
     }
 
     /// Kick off a check for a newer release on a background thread (no-op while a check or
@@ -243,7 +249,9 @@ impl Updater {
     /// ([`Phase::Downloaded`]). The caller launches it + quits the app.
     pub fn installer_path(&self) -> Option<PathBuf> {
         let g = guard(&self.inner);
-        (g.phase == Phase::Downloaded).then(|| g.installer.clone()).flatten()
+        (g.phase == Phase::Downloaded)
+            .then(|| g.installer.clone())
+            .flatten()
     }
 
     /// Force an error state with `msg` (used when launching the installer fails).
@@ -299,7 +307,11 @@ fn fetch_latest() -> Result<ReleaseInfo, String> {
             }
         }
     }
-    Ok(ReleaseInfo { tag, asset_url, asset_name })
+    Ok(ReleaseInfo {
+        tag,
+        asset_url,
+        asset_name,
+    })
 }
 
 /// Stream the installer to `%TEMP%\hyperpanes-update\<name>`, updating `inner.progress` as it

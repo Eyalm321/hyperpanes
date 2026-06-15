@@ -29,6 +29,12 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 subtle = "2"      # constant-time master-token compare (timingSafeEqual parity)
 rand = "0.8"      # 32-random-byte hex master token
+# --- Phase 2: durable work queue (control/work.rs) ---
+# SQLite-with-WAL is the design's chosen store (atomic competing-consumers claim,
+# indexed visibility-timeout reap, count-by-state); `bundled` compiles the
+# amalgamation so the queue ships inside the single native binary (no libsqlite3
+# system dep) — consistent with the single-binary goal of the native rewrite.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # platform: single-instance (named mutex + named-pipe argv handoff)
 # 0.58 -> 0.62 to unify with the app + wgpu-hal 29 (avoids two `windows` crate versions).

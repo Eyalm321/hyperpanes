@@ -159,7 +159,7 @@ fn redact_jwt(b: &[u8]) -> Vec<u8> {
 fn jwt_match(b: &[u8], start: usize) -> Option<usize> {
     // "eyJ" then >=1 class, '.', >=1 class, '.', >=1 class.
     let mut p = start + 3; // past "eyJ"
-    // segment 1 already has "eyJ"; require at least one more class char.
+                           // segment 1 already has "eyJ"; require at least one more class char.
     let s1 = p;
     while p < b.len() && is_jwt_char(b[p]) {
         p += 1;
@@ -413,7 +413,10 @@ mod tests {
 
     #[test]
     fn redacts_an_aws_access_key_id() {
-        assert_eq!(redact("key AKIAIOSFODNN7EXAMPLE here"), "key [REDACTED] here");
+        assert_eq!(
+            redact("key AKIAIOSFODNN7EXAMPLE here"),
+            "key [REDACTED] here"
+        );
     }
 
     #[test]
@@ -443,7 +446,10 @@ mod tests {
             "-----END RSA PRIVATE KEY-----",
         ]
         .join("\n");
-        assert_eq!(redact(&format!("my key:\n{pem}\ndone")), "my key:\n[REDACTED]\ndone");
+        assert_eq!(
+            redact(&format!("my key:\n{pem}\ndone")),
+            "my key:\n[REDACTED]\ndone"
+        );
     }
 
     #[test]
@@ -484,7 +490,8 @@ mod tests {
 
     #[test]
     fn scrubs_a_mixed_multi_secret_blob_leaving_non_secrets_intact() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.Dk5f2nL9q-7gWmVw3Yx1pQrStUvWxYz0123456789AB";
+        let jwt =
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.Dk5f2nL9q-7gWmVw3Yx1pQrStUvWxYz0123456789AB";
         let input = [
             "starting up on PORT=3000".to_string(),
             "aws id AKIAIOSFODNN7EXAMPLE".to_string(),

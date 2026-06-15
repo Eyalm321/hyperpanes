@@ -80,7 +80,10 @@ fn spawn_scanner() -> Scanner {
             }
         })
         .ok();
-    Scanner { tx: job_tx, rx: res_rx }
+    Scanner {
+        tx: job_tx,
+        rx: res_rx,
+    }
 }
 
 /// Ask for a (re-)scan of `project_root`'s Claude sessions. No-op while one is already

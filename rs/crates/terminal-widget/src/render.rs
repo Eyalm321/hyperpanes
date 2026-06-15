@@ -37,6 +37,8 @@ fn lerp_u8(b: u8, f: u8, cov: u8) -> u8 {
 /// (`x0`,`y0`) and the baseline at `y0 + ascent`. Shared by the normal glyph pass and the
 /// cursor's true-invert redraw so the two never drift. Clips to the `w`×`h` buffer.
 #[inline]
+// pre-existing; deferred per repo lint policy (test.yml)
+#[allow(clippy::too_many_arguments)]
 fn blit_glyph(
     px: &mut [Rgba8Pixel],
     w: u32,
@@ -87,6 +89,12 @@ pub struct SoftwareRenderer {
     h: u32,
 }
 
+impl Default for SoftwareRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SoftwareRenderer {
     pub fn new() -> Self {
         SoftwareRenderer {
@@ -111,10 +119,7 @@ impl PaneRenderer for SoftwareRenderer {
         if w != self.w || h != self.h || self.bufs.is_empty() {
             self.w = w;
             self.h = h;
-            self.bufs = vec![
-                SharedPixelBuffer::new(w, h),
-                SharedPixelBuffer::new(w, h),
-            ];
+            self.bufs = vec![SharedPixelBuffer::new(w, h), SharedPixelBuffer::new(w, h)];
         }
         // Double-buffer: write into the buffer Slint is not currently displaying.
         self.idx ^= 1;
@@ -176,8 +181,8 @@ impl PaneRenderer for SoftwareRenderer {
                 // Underline. Compute in i32 (a negative ascent must not wrap to a huge u32)
                 // and clamp WITHIN this cell's band — never to the bottom screen row.
                 if cell.underline {
-                    let uy = (y0 as i32 + font.ascent + 2)
-                        .clamp(y0 as i32, (y0 + ch) as i32 - 1) as u32;
+                    let uy =
+                        (y0 as i32 + font.ascent + 2).clamp(y0 as i32, (y0 + ch) as i32 - 1) as u32;
                     let row_off = uy as usize * stride + x0 as usize;
                     for xx in 0..cell_px_w {
                         if (x0 + xx) >= w {
@@ -206,7 +211,11 @@ impl PaneRenderer for SoftwareRenderer {
             let block_w = if cell.wide { cw * 2 } else { cw };
             // The colour the inverted glyph is drawn in: the cell's own bg if opaque, else the
             // grid default bg — i.e. whatever the block colour "replaced", so it reads as invert.
-            let under = if cell.bg[3] > 0 { cell.bg } else { grid.default_bg };
+            let under = if cell.bg[3] > 0 {
+                cell.bg
+            } else {
+                grid.default_bg
+            };
 
             // 1) Fill the cursor block with the cell's fg colour.
             for yy in 0..ch {
@@ -661,7 +670,11 @@ impl GpuRenderer {
                 }
                 let x0 = (col as u32 * cw) as f32;
                 let y0 = (row as u32 * ch) as f32;
-                let cell_w = if cell.wide { (cw * 2) as f32 } else { cw as f32 };
+                let cell_w = if cell.wide {
+                    (cw * 2) as f32
+                } else {
+                    cw as f32
+                };
 
                 if cell.bg[3] > 0 {
                     bgs.push(BgInstance {
@@ -825,9 +838,7 @@ impl PaneRenderer for GpuRenderer {
                 img
             }
             Err(_) => {
-                eprintln!(
-                    "[gpu] wgpu texture import into slint failed; using fallback frame"
-                );
+                eprintln!("[gpu] wgpu texture import into slint failed; using fallback frame");
                 self.last_image.clone().unwrap_or_default()
             }
         }

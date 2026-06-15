@@ -281,7 +281,10 @@ mod tests {
             ..Default::default()
         };
         let out = serde_json::to_string_pretty(&ws).unwrap();
-        assert!(!out.contains("null"), "no field should serialize as null: {out}");
+        assert!(
+            !out.contains("null"),
+            "no field should serialize as null: {out}"
+        );
         assert!(!out.contains("layout"), "unset layout omitted");
         assert!(!out.contains("label"), "unset pane label omitted");
         assert_eq!(
@@ -326,7 +329,10 @@ mod tests {
         };
         let json = serde_json::to_string_pretty(&ws).unwrap();
         // The zoomed pane records fontSize; the base pane omits it entirely.
-        assert!(json.contains("\"fontSize\": 20"), "zoomed pane keeps its size: {json}");
+        assert!(
+            json.contains("\"fontSize\": 20"),
+            "zoomed pane keeps its size: {json}"
+        );
         let parsed: WorkspaceFile = serde_json::from_str(&json).unwrap();
         let panes = parsed.panes.clone().unwrap();
         assert_eq!(panes[0].font_size, Some(20));

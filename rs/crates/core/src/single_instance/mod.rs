@@ -190,7 +190,11 @@ mod tests {
     #[test]
     fn handoff_message_json_round_trips() {
         let msg = HandoffMessage {
-            argv: vec!["hyperpanes".to_string(), "--tab".to_string(), ".".to_string()],
+            argv: vec![
+                "hyperpanes".to_string(),
+                "--tab".to_string(),
+                ".".to_string(),
+            ],
             cwd: "C:\\work".to_string(),
         };
         let json = serde_json::to_string(&msg).unwrap();

@@ -118,7 +118,11 @@ pub fn github_issue_url(report: &str) -> String {
         "Describe what you were doing when it crashed.\n\n(Full diagnostics are on your clipboard — paste them below.)\n\n```\n{}\n```",
         truncate(report, 1200),
     );
-    format!("{REPO_NEW_ISSUE}?labels=crash&title={}&body={}", pct(&title), pct(&body))
+    format!(
+        "{REPO_NEW_ISSUE}?labels=crash&title={}&body={}",
+        pct(&title),
+        pct(&body)
+    )
 }
 
 fn truncate(s: &str, max: usize) -> String {

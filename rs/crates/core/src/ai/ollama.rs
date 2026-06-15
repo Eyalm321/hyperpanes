@@ -151,7 +151,13 @@ mod tests {
     impl CapturedReq {
         fn path(&self) -> &str {
             // start-line: "METHOD PATH HTTP/1.1"
-            self.raw.split("\r\n").next().unwrap().split(' ').nth(1).unwrap()
+            self.raw
+                .split("\r\n")
+                .next()
+                .unwrap()
+                .split(' ')
+                .nth(1)
+                .unwrap()
         }
         fn method(&self) -> &str {
             self.raw.split(' ').next().unwrap()
@@ -162,10 +168,10 @@ mod tests {
             head.split("\r\n")
                 .skip(1)
                 .find(|l| l.to_ascii_lowercase().starts_with(&format!("{lname}:")))
-                .map(|l| l.splitn(2, ':').nth(1).unwrap().trim().to_string())
+                .map(|l| l.split_once(':').unwrap().1.trim().to_string())
         }
         fn body_json(&self) -> serde_json::Value {
-            let body = self.raw.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
+            let body = self.raw.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("");
             serde_json::from_str(body).unwrap()
         }
     }
@@ -238,7 +244,12 @@ mod tests {
 
     #[tokio::test]
     async fn parses_response_trims_and_returns_a_clean_single_line() {
-        let (port, h) = serve_once(200, "OK", r#"{"response":"  rebased onto main, 3 commits  "}"#.into()).await;
+        let (port, h) = serve_once(
+            200,
+            "OK",
+            r#"{"response":"  rebased onto main, 3 commits  "}"#.into(),
+        )
+        .await;
         let client = client_for(port, "gemma");
         assert_eq!(
             client.summarize(&input()).await.unwrap(),
@@ -249,10 +260,14 @@ mod tests {
 
     #[tokio::test]
     async fn takes_first_non_empty_line_and_collapses_internal_whitespace() {
-        let body = json!({"response":"\n\n   running   tests\twith   gaps\nsecond line\nthird"}).to_string();
+        let body = json!({"response":"\n\n   running   tests\twith   gaps\nsecond line\nthird"})
+            .to_string();
         let (port, h) = serve_once(200, "OK", body).await;
         let client = client_for(port, "gemma");
-        assert_eq!(client.summarize(&input()).await.unwrap(), "running tests with gaps");
+        assert_eq!(
+            client.summarize(&input()).await.unwrap(),
+            "running tests with gaps"
+        );
         h.await.unwrap();
     }
 
@@ -280,7 +295,10 @@ mod tests {
         let req = h.await.unwrap();
         assert_eq!(req.method(), "POST");
         assert_eq!(req.path(), "/api/generate");
-        assert_eq!(req.header("content-type").as_deref(), Some("application/json"));
+        assert_eq!(
+            req.header("content-type").as_deref(),
+            Some("application/json")
+        );
         assert_eq!(
             req.body_json(),
             json!({
@@ -295,7 +313,8 @@ mod tests {
 
     #[tokio::test]
     async fn errors_on_a_non_2xx_response() {
-        let (port, h) = serve_once(500, "Internal Server Error", r#"{"error":"boom"}"#.into()).await;
+        let (port, h) =
+            serve_once(500, "Internal Server Error", r#"{"error":"boom"}"#.into()).await;
         let client = client_for(port, "gemma");
         let err = client.summarize(&input()).await.unwrap_err();
         assert!(err.contains("ollama 500"), "got: {err}");

@@ -11,6 +11,7 @@
 //!     tokens lazily — [`TokenStore::resolve`].
 //!   * `mintToken` registers a scoped token with an optional `Date.now()+ttlMs` expiry —
 //!     [`TokenStore::mint`].
+//!
 //! The no-escalation check itself is `scope::check_mintable`, applied by the routes layer
 //! against the live read-model.
 
@@ -99,7 +100,10 @@ impl TokenStore {
             return None;
         }
         if self.token_matches(presented) {
-            return Some(TokenInfo { scope: None, expires_at: None });
+            return Some(TokenInfo {
+                scope: None,
+                expires_at: None,
+            });
         }
         let info = self.scoped.get(presented)?.clone();
         if let Some(exp) = info.expires_at {
@@ -116,8 +120,13 @@ impl TokenStore {
     pub fn mint(&mut self, scope: Scope, ttl_ms: Option<i64>, now: i64) -> (String, Option<i64>) {
         let token = random_token();
         let expires_at = ttl_ms.filter(|&t| t > 0).map(|t| now + t);
-        self.scoped
-            .insert(token.clone(), TokenInfo { scope: Some(scope), expires_at });
+        self.scoped.insert(
+            token.clone(),
+            TokenInfo {
+                scope: Some(scope),
+                expires_at,
+            },
+        );
         (token, expires_at)
     }
 }
@@ -137,7 +146,9 @@ mod tests {
     fn random_token_is_64_lowercase_hex_chars() {
         let t = random_token();
         assert_eq!(t.len(), 64);
-        assert!(t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(t
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
         // Two draws practically never collide.
         assert_ne!(random_token(), random_token());
     }
@@ -152,7 +163,13 @@ mod tests {
         assert!(!store.token_matches("deadbee0"));
         assert!(!store.token_matches(""));
         let info = store.resolve(Some("deadbeef"), 0).expect("master resolves");
-        assert_eq!(info, TokenInfo { scope: None, expires_at: None });
+        assert_eq!(
+            info,
+            TokenInfo {
+                scope: None,
+                expires_at: None
+            }
+        );
     }
 
     #[test]

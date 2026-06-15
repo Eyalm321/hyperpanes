@@ -130,7 +130,11 @@ pub fn build(state: &State) -> Vec<Entry> {
             Command::MovePaneToNewWindow,
         ));
         cmds.push(Entry::new(
-            if t.zoomed.is_some() { "Unzoom pane" } else { "Zoom pane" },
+            if t.zoomed.is_some() {
+                "Unzoom pane"
+            } else {
+                "Zoom pane"
+            },
             "Toggle full-tab zoom of the focused pane",
             "maximize fullscreen expand",
             Command::ToggleZoom,
@@ -224,7 +228,10 @@ mod tests {
         // "lg" should match "Layout: Grid" (word boundaries) better than a scattered hit.
         let strong = fuzzy_score("lg", "Layout: Grid").unwrap();
         let weak = fuzzy_score("lg", "abclxxxg").unwrap();
-        assert!(strong > weak, "boundary {strong} should beat scattered {weak}");
+        assert!(
+            strong > weak,
+            "boundary {strong} should beat scattered {weak}"
+        );
     }
 
     #[test]

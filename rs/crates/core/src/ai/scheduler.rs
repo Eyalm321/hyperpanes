@@ -71,8 +71,8 @@ pub struct SummaryScheduler {
     last_summary_at: HashMap<String, i64>,
 
     backoff_ms: i64,
-    backoff_timer: Option<i64>,    // fire time
-    staleness_timer: Option<i64>,  // next tick fire time
+    backoff_timer: Option<i64>,   // fire time
+    staleness_timer: Option<i64>, // next tick fire time
     last_online: Option<bool>,
     running: bool,
 
@@ -301,7 +301,7 @@ impl SummaryScheduler {
             self.queue.push_front(uid.clone()); // retry this one first
             self.queued.insert(uid);
         }
-        self.backoff_ms = (self.backoff_ms * 2).max(BACKOFF_MIN_MS).min(BACKOFF_MAX_MS);
+        self.backoff_ms = (self.backoff_ms * 2).clamp(BACKOFF_MIN_MS, BACKOFF_MAX_MS);
         self.backoff_timer = Some(self.now + self.backoff_ms);
     }
 

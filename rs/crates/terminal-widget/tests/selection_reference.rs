@@ -86,14 +86,21 @@ fn select_all_covers_the_visible_screen() {
     p.select_all();
     // The 4-row screen has one trailing blank row — select-all keeps it as a final
     // newline (each row is right-trimmed, rows joined by `\n`).
-    assert_eq!(p.selection_text().as_deref(), Some("first\nsecond\nthird\n"));
+    assert_eq!(
+        p.selection_text().as_deref(),
+        Some("first\nsecond\nthird\n")
+    );
 }
 
 #[test]
 fn selection_over_blank_cells_yields_none() {
     let mut p = pane_with(""); // empty grid
     drag(&mut p, (0, 0), (5, 0));
-    assert_eq!(p.selection_text(), None, "an all-blank row extracts no text");
+    assert_eq!(
+        p.selection_text(),
+        None,
+        "an all-blank row extracts no text"
+    );
 }
 
 #[test]

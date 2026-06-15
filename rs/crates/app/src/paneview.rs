@@ -17,13 +17,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::contextmenu::CtxKind;
+use crate::prefs;
 use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
     AppWindow, ClaudeSessionItem, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem,
     LayoutOption, MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem, WorktreeRow,
 };
-use crate::prefs;
 
 /// Thickness (logical px) of the draggable divider hit-area.
 const DIVIDER_THICK: f32 = 10.0;
@@ -213,7 +213,15 @@ fn pane_item(
         .collect();
     let (search_active_on, search_active_rect) = match search_active {
         Some((x, y, w, h)) => (true, HiRect { x, y, w, h }),
-        None => (false, HiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }),
+        None => (
+            false,
+            HiRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+        ),
     };
     // In-pane search box state (opened from the pane menu's "Search…").
     let search_open = ps.pane.search_is_open();
@@ -390,7 +398,14 @@ fn build_dividers(state: &State, area: (f32, f32)) -> Vec<DividerItem> {
 
 /// Rebuild every UI model + scalar from `State` (the resync step). Called when
 /// `state.dirty` is set.
-pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), scale: f32, mgr: &SessionManager) {
+pub fn resync(
+    state: &mut State,
+    app: &AppWindow,
+    ui: &Ui,
+    area: (f32, f32),
+    scale: f32,
+    mgr: &SessionManager,
+) {
     relayout_active(state, area, scale, mgr);
 
     // tab strip
@@ -429,7 +444,16 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .panes
         .iter()
         .enumerate()
-        .map(|(i, p)| pane_item(p, i == focused, i as i32 == editing_pane, show_frame, show_dot, p.font_px))
+        .map(|(i, p)| {
+            pane_item(
+                p,
+                i == focused,
+                i as i32 == editing_pane,
+                show_frame,
+                show_dot,
+                p.font_px,
+            )
+        })
         .collect();
     // Slint samples a TouchArea's `mouse-cursor` only while dispatching a mouse event, and the
     // link hover hit-test lands in the model one pump tick AFTER the move that triggered it —
@@ -474,7 +498,10 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         state.active_tab().panes.len(),
         divs.len(),
         divs.iter()
-            .map(|d| format!("(x={:.0},y={:.0},w={:.0},h={:.0},vert={})", d.x, d.y, d.w, d.h, d.vertical))
+            .map(|d| format!(
+                "(x={:.0},y={:.0},w={:.0},h={:.0},vert={})",
+                d.x, d.y, d.w, d.h, d.vertical
+            ))
             .collect::<Vec<_>>()
     ));
     sync_model(&ui.dividers, divs);
@@ -488,7 +515,10 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     // hint (fullscreen solos the focused pane), tracking that pane's per-pane zoom.
     let focused_px = {
         let t = state.active_tab();
-        t.panes.get(t.focused).map(|p| p.font_px).unwrap_or(prefs::DEFAULT_FONT_PX)
+        t.panes
+            .get(t.focused)
+            .map(|p| p.font_px)
+            .unwrap_or(prefs::DEFAULT_FONT_PX)
     };
     app.set_zoom_factor(focused_px / prefs::DEFAULT_FONT_PX);
     // Single-layout pane taskbar gate (the hidden-panes strip; see State::taskbar_visible).
@@ -526,7 +556,11 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
         .enumerate()
         .map(|(id, (label, _))| PrefOption {
             id: id as i32,
-            label: if id == 0 { "Use default shell".into() } else { (*label).into() },
+            label: if id == 0 {
+                "Use default shell".into()
+            } else {
+                (*label).into()
+            },
             active: false,
         })
         .collect();
@@ -566,7 +600,11 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             if active {
                 font_label = (*label).to_string();
             }
-            PrefOption { id: id as i32, label: (*label).into(), active }
+            PrefOption {
+                id: id as i32,
+                label: (*label).into(),
+                active,
+            }
         })
         .collect();
     families.push(PrefOption {
@@ -616,7 +654,11 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             if active {
                 theme_label = (*label).to_string();
             }
-            PrefOption { id: id as i32, label: (*label).into(), active }
+            PrefOption {
+                id: id as i32,
+                label: (*label).into(),
+                active,
+            }
         })
         .collect();
     sync_model(&ui.themes, themes);
@@ -634,7 +676,11 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             if active {
                 shell_label = (*label).to_string();
             }
-            PrefOption { id: id as i32, label: (*label).into(), active }
+            PrefOption {
+                id: id as i32,
+                label: (*label).into(),
+                active,
+            }
         })
         .collect();
     sync_model(&ui.shells, shells);
@@ -651,7 +697,11 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
             if active {
                 idle_label = (*label).to_string();
             }
-            PrefOption { id: id as i32, label: (*label).into(), active }
+            PrefOption {
+                id: id as i32,
+                label: (*label).into(),
+                active,
+            }
         })
         .collect();
     sync_model(&ui.idle_effects, idle_effects);
@@ -800,8 +850,12 @@ pub fn resync(state: &mut State, app: &AppWindow, ui: &Ui, area: (f32, f32), sca
     {
         let live: std::collections::HashSet<&str> =
             state.projects.iter().map(|p| p.path.as_str()).collect();
-        ui.wt_models.borrow_mut().retain(|k, _| live.contains(k.as_str()));
-        ui.claude_models.borrow_mut().retain(|k, _| live.contains(k.as_str()));
+        ui.wt_models
+            .borrow_mut()
+            .retain(|k, _| live.contains(k.as_str()));
+        ui.claude_models
+            .borrow_mut()
+            .retain(|k, _| live.contains(k.as_str()));
     }
     sync_model(&ui.projects, projects);
 
@@ -1133,7 +1187,14 @@ pub fn pump(
         if i < ui.panes.row_count() {
             ui.panes.set_row_data(
                 i,
-                pane_item(ps, i == focused, i as i32 == editing_pane, show_frame, show_dot, ps.font_px),
+                pane_item(
+                    ps,
+                    i == focused,
+                    i as i32 == editing_pane,
+                    show_frame,
+                    show_dot,
+                    ps.font_px,
+                ),
             );
         }
     }

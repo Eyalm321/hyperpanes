@@ -2,8 +2,8 @@
 //!
 //! A clean, Wave-2-consumable terminal pane: a [`pane::TerminalPane`] Rust **controller**
 //! + a `TerminalPane` **Slint component** (in [`ui`]), driven by the proven Spike A
-//! renderer (`alacritty_terminal` grid → `swash` atlas → software `SharedPixelBuffer` *or*
-//! GPU `wgpu::Texture` → `slint::Image`, behind the [`render::PaneRenderer`] trait).
+//!   renderer (`alacritty_terminal` grid → `swash` atlas → software `SharedPixelBuffer` *or*
+//!   GPU `wgpu::Texture` → `slint::Image`, behind the [`render::PaneRenderer`] trait).
 //!
 //! Unlike the spike, the pane owns **no PTY**: the live shell lives in
 //! `hyperpanes_core::session_manager`, and the controller is pumped with that session's

@@ -272,8 +272,18 @@ impl TermBackend {
         let cols = self.size.cols;
         let rows = self.size.rows;
         let mut cells = vec![RenderCell::default(); cols * rows];
-        let default_fg = [self.palette[7].r, self.palette[7].g, self.palette[7].b, 0xff];
-        let default_bg = [self.palette[0].r, self.palette[0].g, self.palette[0].b, 0xff];
+        let default_fg = [
+            self.palette[7].r,
+            self.palette[7].g,
+            self.palette[7].b,
+            0xff,
+        ];
+        let default_bg = [
+            self.palette[0].r,
+            self.palette[0].g,
+            self.palette[0].b,
+            0xff,
+        ];
 
         let content = self.term.renderable_content();
         let display_offset = content.display_offset as i32;
@@ -309,7 +319,8 @@ impl TermBackend {
                 bg,
                 bold: flags.contains(Flags::BOLD),
                 italic: flags.contains(Flags::ITALIC),
-                underline: flags.contains(Flags::UNDERLINE) || flags.contains(Flags::DOUBLE_UNDERLINE),
+                underline: flags.contains(Flags::UNDERLINE)
+                    || flags.contains(Flags::DOUBLE_UNDERLINE),
                 wide: flags.contains(Flags::WIDE_CHAR),
                 wide_spacer: flags.contains(Flags::WIDE_CHAR_SPACER),
             };
@@ -360,7 +371,11 @@ fn default_palette() -> [Rgb; 256] {
         [0xff, 0xff, 0xff], // 15 bright white
     ];
     for (i, c) in base.iter().enumerate() {
-        p[i] = Rgb { r: c[0], g: c[1], b: c[2] };
+        p[i] = Rgb {
+            r: c[0],
+            g: c[1],
+            b: c[2],
+        };
     }
     // 6x6x6 colour cube (indices 16..=231).
     let levels = [0u8, 95, 135, 175, 215, 255];

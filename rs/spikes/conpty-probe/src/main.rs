@@ -32,7 +32,10 @@ fn main() {
         eprintln!("usage: conpty-probe <throughput.mjs> [case] [bytesMB] [cols] [rows]");
         std::process::exit(2);
     });
-    let case = args.get(2).cloned().unwrap_or_else(|| "scrolling-region".into());
+    let case = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "scrolling-region".into());
     let bytes_mb: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cols: u16 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(120);
     let rows: u16 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(30);
@@ -59,13 +62,16 @@ fn main() {
     }
 
     let payload_bytes = bytes_mb * 1000 * 1000;
-    eprintln!(
-        "[probe] case={case} payloadMB={bytes_mb} grid={cols}x{rows} — spawning node…"
-    );
+    eprintln!("[probe] case={case} payloadMB={bytes_mb} grid={cols}x{rows} — spawning node…");
 
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .expect("openpty");
 
     // ConPTY's CreateProcessW needs a resolvable application path; a bare "node"
@@ -115,7 +121,9 @@ fn main() {
                         let _ = writer.write_all(b"\x1b[1;1R");
                         let _ = writer.flush();
                         answered = true;
-                        eprintln!("[probe] answered ConPTY cursor-position query (ESC[6n -> ESC[1;1R])");
+                        eprintln!(
+                            "[probe] answered ConPTY cursor-position query (ESC[6n -> ESC[1;1R])"
+                        );
                     }
                 }
                 Err(_) => break,
@@ -145,7 +153,12 @@ fn main() {
     // pane; this tests whether ResizePseudoConsole re-triggers the repaint path.
     if let Some((c2, r2)) = resize_to {
         thread::sleep(std::time::Duration::from_millis(500));
-        match pair.master.resize(PtySize { rows: r2, cols: c2, pixel_width: 0, pixel_height: 0 }) {
+        match pair.master.resize(PtySize {
+            rows: r2,
+            cols: c2,
+            pixel_width: 0,
+            pixel_height: 0,
+        }) {
             Ok(()) => eprintln!("[probe] resized pty {cols}x{rows} -> {c2}x{r2} at t=0.5s"),
             Err(e) => eprintln!("[probe] resize FAILED: {e}"),
         }
@@ -173,7 +186,13 @@ fn main() {
     println!("wall time           : {:.3} s", secs);
     println!("payload (node wrote): {:.2} MB", payload_bytes as f64 / 1e6);
     println!("master  (we read)   : {:.2} MB", read as f64 / 1e6);
-    println!("node INPUT rate     : {:.2} MB/s   <- what the bench calls 'MB/s'", node_mbps);
+    println!(
+        "node INPUT rate     : {:.2} MB/s   <- what the bench calls 'MB/s'",
+        node_mbps
+    );
     println!("master OUTPUT rate  : {:.2} MB/s", master_mbps);
-    println!("INFLATION factor    : {:.1}x   (master bytes / payload bytes)", inflation);
+    println!(
+        "INFLATION factor    : {:.1}x   (master bytes / payload bytes)",
+        inflation
+    );
 }

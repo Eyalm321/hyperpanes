@@ -44,7 +44,13 @@ mod registry {
 
     #[link(name = "advapi32")]
     extern "system" {
-        fn RegOpenKeyExW(hkey: Hkey, sub_key: *const u16, options: u32, sam: u32, result: *mut Hkey) -> i32;
+        fn RegOpenKeyExW(
+            hkey: Hkey,
+            sub_key: *const u16,
+            options: u32,
+            sam: u32,
+            result: *mut Hkey,
+        ) -> i32;
         fn RegEnumValueW(
             hkey: Hkey,
             index: u32,

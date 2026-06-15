@@ -138,7 +138,11 @@ impl TermGrid {
     /// grayscale ramp (indices 16–255) are kept. Marks the grid dirty so it repaints.
     pub fn set_base16(&mut self, base: [[u8; 3]; 16]) {
         for (i, c) in base.iter().enumerate() {
-            self.palette[i] = Rgb { r: c[0], g: c[1], b: c[2] };
+            self.palette[i] = Rgb {
+                r: c[0],
+                g: c[1],
+                b: c[2],
+            };
         }
         self.dirty = true;
     }
@@ -198,7 +202,9 @@ impl TermGrid {
     /// which is what fragments a multi-line paste across `>>` continuation prompts and strands the
     /// caret. See [`TerminalPane::paste_from_clipboard`](crate::pane::TerminalPane).
     pub fn bracketed_paste(&self) -> bool {
-        self.term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
     }
 
     // ---- Scrollback access + scrolling (for in-pane search) ---------------------------------
@@ -234,7 +240,9 @@ impl TermGrid {
     /// TUIs). Type-over-selection must not fire there: its arrow/backspace bytes would be app
     /// commands (vim motions), not line edits.
     pub fn alt_screen(&self) -> bool {
-        self.term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
     }
 
     /// The cursor's row within the current viewport (display offset applied), or `None` when the
@@ -346,8 +354,18 @@ impl TermGrid {
         let cols = self.size.cols;
         let rows = self.size.rows;
         let mut cells = vec![RenderCell::default(); cols * rows];
-        let default_fg = [self.palette[7].r, self.palette[7].g, self.palette[7].b, 0xff];
-        let default_bg = [self.palette[0].r, self.palette[0].g, self.palette[0].b, 0xff];
+        let default_fg = [
+            self.palette[7].r,
+            self.palette[7].g,
+            self.palette[7].b,
+            0xff,
+        ];
+        let default_bg = [
+            self.palette[0].r,
+            self.palette[0].g,
+            self.palette[0].b,
+            0xff,
+        ];
 
         let content = self.term.renderable_content();
         let display_offset = content.display_offset as i32;
@@ -399,7 +417,8 @@ impl TermGrid {
                 bg,
                 bold: flags.contains(Flags::BOLD),
                 italic: flags.contains(Flags::ITALIC),
-                underline: flags.contains(Flags::UNDERLINE) || flags.contains(Flags::DOUBLE_UNDERLINE),
+                underline: flags.contains(Flags::UNDERLINE)
+                    || flags.contains(Flags::DOUBLE_UNDERLINE),
                 wide: flags.contains(Flags::WIDE_CHAR),
                 wide_spacer: flags.contains(Flags::WIDE_CHAR_SPACER),
             };
@@ -435,10 +454,14 @@ impl TermGrid {
 fn dim_blend(fg: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
     const KEEP_NUM: u32 = 45; // keep 45% of fg → 55% toward bg
     const DEN: u32 = 100;
-    let mix = |f: u8, b: u8| -> u8 {
-        ((f as u32 * KEEP_NUM + b as u32 * (DEN - KEEP_NUM)) / DEN) as u8
-    };
-    [mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2]), 0xff]
+    let mix =
+        |f: u8, b: u8| -> u8 { ((f as u32 * KEEP_NUM + b as u32 * (DEN - KEEP_NUM)) / DEN) as u8 };
+    [
+        mix(fg[0], bg[0]),
+        mix(fg[1], bg[1]),
+        mix(fg[2], bg[2]),
+        0xff,
+    ]
 }
 
 /// Tokyo-Night-ish default 16 + the standard xterm 256-colour cube/grayscale.
@@ -463,7 +486,11 @@ fn default_palette() -> [Rgb; 256] {
         [0xff, 0xff, 0xff], // 15 bright white
     ];
     for (i, c) in base.iter().enumerate() {
-        p[i] = Rgb { r: c[0], g: c[1], b: c[2] };
+        p[i] = Rgb {
+            r: c[0],
+            g: c[1],
+            b: c[2],
+        };
     }
     // 6x6x6 colour cube (indices 16..=231).
     let levels = [0u8, 95, 135, 175, 215, 255];
@@ -522,11 +549,20 @@ mod tests {
         let snap = g.snapshot();
         let c = snap.cell(0, 0);
         assert_eq!(c.ch, 'X');
-        assert_eq!(c.fg[3], 0xff, "inverse glyph colour must be opaque (visible)");
+        assert_eq!(
+            c.fg[3], 0xff,
+            "inverse glyph colour must be opaque (visible)"
+        );
         assert_eq!(c.bg[3], 0xff, "inverse background must be opaque");
         // The block paints in the default fg; the glyph in the default bg.
-        assert_eq!([c.bg[0], c.bg[1], c.bg[2]], [snap.default_fg[0], snap.default_fg[1], snap.default_fg[2]]);
-        assert_eq!([c.fg[0], c.fg[1], c.fg[2]], [snap.default_bg[0], snap.default_bg[1], snap.default_bg[2]]);
+        assert_eq!(
+            [c.bg[0], c.bg[1], c.bg[2]],
+            [snap.default_fg[0], snap.default_fg[1], snap.default_fg[2]]
+        );
+        assert_eq!(
+            [c.fg[0], c.fg[1], c.fg[2]],
+            [snap.default_bg[0], snap.default_bg[1], snap.default_bg[2]]
+        );
     }
 
     #[test]
@@ -563,7 +599,14 @@ mod tests {
         }
         // Feed `budget` bytes of `line` in pty-sized chunks after `prologue`; snapshot every
         // `snap_every` lines (0 = never) to mimic the render gate without a font dependency.
-        fn run(cols: usize, rows: usize, prologue: &[u8], line: &str, budget: usize, snap_every: usize) -> std::time::Duration {
+        fn run(
+            cols: usize,
+            rows: usize,
+            prologue: &[u8],
+            line: &str,
+            budget: usize,
+            snap_every: usize,
+        ) -> std::time::Duration {
             let mut g = TermGrid::new(cols, rows);
             g.feed(prologue);
             let lb = line.as_bytes();
@@ -617,8 +660,8 @@ mod tests {
         g.feed(b"\x1b[2;4r"); // set scroll region rows 2..=4
         g.feed(b"\x1b[4;1H"); // park the cursor on the region's bottom line (1-based row 4)
         g.feed(b"\n"); // line-feed there scrolls the region up by one
-        // Region rows scroll (b drops out, blank appears at the bottom of the region); the lines
-        // ABOVE (a) and BELOW (e, f) the region must be untouched.
+                       // Region rows scroll (b drops out, blank appears at the bottom of the region); the lines
+                       // ABOVE (a) and BELOW (e, f) the region must be untouched.
         assert_eq!(col0_chars(&g), vec!['a', 'c', 'd', ' ', 'e', 'f']);
     }
 
@@ -646,7 +689,10 @@ mod tests {
         let snap = g.snapshot();
         assert!(snap.cell(0, 0).bold && !snap.cell(0, 0).italic);
         assert!(snap.cell(1, 0).italic && !snap.cell(1, 0).bold);
-        assert!(snap.cell(2, 0).bold && snap.cell(2, 0).italic, "SGR 1;3 sets both");
+        assert!(
+            snap.cell(2, 0).bold && snap.cell(2, 0).italic,
+            "SGR 1;3 sets both"
+        );
     }
 
     #[test]
@@ -665,7 +711,9 @@ mod tests {
             assert!(
                 dim[i] < normal[i] && dim[i] > snap.default_bg[i],
                 "dim channel {i} must sit between bg and fg (bg={} dim={} fg={})",
-                snap.default_bg[i], dim[i], normal[i]
+                snap.default_bg[i],
+                dim[i],
+                normal[i]
             );
         }
         // Exactly the documented 45/55 blend.
@@ -721,7 +769,11 @@ mod tests {
         assert!(c.italic, "prediction renders italic");
         assert!(!c.bold);
         let gray = [68u8, 68, 68, 0xff]; // index 238
-        assert_eq!(c.fg, dim_blend(gray, snap.default_bg), "dim applied on top of the 256-colour gray");
+        assert_eq!(
+            c.fg,
+            dim_blend(gray, snap.default_bg),
+            "dim applied on top of the 256-colour gray"
+        );
     }
 
     #[test]

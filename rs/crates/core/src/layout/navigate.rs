@@ -42,7 +42,7 @@ pub fn neighbor_index(tiles: &[Tile], from_index: usize, dir: Direction) -> Opti
             Direction::Up => (dy < -0.001, -dy + dx.abs() * 2.0),
         };
 
-        if ok && best.map_or(true, |(_, bs)| score < bs) {
+        if ok && best.is_none_or(|(_, bs)| score < bs) {
             best = Some((t.index, score));
         }
     }

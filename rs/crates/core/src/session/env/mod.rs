@@ -64,14 +64,24 @@ pub fn merge_fresh_env(machine: &[RawVar], user: &[RawVar], process: &EnvMap) ->
     let mut merged: Vec<RawVar> = machine.to_vec();
     for (name, value, expand) in user {
         if name.eq_ignore_ascii_case("PATH") {
-            if let Some(slot) = merged.iter_mut().find(|(n, _, _)| n.eq_ignore_ascii_case("PATH")) {
+            if let Some(slot) = merged
+                .iter_mut()
+                .find(|(n, _, _)| n.eq_ignore_ascii_case("PATH"))
+            {
                 let mp = slot.1.trim_end_matches(';');
-                slot.1 = if mp.is_empty() { value.clone() } else { format!("{mp};{value}") };
+                slot.1 = if mp.is_empty() {
+                    value.clone()
+                } else {
+                    format!("{mp};{value}")
+                };
                 slot.2 = slot.2 || *expand;
                 continue;
             }
         }
-        match merged.iter_mut().find(|(n, _, _)| n.eq_ignore_ascii_case(name)) {
+        match merged
+            .iter_mut()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
+        {
             Some(slot) => {
                 slot.1 = value.clone();
                 slot.2 = *expand;
@@ -96,7 +106,11 @@ pub fn merge_fresh_env(machine: &[RawVar], user: &[RawVar], process: &EnvMap) ->
     };
     let mut env = EnvMap::new();
     for (name, value, expand) in &merged {
-        let v = if *expand { expand_value(value, &lookup) } else { value.clone() };
+        let v = if *expand {
+            expand_value(value, &lookup)
+        } else {
+            value.clone()
+        };
         env.insert(name.clone(), v);
     }
 
@@ -147,11 +161,17 @@ mod tests {
     use super::*;
 
     fn raw(pairs: &[(&str, &str, bool)]) -> Vec<RawVar> {
-        pairs.iter().map(|(n, v, e)| (n.to_string(), v.to_string(), *e)).collect()
+        pairs
+            .iter()
+            .map(|(n, v, e)| (n.to_string(), v.to_string(), *e))
+            .collect()
     }
 
     fn map(pairs: &[(&str, &str)]) -> EnvMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn get<'a>(env: &'a EnvMap, name: &str) -> Option<&'a str> {
@@ -167,7 +187,12 @@ mod tests {
         let env = merge_fresh_env(&machine, &user, &map(&[]));
         assert_eq!(get(&env, "JAVA_HOME"), Some("C:\\jdk21"));
         // exactly one spelling survives
-        assert_eq!(env.keys().filter(|k| k.eq_ignore_ascii_case("JAVA_HOME")).count(), 1);
+        assert_eq!(
+            env.keys()
+                .filter(|k| k.eq_ignore_ascii_case("JAVA_HOME"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -198,7 +223,10 @@ mod tests {
         // USERPROFILE only exists in the process env → the fallback lookup.
         let process = map(&[("USERPROFILE", "C:\\Users\\me")]);
         let env = merge_fresh_env(&machine, &user, &process);
-        assert_eq!(get(&env, "TEMP"), Some("C:\\Users\\me\\AppData\\Local\\Temp"));
+        assert_eq!(
+            get(&env, "TEMP"),
+            Some("C:\\Users\\me\\AppData\\Local\\Temp")
+        );
         assert_eq!(get(&env, "WINDIR2"), Some("C:\\Windows\\sub"));
     }
 
@@ -243,7 +271,12 @@ mod tests {
         let process = map(&[("PATH", "C:\\stale"), ("Path", "C:\\stale2")]);
         let env = merge_fresh_env(&machine, &[], &process);
         assert_eq!(get(&env, "PATH"), Some("C:\\fresh"));
-        assert_eq!(env.keys().filter(|k| k.eq_ignore_ascii_case("PATH")).count(), 1);
+        assert_eq!(
+            env.keys()
+                .filter(|k| k.eq_ignore_ascii_case("PATH"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -263,7 +296,10 @@ mod tests {
     #[test]
     #[ignore = "requires the HP_TEST user env var to be set out-of-process first"]
     fn fresh_env_sees_post_launch_user_var() {
-        assert!(std::env::var("HP_TEST").is_err(), "HP_TEST leaked into the process env");
+        assert!(
+            std::env::var("HP_TEST").is_err(),
+            "HP_TEST leaked into the process env"
+        );
         assert_eq!(get(&fresh_env(), "HP_TEST"), Some("1"));
     }
 

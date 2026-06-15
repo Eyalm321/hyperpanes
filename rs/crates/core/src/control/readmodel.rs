@@ -41,15 +41,32 @@ impl PaneStatus {
 pub enum Activity {
     Busy,
     Idle,
+    /// Phase-4 precise state: a command finished / the shell is at a prompt, derived from
+    /// OSC-133 markers (not from output silence). For the FROZEN legacy `activity` frame +
+    /// `/state` field this DOWN-MAPS to `idle` (see [`Activity::legacy_str`]); the precise
+    /// value is exposed on the new `liveness` frame instead.
+    AwaitingInput,
     Exited,
 }
 
 impl Activity {
+    /// The precise wire string (used by the new `liveness` channel and internal logic).
     pub fn as_str(self) -> &'static str {
         match self {
             Activity::Busy => "busy",
             Activity::Idle => "idle",
+            Activity::AwaitingInput => "awaiting-input",
             Activity::Exited => "exited",
+        }
+    }
+
+    /// The LEGACY-frame string: `AwaitingInput` collapses to `idle` so the frozen
+    /// `activity` frame + `/state.activity` field keep their `busy|idle|exited` value set
+    /// and no existing client sees a novel value.
+    pub fn legacy_str(self) -> &'static str {
+        match self {
+            Activity::AwaitingInput => "idle",
+            other => other.as_str(),
         }
     }
 }
@@ -354,7 +371,11 @@ impl ReadModel {
                 }
             }
         }
-        p.meta = if merged.is_empty() { None } else { Some(merged.clone()) };
+        p.meta = if merged.is_empty() {
+            None
+        } else {
+            Some(merged.clone())
+        };
         Some(merged)
     }
 
@@ -540,7 +561,9 @@ fn pane_out(p: &PaneInfo, activity: Activity) -> PaneOut {
         shell: p.shell.clone(),
         status: p.status.as_str(),
         exit_code: p.exit_code,
-        activity: activity.as_str(),
+        // Frozen legacy field: AwaitingInput down-maps to "idle" (the precise value rides
+        // the new `liveness` frame, not `/state`).
+        activity: activity.legacy_str(),
         meta: p.meta.clone(),
     }
 }
@@ -615,7 +638,8 @@ mod tests {
             p.status = PaneStatus::Exited;
         }
         let out = m.state_for_scope(None, &|_p| Activity::Exited);
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap();
         let pane = &v["windows"][0]["tabs"][0]["panes"][0];
         assert_eq!(pane["subtitle"], json!("sub"));
         assert_eq!(pane["command"], json!("claude"));
@@ -630,10 +654,7 @@ mod tests {
     #[test]
     fn scope_filters_to_in_scope_panes_dropping_empty_tabs_and_windows() {
         let mut m = seeded();
-        m.insert_pane(
-            1,
-            pane("p2", "u2"),
-        );
+        m.insert_pane(1, pane("p2", "u2"));
         // Add a second window with its own pane.
         m.add_window(WindowInfo {
             window_id: 2,

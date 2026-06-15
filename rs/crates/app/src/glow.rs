@@ -69,7 +69,10 @@ impl IdleEffect {
 
     /// The index of this effect's token in [`Self::OPTIONS`] (the picker's active row).
     pub fn index(self) -> usize {
-        Self::OPTIONS.iter().position(|(t, _)| *t == self.token()).unwrap_or(0)
+        Self::OPTIONS
+            .iter()
+            .position(|(t, _)| *t == self.token())
+            .unwrap_or(0)
     }
 
     /// Whether one pulse interpolates its keyframes linearly (fluorescent — snappy/electric)
@@ -99,7 +102,11 @@ fn interp(stops: &[(f32, f32)], t: f32, linear: bool) -> f32 {
         i += 1;
     }
     let (o0, a0) = stops[i];
-    let (o1, a1) = if i + 1 < stops.len() { stops[i + 1] } else { stops[i] };
+    let (o1, a1) = if i + 1 < stops.len() {
+        stops[i + 1]
+    } else {
+        stops[i]
+    };
     if o1 <= o0 {
         return a1;
     }
@@ -287,14 +294,21 @@ impl Glow {
             self.begin_cycle(effect, now);
         }
         // Roll to the next cycle once the period elapses.
-        let mut e = now.saturating_duration_since(self.cycle_start.unwrap()).as_secs_f32() * 1000.0;
+        let mut e = now
+            .saturating_duration_since(self.cycle_start.unwrap())
+            .as_secs_f32()
+            * 1000.0;
         if e >= self.period_ms {
             self.begin_cycle(effect, now);
             e = 0.0;
         }
         // Within the pulse: interpolate the keyframes; past it (firefly/blink gap) the last
         // keyframe (0) holds dark until the next cycle.
-        let t = if self.dur_ms > 0.0 { (e / self.dur_ms).min(1.0) } else { 1.0 };
+        let t = if self.dur_ms > 0.0 {
+            (e / self.dur_ms).min(1.0)
+        } else {
+            1.0
+        };
         self.alpha = interp(&self.stops, t, self.linear);
         self.alpha
     }
@@ -314,8 +328,18 @@ pub fn now_epoch_ms() -> u64 {
 /// `useIdle.ts`'s `AI_PATTERN`). The glow only arms on a pane whose shell title contains
 /// one of these — a plain quiet shell never glows, matching the Electron behaviour.
 const AI_NAMES: [&str; 13] = [
-    "claude", "aider", "gemini", "ollama", "llm", "chatgpt", "codex", "cursor-agent", "goose",
-    "cody", "copilot", "continue",
+    "claude",
+    "aider",
+    "gemini",
+    "ollama",
+    "llm",
+    "chatgpt",
+    "codex",
+    "cursor-agent",
+    "goose",
+    "cody",
+    "copilot",
+    "continue",
     // common when an agent is launched via `npx <tool>` / shows in the title:
     "agent",
 ];
@@ -339,13 +363,18 @@ pub fn sniff_osc_title(data: &str) -> Option<String> {
     let mut i = 0;
     while i + 3 < bytes.len() {
         // OSC introducer: ESC ] (0|2) ;
-        if bytes[i] == 0x1b && bytes[i + 1] == b']' && (bytes[i + 2] == b'0' || bytes[i + 2] == b'2')
+        if bytes[i] == 0x1b
+            && bytes[i + 1] == b']'
+            && (bytes[i + 2] == b'0' || bytes[i + 2] == b'2')
             && bytes[i + 3] == b';'
         {
             let start = i + 4;
             // terminator: BEL (0x07) or ST (ESC \).
             let mut j = start;
-            while j < bytes.len() && bytes[j] != 0x07 && !(bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\') {
+            while j < bytes.len()
+                && bytes[j] != 0x07
+                && !(bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\')
+            {
                 j += 1;
             }
             if let Ok(title) = std::str::from_utf8(&bytes[start..j]) {
@@ -381,7 +410,10 @@ mod tests {
             assert_eq!(e.index(), i);
         }
         // fluorescent is now a real, selectable style (it was renderer-only before).
-        assert_eq!(IdleEffect::from_token("fluorescent"), IdleEffect::Fluorescent);
+        assert_eq!(
+            IdleEffect::from_token("fluorescent"),
+            IdleEffect::Fluorescent
+        );
         // Unknown / empty falls back to firefly.
         assert_eq!(IdleEffect::from_token("nope"), IdleEffect::Firefly);
         assert_eq!(IdleEffect::from_token(""), IdleEffect::Firefly);
@@ -414,7 +446,10 @@ mod tests {
         for step in 0..120 {
             let now = start + Duration::from_millis(step * 50);
             let a = g.update(IdleEffect::Pulse, true, now);
-            assert!((0.119..=0.701).contains(&a), "pulse alpha {a} at step {step} out of range");
+            assert!(
+                (0.119..=0.701).contains(&a),
+                "pulse alpha {a} at step {step} out of range"
+            );
             peak = peak.max(a);
         }
         assert!(peak > 0.6, "pulse never swelled (peak {peak})");
@@ -431,7 +466,10 @@ mod tests {
         g.update(IdleEffect::Blink, true, start);
         let near_peak = g.update(IdleEffect::Blink, true, start + Duration::from_millis(210));
         let in_gap = g.update(IdleEffect::Blink, true, start + Duration::from_millis(700));
-        assert!(near_peak > 0.9, "blink should peak near 1.0 mid-swell (got {near_peak})");
+        assert!(
+            near_peak > 0.9,
+            "blink should peak near 1.0 mid-swell (got {near_peak})"
+        );
         assert_eq!(in_gap, 0.0, "blink should be dark in the gap");
     }
 
@@ -442,7 +480,10 @@ mod tests {
         for step in 0..400 {
             let now = start + Duration::from_millis(step * 25);
             let a = g.update(IdleEffect::Firefly, true, now);
-            assert!((0.0..=0.8001).contains(&a), "firefly alpha {a} out of range");
+            assert!(
+                (0.0..=0.8001).contains(&a),
+                "firefly alpha {a} out of range"
+            );
         }
     }
 
@@ -454,7 +495,10 @@ mod tests {
             let now = start + Duration::from_millis(step * 20);
             let a = g.update(IdleEffect::Fluorescent, true, now);
             // flashes reach ~1.0; nothing ever exceeds it or goes negative.
-            assert!((0.0..=1.0001).contains(&a), "fluorescent alpha {a} out of range");
+            assert!(
+                (0.0..=1.0001).contains(&a),
+                "fluorescent alpha {a} out of range"
+            );
         }
     }
 
@@ -481,8 +525,14 @@ mod tests {
     #[test]
     fn osc_title_sniff() {
         // BEL-terminated and ST-terminated, last one wins.
-        assert_eq!(sniff_osc_title("\x1b]0;claude\x07ready").as_deref(), Some("claude"));
-        assert_eq!(sniff_osc_title("a\x1b]2;build\x1b\\b").as_deref(), Some("build"));
+        assert_eq!(
+            sniff_osc_title("\x1b]0;claude\x07ready").as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            sniff_osc_title("a\x1b]2;build\x1b\\b").as_deref(),
+            Some("build")
+        );
         assert_eq!(
             sniff_osc_title("\x1b]0;first\x07\x1b]0;second\x07").as_deref(),
             Some("second")

@@ -70,7 +70,11 @@ pub fn encode_key(text: &str, ctrl: bool, alt: bool, shift: bool) -> Option<Vec<
         // Shift+Tab is the backtab sequence (CSI Z) — TUIs bind it (e.g. Claude Code's
         // mode cycle). Slint normally reports Shift+Tab as `Key::Backtab` (below), but
         // some backends deliver Tab + the shift modifier instead; handle both.
-        return Some(if shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() });
+        return Some(if shift {
+            b"\x1b[Z".to_vec()
+        } else {
+            b"\t".to_vec()
+        });
     }
     if is(Key::Backtab) {
         return Some(b"\x1b[Z".to_vec());
@@ -188,25 +192,49 @@ mod tests {
 
     #[test]
     fn enter_and_backspace_and_tab() {
-        assert_eq!(encode_key(&special(Key::Return), false, false, false), Some(b"\r".to_vec()));
-        assert_eq!(encode_key(&special(Key::Backspace), false, false, false), Some(vec![0x7f]));
-        assert_eq!(encode_key(&special(Key::Tab), false, false, false), Some(b"\t".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::Return), false, false, false),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::Backspace), false, false, false),
+            Some(vec![0x7f])
+        );
+        assert_eq!(
+            encode_key(&special(Key::Tab), false, false, false),
+            Some(b"\t".to_vec())
+        );
     }
 
     #[test]
     fn shift_tab_is_backtab() {
         // Slint's normal delivery: the dedicated Backtab key (with or without the
         // shift flag set).
-        assert_eq!(encode_key(&special(Key::Backtab), false, false, true), Some(b"\x1b[Z".to_vec()));
-        assert_eq!(encode_key(&special(Key::Backtab), false, false, false), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::Backtab), false, false, true),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::Backtab), false, false, false),
+            Some(b"\x1b[Z".to_vec())
+        );
         // Defensive: a backend that reports Tab + shift modifier instead.
-        assert_eq!(encode_key(&special(Key::Tab), false, false, true), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::Tab), false, false, true),
+            Some(b"\x1b[Z".to_vec())
+        );
     }
 
     #[test]
     fn arrows_emit_csi() {
-        assert_eq!(encode_key(&special(Key::UpArrow), false, false, false), Some(b"\x1b[A".to_vec()));
-        assert_eq!(encode_key(&special(Key::LeftArrow), false, false, false), Some(b"\x1b[D".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::UpArrow), false, false, false),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::LeftArrow), false, false, false),
+            Some(b"\x1b[D".to_vec())
+        );
     }
 
     #[test]
@@ -229,15 +257,24 @@ mod tests {
     #[test]
     fn plain_pageup_down_still_reach_the_shell() {
         // Without Shift, PageUp/PageDown encode to their CSI sequences (unchanged behavior).
-        assert_eq!(encode_key(&special(Key::PageUp), false, false, false), Some(b"\x1b[5~".to_vec()));
-        assert_eq!(encode_key(&special(Key::PageDown), false, false, false), Some(b"\x1b[6~".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::PageUp), false, false, false),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::PageDown), false, false, false),
+            Some(b"\x1b[6~".to_vec())
+        );
     }
 
     #[test]
     fn shift_pageup_down_are_gated_from_the_pty() {
         // The scrollback gesture must never leak bytes to the shell.
         assert_eq!(encode_key(&special(Key::PageUp), false, false, true), None);
-        assert_eq!(encode_key(&special(Key::PageDown), false, false, true), None);
+        assert_eq!(
+            encode_key(&special(Key::PageDown), false, false, true),
+            None
+        );
     }
 
     #[test]

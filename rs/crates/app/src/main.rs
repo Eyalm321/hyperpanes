@@ -62,7 +62,11 @@ pub fn dbg_log(msg: &str) {
         return;
     }
     let path = std::env::temp_dir().join("hyperpanes-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{msg}");
     }
 }
@@ -133,12 +137,19 @@ pub(crate) mod perf {
 
     /// Milliseconds since [`init`].
     pub fn elapsed_ms() -> f64 {
-        START.get().map(|s| s.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0)
+        START
+            .get()
+            .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
     }
 
     fn write_line(line: &str) {
         if let Some(Some(p)) = PATH.get() {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+            {
                 let _ = writeln!(f, "{line}");
             }
         }
@@ -184,7 +195,14 @@ pub(crate) mod perf {
     /// activity. `drain_ns` covers the session-event drain+feed, `render_ns` the per-window
     /// render pump, `tick_ns` the whole tick — so the summary shows the app's busy fraction
     /// (is the app the throughput bottleneck, or is it idle waiting on the pty?).
-    pub fn tick(events: u64, bytes: u64, renders: u64, drain_ns: u128, render_ns: u128, tick_ns: u128) {
+    pub fn tick(
+        events: u64,
+        bytes: u64,
+        renders: u64,
+        drain_ns: u128,
+        render_ns: u128,
+        tick_ns: u128,
+    ) {
         if !enabled() {
             return;
         }
@@ -253,7 +271,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write;
         let path = std::env::temp_dir().join("hyperpanes-crash.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = writeln!(f, "PANIC: {info}");
             let bt = std::backtrace::Backtrace::force_capture();
             let _ = writeln!(f, "{bt}");
@@ -363,7 +385,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 m
             }
             Err(e) => {
-                dbg_log(&format!("session-backend: daemon unavailable ({e}); falling back to in-process"));
+                dbg_log(&format!(
+                    "session-backend: daemon unavailable ({e}); falling back to in-process"
+                ));
                 SessionManager::new(etx)
             }
         }
@@ -664,7 +688,12 @@ mod tests {
     use super::*;
 
     fn msg(text: &str, ctrl: bool, alt: bool, shift: bool) -> KeyMsg {
-        KeyMsg { text: text.into(), control: ctrl, alt, shift }
+        KeyMsg {
+            text: text.into(),
+            control: ctrl,
+            alt,
+            shift,
+        }
     }
 
     fn keymap() -> keybindings::Keymap {
@@ -693,9 +722,15 @@ mod tests {
     #[test]
     fn session_daemon_salt_is_none_for_a_normal_launch() {
         assert_eq!(session_daemon_salt(&argv(&["hyperpanes"])), None);
-        assert_eq!(session_daemon_salt(&argv(&["hyperpanes", "-c", "ls", "--cwd", "/tmp"])), None);
+        assert_eq!(
+            session_daemon_salt(&argv(&["hyperpanes", "-c", "ls", "--cwd", "/tmp"])),
+            None
+        );
         // A bare flag with no following salt yields None (nothing to run a daemon for).
-        assert_eq!(session_daemon_salt(&argv(&["hyperpanes", "--session-daemon"])), None);
+        assert_eq!(
+            session_daemon_salt(&argv(&["hyperpanes", "--session-daemon"])),
+            None
+        );
     }
 
     // ---- --kill-daemon flag parsing (M3) ----
@@ -704,7 +739,12 @@ mod tests {
     fn kill_daemon_flag_is_detected() {
         assert!(wants_kill_daemon(&argv(&["hyperpanes", "--kill-daemon"])));
         // Tolerates other args around it.
-        assert!(wants_kill_daemon(&argv(&["hyperpanes", "--foo", "--kill-daemon", "bar"])));
+        assert!(wants_kill_daemon(&argv(&[
+            "hyperpanes",
+            "--foo",
+            "--kill-daemon",
+            "bar"
+        ])));
     }
 
     #[test]
@@ -712,7 +752,11 @@ mod tests {
         assert!(!wants_kill_daemon(&argv(&["hyperpanes"])));
         assert!(!wants_kill_daemon(&argv(&["hyperpanes", "-c", "ls"])));
         // Not confused by the daemon-RUN flag.
-        assert!(!wants_kill_daemon(&argv(&["hyperpanes", "--session-daemon", "/data"])));
+        assert!(!wants_kill_daemon(&argv(&[
+            "hyperpanes",
+            "--session-daemon",
+            "/data"
+        ])));
     }
 
     // ---- Ctrl+Shift+P → palette, pinned at the ROUTER level (the full text→tok→chord
@@ -737,7 +781,10 @@ mod tests {
         // "C"): shifted = "P", plain = "p".
         for text in ["P", "p"] {
             let cmd = route_chord(&keymap(), &msg(text, true, false, true));
-            assert!(matches!(cmd, Some(Command::PaletteOpen)), "text {text:?} got {cmd:?}");
+            assert!(
+                matches!(cmd, Some(Command::PaletteOpen)),
+                "text {text:?} got {cmd:?}"
+            );
         }
     }
 
@@ -754,7 +801,10 @@ mod tests {
         // press on the way to it (previous test) must not open the palette first.
         for text in ["C", "c"] {
             let cmd = route_chord(&keymap(), &msg(text, true, false, true));
-            assert!(matches!(cmd, Some(Command::CopyFocused)), "text {text:?} got {cmd:?}");
+            assert!(
+                matches!(cmd, Some(Command::CopyFocused)),
+                "text {text:?} got {cmd:?}"
+            );
         }
     }
 
@@ -784,10 +834,22 @@ mod tests {
         let down: slint::SharedString = Key::DownArrow.into();
         let enter: slint::SharedString = Key::Return.into();
         let esc: slint::SharedString = Key::Escape.into();
-        assert!(matches!(palette_key("", &msg(up.as_str(), false, false, false)), Some(Command::PaletteNav(-1))));
-        assert!(matches!(palette_key("", &msg(down.as_str(), false, false, false)), Some(Command::PaletteNav(1))));
-        assert!(matches!(palette_key("", &msg(enter.as_str(), false, false, false)), Some(Command::PaletteActivate)));
-        assert!(matches!(palette_key("", &msg(esc.as_str(), false, false, false)), Some(Command::CloseOverlay)));
+        assert!(matches!(
+            palette_key("", &msg(up.as_str(), false, false, false)),
+            Some(Command::PaletteNav(-1))
+        ));
+        assert!(matches!(
+            palette_key("", &msg(down.as_str(), false, false, false)),
+            Some(Command::PaletteNav(1))
+        ));
+        assert!(matches!(
+            palette_key("", &msg(enter.as_str(), false, false, false)),
+            Some(Command::PaletteActivate)
+        ));
+        assert!(matches!(
+            palette_key("", &msg(esc.as_str(), false, false, false)),
+            Some(Command::CloseOverlay)
+        ));
     }
 
     #[test]

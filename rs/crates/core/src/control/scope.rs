@@ -19,6 +19,11 @@ use serde_json::Value;
 /// A scope names allowed targets at any level. A pane is reachable if it matches
 /// on ANY level (its own id, its tab, or its window). Empty/absent arrays match
 /// nothing at that level. A `None` scope (master) means unscoped.
+///
+/// `queue_ids` is a separate capability dimension (worker-pool §7): queues don't map
+/// onto the pane tree, so a token may carry queue scope to enqueue/claim/ack tasks on
+/// the named work queues — see [`queue_in_scope`]. The field is additive (omitted when
+/// `None`), so existing pane-only tokens stay byte-identical on the wire.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scope {
@@ -28,6 +33,8 @@ pub struct Scope {
     pub tab_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pane_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub queue_ids: Option<Vec<String>>,
 }
 
 /// A pane's addressing coordinates, from the server read-model.
@@ -57,7 +64,10 @@ pub fn pane_in_scope(scope: Option<&Scope>, c: &PaneCoords) -> bool {
         .pane_ids
         .as_ref()
         .is_some_and(|v| v.contains(&c.pane_id))
-        || scope.tab_ids.as_ref().is_some_and(|v| v.contains(&c.tab_id))
+        || scope
+            .tab_ids
+            .as_ref()
+            .is_some_and(|v| v.contains(&c.tab_id))
         || scope
             .window_ids
             .as_ref()
@@ -90,6 +100,19 @@ pub fn tab_in_scope(scope: Option<&Scope>, tab_id: &str, window_id: i64) -> bool
             .window_ids
             .as_ref()
             .is_some_and(|v| v.contains(&window_id))
+}
+
+/// Whether `scope` may act on a work queue (by its `queueId`). Queues are a flat
+/// namespace that doesn't map onto the pane tree, so this is a direct membership
+/// check; `None` (master) reaches every queue (worker-pool §7).
+pub fn queue_in_scope(scope: Option<&Scope>, queue: &str) -> bool {
+    match scope {
+        None => true,
+        Some(s) => s
+            .queue_ids
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|q| q == queue)),
+    }
 }
 
 /// Validate a requested scope: every named id must resolve to a real target and
@@ -133,11 +156,24 @@ pub fn check_mintable(
             }
         }
     }
+    // Queues are a dynamic namespace (auto-created on first enqueue), so unlike
+    // panes/tabs/windows there is no existence check — only no-escalation: a parent
+    // may delegate a queue scope it already holds (master = any).
+    if let Some(queues) = &child.queue_ids {
+        for q in queues {
+            if !queue_in_scope(parent, q) {
+                return Some(format!("queueId {q} is outside the minting token's scope"));
+            }
+        }
+    }
     let has_any = child.window_ids.as_ref().is_some_and(|v| !v.is_empty())
         || child.tab_ids.as_ref().is_some_and(|v| !v.is_empty())
-        || child.pane_ids.as_ref().is_some_and(|v| !v.is_empty());
+        || child.pane_ids.as_ref().is_some_and(|v| !v.is_empty())
+        || child.queue_ids.as_ref().is_some_and(|v| !v.is_empty());
     if !has_any {
-        return Some("scope must name at least one windowId, tabId, or paneId".to_string());
+        return Some(
+            "scope must name at least one windowId, tabId, paneId, or queueId".to_string(),
+        );
     }
     None
 }
@@ -174,7 +210,16 @@ pub fn coerce_scope(v: &Value) -> Option<Scope> {
             scope.pane_ids = Some(p);
         }
     }
-    if scope.window_ids.is_some() || scope.tab_ids.is_some() || scope.pane_ids.is_some() {
+    if let Some(q) = strs("queueIds") {
+        if !q.is_empty() {
+            scope.queue_ids = Some(q);
+        }
+    }
+    if scope.window_ids.is_some()
+        || scope.tab_ids.is_some()
+        || scope.pane_ids.is_some()
+        || scope.queue_ids.is_some()
+    {
         Some(scope)
     } else {
         None
@@ -224,11 +269,26 @@ mod tests {
 
     #[test]
     fn pane_in_scope_matches_on_pane_tab_or_window_level() {
-        assert!(pane_in_scope(Some(&scope_panes(&["p1"])), &coords("p1", "t", 1)));
-        assert!(pane_in_scope(Some(&scope_tabs(&["t1"])), &coords("p9", "t1", 1)));
-        assert!(pane_in_scope(Some(&scope_windows(&[2])), &coords("p9", "t9", 2)));
-        assert!(!pane_in_scope(Some(&scope_panes(&["p1"])), &coords("p2", "t", 1)));
-        assert!(!pane_in_scope(Some(&scope_tabs(&["t1"])), &coords("p", "t2", 1)));
+        assert!(pane_in_scope(
+            Some(&scope_panes(&["p1"])),
+            &coords("p1", "t", 1)
+        ));
+        assert!(pane_in_scope(
+            Some(&scope_tabs(&["t1"])),
+            &coords("p9", "t1", 1)
+        ));
+        assert!(pane_in_scope(
+            Some(&scope_windows(&[2])),
+            &coords("p9", "t9", 2)
+        ));
+        assert!(!pane_in_scope(
+            Some(&scope_panes(&["p1"])),
+            &coords("p2", "t", 1)
+        ));
+        assert!(!pane_in_scope(
+            Some(&scope_tabs(&["t1"])),
+            &coords("p", "t2", 1)
+        ));
     }
 
     #[test]
@@ -316,15 +376,64 @@ mod tests {
     #[test]
     fn coerce_keeps_well_typed_arrays_drops_junk_returns_none_when_empty() {
         assert_eq!(
-            coerce_scope(&json!({ "paneIds": ["a", 1, "b"], "tabIds": "x", "windowIds": [2, "3"] })),
+            coerce_scope(
+                &json!({ "paneIds": ["a", 1, "b"], "tabIds": "x", "windowIds": [2, "3"] })
+            ),
             Some(Scope {
                 pane_ids: Some(vec!["a".to_string(), "b".to_string()]),
                 window_ids: Some(vec![2]),
                 tab_ids: None,
+                queue_ids: None,
             })
         );
         assert_eq!(coerce_scope(&json!({ "paneIds": [] })), None);
         assert_eq!(coerce_scope(&Value::Null), None);
         assert_eq!(coerce_scope(&json!("nope")), None);
+    }
+
+    // --- queue scope (worker-pool §7) ---------------------------------------
+
+    fn scope_queues(ids: &[&str]) -> Scope {
+        Scope {
+            queue_ids: Some(ids.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn queue_in_scope_master_any_scoped_membership() {
+        assert!(queue_in_scope(None, "build"));
+        assert!(queue_in_scope(Some(&scope_queues(&["build"])), "build"));
+        assert!(!queue_in_scope(Some(&scope_queues(&["build"])), "deploy"));
+        // a pane-only scope grants no queue
+        assert!(!queue_in_scope(Some(&scope_panes(&["p1"])), "build"));
+    }
+
+    #[test]
+    fn coerce_picks_up_queue_ids() {
+        assert_eq!(
+            coerce_scope(&json!({ "queueIds": ["build", 2, "deploy"] })),
+            Some(scope_queues(&["build", "deploy"]))
+        );
+    }
+
+    #[test]
+    fn check_mintable_allows_queue_only_and_blocks_escalation() {
+        // master may mint any queue scope (queues need no existence check)
+        assert_eq!(
+            check_mintable(None, &scope_queues(&["build"]), &TestTree),
+            None
+        );
+        // a queue-scoped parent may narrow to its own queue but not another
+        let parent = scope_queues(&["build"]);
+        assert_eq!(
+            check_mintable(Some(&parent), &scope_queues(&["build"]), &TestTree),
+            None
+        );
+        assert!(
+            check_mintable(Some(&parent), &scope_queues(&["deploy"]), &TestTree)
+                .unwrap()
+                .contains("outside")
+        );
     }
 }

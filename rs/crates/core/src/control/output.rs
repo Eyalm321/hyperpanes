@@ -88,7 +88,7 @@ pub fn next_poll_delay(
     // Aim for the quiet point, clamped to the poll band so we neither spin nor
     // sleep so long we lag a settle. But the deadline always wins — never sleep
     // past it (even below the band), so the wait returns its `timeout` on time.
-    let target = until_quiet.max(WAIT_POLL_MIN_MS).min(WAIT_POLL_MAX_MS);
+    let target = until_quiet.clamp(WAIT_POLL_MIN_MS, WAIT_POLL_MAX_MS);
     1.max(target.min(until_deadline))
 }
 
@@ -118,7 +118,11 @@ pub struct SinceSlice {
 // cursor arithmetic is byte-parity with the TS source for non-ASCII output.
 pub fn slice_since(replay: &str, total_bytes: i64, since: i64) -> SinceSlice {
     if since >= total_bytes {
-        return SinceSlice { output: String::new(), cursor: total_bytes, truncated: false };
+        return SinceSlice {
+            output: String::new(),
+            cursor: total_bytes,
+            truncated: false,
+        };
     }
     // UTF-16 code units — the same unit JS `String#length` / `String#slice` count.
     let units: Vec<u16> = replay.encode_utf16().collect();
@@ -138,7 +142,11 @@ pub fn slice_since(replay: &str, total_bytes: i64, since: i64) -> SinceSlice {
     // pair (JS keeps the lone surrogate; we substitute U+FFFD). Cursors are kept
     // in whole code units by callers, so in practice the slice lands on a boundary.
     let output = String::from_utf16_lossy(&units[start..]);
-    SinceSlice { output, cursor: total_bytes, truncated: false }
+    SinceSlice {
+        output,
+        cursor: total_bytes,
+        truncated: false,
+    }
 }
 
 // Patterns that mark a TUI's last visible line as a prompt WAITING for the user
@@ -300,11 +308,20 @@ mod tests {
     #[test]
     fn sleeps_until_just_past_the_quiet_point_clamped_to_the_poll_band() {
         // 500ms since last output, settle 600 → ~100ms until quiet (== max band).
-        assert_eq!(next_poll_delay(Some(500), 1000, 0, 600, 30000), WAIT_POLL_MAX_MS);
+        assert_eq!(
+            next_poll_delay(Some(500), 1000, 0, 600, 30000),
+            WAIT_POLL_MAX_MS
+        );
         // Output just arrived (still ~590ms from quiet) → re-check at the band max.
-        assert_eq!(next_poll_delay(Some(990), 1000, 0, 600, 30000), WAIT_POLL_MAX_MS);
+        assert_eq!(
+            next_poll_delay(Some(990), 1000, 0, 600, 30000),
+            WAIT_POLL_MAX_MS
+        );
         // Almost quiet (only ~10ms left in the settle window) → floor at the band min.
-        assert_eq!(next_poll_delay(Some(410), 1000, 0, 600, 30000), WAIT_POLL_MIN_MS);
+        assert_eq!(
+            next_poll_delay(Some(410), 1000, 0, 600, 30000),
+            WAIT_POLL_MIN_MS
+        );
     }
 
     #[test]
@@ -317,11 +334,19 @@ mod tests {
     fn returns_nothing_new_when_cursor_at_or_ahead_of_total() {
         assert_eq!(
             slice_since("abcdef", 6, 6),
-            SinceSlice { output: String::new(), cursor: 6, truncated: false }
+            SinceSlice {
+                output: String::new(),
+                cursor: 6,
+                truncated: false
+            }
         );
         assert_eq!(
             slice_since("abcdef", 6, 99),
-            SinceSlice { output: String::new(), cursor: 6, truncated: false }
+            SinceSlice {
+                output: String::new(),
+                cursor: 6,
+                truncated: false
+            }
         );
     }
 
@@ -329,11 +354,19 @@ mod tests {
     fn returns_the_exact_tail_slice_for_a_cursor_inside_the_buffer() {
         assert_eq!(
             slice_since("abcdef", 6, 4),
-            SinceSlice { output: "ef".to_string(), cursor: 6, truncated: false }
+            SinceSlice {
+                output: "ef".to_string(),
+                cursor: 6,
+                truncated: false
+            }
         );
         assert_eq!(
             slice_since("abcdef", 6, 0),
-            SinceSlice { output: "abcdef".to_string(), cursor: 6, truncated: false }
+            SinceSlice {
+                output: "abcdef".to_string(),
+                cursor: 6,
+                truncated: false
+            }
         );
     }
 
@@ -350,7 +383,11 @@ mod tests {
         // newBytes (6) == replay.length (6): everything new is still retained.
         assert_eq!(
             slice_since("abcdef", 6, 0),
-            SinceSlice { output: "abcdef".to_string(), cursor: 6, truncated: false }
+            SinceSlice {
+                output: "abcdef".to_string(),
+                cursor: 6,
+                truncated: false
+            }
         );
     }
 
@@ -370,16 +407,28 @@ mod tests {
         assert_eq!(replay.len(), 5); // UTF-8 bytes — deliberately different
         assert_eq!(
             slice_since(replay, 4, 2),
-            SinceSlice { output: "cé".to_string(), cursor: 4, truncated: false }
+            SinceSlice {
+                output: "cé".to_string(),
+                cursor: 4,
+                truncated: false
+            }
         );
         // And the whole-buffer / nothing-new paths stay parity for non-ASCII too.
         assert_eq!(
             slice_since(replay, 4, 0),
-            SinceSlice { output: "abcé".to_string(), cursor: 4, truncated: false }
+            SinceSlice {
+                output: "abcé".to_string(),
+                cursor: 4,
+                truncated: false
+            }
         );
         assert_eq!(
             slice_since(replay, 4, 4),
-            SinceSlice { output: String::new(), cursor: 4, truncated: false }
+            SinceSlice {
+                output: String::new(),
+                cursor: 4,
+                truncated: false
+            }
         );
     }
 
@@ -393,16 +442,22 @@ mod tests {
 
     #[test]
     fn flags_trust_dialogs_press_enter_prompts_and_the_claude_prompt_caret() {
-        assert!(detect_awaiting_input("Do you trust the files in this folder?"));
+        assert!(detect_awaiting_input(
+            "Do you trust the files in this folder?"
+        ));
         assert!(detect_awaiting_input("Press enter to continue"));
         assert!(detect_awaiting_input("❯ 1. Yes, proceed"));
     }
 
     #[test]
     fn looks_only_at_the_last_non_empty_line() {
-        assert!(detect_awaiting_input("lots of output\nmore\n\nReady? (y/n)\n\n"));
+        assert!(detect_awaiting_input(
+            "lots of output\nmore\n\nReady? (y/n)\n\n"
+        ));
         // A question earlier in the scrollback, but the agent has moved on.
-        assert!(!detect_awaiting_input("Are you sure?\nOK, done.\nSpun you up a server."));
+        assert!(!detect_awaiting_input(
+            "Are you sure?\nOK, done.\nSpun you up a server."
+        ));
     }
 
     #[test]

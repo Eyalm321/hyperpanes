@@ -134,35 +134,35 @@ pub fn compute_tiles(
         }
         Layout::Columns => {
             let mut x = 0.0;
-            for i in 0..n {
+            for (i, &frac) in norm.iter().enumerate() {
                 tiles.push(Tile {
                     index: i,
                     rect: Rect {
                         x,
                         y: 0.0,
-                        w: norm[i],
+                        w: frac,
                         h: 1.0,
                     },
                     visible: true,
                 });
-                x += norm[i];
+                x += frac;
             }
             tiles
         }
         Layout::Rows => {
             let mut y = 0.0;
-            for i in 0..n {
+            for (i, &frac) in norm.iter().enumerate() {
                 tiles.push(Tile {
                     index: i,
                     rect: Rect {
                         x: 0.0,
                         y,
                         w: 1.0,
-                        h: norm[i],
+                        h: frac,
                     },
                     visible: true,
                 });
-                y += norm[i];
+                y += frac;
             }
             tiles
         }
@@ -171,7 +171,11 @@ pub fn compute_tiles(
             let rows = ((n as f64) / (cols as f64)).ceil() as usize;
             for i in 0..n {
                 let r = i / cols;
-                let items_in_row = if r < rows - 1 { cols } else { n - cols * (rows - 1) };
+                let items_in_row = if r < rows - 1 {
+                    cols
+                } else {
+                    n - cols * (rows - 1)
+                };
                 let c = i - r * cols;
                 tiles.push(Tile {
                     index: i,
@@ -237,8 +241,8 @@ pub fn compute_dividers(
     match layout {
         Layout::Columns => {
             let mut x = 0.0;
-            for i in 0..n - 1 {
-                x += norm[i];
+            for (i, &frac) in norm.iter().enumerate().take(n - 1) {
+                x += frac;
                 out.push(DividerDesc {
                     id: format!("v-{i}"),
                     kind: DividerKind::Size,
@@ -250,8 +254,8 @@ pub fn compute_dividers(
         }
         Layout::Rows => {
             let mut y = 0.0;
-            for i in 0..n - 1 {
-                y += norm[i];
+            for (i, &frac) in norm.iter().enumerate().take(n - 1) {
+                y += frac;
                 out.push(DividerDesc {
                     id: format!("h-{i}"),
                     kind: DividerKind::Size,

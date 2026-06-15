@@ -5,7 +5,10 @@
 
 use core::ffi::c_void;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::iter::once;
+use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -14,9 +17,6 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use std::iter::once;
-use std::os::windows::ffi::OsStrExt;
-use windows::core::PCWSTR;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -210,7 +210,12 @@ pub fn start_drag(raw: isize) {
     unsafe {
         let h = hwnd(raw);
         let _ = ReleaseCapture();
-        SendMessageW(h, WM_NCLBUTTONDOWN, Some(WPARAM(HTCAPTION as usize)), Some(LPARAM(0)));
+        SendMessageW(
+            h,
+            WM_NCLBUTTONDOWN,
+            Some(WPARAM(HTCAPTION as usize)),
+            Some(LPARAM(0)),
+        );
     }
 }
 

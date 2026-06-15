@@ -23,8 +23,7 @@ fn main() {
     //
     // ConPTY is Windows-only: gate on the TARGET OS (not the host) so Linux/macOS
     // builds — including cross-compiles — never look for or ship conpty.dll.
-    let target_windows =
-        std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let target_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let conpty = manifest.join("../../../resources/conpty");
     if let Ok(out_dir) = std::env::var("OUT_DIR") {
         // OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out → profile dir is 3 up.
@@ -38,7 +37,12 @@ fn main() {
             }
         }
     }
-    for f in ["hp-init.ps1", "hp-init.sh", "zdotdir/.zshenv", "zdotdir/.zshrc"] {
+    for f in [
+        "hp-init.ps1",
+        "hp-init.sh",
+        "zdotdir/.zshenv",
+        "zdotdir/.zshrc",
+    ] {
         println!("cargo:rerun-if-changed={}", scripts.join(f).display());
     }
     if target_windows {

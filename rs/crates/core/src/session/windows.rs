@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 
-use crate::session::proto::{ClientMsg, DaemonMsg, SessionMeta, PROTO_VER, MAX_FRAME_LEN};
+use crate::session::proto::{ClientMsg, DaemonMsg, SessionMeta, MAX_FRAME_LEN, PROTO_VER};
 use crate::session_manager::{SessionEvent, SessionRegistry};
 
 // Re-use the same idle grace knob as the unix side (the env override is platform-agnostic).
@@ -91,7 +91,10 @@ struct Lifecycle {
 
 impl Lifecycle {
     fn new() -> Self {
-        Lifecycle { active_conns: AtomicU64::new(0), shutting_down: AtomicBool::new(false) }
+        Lifecycle {
+            active_conns: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
+        }
     }
     fn conn_opened(&self) {
         self.active_conns.fetch_add(1, Ordering::SeqCst);
@@ -162,9 +165,7 @@ pub fn kill_daemon(salt: &str) -> io::Result<bool> {
 /// either (a) wrap this async pipe behind a blocking adapter the existing reader thread can
 /// use, or (b) add a `#[cfg(windows)]` reader task. (a) keeps the most code shared; this
 /// function returns the raw async client for whichever path M4 picks.
-pub async fn connect(
-    salt: &str,
-) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+pub async fn connect(salt: &str) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
     use windows::Win32::Foundation::ERROR_PIPE_BUSY;
     const PIPE_BUSY: i32 = ERROR_PIPE_BUSY.0 as i32;
     let pipe = pipe_name(salt);
@@ -177,7 +178,10 @@ pub async fn connect(
             Err(e) => return Err(e),
         }
     }
-    Err(io::Error::new(io::ErrorKind::TimedOut, "named pipe stayed busy"))
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "named pipe stayed busy",
+    ))
 }
 
 /// The running Windows daemon — the same shape as the unix `Daemon` (a `SessionRegistry`, an
@@ -209,7 +213,12 @@ impl Daemon {
             }
         });
 
-        Daemon { registry, bus, cwds, lifecycle: Arc::new(Lifecycle::new()) }
+        Daemon {
+            registry,
+            bus,
+            cwds,
+            lifecycle: Arc::new(Lifecycle::new()),
+        }
     }
 
     /// Idle-exit monitor (mirror of the unix one): 0 sessions AND 0 clients through the grace
@@ -248,7 +257,9 @@ impl Daemon {
         // TODO(m3-windows): `first_pipe_instance(true)` requires we are the FIRST server for
         // this name — pair it with the named-mutex gate (see `run`) so a stale instance is
         // detected race-free rather than surfacing here as a bind error.
-        let mut server = ServerOptions::new().first_pipe_instance(true).create(pipe)?;
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(pipe)?;
         loop {
             if self.lifecycle.is_shutting_down() {
                 return Ok(());
@@ -319,11 +330,16 @@ impl Daemon {
         match msg {
             ClientMsg::Hello { .. } => {
                 let _ = pc
-                    .write_msg(&DaemonMsg::Hello { proto_ver: PROTO_VER, daemon_pid: std::process::id() })
+                    .write_msg(&DaemonMsg::Hello {
+                        proto_ver: PROTO_VER,
+                        daemon_pid: std::process::id(),
+                    })
                     .await;
             }
             ClientMsg::ListSessions => {
-                let _ = pc.write_msg(&DaemonMsg::Sessions(self.list_sessions())).await;
+                let _ = pc
+                    .write_msg(&DaemonMsg::Sessions(self.list_sessions()))
+                    .await;
             }
             ClientMsg::Attach { uid } => {
                 attached.insert(uid.clone());
@@ -387,7 +403,13 @@ impl Daemon {
 
 fn event_uid(ev: &SessionEvent) -> &str {
     match ev {
-        SessionEvent::Data { uid, .. } | SessionEvent::Cwd { uid, .. } | SessionEvent::Exit { uid, .. } => uid,
+        SessionEvent::Data { uid, .. }
+        | SessionEvent::Cwd { uid, .. }
+        | SessionEvent::Exit { uid, .. }
+        | SessionEvent::CommandStart { uid }
+        | SessionEvent::CommandEnd { uid, .. }
+        | SessionEvent::PromptReady { uid }
+        | SessionEvent::AgentState { uid, .. } => uid,
     }
 }
 
@@ -406,7 +428,10 @@ struct PipeConn {
 
 impl PipeConn {
     fn new(pipe: NamedPipeServer) -> Self {
-        PipeConn { pipe, buf: Vec::with_capacity(8192) }
+        PipeConn {
+            pipe,
+            buf: Vec::with_capacity(8192),
+        }
     }
 
     /// Read the next framed `ClientMsg`, accumulating bytes until a whole frame is buffered.
@@ -423,7 +448,10 @@ impl PipeConn {
                     return if self.buf.is_empty() {
                         Ok(None) // clean EOF between frames
                     } else {
-                        Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF mid-frame"))
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "EOF mid-frame",
+                        ))
                     };
                 }
                 Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
@@ -441,7 +469,10 @@ impl PipeConn {
         }
         let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
         if len > MAX_FRAME_LEN {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "frame exceeds MAX_FRAME_LEN"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame exceeds MAX_FRAME_LEN",
+            ));
         }
         let total = 4 + len as usize;
         if self.buf.len() < total {
@@ -470,7 +501,10 @@ fn frame_bytes(msg: &impl serde::Serialize) -> io::Result<Vec<u8>> {
         .try_into()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame body exceeds u32"))?;
     if len > MAX_FRAME_LEN {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame body exceeds MAX_FRAME_LEN"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame body exceeds MAX_FRAME_LEN",
+        ));
     }
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&len.to_le_bytes());

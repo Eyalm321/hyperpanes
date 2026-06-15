@@ -64,12 +64,18 @@ fn fc_query(cmd: &str, pattern: &str) -> Option<String> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let files: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let files: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     let pick = files
         .iter()
         .find(|f| f.contains("Regular") || f.contains("regular"))
         .or_else(|| files.first())?;
-    std::path::Path::new(pick).exists().then(|| pick.to_string())
+    std::path::Path::new(pick)
+        .exists()
+        .then(|| pick.to_string())
 }
 
 /// The shell to prefer when the user picked "System": the login shell from `$SHELL` when
@@ -123,7 +129,9 @@ mod tests {
     fn font_dirs_end_with_the_bundled_dir() {
         let dirs = font_dirs();
         assert_eq!(dirs.last(), Some(&super::super::bundled_font_dir()));
-        assert!(dirs.iter().any(|d| d == std::path::Path::new("/usr/share/fonts")));
+        assert!(dirs
+            .iter()
+            .any(|d| d == std::path::Path::new("/usr/share/fonts")));
     }
 
     #[test]
@@ -145,15 +153,26 @@ mod tests {
         // Any desktop Linux (and CI ubuntu-latest) has fontconfig, so the empty "System
         // default" value must resolve via `fc-match monospace` to an actually-existing
         // file. Skipped quietly without fontconfig (the bundled fonts cover that at runtime).
-        if std::process::Command::new("fc-match").arg("--version").output().is_ok() {
+        if std::process::Command::new("fc-match")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
             let p = super::super::resolve_or_default("");
-            assert!(std::path::Path::new(&p).exists(), "unresolved default font: {p}");
+            assert!(
+                std::path::Path::new(&p).exists(),
+                "unresolved default font: {p}"
+            );
         }
     }
 
     #[test]
     fn resolve_family_finds_installed_families_only() {
-        if std::process::Command::new("fc-list").arg("--version").output().is_err() {
+        if std::process::Command::new("fc-list")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return; // no fontconfig on this box — runtime falls back to bundled fonts
         }
         // A family no distro ships must NOT resolve (fc-list, unlike fc-match, never

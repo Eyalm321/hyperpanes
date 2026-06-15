@@ -198,12 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let scale = app.window().scale_factor().max(1.0);
                 let px = (14.0 * scale).round().max(8.0);
-                let font_path = if std::path::Path::new("C:/Windows/Fonts/CascadiaMono.ttf").exists()
-                {
-                    "C:/Windows/Fonts/CascadiaMono.ttf"
-                } else {
-                    "C:/Windows/Fonts/consola.ttf"
-                };
+                let font_path =
+                    if std::path::Path::new("C:/Windows/Fonts/CascadiaMono.ttf").exists() {
+                        "C:/Windows/Fonts/CascadiaMono.ttf"
+                    } else {
+                        "C:/Windows/Fonts/consola.ttf"
+                    };
                 let font = Font::from_path(font_path, px).expect("font load");
                 let (cw, ch) = (font.cell_w, font.cell_h);
 
@@ -230,9 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
 
-                eprintln!(
-                    "[init] scale={scale} font_px={px} cell={cw}x{ch}  panes:",
-                );
+                eprintln!("[init] scale={scale} font_px={px} cell={cw}x{ch}  panes:",);
                 for p in &panes {
                     eprintln!(
                         "       {} — {}x{} cells ({}x{} px) [{}]",

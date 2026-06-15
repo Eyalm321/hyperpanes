@@ -144,8 +144,16 @@ fn open_url(url: &str) -> OpenResult {
         .stderr(Stdio::null())
         .spawn();
     match spawn {
-        Ok(_) => OpenResult { ok: true, blocked: false, error: None },
-        Err(e) => OpenResult { ok: false, blocked: false, error: Some(e.to_string()) },
+        Ok(_) => OpenResult {
+            ok: true,
+            blocked: false,
+            error: None,
+        },
+        Err(e) => OpenResult {
+            ok: false,
+            blocked: false,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -335,7 +343,13 @@ impl TerminalPane {
     /// Find an http/https URL under the (logical-px) point, returning the candidate, its row,
     /// and the cell metrics. URLs linkify on shape alone — no disk/network verification (so no
     /// cache either; extraction per hover is cheap, same as the path re-extract in `link_at`).
-    fn url_under(&self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<(UrlCandidate, usize, f32, f32)> {
+    fn url_under(
+        &self,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Option<(UrlCandidate, usize, f32, f32)> {
         let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
         if x < 0.0 || y < 0.0 {
             return None;
@@ -379,7 +393,10 @@ impl TerminalPane {
         let cand = extract_path_candidates(&text)
             .into_iter()
             .find(|c| c.start == start && c.end == end);
-        let (line, col) = cand.as_ref().map(|c| (c.line, c.col)).unwrap_or((None, None));
+        let (line, col) = cand
+            .as_ref()
+            .map(|c| (c.line, c.col))
+            .unwrap_or((None, None));
 
         let tip = match (line, col) {
             (Some(l), Some(c)) => format!("{}:{}:{}", r.abs_path, l, c),
@@ -461,7 +478,9 @@ impl TerminalPane {
     /// selection. The selection only starts *rendering* once the drag leaves the anchor cell, so
     /// a click that doesn't move still falls through to a link activation.
     pub fn selection_begin(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
-        self.selection = self.cell_at_clamped(x, y, surf_w, surf_h).map(Selection::new);
+        self.selection = self
+            .cell_at_clamped(x, y, surf_w, surf_h)
+            .map(Selection::new);
         self.select_origin = Some((x, y));
     }
 
@@ -503,7 +522,10 @@ impl TerminalPane {
             return;
         }
         let mut sel = Selection::new(selection::Cell { col: 0, row: 0 });
-        sel.update(selection::Cell { col: cols - 1, row: rows - 1 });
+        sel.update(selection::Cell {
+            col: cols - 1,
+            row: rows - 1,
+        });
         self.selection = Some(sel);
     }
 
@@ -520,7 +542,7 @@ impl TerminalPane {
     /// True once the active selection has actually been dragged across cells (i.e. it's a real
     /// selection, not a stationary click). The caller uses this to choose copy-vs-click on release.
     pub fn selection_is_drag(&self) -> bool {
-        self.selection.map_or(false, |s| s.dragged)
+        self.selection.is_some_and(|s| s.dragged)
     }
 
     /// True when there's an active *dragged* selection lying entirely on the cursor's own viewport
@@ -705,7 +727,11 @@ impl TerminalPane {
     pub fn paste_from_clipboard(&mut self) -> Option<String> {
         let text = self.clipboard.paste()?;
         let n = text.chars().count();
-        self.set_toast(format!("Pasted {} char{}", n, if n == 1 { "" } else { "s" }));
+        self.set_toast(format!(
+            "Pasted {} char{}",
+            n,
+            if n == 1 { "" } else { "s" }
+        ));
         Some(prepare_paste(&text, self.grid.bracketed_paste()))
     }
 
@@ -819,6 +845,8 @@ impl TerminalPane {
     /// Highlight rectangles (logical px) for every match currently in the viewport, plus the
     /// active match's rect on its own (so the pane can draw it distinctly). Matches scrolled out
     /// of view are omitted.
+    // pre-existing; deferred per repo lint policy (test.yml)
+    #[allow(clippy::type_complexity)]
     pub fn search_view_rects(
         &self,
         surf_w: f32,
@@ -871,7 +899,10 @@ impl TerminalPane {
 
     /// Scroll the active match into view (no-op if already visible or there's none).
     fn search_reveal_active(&mut self) {
-        if let Some(m) = self.search_index.and_then(|i| self.search_matches.get(i).copied()) {
+        if let Some(m) = self
+            .search_index
+            .and_then(|i| self.search_matches.get(i).copied())
+        {
             self.grid.scroll_to_visible(m.line);
         }
     }
@@ -964,7 +995,9 @@ mod tests {
         let (w, h) = (40.0, 3.0); // 1px per cell
 
         // Over the path token → a hit pointing at the absolute file.
-        let hit = p.link_at(6.5, 0.5, w, h).expect("hover over note.txt should hit");
+        let hit = p
+            .link_at(6.5, 0.5, w, h)
+            .expect("hover over note.txt should hit");
         assert!(hit.abs_path.replace('\\', "/").ends_with("note.txt"));
         // Underline spans exactly the token's columns (4..12) at 1px/col.
         assert_eq!(hit.x, 4.0);
@@ -1016,7 +1049,7 @@ mod tests {
         let mut p = unit_pane(20, 2);
         p.set_cwd(Some(dir.to_string_lossy().into_owned()));
         p.feed("a.txt"); // cols 0..5, 1px/cell on a 20x2 surface
-        // A real drag past the threshold marks the selection dragged.
+                         // A real drag past the threshold marks the selection dragged.
         p.selection_begin(0.5, 0.5, 20.0, 2.0);
         p.selection_update(5.5, 0.5, 20.0, 2.0); // 5px move > DRAG_THRESHOLD_PX
         assert!(p.selection_is_drag());
@@ -1040,7 +1073,9 @@ mod tests {
         p.feed("go https://a.com/x?q=1 now"); // "go " = cols 0..3, URL = cols 3..22
         let (w, h) = (40.0, 3.0); // 1px per cell
 
-        let hit = p.link_at(10.5, 0.5, w, h).expect("hover over the URL should hit");
+        let hit = p
+            .link_at(10.5, 0.5, w, h)
+            .expect("hover over the URL should hit");
         assert!(hit.is_url);
         assert_eq!(hit.abs_path, "https://a.com/x?q=1");
         assert_eq!(hit.tip, "https://a.com/x?q=1");
@@ -1107,9 +1142,18 @@ mod tests {
         let mut p = unit_pane(10, 10);
         p.selection_begin(19.0, 5.0, 100.0, 100.0);
         p.selection_update(21.0, 5.0, 100.0, 100.0); // 2px move, crosses cell 1→2
-        assert!(!p.selection_is_drag(), "a sub-threshold twitch must not be a drag");
-        assert!(p.selection_text().is_none(), "a click must not yield copyable text");
-        assert!(p.selection_rects(100.0, 100.0).is_empty(), "a click leaves no highlight");
+        assert!(
+            !p.selection_is_drag(),
+            "a sub-threshold twitch must not be a drag"
+        );
+        assert!(
+            p.selection_text().is_none(),
+            "a click must not yield copyable text"
+        );
+        assert!(
+            p.selection_rects(100.0, 100.0).is_empty(),
+            "a click leaves no highlight"
+        );
     }
 
     #[test]
@@ -1118,7 +1162,10 @@ mod tests {
         p.feed("abcdefghij"); // row 0 cells 0..10
         p.selection_begin(5.0, 5.0, 100.0, 100.0); // cell 0
         p.selection_update(55.0, 5.0, 100.0, 100.0); // 50px move → well past threshold, cell 5
-        assert!(p.selection_is_drag(), "a real drag past the threshold selects");
+        assert!(
+            p.selection_is_drag(),
+            "a real drag past the threshold selects"
+        );
         assert_eq!(p.selection_text().as_deref(), Some("abcdef"));
     }
 
@@ -1133,18 +1180,30 @@ mod tests {
         p.selection_begin(0.5, 2.5, w, h);
         p.selection_update(5.5, 2.5, w, h);
         assert!(p.selection_is_drag());
-        assert!(p.selection_on_cursor_row(), "selection on the cursor row is the prompt line");
+        assert!(
+            p.selection_on_cursor_row(),
+            "selection on the cursor row is the prompt line"
+        );
         // A drag on a different row is not the prompt line.
         p.selection_begin(0.5, 0.5, w, h);
         p.selection_update(3.5, 0.5, w, h);
-        assert!(!p.selection_on_cursor_row(), "an off-row selection is not the prompt line");
+        assert!(
+            !p.selection_on_cursor_row(),
+            "an off-row selection is not the prompt line"
+        );
         // A multi-row selection (even one touching the cursor row) is not a single prompt line.
         p.selection_begin(0.5, 0.5, w, h);
         p.selection_update(3.5, 2.5, w, h);
-        assert!(!p.selection_on_cursor_row(), "a multi-row selection is not a prompt line");
+        assert!(
+            !p.selection_on_cursor_row(),
+            "a multi-row selection is not a prompt line"
+        );
         // A stationary click (not dragged) is not a selection.
         p.selection_begin(0.5, 2.5, w, h);
-        assert!(!p.selection_on_cursor_row(), "a click is not a drag-selection");
+        assert!(
+            !p.selection_on_cursor_row(),
+            "a click is not a drag-selection"
+        );
     }
 
     /// 10px/cell on a 20x5 grid: drags between exact cells while clearing the 4px threshold.
@@ -1210,7 +1269,10 @@ mod tests {
         let (mut p, w, h) = prompt_pane();
         drag(&mut p, 0, 3, 0, w, h);
         assert_eq!(p.type_over_selection(), None);
-        assert!(p.selection_is_drag(), "declining must not consume the selection");
+        assert!(
+            p.selection_is_drag(),
+            "declining must not consume the selection"
+        );
     }
 
     #[test]
@@ -1241,15 +1303,21 @@ mod tests {
         let mut p = unit_pane(20, 2);
         p.set_cwd(Some("/a".to_string()));
         // Prime the cache with a fake entry, then a cwd change must drop it.
-        p.verified.insert("x".to_string(), paths::ResolveResult {
-            token: "t".into(),
-            abs_path: "/a/t".into(),
-            exists: true,
-            is_dir: false,
-            is_exe: false,
-        });
+        p.verified.insert(
+            "x".to_string(),
+            paths::ResolveResult {
+                token: "t".into(),
+                abs_path: "/a/t".into(),
+                exists: true,
+                is_dir: false,
+                is_exe: false,
+            },
+        );
         assert!(!p.verified.is_empty());
         p.set_cwd(Some("/b".to_string()));
-        assert!(p.verified.is_empty(), "a cwd change must clear stale resolutions");
+        assert!(
+            p.verified.is_empty(),
+            "a cwd change must clear stale resolutions"
+        );
     }
 }

@@ -34,7 +34,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,7 +46,9 @@ use crate::session::cwd::parse_osc_cwd;
 use crate::session::pty::{spawn_pty, Pty, PtyEvent, PtySpec};
 use crate::session::replay::Replay;
 use crate::session::screen::Screen;
-use crate::session::spawn::{build_env, default_shell, resolve_spawn, resolve_windows_command, EnvInputs, EnvMap};
+use crate::session::spawn::{
+    build_env, default_shell, resolve_spawn, resolve_windows_command, EnvInputs, EnvMap,
+};
 
 /// Process-global counter for the in-process backend's `pane-N` uids (see
 /// [`SessionManager::fresh_uid`]). Must be process-global (not per-manager) so two windows
@@ -79,6 +81,45 @@ pub enum SessionEvent {
     /// The child exited with this code. Emitted on a *natural* exit only — a manual
     /// `kill` / `kill_all` is silent (mirrors TS `destroy()` gating `onExit`).
     Exit { uid: String, code: i32 },
+    /// Phase-4 semantic markers (sniffed off the raw stream like cwd, then stripped).
+    /// Additive — they ride the daemon proto verbatim via serde, and consumers that only
+    /// care about output/cwd/exit ignore them.
+    ///
+    /// `133;C` — a command's output begins (a command is now running).
+    CommandStart { uid: String },
+    /// `133;D` / `133;D;<code>` — a command finished, optionally with its exit code.
+    CommandEnd { uid: String, code: Option<i32> },
+    /// `133;A` / `133;B` — the shell is at / drawing a prompt → ready for input.
+    PromptReady { uid: String },
+    /// `9;hp;state=…` — the program self-reports its liveness.
+    AgentState {
+        uid: String,
+        state: AgentLiveness,
+        code: Option<i32>,
+    },
+}
+
+/// Serializable mirror of [`crate::session::osc133::AgentLiveness`] so the event can ride
+/// the daemon proto. Kept in lockstep with the parser's enum via [`From`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentLiveness {
+    Busy,
+    AwaitingInput,
+    Done,
+    Error,
+}
+
+impl From<crate::session::osc133::AgentLiveness> for AgentLiveness {
+    fn from(a: crate::session::osc133::AgentLiveness) -> Self {
+        use crate::session::osc133::AgentLiveness as P;
+        match a {
+            P::Busy => AgentLiveness::Busy,
+            P::AwaitingInput => AgentLiveness::AwaitingInput,
+            P::Done => AgentLiveness::Done,
+            P::Error => AgentLiveness::Error,
+        }
+    }
 }
 
 /// Resolved shell-integration inputs for an interactive spawn: extra leading args and
@@ -138,6 +179,29 @@ struct Shared {
     last_output_at: AtomicU64,
     /// Set by a manual kill so the natural-exit `Exit` event is suppressed.
     killed: AtomicBool,
+    /// Phase-4 liveness mirror, fed by the OSC-133 / OSC-9;hp sniff so the *pull-based*
+    /// activity ticker can read a pane's precise state cheaply (no per-tick scan). Gated
+    /// on `marker_seen`: until a marker is ever seen, the legacy silence heuristic owns
+    /// the activity, so an un-instrumented pane is byte-for-byte unchanged.
+    ///
+    /// `prompt_ready` — true after `133;A`/`133;D` or agent awaiting-input/done.
+    prompt_ready: AtomicBool,
+    /// `command_running` — true after `133;C` or agent busy; cleared by `133;D`/prompt.
+    command_running: AtomicBool,
+    /// Last `133;D` exit code (`i32::MIN` = none yet).
+    last_exit_code: AtomicI32,
+    /// Have we EVER seen a marker? Gates the fallback to the silence heuristic.
+    marker_seen: AtomicBool,
+}
+
+/// A cheap snapshot of a session's phase-4 liveness mirror (the pull side of the marker
+/// channel). `marker_seen == false` ⇒ the caller must fall back to the silence heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Liveness {
+    pub prompt_ready: bool,
+    pub command_running: bool,
+    pub last_exit_code: Option<i32>,
+    pub marker_seen: bool,
 }
 
 impl Shared {
@@ -155,6 +219,68 @@ impl Shared {
             std::mem::take(&mut *p)
         };
         self.screen.lock().unwrap().advance(&pending);
+    }
+
+    /// Fold one parsed [`Marker`](crate::session::osc133::Marker) into the liveness mirror.
+    /// Every marker flips `marker_seen`, which is what hands authority from the silence
+    /// heuristic to the precise state for this pane (gate in `control::server::activity_for`).
+    fn apply_marker(&self, m: &crate::session::osc133::Marker) {
+        use crate::session::osc133::{AgentLiveness as A, Marker};
+        self.marker_seen.store(true, Ordering::Relaxed);
+        match m {
+            Marker::CommandStart => {
+                self.command_running.store(true, Ordering::Relaxed);
+                self.prompt_ready.store(false, Ordering::Relaxed);
+            }
+            Marker::CommandEnd { code } => {
+                self.command_running.store(false, Ordering::Relaxed);
+                self.prompt_ready.store(true, Ordering::Relaxed);
+                if let Some(c) = code {
+                    self.last_exit_code.store(*c, Ordering::Relaxed);
+                }
+            }
+            Marker::PromptReady => {
+                self.command_running.store(false, Ordering::Relaxed);
+                self.prompt_ready.store(true, Ordering::Relaxed);
+            }
+            Marker::Agent { state, code } => match state {
+                A::Busy => {
+                    self.command_running.store(true, Ordering::Relaxed);
+                    self.prompt_ready.store(false, Ordering::Relaxed);
+                }
+                A::AwaitingInput | A::Done => {
+                    self.command_running.store(false, Ordering::Relaxed);
+                    self.prompt_ready.store(true, Ordering::Relaxed);
+                }
+                A::Error => {
+                    self.command_running.store(false, Ordering::Relaxed);
+                    self.prompt_ready.store(true, Ordering::Relaxed);
+                    if let Some(c) = code {
+                        self.last_exit_code.store(*c, Ordering::Relaxed);
+                    }
+                }
+            },
+        }
+    }
+
+    /// Snapshot the liveness mirror for the activity ticker.
+    fn liveness(&self) -> Liveness {
+        let raw = self.last_exit_code.load(Ordering::Relaxed);
+        Liveness {
+            prompt_ready: self.prompt_ready.load(Ordering::Relaxed),
+            command_running: self.command_running.load(Ordering::Relaxed),
+            last_exit_code: (raw != i32::MIN).then_some(raw),
+            marker_seen: self.marker_seen.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Input was just sent → optimistically clear `prompt_ready` so the busy edge is
+    /// reported without waiting for the next marker (tightens latency, never lies for
+    /// long — a real prompt re-asserts `prompt_ready` on its next `133;A`).
+    fn note_write(&self) {
+        if self.marker_seen.load(Ordering::Relaxed) {
+            self.prompt_ready.store(false, Ordering::Relaxed);
+        }
     }
 }
 
@@ -221,9 +347,7 @@ impl SessionRegistry {
     /// Spawn a real pty session for `opts`. Returns once the pty is live and its driver
     /// task is running. Errors if the pty fails to spawn.
     pub fn create(&self, opts: SpawnOptions) -> io::Result<()> {
-        let factory: SpawnFn = Box::new(|spec, sink| {
-            spawn_pty(spec, move |ev| sink(ev))
-        });
+        let factory: SpawnFn = Box::new(|spec, sink| spawn_pty(spec, move |ev| sink(ev)));
         self.create_with(opts, factory)
     }
 
@@ -245,6 +369,10 @@ impl SessionRegistry {
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
             killed: AtomicBool::new(false),
+            prompt_ready: AtomicBool::new(false),
+            command_running: AtomicBool::new(false),
+            last_exit_code: AtomicI32::new(i32::MIN),
+            marker_seen: AtomicBool::new(false),
         });
 
         let pipeline = SessionPipeline::new(opts.uid.clone(), Arc::clone(&shared));
@@ -273,24 +401,27 @@ impl SessionRegistry {
     /// Recent output for a re-attaching view (the rolling replay buffer).
     pub fn replay(&self, uid: &str) -> Option<String> {
         let map = self.sessions.lock().unwrap();
-        map.get(uid).map(|s| s.shared.replay.lock().unwrap().get().to_string())
+        map.get(uid)
+            .map(|s| s.shared.replay.lock().unwrap().get().to_string())
     }
 
     /// Monotonic count of all output UTF-16 code units ever emitted (the `since`
     /// cursor; pair with `control::output::sliceSince`).
     pub fn output_bytes(&self, uid: &str) -> Option<u64> {
         let map = self.sessions.lock().unwrap();
-        map.get(uid).map(|s| s.shared.output_bytes.load(Ordering::Relaxed))
+        map.get(uid)
+            .map(|s| s.shared.output_bytes.load(Ordering::Relaxed))
     }
 
     /// Epoch-ms of the last output flush, or `None` if the pane has produced nothing
     /// yet (feeds `control::output::waitDecision`).
     pub fn last_output_at(&self, uid: &str) -> Option<u64> {
         let map = self.sessions.lock().unwrap();
-        map.get(uid).and_then(|s| match s.shared.last_output_at.load(Ordering::Relaxed) {
-            0 => None,
-            ms => Some(ms),
-        })
+        map.get(uid)
+            .and_then(|s| match s.shared.last_output_at.load(Ordering::Relaxed) {
+                0 => None,
+                ms => Some(ms),
+            })
     }
 
     /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
@@ -307,8 +438,17 @@ impl SessionRegistry {
     pub fn write(&self, uid: &str, data: &str) {
         let map = self.sessions.lock().unwrap();
         if let Some(s) = map.get(uid) {
+            // Phase 4: input was just sent → optimistically clear `prompt_ready` so the
+            // busy edge is reported immediately (a real prompt re-asserts it on its `133;A`).
+            s.shared.note_write();
             let _ = s.pty.write(data.as_bytes());
         }
+    }
+
+    /// Snapshot a session's phase-4 liveness mirror, or `None` if the uid is unknown.
+    pub fn liveness(&self, uid: &str) -> Option<Liveness> {
+        let map = self.sessions.lock().unwrap();
+        map.get(uid).map(|s| s.shared.liveness())
     }
 
     /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
@@ -520,6 +660,20 @@ impl SessionManager {
         }
     }
 
+    /// Snapshot a session's phase-4 liveness mirror (OSC-133 / OSC-9;hp), or `None`.
+    ///
+    /// The in-process backend reads the live mirror. The daemon backend has no shadow
+    /// of the marker mirror yet (the marker `SessionEvent`s do flow over the proto, but
+    /// the client doesn't fold them into a shadow), so it returns `None` → the activity
+    /// ticker keeps using the silence heuristic for daemon-backed panes. STUB: a later
+    /// pass can mirror markers into `daemon_client::Shadow` like `last_output_at`.
+    pub fn liveness(&self, uid: &str) -> Option<Liveness> {
+        match self {
+            SessionManager::InProcess(r) => r.liveness(uid),
+            SessionManager::Daemon(_) => None,
+        }
+    }
+
     /// Resize the pane (≥1×1) — both the pty grid and the live screen model.
     pub fn resize(&self, uid: &str, cols: u16, rows: u16) {
         match self {
@@ -567,7 +721,13 @@ impl SessionManager {
 fn build_spec(opts: &SpawnOptions) -> PtySpec {
     let shell = opts.shell.clone().unwrap_or_else(default_shell);
     let args = opts.args.as_deref();
-    let resolved = resolve_spawn(&shell, opts.command.as_deref(), args, opts.cwd.as_deref(), opts.env.as_ref());
+    let resolved = resolve_spawn(
+        &shell,
+        opts.command.as_deref(),
+        args,
+        opts.cwd.as_deref(),
+        opts.env.as_ref(),
+    );
 
     // node-pty/conpty launches `file` directly and won't find a bare shell NAME like
     // 'cmd' — resolve to a full path on Windows (idempotent for an already-resolved
@@ -650,7 +810,10 @@ fn resolve_spawn_cwd(requested: Option<&str>, env: &EnvMap) -> Option<String> {
 }
 
 fn epoch_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // The async driver: pull pty events, run them through the pipeline, forward emitted
@@ -708,6 +871,9 @@ struct SessionPipeline {
     batcher: DataBatcher,
     /// Carry for an OSC cwd sequence split across pty chunks.
     osc_carry: String,
+    /// Carry for a phase-4 semantic marker (OSC 133 / OSC 9;hp) split across chunks —
+    /// independent of `osc_carry` so the two scanners never clobber each other's tail.
+    marker_carry: String,
     /// De-dupe: emit `Cwd` only when the directory actually changes.
     last_cwd: Option<String>,
     /// Carry for an incomplete trailing UTF-8 sequence split across pty reads.
@@ -722,6 +888,7 @@ impl SessionPipeline {
             uid,
             batcher: DataBatcher::new(),
             osc_carry: String::new(),
+            marker_carry: String::new(),
             last_cwd: None,
             utf8_carry: Vec::new(),
             ended: false,
@@ -751,8 +918,23 @@ impl SessionPipeline {
         if let Some(cwd) = cwd {
             if Some(&cwd) != self.last_cwd.as_ref() {
                 self.last_cwd = Some(cwd.clone());
-                out.push(SessionEvent::Cwd { uid: self.uid.clone(), cwd });
+                out.push(SessionEvent::Cwd {
+                    uid: self.uid.clone(),
+                    cwd,
+                });
             }
+        }
+
+        // Phase 4: tap the same RAW chunk for semantic prompt markers (OSC 133 /
+        // OSC 9;hp), updating the liveness mirror and emitting per-marker events. The
+        // marker bytes are NOT stripped from the batched stream here — like the cwd OSC
+        // they are inert escape sequences the terminal grid ignores, so they never render
+        // visibly; this keeps the byte cursor / replay buffer faithful to what was sent.
+        let (markers, mcarry) = crate::session::osc133::parse_osc_markers(&self.marker_carry, raw);
+        self.marker_carry = mcarry;
+        for m in &markers {
+            self.shared.apply_marker(m);
+            out.push(marker_to_event(&self.uid, m));
         }
 
         if let Some(flushed) = self.batcher.write(raw, now_mono_ms) {
@@ -784,7 +966,10 @@ impl SessionPipeline {
         if let Some(flushed) = self.batcher.flush() {
             self.flush_into(flushed, now_epoch_ms, &mut out);
         }
-        out.push(SessionEvent::Exit { uid: self.uid.clone(), code });
+        out.push(SessionEvent::Exit {
+            uid: self.uid.clone(),
+            code,
+        });
         out
     }
 
@@ -797,10 +982,41 @@ impl SessionPipeline {
     fn flush_into(&mut self, data: String, now_epoch_ms: u64, out: &mut Vec<SessionEvent>) {
         let n = data.encode_utf16().count() as u64;
         self.shared.replay.lock().unwrap().append(&data);
-        self.shared.screen_pending.lock().unwrap().extend_from_slice(data.as_bytes());
+        self.shared
+            .screen_pending
+            .lock()
+            .unwrap()
+            .extend_from_slice(data.as_bytes());
         self.shared.output_bytes.fetch_add(n, Ordering::Relaxed);
-        self.shared.last_output_at.store(now_epoch_ms, Ordering::Relaxed);
-        out.push(SessionEvent::Data { uid: self.uid.clone(), data });
+        self.shared
+            .last_output_at
+            .store(now_epoch_ms, Ordering::Relaxed);
+        out.push(SessionEvent::Data {
+            uid: self.uid.clone(),
+            data,
+        });
+    }
+}
+
+/// Map a parsed phase-4 [`Marker`](crate::session::osc133::Marker) to its `SessionEvent`.
+fn marker_to_event(uid: &str, m: &crate::session::osc133::Marker) -> SessionEvent {
+    use crate::session::osc133::Marker;
+    match m {
+        Marker::CommandStart => SessionEvent::CommandStart {
+            uid: uid.to_string(),
+        },
+        Marker::CommandEnd { code } => SessionEvent::CommandEnd {
+            uid: uid.to_string(),
+            code: *code,
+        },
+        Marker::PromptReady => SessionEvent::PromptReady {
+            uid: uid.to_string(),
+        },
+        Marker::Agent { state, code } => SessionEvent::AgentState {
+            uid: uid.to_string(),
+            state: (*state).into(),
+            code: *code,
+        },
     }
 }
 
@@ -853,6 +1069,10 @@ mod tests {
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
             killed: AtomicBool::new(false),
+            prompt_ready: AtomicBool::new(false),
+            command_running: AtomicBool::new(false),
+            last_exit_code: AtomicI32::new(i32::MIN),
+            marker_seen: AtomicBool::new(false),
         })
     }
 
@@ -869,7 +1089,7 @@ mod tests {
     fn decoder_buffers_a_split_multibyte_char() {
         let mut carry = Vec::new();
         let emoji = "😀".as_bytes(); // 4 bytes: F0 9F 98 80
-        // First read ends mid-emoji.
+                                     // First read ends mid-emoji.
         let a = decode_utf8_streaming(&mut carry, &emoji[..2]);
         assert_eq!(a, "");
         assert_eq!(carry.len(), 2);
@@ -896,10 +1116,65 @@ mod tests {
         let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
         let seq = "\u{1b}]7;file:///C:/proj\u{07}";
         let evs = p.on_data(seq, 0, 1000);
-        assert_eq!(evs[0], SessionEvent::Cwd { uid: "u1".into(), cwd: "C:\\proj".into() });
+        assert_eq!(
+            evs[0],
+            SessionEvent::Cwd {
+                uid: "u1".into(),
+                cwd: "C:\\proj".into()
+            }
+        );
         // Same cwd again → no Cwd event (the prompt re-emits its OSC each keystroke).
         let evs2 = p.on_data(seq, 1, 1001);
         assert!(!evs2.iter().any(|e| matches!(e, SessionEvent::Cwd { .. })));
+    }
+
+    // ---- pipeline: phase-4 marker sniff + liveness mirror ----
+
+    #[test]
+    fn pipeline_sniffs_osc133_markers_and_updates_the_liveness_mirror() {
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        // Before any marker the mirror reports marker_seen=false (silence heuristic owns it).
+        assert!(!sh.liveness().marker_seen);
+
+        // A command starts running: 133;C → CommandStart event + command_running mirror.
+        let evs = p.on_data("\u{1b}]133;C\u{07}", 0, 1000);
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, SessionEvent::CommandStart { .. })));
+        let l = sh.liveness();
+        assert!(l.marker_seen && l.command_running && !l.prompt_ready);
+
+        // The command finishes with code 0, then the prompt returns: 133;D;0 then 133;A.
+        let evs2 = p.on_data("\u{1b}]133;D;0\u{07}\u{1b}]133;A\u{07}", 1, 1001);
+        assert!(evs2
+            .iter()
+            .any(|e| matches!(e, SessionEvent::CommandEnd { code: Some(0), .. })));
+        assert!(evs2
+            .iter()
+            .any(|e| matches!(e, SessionEvent::PromptReady { .. })));
+        let l2 = sh.liveness();
+        assert!(!l2.command_running && l2.prompt_ready);
+        assert_eq!(l2.last_exit_code, Some(0));
+    }
+
+    #[test]
+    fn pipeline_sniffs_agent_liveness_marker() {
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        let evs = p.on_data("\u{1b}]9;hp;state=busy\u{07}", 0, 1000);
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            SessionEvent::AgentState {
+                state: AgentLiveness::Busy,
+                ..
+            }
+        )));
+        assert!(sh.liveness().command_running);
+        // awaiting-input flips the mirror to prompt_ready.
+        p.on_data("\u{1b}]9;hp;state=awaiting-input\u{07}", 1, 1001);
+        let l = sh.liveness();
+        assert!(l.prompt_ready && !l.command_running);
     }
 
     // ---- pipeline: flush → replay + counters + Data ----
@@ -913,7 +1188,13 @@ mod tests {
         assert!(p.on_data("de", 5, 505).is_empty());
         // Timer fires.
         let evs = p.on_timer(520);
-        assert_eq!(evs, vec![SessionEvent::Data { uid: "u1".into(), data: "abcde".into() }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::Data {
+                uid: "u1".into(),
+                data: "abcde".into()
+            }]
+        );
         assert_eq!(sh.replay.lock().unwrap().get(), "abcde");
         assert_eq!(sh.output_bytes.load(Ordering::Relaxed), 5);
         assert_eq!(sh.last_output_at.load(Ordering::Relaxed), 520);
@@ -936,10 +1217,22 @@ mod tests {
         assert!(p.on_data(&big, 0, 100).is_empty());
         // This pushes past the threshold → the buffered `big` flushes out as Data.
         let evs = p.on_data("yy", 1, 101);
-        assert_eq!(evs, vec![SessionEvent::Data { uid: "u1".into(), data: big.clone() }]);
+        assert_eq!(
+            evs,
+            vec![SessionEvent::Data {
+                uid: "u1".into(),
+                data: big.clone()
+            }]
+        );
         // The new chunk remains buffered until its own flush.
         let evs2 = p.on_timer(120);
-        assert_eq!(evs2, vec![SessionEvent::Data { uid: "u1".into(), data: "yy".into() }]);
+        assert_eq!(
+            evs2,
+            vec![SessionEvent::Data {
+                uid: "u1".into(),
+                data: "yy".into()
+            }]
+        );
     }
 
     // ---- pipeline: exit gating ----
@@ -953,8 +1246,14 @@ mod tests {
         assert_eq!(
             evs,
             vec![
-                SessionEvent::Data { uid: "u1".into(), data: "tail".into() },
-                SessionEvent::Exit { uid: "u1".into(), code: 0 },
+                SessionEvent::Data {
+                    uid: "u1".into(),
+                    data: "tail".into()
+                },
+                SessionEvent::Exit {
+                    uid: "u1".into(),
+                    code: 0
+                },
             ]
         );
     }
@@ -1015,8 +1314,14 @@ mod tests {
             *slot2.lock().unwrap() = Some(sink);
             Ok(Box::new(MockPty::default()) as Box<dyn Pty>)
         });
-        mgr.create_with(SpawnOptions { uid: uid.into(), ..Default::default() }, factory)
-            .expect("create");
+        mgr.create_with(
+            SpawnOptions {
+                uid: uid.into(),
+                ..Default::default()
+            },
+            factory,
+        )
+        .expect("create");
         let sink = slot.lock().unwrap().clone().expect("sink captured");
         (mgr, erx, sink)
     }
@@ -1024,7 +1329,10 @@ mod tests {
     async fn recv(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
     ) -> Option<SessionEvent> {
-        tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.ok().flatten()
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .ok()
+            .flatten()
     }
 
     #[tokio::test]
@@ -1034,13 +1342,25 @@ mod tests {
 
         sink(PtyEvent::Data(b"hello".to_vec()));
         // Flushed by the 16 ms batch timer.
-        assert_eq!(recv(&mut rx).await, Some(SessionEvent::Data { uid: "u1".into(), data: "hello".into() }));
+        assert_eq!(
+            recv(&mut rx).await,
+            Some(SessionEvent::Data {
+                uid: "u1".into(),
+                data: "hello".into()
+            })
+        );
         assert_eq!(mgr.output_bytes("u1"), Some(5));
         assert_eq!(mgr.replay("u1").as_deref(), Some("hello"));
         assert!(mgr.last_output_at("u1").is_some());
 
         sink(PtyEvent::Exit(0));
-        assert_eq!(recv(&mut rx).await, Some(SessionEvent::Exit { uid: "u1".into(), code: 0 }));
+        assert_eq!(
+            recv(&mut rx).await,
+            Some(SessionEvent::Exit {
+                uid: "u1".into(),
+                code: 0
+            })
+        );
 
         // The driver removes the session from the map after the terminal exit.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1067,7 +1387,13 @@ mod tests {
         let (mgr, mut rx, sink) = make_session("u1");
         sink(PtyEvent::Data(b"\x1b]7;file:///C:/work\x07".to_vec()));
         // Cwd fires immediately (pre-batch), before any Data flush.
-        assert_eq!(recv(&mut rx).await, Some(SessionEvent::Cwd { uid: "u1".into(), cwd: "C:\\work".into() }));
+        assert_eq!(
+            recv(&mut rx).await,
+            Some(SessionEvent::Cwd {
+                uid: "u1".into(),
+                cwd: "C:\\work".into()
+            })
+        );
         let _ = mgr;
     }
 
@@ -1079,7 +1405,11 @@ mod tests {
         let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
         p.on_data("hello world", 0, 100);
         p.on_timer(120); // flush → buffered, screen NOT yet advanced
-        assert_eq!(sh.screen.lock().unwrap().render(), "", "screen is lazy: empty before sync");
+        assert_eq!(
+            sh.screen.lock().unwrap().render(),
+            "",
+            "screen is lazy: empty before sync"
+        );
         sh.sync_screen();
         assert_eq!(sh.screen.lock().unwrap().render(), "hello world");
         // A second sync with nothing pending is a no-op and leaves the screen intact.
@@ -1092,7 +1422,10 @@ mod tests {
         let (mgr, mut rx, sink) = make_session("u1");
         sink(PtyEvent::Data(b"abc\r\ndef".to_vec()));
         // Wait for the Data flush so the bytes are buffered for the screen.
-        assert!(matches!(recv(&mut rx).await, Some(SessionEvent::Data { .. })));
+        assert!(matches!(
+            recv(&mut rx).await,
+            Some(SessionEvent::Data { .. })
+        ));
         // render_screen must lazily sync the buffered output before serializing.
         assert_eq!(mgr.render_screen("u1").as_deref(), Some("abc\ndef"));
     }
@@ -1111,7 +1444,10 @@ mod tests {
     fn in_process_backend_is_not_daemon() {
         let (etx, _erx) = unbounded_channel::<SessionEvent>();
         let mgr = SessionManager::new(etx);
-        assert!(!mgr.is_daemon(), "the in-process backend reports is_daemon() == false");
+        assert!(
+            !mgr.is_daemon(),
+            "the in-process backend reports is_daemon() == false"
+        );
     }
 
     // shutdown_daemon is INERT for the in-process backend (session-daemon M3): there is no
@@ -1121,7 +1457,10 @@ mod tests {
     fn in_process_shutdown_daemon_is_inert() {
         let (etx, _erx) = unbounded_channel::<SessionEvent>();
         let mgr = SessionManager::new(etx);
-        assert!(!mgr.shutdown_daemon(), "in-process shutdown_daemon is a no-op returning false");
+        assert!(
+            !mgr.shutdown_daemon(),
+            "in-process shutdown_daemon is a no-op returning false"
+        );
     }
 
     #[test]
@@ -1132,12 +1471,19 @@ mod tests {
         // uniqueness suffices); the counter is process-global so two managers never alias.
         let a = mgr.fresh_uid();
         let b = mgr.fresh_uid();
-        assert!(a.starts_with("pane-"), "in-process fresh_uid is pane-N, got {a}");
+        assert!(
+            a.starts_with("pane-"),
+            "in-process fresh_uid is pane-N, got {a}"
+        );
         assert_ne!(a, b, "successive fresh_uids are unique");
         let (etx2, _erx2) = unbounded_channel::<SessionEvent>();
         let mgr2 = SessionManager::new(etx2);
         // A SECOND manager shares the process-global counter — no cross-manager `pane-0`
         // collision (the historical multi-window clobber this counter was hardened against).
-        assert_ne!(mgr2.fresh_uid(), a, "the counter is process-global across managers");
+        assert_ne!(
+            mgr2.fresh_uid(),
+            a,
+            "the counter is process-global across managers"
+        );
     }
 }

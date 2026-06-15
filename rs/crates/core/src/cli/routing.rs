@@ -110,8 +110,8 @@ mod tests {
 
     #[test]
     fn json_launch_is_always_new_window() {
-        let json = std::env::temp_dir()
-            .join(format!("hp-routing-{}-launch.json", std::process::id()));
+        let json =
+            std::env::temp_dir().join(format!("hp-routing-{}-launch.json", std::process::id()));
         std::fs::write(&json, br#"{"panes":[{"command":"x","label":"x"}]}"#).unwrap();
         let json_str = json.to_string_lossy().into_owned();
         let r = resolve_second_instance_windows(&argv(&[&json_str]), ".");

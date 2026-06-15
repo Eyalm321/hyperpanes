@@ -137,11 +137,8 @@ pub fn parse_osc_cwd(carry: &str, chunk: &str) -> (Option<String>, String) {
     let buf = format!("{carry}{chunk}");
     let mut last_cwd: Option<String> = None;
     let mut search_from = 0usize;
-    loop {
-        let start = match buf[search_from..].find(OSC_PREFIX) {
-            Some(i) => i + search_from,
-            None => break,
-        };
+    while let Some(i) = buf[search_from..].find(OSC_PREFIX) {
+        let start = i + search_from;
         let after_prefix = start + OSC_PREFIX.len();
         let bel_idx = buf[after_prefix..].find(BEL).map(|i| i + after_prefix);
         let st_idx = buf[after_prefix..].find(ST).map(|i| i + after_prefix);
@@ -201,7 +198,10 @@ mod tests {
 
     #[test]
     fn uppercases_the_drive_letter() {
-        assert_eq!(file_uri_to_path("file:///c:/temp").as_deref(), Some("C:\\temp"));
+        assert_eq!(
+            file_uri_to_path("file:///c:/temp").as_deref(),
+            Some("C:\\temp")
+        );
     }
 
     #[test]
@@ -226,12 +226,18 @@ mod tests {
 
     #[test]
     fn handles_a_percent_encoded_colon() {
-        assert_eq!(file_uri_to_path("file:///c%3A/temp").as_deref(), Some("C:\\temp"));
+        assert_eq!(
+            file_uri_to_path("file:///c%3A/temp").as_deref(),
+            Some("C:\\temp")
+        );
     }
 
     #[test]
     fn accepts_an_explicit_localhost_authority() {
-        assert_eq!(file_uri_to_path("file://localhost/C:/x").as_deref(), Some("C:\\x"));
+        assert_eq!(
+            file_uri_to_path("file://localhost/C:/x").as_deref(),
+            Some("C:\\x")
+        );
     }
 
     #[test]
@@ -242,7 +248,10 @@ mod tests {
 
     #[test]
     fn returns_a_posix_absolute_path_unchanged() {
-        assert_eq!(file_uri_to_path("file:///home/me/proj").as_deref(), Some("/home/me/proj"));
+        assert_eq!(
+            file_uri_to_path("file:///home/me/proj").as_deref(),
+            Some("/home/me/proj")
+        );
     }
 
     #[test]

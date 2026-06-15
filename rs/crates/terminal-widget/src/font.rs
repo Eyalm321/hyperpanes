@@ -26,8 +26,7 @@ use swash::{FontRef, GlyphId};
 
 /// The bundled JetBrains Mono — the universal fallback. Embedded so the widget needs no
 /// asset path at runtime (the file lives in the app crate's `assets/fonts`).
-const JETBRAINS_MONO: &[u8] =
-    include_bytes!("../../app/assets/fonts/JetBrainsMono-Regular.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../app/assets/fonts/JetBrainsMono-Regular.ttf");
 
 /// Symbols Nerd Font Mono — covers the private-use icon ranges (powerline, devicons,
 /// font-awesome, etc., roughly U+E000–U+F8FF + supplementary) that neither the primary nor
@@ -194,10 +193,7 @@ impl Font {
             .hint(true)
             .build();
 
-        let mut render = Render::new(&[
-            Source::Outline,
-            Source::Bitmap(StrikeWith::BestFit),
-        ]);
+        let mut render = Render::new(&[Source::Outline, Source::Bitmap(StrikeWith::BestFit)]);
         render.format(Format::Alpha);
         if key.italic {
             // ~12-degree synthetic slant.
@@ -217,11 +213,7 @@ impl Font {
                 let mask = match img.content {
                     Content::Mask => img.data,
                     // Defensive: collapse any color result to luminance-ish coverage.
-                    _ => img
-                        .data
-                        .chunks_exact(4)
-                        .map(|p| p[3])
-                        .collect::<Vec<u8>>(),
+                    _ => img.data.chunks_exact(4).map(|p| p[3]).collect::<Vec<u8>>(),
                 };
                 CachedGlyph {
                     mask,
@@ -287,7 +279,11 @@ fn fontconfig_family_file(family: &str) -> Option<String> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let files: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let files: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     files
         .iter()
         .find(|f| f.contains("Regular") || f.contains("regular"))
@@ -335,6 +331,20 @@ fn fallback_specs() -> Vec<FallbackSpec> {
     ];
 }
 
+/// Uniform shrink factor so this fallback's glyphs fit the primary cell height. Returns
+/// `None` if the bytes aren't a valid font (so the face is dropped from the chain).
+fn compute_fit(data: &[u8], px: f32, cell_h: u32) -> Option<f32> {
+    let font = FontRef::from_index(data, 0)?;
+    let m = font.metrics(&[]).scale(px);
+    let lh = m.ascent + m.descent + m.leading;
+    let fit = if lh > cell_h as f32 && lh > 0.0 {
+        cell_h as f32 / lh
+    } else {
+        1.0
+    };
+    Some(fit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +364,10 @@ mod tests {
         // it must resolve to a non-primary face with a real gid on every platform.
         let mut f = jetbrains_font();
         let (font_id, gid) = f.resolve('\u{f121}');
-        assert!(font_id > 0 && gid != 0, "nerd icon fell to ({font_id}, {gid})");
+        assert!(
+            font_id > 0 && gid != 0,
+            "nerd icon fell to ({font_id}, {gid})"
+        );
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -373,18 +386,4 @@ mod tests {
         let (font_id, gid) = f.resolve('😀');
         assert!(font_id > 0 && gid != 0, "emoji fell to ({font_id}, {gid})");
     }
-}
-
-/// Uniform shrink factor so this fallback's glyphs fit the primary cell height. Returns
-/// `None` if the bytes aren't a valid font (so the face is dropped from the chain).
-fn compute_fit(data: &[u8], px: f32, cell_h: u32) -> Option<f32> {
-    let font = FontRef::from_index(data, 0)?;
-    let m = font.metrics(&[]).scale(px);
-    let lh = m.ascent + m.descent + m.leading;
-    let fit = if lh > cell_h as f32 && lh > 0.0 {
-        cell_h as f32 / lh
-    } else {
-        1.0
-    };
-    Some(fit)
 }

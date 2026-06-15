@@ -66,7 +66,12 @@ fn pwsh_available() -> bool {
 pub fn font_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = vec![std::path::PathBuf::from("C:/Windows/Fonts")];
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        dirs.push(std::path::Path::new(&local).join("Microsoft").join("Windows").join("Fonts"));
+        dirs.push(
+            std::path::Path::new(&local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
+        );
     }
     dirs.push(super::bundled_font_dir());
     dirs

@@ -60,8 +60,12 @@ pub fn window_rect(raw: isize) -> (i32, i32, i32, i32) {
     if raw == 0 {
         return (0, 0, 0, 0);
     }
-    let Some(mtm) = MainThreadMarker::new() else { return (0, 0, 0, 0) };
-    let Some((height, scale)) = screen_metrics(mtm) else { return (0, 0, 0, 0) };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return (0, 0, 0, 0);
+    };
+    let Some((height, scale)) = screen_metrics(mtm) else {
+        return (0, 0, 0, 0);
+    };
     let f = unsafe { &*(raw as *const NSWindow) }.frame();
     (
         (f.origin.x * scale).round() as i32,
@@ -85,7 +89,9 @@ pub struct Ghost {
 
 impl Ghost {
     pub fn new() -> Ghost {
-        let Some(mtm) = MainThreadMarker::new() else { return Ghost { win: None } };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return Ghost { win: None };
+        };
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(GHOST_W, GHOST_H));
         let win = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -125,8 +131,12 @@ impl Ghost {
     /// pump's physical-px top-left coords; convert back to cocoa points.
     pub fn follow(&self, p: (i32, i32)) {
         let Some(win) = &self.win else { return };
-        let Some(mtm) = MainThreadMarker::new() else { return };
-        let Some((height, scale)) = screen_metrics(mtm) else { return };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some((height, scale)) = screen_metrics(mtm) else {
+            return;
+        };
         let x = p.0 as f64 / scale + 14.0;
         let y_top = p.1 as f64 / scale + 16.0;
         unsafe {

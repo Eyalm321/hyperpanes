@@ -61,8 +61,14 @@ pub fn font_label(font: &str) -> &str {
 /// on startup (see [`init_bundled_fonts`]); their file names match the [`FONT_OPTIONS`]
 /// values so the picker resolves them. Licenses live in `assets/fonts/*-OFL.txt`.
 pub const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
-    ("FiraCode-Regular.ttf", include_bytes!("../../assets/fonts/FiraCode-Regular.ttf")),
-    ("JetBrainsMono-Regular.ttf", include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf")),
+    (
+        "FiraCode-Regular.ttf",
+        include_bytes!("../../assets/fonts/FiraCode-Regular.ttf"),
+    ),
+    (
+        "JetBrainsMono-Regular.ttf",
+        include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf"),
+    ),
 ];
 
 /// Where the baked-in fonts are extracted: `%APPDATA%\hyperpanes\fonts`.
@@ -78,7 +84,9 @@ pub fn init_bundled_fonts() {
     let _ = std::fs::create_dir_all(&dir);
     for (name, bytes) in BUNDLED_FONTS {
         let p = dir.join(name);
-        let stale = std::fs::metadata(&p).map(|m| m.len() as usize != bytes.len()).unwrap_or(true);
+        let stale = std::fs::metadata(&p)
+            .map(|m| m.len() as usize != bytes.len())
+            .unwrap_or(true);
         if stale {
             let _ = std::fs::write(&p, bytes);
         }

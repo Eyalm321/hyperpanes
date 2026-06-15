@@ -21,7 +21,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use crate::ai::ollama::{OllamaClient, OllamaConfig};
 use crate::ai::service::{AiService, AiSettings, OnStatus, PushMeta};
 use crate::control::readmodel::{PaneInfo, PaneStatus, ReadModel, TabInfo, WindowInfo};
-use crate::control::server::{self, now_ms, notify_state, Shared};
+use crate::control::server::{self, notify_state, now_ms, Shared};
 use crate::persistence::{control_settings, paths};
 use crate::session::spawn::EnvMap;
 use crate::session_manager::{SessionEvent, SessionManager, SpawnOptions};
@@ -56,7 +56,12 @@ pub async fn run() -> io::Result<()> {
     let (etx, erx) = unbounded_channel::<SessionEvent>();
     let sessions = Arc::new(SessionManager::new(etx));
 
-    let shared = Shared::new(Arc::clone(&sessions), allow_input, VERSION, control_file.clone());
+    let shared = Shared::new(
+        Arc::clone(&sessions),
+        allow_input,
+        VERSION,
+        control_file.clone(),
+    );
 
     // Seed the read-model from the launch workspace (argv only — no last-session restore, so the
     // daemon starts clean and deterministic). Always leaves ≥1 window for open_pane to target.
@@ -73,7 +78,12 @@ pub async fn run() -> io::Result<()> {
     // over `meta_rx` and merge into the read-model.
     let (ai_tx, ai_rx) = unbounded_channel::<SessionEvent>();
     let (meta_tx, meta_rx) = unbounded_channel::<MetaUpdate>();
-    spawn_ai_thread(paths::ai_settings_json(), paths::ai_memory_json(), ai_rx, meta_tx);
+    spawn_ai_thread(
+        paths::ai_settings_json(),
+        paths::ai_memory_json(),
+        ai_rx,
+        meta_tx,
+    );
     {
         let shared = Arc::clone(&shared);
         tokio::spawn(async move { apply_meta_updates(shared, meta_rx).await });
@@ -132,12 +142,16 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
         model.add_window(WindowInfo {
             window_id: start_id,
             active_tab_id: Some(tab_id.clone()),
-            tabs: vec![TabInfo { id: tab_id, title: "Tab 1".into(), layout: "auto".into(), panes: vec![] }],
+            tabs: vec![TabInfo {
+                id: tab_id,
+                title: "Tab 1".into(),
+                layout: "auto".into(),
+                panes: vec![],
+            }],
         });
         return;
     }
-    let mut window_id = start_id;
-    for ws in windows {
+    for (window_id, ws) in (start_id..).zip(windows) {
         let groups = if ws.groups.is_empty() {
             vec![Default::default()]
         } else {
@@ -158,18 +172,30 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
                 .iter()
                 .map(|ps| spawn_seed_pane(&shared.sessions, control_file.as_deref(), ps))
                 .collect();
-            tabs.push(TabInfo { id: tab_id, title, layout, panes });
+            tabs.push(TabInfo {
+                id: tab_id,
+                title,
+                layout,
+                panes,
+            });
         }
         if active_tab_id.is_none() {
             active_tab_id = tabs.first().map(|t| t.id.clone());
         }
-        model.add_window(WindowInfo { window_id, active_tab_id, tabs });
-        window_id += 1;
+        model.add_window(WindowInfo {
+            window_id,
+            active_tab_id,
+            tabs,
+        });
     }
 }
 
 /// Spawn a pty for a workspace `PaneSpec` and return its `PaneInfo` (not yet inserted).
-fn spawn_seed_pane(sessions: &SessionManager, control_file: Option<&str>, ps: &PaneSpec) -> PaneInfo {
+fn spawn_seed_pane(
+    sessions: &SessionManager,
+    control_file: Option<&str>,
+    ps: &PaneSpec,
+) -> PaneInfo {
     let pane_id = new_id();
     let session_uid = new_id();
     let label = ps
@@ -177,7 +203,10 @@ fn spawn_seed_pane(sessions: &SessionManager, control_file: Option<&str>, ps: &P
         .clone()
         .or_else(|| ps.command.clone())
         .unwrap_or_else(|| "shell".to_string());
-    let color = ps.color.clone().unwrap_or_else(|| DEFAULT_PANE_COLOR.to_string());
+    let color = ps
+        .color
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PANE_COLOR.to_string());
     let args = ps.args.clone().filter(|a| !a.is_empty());
     let opts = SpawnOptions {
         uid: session_uid.clone(),
@@ -214,14 +243,22 @@ fn handle_handoff(shared: &Arc<Shared>, msg: HandoffMessage) {
     let si = crate::cli::routing::resolve_second_instance_windows(&msg.argv, &msg.cwd);
     let next_id = {
         let model = shared.model.lock().unwrap();
-        model.first_window_id().map(|_| max_window_id(&model) + 1).unwrap_or(1)
+        model
+            .first_window_id()
+            .map(|_| max_window_id(&model) + 1)
+            .unwrap_or(1)
     };
     seed_windows(shared, si.windows, next_id);
     notify_state(shared);
 }
 
 fn max_window_id(model: &ReadModel) -> i64 {
-    model.panes().iter().map(|p| p.coords.window_id).max().unwrap_or(0)
+    model
+        .panes()
+        .iter()
+        .map(|p| p.coords.window_id)
+        .max()
+        .unwrap_or(0)
 }
 
 // ---- live event plumbing ------------------------------------------------------------------
@@ -243,7 +280,12 @@ async fn apply_meta_updates(shared: Arc<Shared>, mut rx: UnboundedReceiver<MetaU
         for (k, v) in u.pairs {
             patch.insert(k, Some(v));
         }
-        let changed = shared.model.lock().unwrap().set_meta(&u.pane_id, &patch).is_some();
+        let changed = shared
+            .model
+            .lock()
+            .unwrap()
+            .set_meta(&u.pane_id, &patch)
+            .is_some();
         if changed {
             notify_state(&shared);
         }
@@ -261,7 +303,10 @@ fn spawn_ai_thread(
     std::thread::Builder::new()
         .name("ambient-ai".to_string())
         .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
                 return;
             };
             let local = tokio::task::LocalSet::new();
@@ -285,7 +330,10 @@ async fn ai_loop(
         timeout_ms: None,
     });
     let push_meta: PushMeta = Box::new(move |_window_id, pane_id, pairs| {
-        let _ = meta_tx.send(MetaUpdate { pane_id: pane_id.to_string(), pairs });
+        let _ = meta_tx.send(MetaUpdate {
+            pane_id: pane_id.to_string(),
+            pairs,
+        });
     });
     let on_status: OnStatus = Box::new(|_status| {});
     let mut ai = AiService::new(settings_path, memory_path, client, push_meta, on_status);
@@ -299,6 +347,8 @@ async fn ai_loop(
                 Some(SessionEvent::Data { uid, data }) => ai.on_data(&uid, &data),
                 Some(SessionEvent::Cwd { uid, cwd }) => ai.on_cwd(&uid, &cwd, None),
                 Some(SessionEvent::Exit { uid, .. }) => ai.on_session_exit(&uid),
+                // Phase-4 semantic markers are not part of the AI tap's input model.
+                Some(_) => {}
                 None => break,
             },
             _ = ticker.tick() => {

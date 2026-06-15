@@ -211,7 +211,11 @@ fn consecutive_wide_glyphs_advance_two_columns_each() {
     assert_eq!(snap.cell(2, 0).ch, '界');
     assert!(snap.cell(2, 0).wide);
     assert!(snap.cell(3, 0).wide_spacer);
-    assert_eq!(snap.cursor, (4, 0), "each wide glyph advances the cursor 2 columns");
+    assert_eq!(
+        snap.cursor,
+        (4, 0),
+        "each wide glyph advances the cursor 2 columns"
+    );
 }
 
 #[test]
@@ -223,10 +227,18 @@ fn wide_glyph_that_does_not_fit_wraps_whole_to_the_next_row() {
     let snap = g.snapshot();
     assert_eq!(snap.cell(0, 0).ch, 'a');
     assert_eq!(snap.cell(3, 0).ch, 'd');
-    assert_eq!(snap.cell(0, 1).ch, '世', "wide glyph wraps whole onto row 1");
+    assert_eq!(
+        snap.cell(0, 1).ch,
+        '世',
+        "wide glyph wraps whole onto row 1"
+    );
     assert!(snap.cell(0, 1).wide);
     assert!(snap.cell(1, 1).wide_spacer);
-    assert_ne!(snap.cell(4, 0).ch, '世', "the orphan margin cell must not hold the glyph");
+    assert_ne!(
+        snap.cell(4, 0).ch,
+        '世',
+        "the orphan margin cell must not hold the glyph"
+    );
 }
 
 // ---- Wrap + reflow across resize -----------------------------------------------------------
@@ -234,7 +246,10 @@ fn wide_glyph_that_does_not_fit_wraps_whole_to_the_next_row() {
 /// All viewport text concatenated (rows trimmed, joined bare) — reflow-shape-agnostic probe.
 fn visible_text(g: &TermGrid) -> String {
     let snap = g.snapshot();
-    (0..snap.rows).map(|r| row_text(&snap, r)).collect::<Vec<_>>().concat()
+    (0..snap.rows)
+        .map(|r| row_text(&snap, r))
+        .collect::<Vec<_>>()
+        .concat()
 }
 
 #[test]
@@ -291,8 +306,10 @@ fn resize_keeps_text_when_rows_change() {
     g.feed(b"top\r\nmid\r\nbot");
     g.resize(10, 8);
     let after = visible_text(&g);
-    assert!(after.contains("top") && after.contains("mid") && after.contains("bot"),
-        "growing rows must keep all lines: {after:?}");
+    assert!(
+        after.contains("top") && after.contains("mid") && after.contains("bot"),
+        "growing rows must keep all lines: {after:?}"
+    );
 }
 
 #[test]

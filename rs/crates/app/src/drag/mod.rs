@@ -59,7 +59,13 @@ pub struct DragState {
 
 impl DragState {
     pub fn new(source_win: usize, kind: DragKind, origin: (i32, i32)) -> Self {
-        DragState { source_win, kind, origin, armed: false, active: false }
+        DragState {
+            source_win,
+            kind,
+            origin,
+            armed: false,
+            active: false,
+        }
     }
     pub fn is_pane(&self) -> bool {
         matches!(self.kind, DragKind::Pane { .. })

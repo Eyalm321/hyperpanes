@@ -97,7 +97,9 @@ fn idle_grace() -> Duration {
 /// unparseable value → [`DEFAULT_IDLE_GRACE_MS`].
 #[cfg(unix)]
 fn idle_grace_from(raw: Option<&str>) -> Duration {
-    let ms = raw.and_then(|v| v.parse::<u64>().ok()).unwrap_or(DEFAULT_IDLE_GRACE_MS);
+    let ms = raw
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_GRACE_MS);
     Duration::from_millis(ms)
 }
 
@@ -129,7 +131,10 @@ pub fn run(salt: &str) -> io::Result<()> {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => {
             // Another daemon already serves this salt — nothing to do.
-            return Err(io::Error::new(io::ErrorKind::AddrInUse, "a daemon already holds this salt"));
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "a daemon already holds this salt",
+            ));
         }
         Err(std::fs::TryLockError::Error(e)) => return Err(e),
     }
@@ -337,7 +342,12 @@ pub fn kill_daemon(salt: &str) -> io::Result<bool> {
     let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
         Ok(s) => s,
         // No daemon listening (refused / no socket file) → nothing to kill.
-        Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound) => {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
             // A stale socket FILE with no listener: tidy it so a later launch binds cleanly.
             let _ = std::fs::remove_file(&socket);
             return Ok(false);
@@ -416,7 +426,13 @@ impl Daemon {
         // Capture the ambient runtime's handle so connection threads (plain OS threads)
         // can enter it to spawn pty drivers — `new` is always called inside a runtime.
         let rt = tokio::runtime::Handle::current();
-        Daemon { registry, bus, cwds, rt, lifecycle }
+        Daemon {
+            registry,
+            bus,
+            cwds,
+            rt,
+            lifecycle,
+        }
     }
 
     /// Start the **idle-exit monitor** on its own thread: once the daemon has 0 live sessions
@@ -543,8 +559,8 @@ impl Daemon {
                         break; // a control path asked to close the connection
                     }
                 }
-                Ok(None) => break,  // client closed cleanly
-                Err(_) => break,    // malformed frame / socket error → drop the connection
+                Ok(None) => break, // client closed cleanly
+                Err(_) => break,   // malformed frame / socket error → drop the connection
             }
         }
 
@@ -714,10 +730,8 @@ fn writer_loop(
             match bus_rx.try_recv() {
                 Ok(ev) => {
                     let is_attached = attached.lock().unwrap().contains(event_uid(&ev));
-                    if is_attached {
-                        if write_frame(&mut write_half, &DaemonMsg::Event(ev)).is_err() {
-                            return;
-                        }
+                    if is_attached && write_frame(&mut write_half, &DaemonMsg::Event(ev)).is_err() {
+                        return;
                     }
                 }
                 // Lagged: the bounded bus dropped events for this slow connection. It can
@@ -750,7 +764,11 @@ fn event_uid(ev: &SessionEvent) -> &str {
     match ev {
         SessionEvent::Data { uid, .. }
         | SessionEvent::Cwd { uid, .. }
-        | SessionEvent::Exit { uid, .. } => uid,
+        | SessionEvent::Exit { uid, .. }
+        | SessionEvent::CommandStart { uid }
+        | SessionEvent::CommandEnd { uid, .. }
+        | SessionEvent::PromptReady { uid }
+        | SessionEvent::AgentState { uid, .. } => uid,
     }
 }
 
@@ -787,21 +805,20 @@ impl DaemonClient {
             .name("hp-daemon-client-reader".into())
             .spawn(move || {
                 let mut r = read_half;
-                loop {
-                    match read_frame::<_, DaemonMsg>(&mut r) {
-                        Ok(Some(msg)) => {
-                            if tx.send(msg).is_err() {
-                                break; // client dropped
-                            }
-                        }
-                        // Clean EOF (peer closed) or a malformed-frame/socket error: the
-                        // connection is finished, so stop reading.
-                        Ok(None) | Err(_) => break,
+                // Loop until clean EOF (peer closed) or a malformed-frame/socket error:
+                // either means the connection is finished, so stop reading.
+                while let Ok(Some(msg)) = read_frame::<_, DaemonMsg>(&mut r) {
+                    if tx.send(msg).is_err() {
+                        break; // client dropped
                     }
                 }
             })?;
 
-        Ok(DaemonClient { write_half: Mutex::new(write_half), inbox: rx, _reader: reader })
+        Ok(DaemonClient {
+            write_half: Mutex::new(write_half),
+            inbox: rx,
+            _reader: reader,
+        })
     }
 
     /// Send one request to the daemon (length-framed). Fire-and-forget at this layer —
@@ -886,7 +903,10 @@ pub(crate) fn spawn_in_process_with_idle(
 }
 
 #[cfg(all(unix, test))]
-fn spawn_in_process_inner(socket: &Path, idle_grace: Option<Duration>) -> io::Result<InProcessDaemon> {
+fn spawn_in_process_inner(
+    socket: &Path,
+    idle_grace: Option<Duration>,
+) -> io::Result<InProcessDaemon> {
     let _ = std::fs::remove_file(socket);
     let listener = std::os::unix::net::UnixListener::bind(socket)?;
     // FlagOnly teardown: a test-mode `Shutdown`/idle-exit must not kill the test process.
@@ -902,7 +922,9 @@ fn spawn_in_process_inner(socket: &Path, idle_grace: Option<Duration>) -> io::Re
         .spawn(move || {
             // The daemon's own runtime — its async work (pump + pty drivers) lives here,
             // isolated from the test harness's scheduling.
-            let Ok(rt) = tokio::runtime::Runtime::new() else { return };
+            let Ok(rt) = tokio::runtime::Runtime::new() else {
+                return;
+            };
             let _guard = rt.enter();
             let daemon = Daemon::new(lifecycle_thread);
             if let Some(grace) = idle_grace {
@@ -910,7 +932,11 @@ fn spawn_in_process_inner(socket: &Path, idle_grace: Option<Duration>) -> io::Re
             }
             let _ = daemon.serve(listener);
         })?;
-    Ok(InProcessDaemon { _accept: accept, lifecycle, socket: socket.to_path_buf() })
+    Ok(InProcessDaemon {
+        _accept: accept,
+        lifecycle,
+        socket: socket.to_path_buf(),
+    })
 }
 
 /// Non-unix `run` stub: the daemon transport (UDS) is unix-only. Windows named pipes are
@@ -949,12 +975,25 @@ mod tests {
     // A unique temp socket path per test AND per run (pid + thread id), so parallel and
     // repeated runs never collide on the bind path.
     fn temp_socket(tag: &str) -> PathBuf {
-        let dir = runtime_dir();
-        dir.join(format!(
-            "hp-daemon-test-{tag}-{}-{:?}.sock",
+        // Unix-socket paths (`sun_path`) are capped: 108 bytes on Linux but only **104 on
+        // macOS/BSD** -- which is shorter than the macOS per-user temp dir
+        // (`/var/folders/.../T/`) plus a descriptive name, so a long `tag` overflows and
+        // `bind` fails with EINVAL. (In CI this showed up as `.expect("binds")` panicking
+        // only on macOS, and only for the longest tags.) Build a compact name and fall back
+        // to a short dir when the runtime-dir path would overflow.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let name = format!(
+            "hp-{}-{}-{tag}.sock",
             std::process::id(),
-            std::thread::current().id()
-        ))
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let candidate = runtime_dir().join(&name);
+        // 104 = macOS/BSD sun_path cap (incl. trailing NUL); keep margin.
+        if candidate.as_os_str().len() < 100 {
+            candidate
+        } else {
+            std::path::Path::new("/tmp").join(&name)
+        }
     }
 
     // Drain a client's inbox until `pred` matches one message or the deadline passes.
@@ -985,9 +1024,18 @@ mod tests {
         let _accept = spawn_in_process(&socket).expect("daemon binds");
 
         let client = DaemonClient::connect_path(&socket).expect("client connects");
-        client.send(&ClientMsg::Hello { proto_ver: PROTO_VER }).unwrap();
-        let hello = recv_until(&client, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Hello { .. }));
-        assert!(matches!(hello, Some(DaemonMsg::Hello { .. })), "handshake reply");
+        client
+            .send(&ClientMsg::Hello {
+                proto_ver: PROTO_VER,
+            })
+            .unwrap();
+        let hello = recv_until(&client, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Hello { .. })
+        });
+        assert!(
+            matches!(hello, Some(DaemonMsg::Hello { .. })),
+            "handshake reply"
+        );
 
         // Create the session and learn its (daemon-minted) uid from the Created reply.
         client
@@ -1006,28 +1054,46 @@ mod tests {
                 ..Default::default()
             }))
             .unwrap();
-        let created = recv_until(&client, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Created { .. }))
-            .expect("Created reply");
-        let DaemonMsg::Created { uid } = created else { unreachable!() };
+        let created = recv_until(&client, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Created { .. })
+        })
+        .expect("Created reply");
+        let DaemonMsg::Created { uid } = created else {
+            unreachable!()
+        };
 
         // Attach so we receive this session's streamed events (Data / Exit).
-        client.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
+        client
+            .send(&ClientMsg::Attach { uid: uid.clone() })
+            .unwrap();
         // The Attach reply is the (initially empty) replay.
-        let replay = recv_until(&client, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Replay { .. }))
-            .expect("Replay reply");
+        let replay = recv_until(&client, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Replay { .. })
+        })
+        .expect("Replay reply");
         assert!(matches!(replay, DaemonMsg::Replay { .. }));
 
         // Assert a Data event containing "hi".
-        let data = recv_until(&client, Duration::from_secs(10), |m| {
-            matches!(m, DaemonMsg::Event(SessionEvent::Data { data, .. }) if data.contains("hi"))
-        });
-        assert!(data.is_some(), "expected a Data event containing 'hi', timed out");
+        let data = recv_until(
+            &client,
+            Duration::from_secs(10),
+            |m| matches!(m, DaemonMsg::Event(SessionEvent::Data { data, .. }) if data.contains("hi")),
+        );
+        assert!(
+            data.is_some(),
+            "expected a Data event containing 'hi', timed out"
+        );
 
         // Assert an Exit{code:0}.
-        let exit = recv_until(&client, Duration::from_secs(10), |m| {
-            matches!(m, DaemonMsg::Event(SessionEvent::Exit { code, .. }) if *code == 0)
-        });
-        assert!(exit.is_some(), "expected an Exit{{code:0}} event, timed out");
+        let exit = recv_until(
+            &client,
+            Duration::from_secs(10),
+            |m| matches!(m, DaemonMsg::Event(SessionEvent::Exit { code, .. }) if *code == 0),
+        );
+        assert!(
+            exit.is_some(),
+            "expected an Exit{{code:0}} event, timed out"
+        );
 
         // A SECOND client attaches and Attach returns the replay for the uid (the
         // protocol round-trip a re-attaching GUI uses to seed a fresh grid). This command
@@ -1039,13 +1105,22 @@ mod tests {
         let client2 = DaemonClient::connect_path(&socket).expect("second client connects");
         // ListSessions over the second client confirms multiple clients can query.
         client2.send(&ClientMsg::ListSessions).unwrap();
-        let _ = recv_until(&client2, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Sessions(_)));
-
-        client2.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
-        let replay2 = recv_until(&client2, Duration::from_secs(2), |m| {
-            matches!(m, DaemonMsg::Replay { uid: u, .. } if *u == uid)
+        let _ = recv_until(&client2, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Sessions(_))
         });
-        assert!(matches!(replay2, Some(DaemonMsg::Replay { .. })), "second client gets a Replay for the uid");
+
+        client2
+            .send(&ClientMsg::Attach { uid: uid.clone() })
+            .unwrap();
+        let replay2 = recv_until(
+            &client2,
+            Duration::from_secs(2),
+            |m| matches!(m, DaemonMsg::Replay { uid: u, .. } if *u == uid),
+        );
+        assert!(
+            matches!(replay2, Some(DaemonMsg::Replay { .. })),
+            "second client gets a Replay for the uid"
+        );
     }
 
     // The "replay seeds a re-attach" payoff on a SURVIVING session: a second client that
@@ -1064,15 +1139,27 @@ mod tests {
             ..Default::default()
         }))
         .unwrap();
-        let created = recv_until(&a, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Created { .. }))
-            .expect("Created");
-        let DaemonMsg::Created { uid } = created else { unreachable!() };
+        let created = recv_until(&a, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Created { .. })
+        })
+        .expect("Created");
+        let DaemonMsg::Created { uid } = created else {
+            unreachable!()
+        };
 
         // Attach A, drive a marker, and wait until A has seen it stream — guaranteeing the
         // daemon's replay buffer for this still-alive session now holds the marker.
         a.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
-        assert!(recv_until(&a, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Replay { .. })).is_some());
-        a.send(&ClientMsg::Write { uid: uid.clone(), data: "echo REPLAY_MARKER\n".into() }).unwrap();
+        assert!(recv_until(&a, Duration::from_secs(2), |m| matches!(
+            m,
+            DaemonMsg::Replay { .. }
+        ))
+        .is_some());
+        a.send(&ClientMsg::Write {
+            uid: uid.clone(),
+            data: "echo REPLAY_MARKER\n".into(),
+        })
+        .unwrap();
         assert!(
             recv_until(&a, Duration::from_secs(10), |m| {
                 matches!(m, DaemonMsg::Event(SessionEvent::Data { data, .. }) if data.contains("REPLAY_MARKER"))
@@ -1085,8 +1172,10 @@ mod tests {
         // the marker (the daemon seeds the re-attach from the retained replay buffer).
         let b = DaemonClient::connect_path(&socket).expect("client B connects");
         b.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
-        let replay = recv_until(&b, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Replay { .. }))
-            .expect("B gets a Replay");
+        let replay = recv_until(&b, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Replay { .. })
+        })
+        .expect("B gets a Replay");
         if let DaemonMsg::Replay { data, .. } = replay {
             assert!(
                 data.contains("REPLAY_MARKER"),
@@ -1113,21 +1202,37 @@ mod tests {
             ..Default::default()
         }))
         .unwrap();
-        let created = recv_until(&a, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Created { .. }))
-            .expect("Created");
-        let DaemonMsg::Created { uid } = created else { unreachable!() };
+        let created = recv_until(&a, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Created { .. })
+        })
+        .expect("Created");
+        let DaemonMsg::Created { uid } = created else {
+            unreachable!()
+        };
 
         let b = DaemonClient::connect_path(&socket).expect("client B connects");
 
         // Both attach to the same uid.
         a.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
         b.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
-        assert!(recv_until(&a, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Replay { .. })).is_some());
-        assert!(recv_until(&b, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Replay { .. })).is_some());
+        assert!(recv_until(&a, Duration::from_secs(2), |m| matches!(
+            m,
+            DaemonMsg::Replay { .. }
+        ))
+        .is_some());
+        assert!(recv_until(&b, Duration::from_secs(2), |m| matches!(
+            m,
+            DaemonMsg::Replay { .. }
+        ))
+        .is_some());
 
         // Write a marker through one client; the shell echoes it. Both attached clients
         // should see it stream as a Data event.
-        a.send(&ClientMsg::Write { uid: uid.clone(), data: "echo MUX_MARKER\n".into() }).unwrap();
+        a.send(&ClientMsg::Write {
+            uid: uid.clone(),
+            data: "echo MUX_MARKER\n".into(),
+        })
+        .unwrap();
 
         let saw = |c: &DaemonClient| {
             recv_until(c, Duration::from_secs(10), |m| {
@@ -1157,8 +1262,13 @@ mod tests {
         ));
 
         c.send(&ClientMsg::ListSessions).unwrap();
-        let sessions = recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Sessions(_)));
-        assert!(matches!(sessions, Some(DaemonMsg::Sessions(v)) if v.is_empty()), "no sessions yet");
+        let sessions = recv_until(&c, Duration::from_secs(2), |m| {
+            matches!(m, DaemonMsg::Sessions(_))
+        });
+        assert!(
+            matches!(sessions, Some(DaemonMsg::Sessions(v)) if v.is_empty()),
+            "no sessions yet"
+        );
     }
 
     #[test]
@@ -1197,11 +1307,14 @@ mod tests {
         let socket = temp_socket("idle-exit");
         // A 150 ms grace; the monitor polls every IDLE_POLL_MS(=100). Connect briefly so the
         // counter goes 1→0 (exercises the reset-then-arm path), then disconnect and wait.
-        let daemon = spawn_in_process_with_idle(&socket, Duration::from_millis(150)).expect("binds");
+        let daemon =
+            spawn_in_process_with_idle(&socket, Duration::from_millis(150)).expect("binds");
         {
             let c = DaemonClient::connect_path(&socket).expect("connect");
             c.send(&ClientMsg::Ping).unwrap();
-            assert!(recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Pong)).is_some());
+            assert!(
+                recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Pong)).is_some()
+            );
             // Drop the client → connection count returns to 0; idle countdown can arm.
         }
         assert!(
@@ -1219,13 +1332,17 @@ mod tests {
     #[test]
     fn idle_exit_is_held_off_by_a_connected_client() {
         let socket = temp_socket("idle-client-held");
-        let daemon = spawn_in_process_with_idle(&socket, Duration::from_millis(100)).expect("binds");
+        let daemon =
+            spawn_in_process_with_idle(&socket, Duration::from_millis(100)).expect("binds");
         let c = DaemonClient::connect_path(&socket).expect("connect");
         c.send(&ClientMsg::Ping).unwrap();
         assert!(recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Pong)).is_some());
         // Hold the connection open well past many grace windows — must NOT shut down.
         std::thread::sleep(Duration::from_millis(600));
-        assert!(!daemon.is_shutting_down(), "a connected client must keep the daemon alive");
+        assert!(
+            !daemon.is_shutting_down(),
+            "a connected client must keep the daemon alive"
+        );
         drop(c);
     }
 
@@ -1234,7 +1351,8 @@ mod tests {
     #[test]
     fn idle_exit_is_held_off_by_a_live_session() {
         let socket = temp_socket("idle-session-held");
-        let daemon = spawn_in_process_with_idle(&socket, Duration::from_millis(100)).expect("binds");
+        let daemon =
+            spawn_in_process_with_idle(&socket, Duration::from_millis(100)).expect("binds");
 
         // Create a long-lived interactive shell, then DROP the client so 0 clients remain —
         // the live session alone must keep the daemon alive.
@@ -1246,13 +1364,25 @@ mod tests {
                 ..Default::default()
             }))
             .unwrap();
-            let created = recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Created { .. }))
-                .expect("Created");
-            let DaemonMsg::Created { uid } = created else { unreachable!() };
+            let created = recv_until(&c, Duration::from_secs(2), |m| {
+                matches!(m, DaemonMsg::Created { .. })
+            })
+            .expect("Created");
+            let DaemonMsg::Created { uid } = created else {
+                unreachable!()
+            };
             // Confirm it's registered before dropping the client (drive a marker echo).
             c.send(&ClientMsg::Attach { uid: uid.clone() }).unwrap();
-            assert!(recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Replay { .. })).is_some());
-            c.send(&ClientMsg::Write { uid: uid.clone(), data: "echo HELD\n".into() }).unwrap();
+            assert!(recv_until(&c, Duration::from_secs(2), |m| matches!(
+                m,
+                DaemonMsg::Replay { .. }
+            ))
+            .is_some());
+            c.send(&ClientMsg::Write {
+                uid: uid.clone(),
+                data: "echo HELD\n".into(),
+            })
+            .unwrap();
             assert!(
                 recv_until(&c, Duration::from_secs(10), |m| {
                     matches!(m, DaemonMsg::Event(SessionEvent::Data { data, .. }) if data.contains("HELD"))
@@ -1264,7 +1394,10 @@ mod tests {
         };
         // 0 clients now, but the session lives → must NOT shut down across grace windows.
         std::thread::sleep(Duration::from_millis(600));
-        assert!(!daemon.is_shutting_down(), "a live session must keep the daemon alive with no clients");
+        assert!(
+            !daemon.is_shutting_down(),
+            "a live session must keep the daemon alive with no clients"
+        );
 
         // Kill the session → now fully idle → it should exit within the grace.
         let c = DaemonClient::connect_path(&socket).expect("reconnect");
@@ -1292,9 +1425,16 @@ mod tests {
             ..Default::default()
         }))
         .unwrap();
-        assert!(recv_until(&c, Duration::from_secs(2), |m| matches!(m, DaemonMsg::Created { .. })).is_some());
+        assert!(recv_until(&c, Duration::from_secs(2), |m| matches!(
+            m,
+            DaemonMsg::Created { .. }
+        ))
+        .is_some());
 
-        assert!(!daemon.is_shutting_down(), "not shutting down before the message");
+        assert!(
+            !daemon.is_shutting_down(),
+            "not shutting down before the message"
+        );
         c.send(&ClientMsg::Shutdown).unwrap();
 
         assert!(
@@ -1322,10 +1462,14 @@ mod tests {
             let stale = std::os::unix::net::UnixListener::bind(&socket).expect("stale bind");
             drop(stale);
         }
-        assert!(socket.exists(), "a stale socket file is present before startup");
+        assert!(
+            socket.exists(),
+            "a stale socket file is present before startup"
+        );
 
         // A fresh daemon on the SAME path must reclaim it and serve a connection.
-        let _daemon = spawn_in_process(&socket).expect("a stale socket must be reclaimed, not block bind");
+        let _daemon =
+            spawn_in_process(&socket).expect("a stale socket must be reclaimed, not block bind");
         let c = DaemonClient::connect_path(&socket).expect("connect to the reclaimed daemon");
         c.send(&ClientMsg::Ping).unwrap();
         assert!(
@@ -1343,8 +1487,15 @@ mod tests {
         let _daemon = spawn_in_process(&socket).expect("binds");
         // The in-process harness binds directly; assert run()'s restrict step on the same path.
         restrict_socket_perms(&socket);
-        let mode = std::fs::metadata(&socket).expect("stat socket").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "the daemon socket must be owner-only, got {mode:o}");
+        let mode = std::fs::metadata(&socket)
+            .expect("stat socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the daemon socket must be owner-only, got {mode:o}"
+        );
     }
 
     // The idle-grace override parses (the test hook for a short grace). Tested through the
@@ -1353,8 +1504,14 @@ mod tests {
     #[test]
     fn idle_grace_honors_the_override() {
         assert_eq!(idle_grace_from(Some("250")), Duration::from_millis(250));
-        assert_eq!(idle_grace_from(None), Duration::from_millis(DEFAULT_IDLE_GRACE_MS));
+        assert_eq!(
+            idle_grace_from(None),
+            Duration::from_millis(DEFAULT_IDLE_GRACE_MS)
+        );
         // An unparseable value falls back to the default rather than erroring.
-        assert_eq!(idle_grace_from(Some("not-a-number")), Duration::from_millis(DEFAULT_IDLE_GRACE_MS));
+        assert_eq!(
+            idle_grace_from(Some("not-a-number")),
+            Duration::from_millis(DEFAULT_IDLE_GRACE_MS)
+        );
     }
 }

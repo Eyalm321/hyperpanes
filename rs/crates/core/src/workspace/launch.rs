@@ -111,7 +111,8 @@ mod tests {
     #[test]
     fn cli_workspace_takes_inline_but_never_last_session() {
         // `resolve_cli_workspace` is what the GUI uses: inline `-c` resolves…
-        let ws = resolve_cli_workspace(&argv(&["-c", "npm run dev"]), ".").expect("inline workspace");
+        let ws =
+            resolve_cli_workspace(&argv(&["-c", "npm run dev"]), ".").expect("inline workspace");
         assert_eq!(ws.panes.unwrap()[0].command.as_deref(), Some("npm run dev"));
         // …but a plain launch yields None even though a last-session file exists on disk (the GUI
         // must stay EmptyTab on a bare launch — that fallback belongs only to resolve_launch_workspace).

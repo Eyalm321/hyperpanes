@@ -95,7 +95,9 @@ impl AiBridge {
         std::thread::Builder::new()
             .name("ambient-ai".to_string())
             .spawn(move || {
-                let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
                 else {
                     return;
                 };

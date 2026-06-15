@@ -12,21 +12,13 @@ use serde::{Deserialize, Serialize};
 
 /// Control-server settings: whether the local control API is enabled, and whether it
 /// accepts input (send_input/send_keys) from clients.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` (DEFAULT_SETTINGS in control-server.ts): control API off, input disallowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlSettings {
     pub enabled: bool,
     pub allow_input: bool,
-}
-
-impl Default for ControlSettings {
-    fn default() -> Self {
-        // DEFAULT_SETTINGS in control-server.ts: control API off, input disallowed.
-        ControlSettings {
-            enabled: false,
-            allow_input: false,
-        }
-    }
 }
 
 /// Read the settings from the canonical `control-settings.json`.

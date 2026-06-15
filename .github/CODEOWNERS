@@ -1,0 +1,47 @@
+# CODEOWNERS — the hard human-review backstop for the unattended auto-merge pipeline.
+#
+# With "Require review from Code Owners" enabled in the branch ruleset (see
+# docs/auto-merge.md), any PR that touches a code-owned path below needs an actual
+# code owner's approval before it can merge. The fleet/automation bot is NOT a code
+# owner, so it physically cannot self-approve these — the dangerous ~5% of paths stop
+# for a human while everything else flows through the checks-only green path.
+#
+# Last match wins (GitHub CODEOWNERS semantics). Keep these globs in lockstep with any
+# risky-path pre-filter in the auto-merge automation; CODEOWNERS is the authoritative stop.
+
+# Default: no owner -> agent path, gated only by the `verify` checks (this is intended).
+
+# CI/CD, the gates themselves, secret usage, this very file. Includes the auto-merge
+# guardrail workflows (merge-guard, llm-review) — an agent must never weaken its own gates.
+/.github/                @Eyalm321
+
+# The LLM-judge gate script: a malicious edit here could rewrite the rubric / fail-open the
+# qualitative reviewer, so it is a hard human-review path even though it sits outside .github/.
+/scripts/llm-review.sh   @Eyalm321
+
+# GPU/GUI surface — heavy, hardware-dependent, not exercised by the per-PR test gate.
+/rs/crates/app/          @Eyalm321
+
+# Auth / token surface — minting and validating control-plane tokens. A bad change here can
+# hand out or accept forged credentials; never auto-merge it.
+/rs/crates/core/src/control/tokens.rs   @Eyalm321
+
+# The control server + its routing/scope/lock = the network-exposed control plane and its
+# authorization boundary. Risky enough to require a human.
+/rs/crates/core/src/control/server.rs   @Eyalm321
+/rs/crates/core/src/control/routes.rs   @Eyalm321
+/rs/crates/core/src/control/scope.rs    @Eyalm321
+
+# Session lifecycle: PTY spawn + the daemon transport run other processes with the user's
+# privileges. A subtle change is a privilege/RCE surface — human review required.
+/rs/crates/core/src/session/   @Eyalm321
+
+# Secret redaction for the AI/telemetry path. Weakening this can leak secrets off the box.
+/rs/crates/core/src/ai/redactor.rs   @Eyalm321
+
+# build.rs = arbitrary code execution at build time.
+**/build.rs              @Eyalm321
+
+# Dependency / supply-chain changes.
+**/Cargo.toml            @Eyalm321
+**/Cargo.lock            @Eyalm321

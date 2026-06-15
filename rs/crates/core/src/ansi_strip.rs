@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn removes_sgr_color_codes_keeps_text() {
-        assert_eq!(strip_ansi(&format!("{ESC}[31mred{ESC}[0m text")), "red text");
+        assert_eq!(
+            strip_ansi(&format!("{ESC}[31mred{ESC}[0m text")),
+            "red text"
+        );
         assert_eq!(strip_ansi(&format!("{ESC}[1;32mok{ESC}[39m")), "ok");
     }
 

@@ -443,7 +443,11 @@ mod tests {
 
     #[test]
     fn resolve_cwds_keeps_absolute_and_resolves_relative() {
-        let abs = if cfg!(windows) { "C:\\abs\\dir" } else { "/abs/dir" };
+        let abs = if cfg!(windows) {
+            "C:\\abs\\dir"
+        } else {
+            "/abs/dir"
+        };
         let base = if cfg!(windows) { "C:\\base" } else { "/base" };
         let ws = WorkspaceFile {
             panes: Some(vec![
@@ -489,7 +493,10 @@ mod tests {
         };
         assert!(write_workspace(&path, &ws));
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("\"format\": \"hyperpanes\""), "versioned form: {raw}");
+        assert!(
+            raw.contains("\"format\": \"hyperpanes\""),
+            "versioned form: {raw}"
+        );
         assert!(raw.contains("\"version\": 1"), "versioned form: {raw}");
         assert_eq!(read_workspace(&path), Some(ws));
         let _ = std::fs::remove_file(&path);
@@ -506,8 +513,8 @@ mod tests {
 
     #[test]
     fn rejects_wrong_format_with_a_clear_error() {
-        let err = parse_workspace_str(r#"{"format":"notpanes","version":1,"workspace":{}}"#)
-            .unwrap_err();
+        let err =
+            parse_workspace_str(r#"{"format":"notpanes","version":1,"workspace":{}}"#).unwrap_err();
         assert!(
             err.contains("not a hyperpanes workspace") && err.contains("notpanes"),
             "error names the bad format: {err}"
@@ -526,13 +533,19 @@ mod tests {
             "error explains the version gap: {err}"
         );
         let err = parse_workspace_str(r#"{"format":"hyperpanes","workspace":{}}"#).unwrap_err();
-        assert!(err.contains("version"), "error mentions the missing version: {err}");
+        assert!(
+            err.contains("version"),
+            "error mentions the missing version: {err}"
+        );
     }
 
     #[test]
     fn rejects_envelope_without_workspace_payload() {
         let err = parse_workspace_str(r#"{"format":"hyperpanes","version":1}"#).unwrap_err();
-        assert!(err.contains("workspace"), "error names the missing payload: {err}");
+        assert!(
+            err.contains("workspace"),
+            "error names the missing payload: {err}"
+        );
     }
 
     #[test]

@@ -68,10 +68,7 @@ impl PaneRenderer for SoftwareRenderer {
         if w != self.w || h != self.h || self.bufs.is_empty() {
             self.w = w;
             self.h = h;
-            self.bufs = vec![
-                SharedPixelBuffer::new(w, h),
-                SharedPixelBuffer::new(w, h),
-            ];
+            self.bufs = vec![SharedPixelBuffer::new(w, h), SharedPixelBuffer::new(w, h)];
         }
         // Double-buffer: write into the buffer Slint is not currently displaying.
         self.idx ^= 1;
@@ -594,7 +591,11 @@ impl GpuRenderer {
                 }
                 let x0 = (col as u32 * cw) as f32;
                 let y0 = (row as u32 * ch) as f32;
-                let cell_w = if cell.wide { (cw * 2) as f32 } else { cw as f32 };
+                let cell_w = if cell.wide {
+                    (cw * 2) as f32
+                } else {
+                    cw as f32
+                };
 
                 if cell.bg[3] > 0 {
                     bgs.push(BgInstance {

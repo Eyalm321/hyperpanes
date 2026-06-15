@@ -4,8 +4,8 @@
 //! into an atlas; the software path blends them directly).
 
 use std::collections::HashMap;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::scale::image::Content;
+use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform};
 use swash::{FontRef, GlyphId};
 
@@ -84,17 +84,9 @@ impl Font {
     fn render_glyph(&mut self, key: GlyphKey) -> CachedGlyph {
         // Disjoint field borrows: `data` (immut) + `scale` (mut).
         let font = FontRef::from_index(&self.data, 0).unwrap();
-        let mut scaler = self
-            .scale
-            .builder(font)
-            .size(self.px)
-            .hint(true)
-            .build();
+        let mut scaler = self.scale.builder(font).size(self.px).hint(true).build();
 
-        let mut render = Render::new(&[
-            Source::Outline,
-            Source::Bitmap(StrikeWith::BestFit),
-        ]);
+        let mut render = Render::new(&[Source::Outline, Source::Bitmap(StrikeWith::BestFit)]);
         render.format(Format::Alpha);
         if key.italic {
             // ~12-degree synthetic slant.
@@ -114,11 +106,7 @@ impl Font {
                 let mask = match img.content {
                     Content::Mask => img.data,
                     // Defensive: collapse any color result to luminance-ish coverage.
-                    _ => img
-                        .data
-                        .chunks_exact(4)
-                        .map(|p| p[3])
-                        .collect::<Vec<u8>>(),
+                    _ => img.data.chunks_exact(4).map(|p| p[3]).collect::<Vec<u8>>(),
                 };
                 CachedGlyph {
                     mask,
