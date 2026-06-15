@@ -29,6 +29,10 @@ pub struct DispatchResult {
     pub status: u16,
     pub body: Value,
     pub notify_state: bool,
+    /// The command touched the project registry (`projects.json`) off the UI thread — a
+    /// project-opening `newPane` bumps a project's recency. The route layer maps this to
+    /// `Shared::mark_projects_dirty` so the GUI sidebar rail refreshes live.
+    pub projects_dirty: bool,
 }
 
 impl DispatchResult {
@@ -37,6 +41,7 @@ impl DispatchResult {
             status,
             body: json!({ "error": message }),
             notify_state: false,
+            projects_dirty: false,
         }
     }
     fn ok(result: Option<Value>, notify_state: bool) -> Self {
@@ -48,6 +53,7 @@ impl DispatchResult {
             status: 200,
             body,
             notify_state,
+            projects_dirty: false,
         }
     }
 }
@@ -84,7 +90,19 @@ pub fn handle_command(
     let window_id = window_id.unwrap();
 
     match exec(ty, cmd, model, sessions, control_file, window_id) {
-        Ok((result, notify)) => DispatchResult::ok(result, notify),
+        Ok((result, notify)) => {
+            let mut r = DispatchResult::ok(result, notify);
+            // A successful newPane that named a project bumped its recency in the registry.
+            if ty == "newPane"
+                && cmd
+                    .pointer("/pane/project")
+                    .and_then(Value::as_str)
+                    .is_some()
+            {
+                r.projects_dirty = true;
+            }
+            r
+        }
         Err(message) => DispatchResult::err(500, &message),
     }
 }
@@ -101,7 +119,12 @@ fn exec(
 ) -> Result<(Option<Value>, bool), String> {
     match ty {
         "newPane" => {
-            let spec = cmd.get("pane").cloned().unwrap_or_else(|| json!({}));
+            let mut spec = cmd.get("pane").cloned().unwrap_or_else(|| json!({}));
+            // `pane.project` (a project id or name) opens the pane in that remembered project:
+            // default its cwd + frame color from the registry (explicit cwd/color still win) and
+            // bump the project's recency, mirroring the GUI sidebar's "open project". An unknown
+            // handle fails the command rather than silently spawning a homeless pane.
+            resolve_project_into_spec(&mut spec)?;
             let pane = spawn_pane(sessions, control_file, &spec)?;
             let pane_id = pane.id.clone();
             if !model.insert_pane(window_id, pane) {
@@ -383,6 +406,31 @@ fn spawn_pane(
     })
 }
 
+/// If a `newPane` spec names a `project` (a project id or name), resolve it from the registry
+/// and fill the pane's `cwd` + frame `color` from the project — without clobbering values the
+/// caller set explicitly — then bump the project's recency so opening via the control plane
+/// reorders the sidebar rail exactly like the GUI's "open project". An unknown handle is an
+/// error (the `newPane` fails rather than spawning a homeless pane). A spec with no `project`
+/// field is left untouched.
+fn resolve_project_into_spec(spec: &mut Value) -> Result<(), String> {
+    let handle = match spec.get("project").and_then(Value::as_str) {
+        Some(h) => h.to_string(),
+        None => return Ok(()),
+    };
+    let project = crate::persistence::projects::resolve(&handle)
+        .ok_or_else(|| format!("unknown project: {handle}"))?;
+    if let Value::Object(map) = spec {
+        if !map.get("cwd").map(Value::is_string).unwrap_or(false) {
+            map.insert("cwd".into(), Value::String(project.path.clone()));
+        }
+        if !map.get("color").map(Value::is_string).unwrap_or(false) {
+            map.insert("color".into(), Value::String(project.color.clone()));
+        }
+    }
+    crate::persistence::projects::upsert_project_by_root(&project.path);
+    Ok(())
+}
+
 /// Whether a scoped token may run `cmd` against its target (pane > tab > window). Mirrors TS
 /// `commandScopeError` exactly, including the active-tab exception for window-targeted spawns.
 pub fn command_scope_error(
@@ -503,6 +551,32 @@ mod tests {
         let r2 = handle_command(&mut m, &s, None, None, &del);
         assert!(r2.body["result"].get("task").is_none());
         assert_eq!(r2.body["result"]["role"], json!("worker"));
+    }
+
+    #[tokio::test]
+    async fn new_pane_with_unknown_project_is_500_and_spawns_nothing() {
+        let mut m = model_one_window();
+        let s = sessions();
+        // A handle that matches no remembered project fails the command (no homeless pane).
+        // Uses a uuid so it can never collide with a real project on the test machine — and
+        // because resolution fails first, this never writes to the registry.
+        let bogus = format!("no-such-project-{}", uuid::Uuid::new_v4());
+        let cmd = json!({ "type": "newPane", "windowId": 1, "pane": { "project": bogus } });
+        let r = handle_command(&mut m, &s, None, None, &cmd);
+        assert_eq!(r.status, 500);
+        assert_eq!(r.body["error"], json!(format!("unknown project: {bogus}")));
+        assert!(!r.projects_dirty);
+        // Nothing landed in the model.
+        assert!(m.panes().is_empty());
+    }
+
+    #[test]
+    fn resolve_project_into_spec_is_noop_without_a_project_field() {
+        // No `project` key → spec untouched, no registry read/write.
+        let mut spec = json!({ "label": "x", "command": "echo hi" });
+        let before = spec.clone();
+        assert!(resolve_project_into_spec(&mut spec).is_ok());
+        assert_eq!(spec, before);
     }
 
     #[test]

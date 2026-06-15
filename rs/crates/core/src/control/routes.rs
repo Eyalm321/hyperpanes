@@ -24,7 +24,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -44,6 +44,7 @@ use crate::control::tokens::TokenInfo;
 use crate::control::work::{
     Counts, EnqueueOpts, LeaseOutcome, ListFilter, NackOpts, QueueSummary, Task, TaskState,
 };
+use crate::persistence::projects;
 
 /// Build the full router with the shared state baked in.
 pub fn router(shared: Arc<Shared>) -> Router {
@@ -52,6 +53,11 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/state", get(state))
         .route("/tokens", post(tokens))
         .route("/command", post(command))
+        .route("/projects", get(projects_list).post(projects_add))
+        .route(
+            "/projects/{id}",
+            patch(projects_patch).delete(projects_delete),
+        )
         .route("/panes/{id}/output", get(output))
         .route("/panes/{id}/input", post(input))
         .route(
@@ -1105,7 +1111,98 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
     if result.notify_state {
         notify_state(&shared);
     }
+    // A project-opening newPane bumped the registry's recency off-thread → tell the GUI host.
+    if result.projects_dirty {
+        shared.mark_projects_dirty();
+    }
     jstatus(result.status, result.body)
+}
+
+// ---- /projects ----------------------------------------------------------------------------
+// The project registry (`projects.json`): the directories the app remembers, shared by the
+// GUI sidebar rail. These are global, not pane-scoped — any authorized token may use them. The
+// `core::persistence::projects` layer owns the file; a write marks the GUI host's dirty flag so
+// the rail refreshes live (`ControlHost::sync`).
+
+async fn projects_list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+    if let Err(e) = authorize(&shared, &headers) {
+        return e;
+    }
+    ok_json(json!({ "projects": projects::list_projects() }))
+}
+
+async fn projects_add(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = authorize(&shared, &headers) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let dir = match b.get("dir").and_then(Value::as_str) {
+        Some(d) if !d.trim().is_empty() => d.trim(),
+        _ => return jstatus(400, json!({ "error": "expected { dir: string }" })),
+    };
+    // Mirror the GUI Add-Project dialog: the path must exist and be a directory (a git repo is
+    // NOT required — `add_project_explicit` happily tracks any folder).
+    if !std::path::Path::new(dir).is_dir() {
+        return jstatus(
+            400,
+            json!({ "error": "path doesn't exist or isn't a directory", "dir": dir }),
+        );
+    }
+    let (project, added) = projects::add_project_explicit(dir);
+    shared.mark_projects_dirty();
+    ok_json(json!({ "ok": true, "added": added, "project": project }))
+}
+
+async fn projects_patch(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = authorize(&shared, &headers) {
+        return e;
+    }
+    let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let name = b
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let color = b
+        .get("color")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if name.is_none() && color.is_none() {
+        return jstatus(
+            400,
+            json!({ "error": "expected { name?: string, color?: string }" }),
+        );
+    }
+    if let Some(name) = name {
+        projects::rename_project(&id, name);
+    }
+    if let Some(color) = color {
+        projects::set_project_color(&id, color);
+    }
+    shared.mark_projects_dirty();
+    ok_json(json!({ "ok": true }))
+}
+
+async fn projects_delete(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(e) = authorize(&shared, &headers) {
+        return e;
+    }
+    projects::remove_project(&id);
+    shared.mark_projects_dirty();
+    ok_json(json!({ "ok": true }))
 }
 
 // ---- /events (WebSocket) ------------------------------------------------------------------
@@ -1567,6 +1664,99 @@ mod golden {
             .await
             .unwrap()
             .contains("outside the minting token's scope"));
+    }
+
+    // ---- /projects -----------------------------------------------------------------------
+    // Only the side-effect-FREE paths are golden-tested here: the persistence layer writes the
+    // real `projects.json` (no store injection), so exercising add/patch/delete over HTTP would
+    // clobber the dev machine's actual registry and race parallel tests. The write paths are
+    // covered by `persistence::projects` unit tests (`add_project_explicit_in`, …); these assert
+    // auth + validation + the read-only GET contract the MCP depends on.
+
+    #[tokio::test]
+    async fn projects_list_is_authorized_and_returns_an_array() {
+        let s = boot(true).await;
+        let r = client()
+            .get(format!("{}/projects", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert!(
+            body["projects"].is_array(),
+            "expected a projects array, got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_list_unauthorized_is_401() {
+        let s = boot(true).await;
+        let r = client()
+            .get(format!("{}/projects", s.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+        assert_eq!(r.text().await.unwrap(), r#"{"error":"unauthorized"}"#);
+    }
+
+    #[tokio::test]
+    async fn projects_add_without_dir_is_400() {
+        let s = boot(true).await;
+        let r = client()
+            .post(format!("{}/projects", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 400);
+        assert_eq!(
+            r.text().await.unwrap(),
+            r#"{"error":"expected { dir: string }"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_add_nonexistent_dir_is_400() {
+        let s = boot(true).await;
+        // A path guaranteed not to exist → 400 before any registry write.
+        let dir = format!("/nonexistent-hp-test-{}/repo", std::process::id());
+        let r = client()
+            .post(format!("{}/projects", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"dir":"{dir}"}}"#))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 400);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(
+            body["error"],
+            serde_json::json!("path doesn't exist or isn't a directory")
+        );
+    }
+
+    #[tokio::test]
+    async fn projects_patch_without_fields_is_400() {
+        let s = boot(true).await;
+        let r = client()
+            .patch(format!("{}/projects/whatever", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 400);
+        assert_eq!(
+            r.text().await.unwrap(),
+            r#"{"error":"expected { name?: string, color?: string }"}"#
+        );
     }
 
     #[tokio::test]
