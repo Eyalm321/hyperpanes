@@ -1,0 +1,21 @@
+{
+  "id": "tsk_01J9X8Z2ABCDEF",
+  "queue": "build",
+  "seq": 42,
+  "kind": "ci_failure",
+  "title": "Fix flaky test session_expiry",
+  "state": "claimed",
+  "payload": "{\"prompt\":\"fix it\",\"base\":\"main\"}",
+  "priority": 50,
+  "attempts": 1,
+  "maxAttempts": 5,
+  "availableAt": 1700000000000,
+  "claimedBy": "wkr-A",
+  "fencingToken": 7,
+  "visibilityDeadline": 1700000030000,
+  "result": "artifact://built/ok",
+  "error": "transient: retried once",
+  "dedupeKey": "ci:owner/repo#920",
+  "createdAt": 1700000000000,
+  "updatedAt": 1700000005000
+}
