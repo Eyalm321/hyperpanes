@@ -36,8 +36,8 @@ the GitHub API or `gh`. Repo: `Eyalm321/hyperpanes`, default branch **`main`**.
 |---|---|---|
 | Verify gate | `.github/workflows/verify.yml` | Umbrella required check named **`verify`** = test (3 OS × 2 workspaces) + blocking fmt/clippy + conditional GUI build |
 | Merge guard | `.github/workflows/merge-guard.yml` | Required check named **`merge-guard`** = kill switch + agent label + protected-path block + diff-size cap + hourly throttle (git-log based, no API) |
-| LLM review | `.github/workflows/llm-review.yml` | Required check named **`llm-review`** = qualitative LLM judge, fail-closed; calls `scripts/llm-review.sh` |
-| LLM judge script | `scripts/llm-review.sh` | The review step; reads diff+meta, writes `verdict.json` (`{verdict,risk,summary}`). Contains a clear `TODO(real-model-call)` for the Anthropic call; plumbing + pass/fail contract are real |
+| LLM review | `.github/workflows/llm-review.yml` | Required check named **`llm-review`** = qualitative LLM judge, fail-closed; calls `scripts/llm-review.sh`. **Runs on a self-hosted runner via Claude Code (subscription), not the API** |
+| LLM judge script | `scripts/llm-review.sh` | The review step; reads diff+meta, writes `verdict.json` (`{verdict,risk,summary}`). Runs the judge through **Claude Code (`claude -p`, subscription-billed)** — no `ANTHROPIC_API_KEY`; plumbing + pass/fail contract are real |
 | Code owners | `.github/CODEOWNERS` | Forces human review on risky paths (CI/CD + the gates themselves, GUI crate, `build.rs`, deps, **auth/token + control server + session/PTY + secret redactor + the LLM-judge script**) |
 | Legacy gate | `.github/workflows/test.yml` | Unchanged; report-only clippy/fmt for everyday human pushes |
 
@@ -212,9 +212,11 @@ PR cannot disable its own guardrails.
 In **Settings → Secrets and variables → Actions**:
 
 - **Variables**: `AUTOMERGE_ENABLED` (set `false` until rollout step §7.5, then `true`),
-  optionally `AUTOMERGE_PER_HOUR`, `AUTOMERGE_MAX_DIFF_LINES`, `LLM_REVIEW_MODEL`.
-- **Secrets**: `ANTHROPIC_API_KEY` — consumed only by `llm-review` (and only in the base-repo
-  context, never exposed to PR head code).
+  optionally `AUTOMERGE_PER_HOUR`, `AUTOMERGE_MAX_DIFF_LINES`, `LLM_REVIEW_MODEL` (a Claude
+  Code alias: `opus`/`sonnet`/`haiku`; unset = the runner's default model).
+- **Secrets**: none required for the gate. `llm-review` uses the **self-hosted runner's Claude
+  Code subscription** (`claude` installed + logged in), not an `ANTHROPIC_API_KEY`. Register a
+  runner labelled `claude` (see §6 / §7).
 
 > Order matters: a *required* `merge-guard` with `AUTOMERGE_ENABLED` unset will block every
 > PR (kill switch fails closed). Either set the variable first, or add the required check only
@@ -240,20 +242,24 @@ Contract (real and enforced by the workflow):
 - The verdict is uploaded as a workflow artifact (`llm-review-verdict`) and echoed into the
   job summary, so every unattended merge has an auditable verdict trail.
 
-`scripts/llm-review.sh` ships with the gate **policy/rubric** real and a clearly marked
-`TODO(real-model-call)` where the Anthropic API call goes (a reference Python snippet is
-inline). Until that TODO is implemented the script emits a conservative **`block`** verdict,
-so the gate is wired and fail-closed out of the box — it cannot accidentally approve before
-the real judge exists. Implement the call (and `ANTHROPIC_API_KEY`) to enable approvals.
+`scripts/llm-review.sh` runs the judge through **Claude Code** (`claude -p`, headless),
+billed against your **Claude Code subscription** — there is no `ANTHROPIC_API_KEY` and no
+metered API call. It feeds the rubric + PR title/body + capped diff to `claude` on stdin and
+parses the returned `{verdict,risk,summary}`. It is **fail-closed**: a missing/unauthenticated
+`claude`, a timeout, or unparseable output each write a `block` verdict (exit 0) — it can never
+accidentally approve. **This is why `llm-review` must run on a self-hosted runner with Claude
+Code installed and logged in** — the workflow pins `runs-on: [self-hosted, claude]`; a cloud
+github-hosted runner has no Claude Code session and the gate fails closed.
 
 Notes:
 - It is a **status check, not a PR approval** — a failing judgment holds the merge without
   consuming the code-owner review slot (§4 of the original rationale).
 - It runs on `pull_request` / `merge_group` (base-repo context) and reads the diff as data,
-  never executing PR code, so a malicious PR can't rewrite the rubric or read the API key.
-- Model routing: default `vars.LLM_REVIEW_MODEL` (a sonnet-class id); escalate for
-  large/security-critical diffs, downgrade for trivial ones, inside the script. Model ids
-  move — verify against the current Anthropic model list before shipping.
+  never executing PR code, so a malicious PR can't rewrite the rubric or reach the runner's
+  Claude Code session.
+- Model routing: optional `vars.LLM_REVIEW_MODEL` is a Claude Code alias (`opus`/`sonnet`/
+  `haiku`); leave it unset to use the runner's default model, or set `opus` for the strongest
+  judgment.
 
 ---
 
@@ -264,15 +270,17 @@ Lowest-risk order to turn the guardrails on:
 1. **Land the workflows** (`merge-guard.yml`, `llm-review.yml`, `scripts/llm-review.sh`) +
    the expanded `CODEOWNERS`. Don't require the new checks yet.
 2. **Set repo variables** (§5): `AUTOMERGE_ENABLED=false` first, plus
-   `AUTOMERGE_PER_HOUR` / `AUTOMERGE_MAX_DIFF_LINES` if overriding defaults; add the
-   `ANTHROPIC_API_KEY` secret.
+   `AUTOMERGE_PER_HOUR` / `AUTOMERGE_MAX_DIFF_LINES` if overriding defaults. Register a
+   **self-hosted runner labelled `claude`** with Claude Code installed and logged in — no
+   API-key secret is needed.
 3. **Validate `merge-guard` on a throwaway agent-labelled PR**: with `AUTOMERGE_ENABLED=false`
    it fails on the kill switch; flip to `true` and confirm a small, non-risky, `agent`-labelled
    PR passes, an unlabelled one fails, one touching `rs/crates/core/src/control/tokens.rs`
    fails the protected-path guardrail, and a 500-line diff fails the size cap.
-4. **Validate `llm-review`**: until the `TODO(real-model-call)` is implemented it emits
-   `block` (fail-closed) — confirm the check fails and `verdict.json` is uploaded. Implement
-   the model call, then tune the rubric until its block rate on known-good human PRs is ~0.
+4. **Validate `llm-review`**: on a runner WITHOUT Claude Code it emits `block` (fail-closed) —
+   confirm the check fails and `verdict.json` is uploaded. On the `claude`-labelled runner with
+   Claude Code logged in, confirm it produces a real verdict, then tune the rubric until its
+   block rate on known-good human PRs is ~0.
 5. **Require all three checks** in the ruleset (§2): `verify`, `merge-guard`, `llm-review`.
    Set `AUTOMERGE_ENABLED=true` and start with `AUTOMERGE_PER_HOUR=3`; let a handful of agent
    PRs self-merge and watch trunk. Raise the budget as confidence grows.

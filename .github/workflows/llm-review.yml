@@ -18,10 +18,15 @@ name: llm-review
 #   * FAIL-CLOSED: a missing/unparseable verdict.json, or any non-"approve" verdict, fails
 #     the check. An API error / timeout must never fail-open a gate.
 #
+# Billing: the judge runs through Claude Code (`claude -p`), billed against the Claude Code
+# SUBSCRIPTION — there is no ANTHROPIC_API_KEY and no metered API call. This must run on a
+# SELF-HOSTED runner that has Claude Code installed AND logged in; a cloud github-hosted
+# runner has no Claude Code session, so the gate fails closed (blocks the merge).
+#
 # Self-defense: runs on `pull_request` / `merge_group` (base-repo context) and reads the diff
 # as DATA only — it never checks out or executes PR head code, so a malicious PR cannot
-# rewrite the rubric or exfiltrate the API key. Keep scripts/llm-review.sh CODEOWNER-protected
-# (it lives under a path owned in .github/CODEOWNERS-adjacent review — see that file).
+# rewrite the rubric or reach the runner's Claude Code session. Keep scripts/llm-review.sh
+# CODEOWNER-protected (it lives under a path owned in .github/CODEOWNERS — see that file).
 
 on:
   pull_request:
@@ -38,7 +43,10 @@ permissions:
 jobs:
   llm-review:
     name: llm-review
-    runs-on: ubuntu-latest
+    # SELF-HOSTED: the judge runs Claude Code (`claude -p`, subscription-billed), so it needs
+    # a runner with Claude Code installed AND logged in. Label that runner `claude`. A cloud
+    # github-hosted runner has no Claude Code session → the gate fails closed.
+    runs-on: [self-hosted, claude]
     defaults:
       run:
         shell: bash
@@ -80,9 +88,8 @@ jobs:
       - name: Run LLM judge
         id: judge
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Model routing knobs (overridable via repo variables). Defaults are a cost/quality
-          # sweet spot for a per-PR gate; raise for risky/large diffs in the script.
+          # No ANTHROPIC_API_KEY — the judge uses the runner's Claude Code subscription.
+          # Optional model alias (opus|sonnet|haiku) via repo variable; unset = runner default.
           LLM_REVIEW_MODEL: ${{ vars.LLM_REVIEW_MODEL }}
           LLM_REVIEW_DIFF: diff.patch
           LLM_REVIEW_META: meta.json
