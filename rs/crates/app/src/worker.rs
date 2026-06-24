@@ -20,7 +20,7 @@ use std::error::Error;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -31,6 +31,11 @@ pub struct WorkerArgs {
     pub worker: String,
     /// Number of concurrent competing workers to run in this process (#11).
     pub count: usize,
+    /// Keep polling this many seconds after the queue empties, to reclaim backoff retries
+    /// within one run (#13); 0 = exit on the first empty claim.
+    pub retry_window_secs: u64,
+    /// Override the nack backoff (ms) on failure; None = the queue's default (#13).
+    pub nack_delay_ms: Option<i64>,
     /// Everything after `--`: program + args, executed directly (no shell).
     pub child: Vec<String>,
 }
@@ -55,6 +60,11 @@ struct Task {
     /// ms-epoch lease deadline from the claim; drives the heartbeat interval (#12).
     #[serde(default)]
     visibility_deadline: Option<i64>,
+    /// retry accounting from the queue, for logging the nack outcome (#13).
+    #[serde(default)]
+    attempts: u32,
+    #[serde(default)]
+    max_attempts: u32,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +84,8 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut queue: Option<String> = None;
     let mut worker: Option<String> = None;
     let mut count_arg: Option<String> = None;
+    let mut retry_window_arg: Option<String> = None;
+    let mut nack_delay_arg: Option<String> = None;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -91,6 +103,15 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                 count_arg = Some(argv.get(i + 1).ok_or("--count needs a value")?.clone());
                 i += 2;
             }
+            "--retry-window" => {
+                retry_window_arg =
+                    Some(argv.get(i + 1).ok_or("--retry-window needs a value")?.clone());
+                i += 2;
+            }
+            "--nack-delay" => {
+                nack_delay_arg = Some(argv.get(i + 1).ok_or("--nack-delay needs a value")?.clone());
+                i += 2;
+            }
             "--" => {
                 child = argv[i + 1..].to_vec();
                 break;
@@ -102,6 +123,10 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                     worker = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--count=") {
                     count_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--retry-window=") {
+                    retry_window_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--nack-delay=") {
+                    nack_delay_arg = Some(v.to_string());
                 } else {
                     return Err(format!("unexpected argument: {other}"));
                 }
@@ -126,10 +151,25 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         }
         None => 1,
     };
+    let retry_window_secs = match retry_window_arg {
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("--retry-window must be a non-negative integer, got '{s}'"))?,
+        None => 0,
+    };
+    let nack_delay_ms = match nack_delay_arg {
+        Some(s) => Some(
+            s.parse()
+                .map_err(|_| format!("--nack-delay must be an integer (ms), got '{s}'"))?,
+        ),
+        None => None,
+    };
     Ok(WorkerArgs {
         queue,
         worker,
         count,
+        retry_window_secs,
+        nack_delay_ms,
         child,
     })
 }
@@ -174,10 +214,22 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
+    let retry_window = Duration::from_secs(args.retry_window_secs);
+    let nack_delay = args.nack_delay_ms;
+
     // One worker drains in this thread; `--count N` spawns N competing workers (#11), each
     // with its own id, and the process exits once they have all seen the queue empty.
     if args.count <= 1 {
-        let done = drain(&client, &base, &disco.token, &args.queue, &args.worker, &args.child)?;
+        let done = drain(
+            &client,
+            &base,
+            &disco.token,
+            &args.queue,
+            &args.worker,
+            &args.child,
+            retry_window,
+            nack_delay,
+        )?;
         eprintln!(
             "[{}] queue drained — {done} task(s) acked, exiting",
             args.worker
@@ -198,7 +250,9 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         let child = args.child.clone();
         let worker = format!("{}-{i}", args.worker);
         handles.push(std::thread::spawn(move || {
-            match drain(&client, &base, &token, &queue, &worker, &child) {
+            match drain(
+                &client, &base, &token, &queue, &worker, &child, retry_window, nack_delay,
+            ) {
                 Ok(n) => {
                     eprintln!("[{worker}] drained {n} task(s)");
                     n
@@ -217,6 +271,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// One worker's claim → run → ack/nack loop. Returns the number of tasks acked; stops when a
 /// claim comes back empty. Shared by the single-worker and `--count` paths.
+#[allow(clippy::too_many_arguments)]
 fn drain(
     client: &reqwest::blocking::Client,
     base: &str,
@@ -224,12 +279,31 @@ fn drain(
     queue: &str,
     worker: &str,
     child: &[String],
+    retry_window: Duration,
+    nack_delay_ms: Option<i64>,
 ) -> Result<u64, Box<dyn Error>> {
     eprintln!("[{worker}] online — draining '{queue}'");
     let mut done: u64 = 0;
+    let mut empty_since: Option<Instant> = None;
     loop {
-        let Some(task) = claim_one(client, base, token, queue, worker)? else {
-            return Ok(done);
+        let task = match claim_one(client, base, token, queue, worker)? {
+            Some(t) => {
+                empty_since = None;
+                t
+            }
+            None => {
+                // Queue empty. With a retry window, keep polling so backoff retries (#13) get
+                // reclaimed within this run; otherwise exit on the first empty claim.
+                if retry_window.is_zero() {
+                    return Ok(done);
+                }
+                let since = *empty_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= retry_window {
+                    return Ok(done);
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
         };
         eprintln!(
             "[{worker}] >> claimed {} (fence {}) :: {}",
@@ -250,8 +324,21 @@ fn drain(
                     Err(e) => e.to_string(),
                     Ok(true) => unreachable!(),
                 };
-                nack(client, base, token, &task.id, task.fencing_token, &reason)?;
-                eprintln!("[{worker}] !! nacked {} ({reason})", short(&task.id));
+                let state = nack(
+                    client,
+                    base,
+                    token,
+                    &task.id,
+                    task.fencing_token,
+                    &reason,
+                    nack_delay_ms,
+                )?;
+                eprintln!(
+                    "[{worker}] !! nacked {} (attempt {}/{}) → {state} ({reason})",
+                    short(&task.id),
+                    task.attempts,
+                    task.max_attempts
+                );
             }
         }
     }
@@ -366,6 +453,8 @@ fn ack(
     Ok(())
 }
 
+/// Nack a failed task. Returns the resulting queue state: `queued` (will retry) | `failed` |
+/// `dead` (retries exhausted). `delay_ms` overrides the backoff when set (#13).
 fn nack(
     client: &reqwest::blocking::Client,
     base: &str,
@@ -373,16 +462,26 @@ fn nack(
     id: &str,
     fence: u64,
     error: &str,
-) -> Result<(), Box<dyn Error>> {
+    delay_ms: Option<i64>,
+) -> Result<String, Box<dyn Error>> {
+    let mut body = serde_json::json!({ "fencingToken": fence, "error": error });
+    if let Some(d) = delay_ms {
+        body["delayMs"] = serde_json::json!(d);
+    }
     let resp = client
         .post(format!("{base}/tasks/{id}/nack"))
         .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({ "fencingToken": fence, "error": error }))
+        .json(&body)
         .send()?;
     if !resp.status().is_success() {
         return Err(format!("nack failed: HTTP {}", resp.status().as_u16()).into());
     }
-    Ok(())
+    let out: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+    Ok(out
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("?")
+        .to_string())
 }
 
 /// POST /tasks/{id}/extend — renew the lease (heartbeat, #12).
@@ -483,6 +582,34 @@ mod tests {
         .is_err());
         assert!(parse_args(&argv(&[
             "hp", "worker", "--queue", "q", "--count", "x", "--", "true"
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn parses_retry_window_and_nack_delay() {
+        let a = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--retry-window",
+            "5",
+            "--nack-delay",
+            "250",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(a.retry_window_secs, 5);
+        assert_eq!(a.nack_delay_ms, Some(250));
+
+        let d = parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).unwrap();
+        assert_eq!(d.retry_window_secs, 0);
+        assert_eq!(d.nack_delay_ms, None);
+
+        assert!(parse_args(&argv(&[
+            "hp", "worker", "--queue", "q", "--retry-window", "x", "--", "true"
         ]))
         .is_err());
     }
