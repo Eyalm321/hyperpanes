@@ -17,6 +17,7 @@
 //! `-- sh -c 'claude -p "$HP_TASK_PAYLOAD"'`.
 
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,6 +37,8 @@ pub struct WorkerArgs {
     pub retry_window_secs: u64,
     /// Override the nack backoff (ms) on failure; None = the queue's default (#13).
     pub nack_delay_ms: Option<i64>,
+    /// Run each task in a throwaway git worktree, auto-removed on exit (#14).
+    pub worktree: bool,
     /// Everything after `--`: program + args, executed directly (no shell).
     pub child: Vec<String>,
 }
@@ -86,6 +89,7 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut count_arg: Option<String> = None;
     let mut retry_window_arg: Option<String> = None;
     let mut nack_delay_arg: Option<String> = None;
+    let mut worktree = false;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -111,6 +115,10 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
             "--nack-delay" => {
                 nack_delay_arg = Some(argv.get(i + 1).ok_or("--nack-delay needs a value")?.clone());
                 i += 2;
+            }
+            "--worktree" => {
+                worktree = true;
+                i += 1;
             }
             "--" => {
                 child = argv[i + 1..].to_vec();
@@ -170,6 +178,7 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         count,
         retry_window_secs,
         nack_delay_ms,
+        worktree,
         child,
     })
 }
@@ -216,6 +225,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
 
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
+    let worktree = args.worktree;
 
     // One worker drains in this thread; `--count N` spawns N competing workers (#11), each
     // with its own id, and the process exits once they have all seen the queue empty.
@@ -229,6 +239,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
             &args.child,
             retry_window,
             nack_delay,
+            worktree,
         )?;
         eprintln!(
             "[{}] queue drained — {done} task(s) acked, exiting",
@@ -251,7 +262,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         let worker = format!("{}-{i}", args.worker);
         handles.push(std::thread::spawn(move || {
             match drain(
-                &client, &base, &token, &queue, &worker, &child, retry_window, nack_delay,
+                &client, &base, &token, &queue, &worker, &child, retry_window, nack_delay, worktree,
             ) {
                 Ok(n) => {
                     eprintln!("[{worker}] drained {n} task(s)");
@@ -281,6 +292,7 @@ fn drain(
     child: &[String],
     retry_window: Duration,
     nack_delay_ms: Option<i64>,
+    worktree: bool,
 ) -> Result<u64, Box<dyn Error>> {
     eprintln!("[{worker}] online — draining '{queue}'");
     let mut done: u64 = 0;
@@ -312,7 +324,26 @@ fn drain(
             task.title
         );
 
-        match run_child(child, &task, queue, client, base, token) {
+        // Optional per-task throwaway worktree (#14): create it, run the child there, remove it
+        // after (the commit, if any, stays on its branch).
+        let wt = if worktree {
+            match Worktree::create(queue, &task.id) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    eprintln!("[{worker}] worktree create failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let cwd = wt.as_ref().map(|w| w.path.as_path());
+        let outcome = run_child(child, &task, queue, client, base, token, cwd);
+        if let Some(w) = &wt {
+            w.remove();
+        }
+
+        match outcome {
             Ok(true) => {
                 ack(client, base, token, &task.id, task.fencing_token)?;
                 done += 1;
@@ -372,6 +403,7 @@ fn run_child(
     client: &reqwest::blocking::Client,
     base: &str,
     token: &str,
+    cwd: Option<&Path>,
 ) -> Result<bool, Box<dyn Error>> {
     // Heartbeat: while the child runs, `extend` the lease at ~half the remaining lease interval.
     let stop = Arc::new(AtomicBool::new(false));
@@ -395,13 +427,17 @@ fn run_child(
         })
     });
 
-    let result = Command::new(&child[0])
-        .args(&child[1..])
+    let mut cmd = Command::new(&child[0]);
+    cmd.args(&child[1..])
         .env("HP_TASK_ID", &task.id)
         .env("HP_TASK_PAYLOAD", &task.payload)
         .env("HP_TASK_TITLE", &task.title)
         .env("HP_FENCING_TOKEN", task.fencing_token.to_string())
-        .env("HP_QUEUE", queue)
+        .env("HP_QUEUE", queue);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir).env("HP_WORKTREE", dir);
+    }
+    let result = cmd
         .status()
         .map_err(|e| format!("failed to spawn '{}': {e}", child[0]));
 
@@ -502,6 +538,64 @@ fn extend(
         return Err(format!("extend failed: HTTP {}", resp.status().as_u16()).into());
     }
     Ok(())
+}
+
+/// A throwaway git worktree for one task (#14). Created off HEAD on a fresh branch; the working
+/// dir is removed when the task finishes (a commit, if any, stays on the branch). Created from
+/// the worker's cwd, so `--worktree` requires running inside a git repo.
+struct Worktree {
+    path: PathBuf,
+}
+
+impl Worktree {
+    fn create(queue: &str, task_id: &str) -> Result<Self, Box<dyn Error>> {
+        let id8 = &task_id[..8.min(task_id.len())];
+        let safe = queue.replace(['/', ' '], "-");
+        let branch = format!("worker/{safe}/{id8}");
+        let path =
+            std::env::temp_dir().join(format!("hp-wt-{safe}-{id8}-{}", std::process::id()));
+        let out = Command::new("git")
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&path)
+            .arg("HEAD")
+            .output()
+            .map_err(|e| format!("git worktree add: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+            .into());
+        }
+        // Ignore agent-scratch dirs in THIS worktree so a child `git add -A` can't sweep e.g.
+        // Serena's auto-created `.serena/` into the commit (the contamination we hit 2026-06-24).
+        if let Ok(o) = Command::new("git")
+            .current_dir(&path)
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .output()
+        {
+            if o.status.success() {
+                let rel = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.join(rel))
+                {
+                    let _ = writeln!(f, ".serena/");
+                }
+            }
+        }
+        eprintln!("  [worktree] {} @ {branch}", path.display());
+        Ok(Self { path })
+    }
+
+    fn remove(&self) {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .output();
+    }
 }
 
 #[cfg(test)]
@@ -612,5 +706,19 @@ mod tests {
             "hp", "worker", "--queue", "q", "--retry-window", "x", "--", "true"
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn parses_worktree_flag() {
+        assert!(
+            parse_args(&argv(&["hp", "worker", "--queue", "q", "--worktree", "--", "true"]))
+                .unwrap()
+                .worktree
+        );
+        assert!(
+            !parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"]))
+                .unwrap()
+                .worktree
+        );
     }
 }
