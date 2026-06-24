@@ -27,6 +27,8 @@ use serde::Deserialize;
 pub struct WorkerArgs {
     pub queue: String,
     pub worker: String,
+    /// Number of concurrent competing workers to run in this process (#11).
+    pub count: usize,
     /// Everything after `--`: program + args, executed directly (no shell).
     pub child: Vec<String>,
 }
@@ -66,6 +68,7 @@ pub fn wants_worker(argv: &[String]) -> bool {
 pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut queue: Option<String> = None;
     let mut worker: Option<String> = None;
+    let mut count_arg: Option<String> = None;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -79,6 +82,10 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                 worker = Some(argv.get(i + 1).ok_or("--worker needs a value")?.clone());
                 i += 2;
             }
+            "--count" | "-n" => {
+                count_arg = Some(argv.get(i + 1).ok_or("--count needs a value")?.clone());
+                i += 2;
+            }
             "--" => {
                 child = argv[i + 1..].to_vec();
                 break;
@@ -88,6 +95,8 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                     queue = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--worker=") {
                     worker = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--count=") {
+                    count_arg = Some(v.to_string());
                 } else {
                     return Err(format!("unexpected argument: {other}"));
                 }
@@ -100,9 +109,22 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         return Err("missing child command after `--`".to_string());
     }
     let worker = worker.unwrap_or_else(default_worker_name);
+    let count = match count_arg {
+        Some(c) => {
+            let n: usize = c
+                .parse()
+                .map_err(|_| format!("--count must be a positive integer, got '{c}'"))?;
+            if n == 0 {
+                return Err("--count must be >= 1".to_string());
+            }
+            n
+        }
+        None => 1,
+    };
     Ok(WorkerArgs {
         queue,
         worker,
+        count,
         child,
     })
 }
@@ -147,33 +169,75 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    eprintln!(
-        "[{}] worker online — draining '{}' via {base}",
-        args.worker, args.queue
-    );
+    // One worker drains in this thread; `--count N` spawns N competing workers (#11), each
+    // with its own id, and the process exits once they have all seen the queue empty.
+    if args.count <= 1 {
+        let done = drain(&client, &base, &disco.token, &args.queue, &args.worker, &args.child)?;
+        eprintln!(
+            "[{}] queue drained — {done} task(s) acked, exiting",
+            args.worker
+        );
+        return Ok(());
+    }
 
+    eprintln!(
+        "spawning {} workers on '{}' via {base}",
+        args.count, args.queue
+    );
+    let mut handles = Vec::with_capacity(args.count);
+    for i in 1..=args.count {
+        let client = client.clone();
+        let base = base.clone();
+        let token = disco.token.clone();
+        let queue = args.queue.clone();
+        let child = args.child.clone();
+        let worker = format!("{}-{i}", args.worker);
+        handles.push(std::thread::spawn(move || {
+            match drain(&client, &base, &token, &queue, &worker, &child) {
+                Ok(n) => {
+                    eprintln!("[{worker}] drained {n} task(s)");
+                    n
+                }
+                Err(e) => {
+                    eprintln!("[{worker}] error: {e}");
+                    0
+                }
+            }
+        }));
+    }
+    let total: u64 = handles.into_iter().filter_map(|h| h.join().ok()).sum();
+    eprintln!("all {} workers exited — {total} task(s) total", args.count);
+    Ok(())
+}
+
+/// One worker's claim → run → ack/nack loop. Returns the number of tasks acked; stops when a
+/// claim comes back empty. Shared by the single-worker and `--count` paths.
+fn drain(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+    queue: &str,
+    worker: &str,
+    child: &[String],
+) -> Result<u64, Box<dyn Error>> {
+    eprintln!("[{worker}] online — draining '{queue}'");
     let mut done: u64 = 0;
     loop {
-        let Some(task) = claim_one(&client, &base, &disco.token, &args.queue, &args.worker)? else {
-            eprintln!(
-                "[{}] queue drained — {done} task(s) acked, exiting",
-                args.worker
-            );
-            return Ok(());
+        let Some(task) = claim_one(client, base, token, queue, worker)? else {
+            return Ok(done);
         };
         eprintln!(
-            "[{}] >> claimed {} (fence {}) :: {}",
-            args.worker,
+            "[{worker}] >> claimed {} (fence {}) :: {}",
             short(&task.id),
             task.fencing_token,
             task.title
         );
 
-        match run_child(&args.child, &task, &args.queue) {
+        match run_child(child, &task, queue) {
             Ok(true) => {
-                ack(&client, &base, &disco.token, &task.id, task.fencing_token)?;
+                ack(client, base, token, &task.id, task.fencing_token)?;
                 done += 1;
-                eprintln!("[{}] << acked  {}", args.worker, short(&task.id));
+                eprintln!("[{worker}] << acked  {}", short(&task.id));
             }
             other => {
                 let reason = match other {
@@ -181,15 +245,8 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
                     Err(e) => e.to_string(),
                     Ok(true) => unreachable!(),
                 };
-                nack(
-                    &client,
-                    &base,
-                    &disco.token,
-                    &task.id,
-                    task.fencing_token,
-                    &reason,
-                )?;
-                eprintln!("[{}] !! nacked {} ({reason})", args.worker, short(&task.id));
+                nack(client, base, token, &task.id, task.fencing_token, &reason)?;
+                eprintln!("[{worker}] !! nacked {} ({reason})", short(&task.id));
             }
         }
     }
@@ -313,5 +370,37 @@ mod tests {
     #[test]
     fn unknown_flag_is_error() {
         assert!(parse_args(&argv(&["hp", "worker", "--bogus", "--", "true"])).is_err());
+    }
+
+    #[test]
+    fn parses_count_with_default_and_validation() {
+        assert_eq!(
+            parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"]))
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(
+            parse_args(&argv(&[
+                "hp", "worker", "--queue", "q", "--count", "4", "--", "true"
+            ]))
+            .unwrap()
+            .count,
+            4
+        );
+        assert_eq!(
+            parse_args(&argv(&["hp", "worker", "--queue=q", "--count=2", "--", "true"]))
+                .unwrap()
+                .count,
+            2
+        );
+        assert!(parse_args(&argv(&[
+            "hp", "worker", "--queue", "q", "--count", "0", "--", "true"
+        ]))
+        .is_err());
+        assert!(parse_args(&argv(&[
+            "hp", "worker", "--queue", "q", "--count", "x", "--", "true"
+        ]))
+        .is_err());
     }
 }
