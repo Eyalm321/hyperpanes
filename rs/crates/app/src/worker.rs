@@ -2,7 +2,8 @@
 //!
 //! Usage:
 //! ```text
-//! hyperpanes worker --queue <name> [--worker <id>] -- <cmd> [args...]
+//! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree] \
+//!   [--retry-window <secs>] [--nack-delay <ms>] -- <cmd> [args...]
 //! ```
 //!
 //! Discovers the running app's control API from `control.json` (or `HYPERPANES_CONTROL_FILE`),
@@ -11,9 +12,12 @@
 //! on child exit 0 / **nack** on non-zero → repeat until a claim comes back empty, then exit 0
 //! (so a hyperpanes pane running the worker auto-closes on drain).
 //!
-//! Single worker in this slice; `--count N` (concurrency), lease heartbeat, retry/backoff and
-//! `--worktree` isolation are follow-up slices (#11–#14). The child reads its task from the
-//! environment, so shell expansion like `$HP_TASK_PAYLOAD` requires an explicit inner shell:
+//! Flags: `--count N` runs N competing workers in this process (#11); `--worktree` runs each
+//! task in a throwaway git worktree that auto-removes (#14); `--retry-window <secs>` keeps
+//! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
+//! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
+//! long task isn't reclaimed mid-flight (#12). The child reads its task from the environment, so
+//! shell expansion like `$HP_TASK_PAYLOAD` needs an explicit inner shell:
 //! `-- sh -c 'claude -p "$HP_TASK_PAYLOAD"'`.
 
 use std::error::Error;
