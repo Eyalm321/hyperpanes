@@ -38,6 +38,7 @@ mod tetris;
 mod theme;
 mod update;
 mod window;
+mod worker;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -319,6 +320,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => dbg_log(&format!("kill-daemon: error {e}")),
         }
         return Ok(());
+    }
+
+    // Headless worker mode (`worker --queue <q> -- <cmd>`): drain a work queue by running a
+    // child command per claimed task, acking/nacking on its exit, until the queue empties —
+    // then return without launching a GUI. Worker runner MVP (#10); the loop lives in `worker`.
+    if worker::wants_worker(&argv0) {
+        return worker::run(&argv0);
     }
 
     // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.
