@@ -18,7 +18,9 @@
 
 use std::error::Error;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -50,6 +52,9 @@ struct Task {
     #[serde(default)]
     payload: String,
     fencing_token: u64,
+    /// ms-epoch lease deadline from the claim; drives the heartbeat interval (#12).
+    #[serde(default)]
+    visibility_deadline: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -233,7 +238,7 @@ fn drain(
             task.title
         );
 
-        match run_child(child, &task, queue) {
+        match run_child(child, &task, queue, client, base, token) {
             Ok(true) => {
                 ack(client, base, token, &task.id, task.fencing_token)?;
                 done += 1;
@@ -271,9 +276,39 @@ fn claim_one(
     Ok(out.tasks.into_iter().next())
 }
 
-/// Run the child command with the task in its environment. Returns Ok(true) on exit 0.
-fn run_child(child: &[String], task: &Task, queue: &str) -> Result<bool, Box<dyn Error>> {
-    let status = Command::new(&child[0])
+/// Run the child command with the task in its environment, while a background heartbeat renews
+/// the lease (#12) so a long-running task is not reclaimed mid-flight. Returns Ok(true) on exit 0.
+fn run_child(
+    child: &[String],
+    task: &Task,
+    queue: &str,
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+) -> Result<bool, Box<dyn Error>> {
+    // Heartbeat: while the child runs, `extend` the lease at ~half the remaining lease interval.
+    let stop = Arc::new(AtomicBool::new(false));
+    let heartbeat = task.visibility_deadline.map(|deadline| {
+        let lease_ms = (deadline - now_ms()).max(2_000);
+        let interval_ms = (lease_ms / 2).max(1_000) as u64;
+        let extra_ms = lease_ms; // renew by a full lease each beat
+        let stop = Arc::clone(&stop);
+        let client = client.clone();
+        let base = base.to_string();
+        let token = token.to_string();
+        let id = task.id.clone();
+        let fence = task.fencing_token;
+        std::thread::spawn(move || {
+            // sleep, then extend, until the child finishes (stop flag set)
+            while !sleep_interruptible(&stop, interval_ms) {
+                if extend(&client, &base, &token, &id, fence, extra_ms).is_err() {
+                    return; // lost lease / server gone — the ack will surface it
+                }
+            }
+        })
+    });
+
+    let result = Command::new(&child[0])
         .args(&child[1..])
         .env("HP_TASK_ID", &task.id)
         .env("HP_TASK_PAYLOAD", &task.payload)
@@ -281,8 +316,36 @@ fn run_child(child: &[String], task: &Task, queue: &str) -> Result<bool, Box<dyn
         .env("HP_FENCING_TOKEN", task.fencing_token.to_string())
         .env("HP_QUEUE", queue)
         .status()
-        .map_err(|e| format!("failed to spawn '{}': {e}", child[0]))?;
-    Ok(status.success())
+        .map_err(|e| format!("failed to spawn '{}': {e}", child[0]));
+
+    // Stop the heartbeat before ack/nack so we never extend a finished task.
+    stop.store(true, Ordering::Relaxed);
+    if let Some(h) = heartbeat {
+        let _ = h.join();
+    }
+    Ok(result?.success())
+}
+
+/// Sleep up to `ms`, waking early and returning `true` if `stop` gets set; `false` on timeout.
+fn sleep_interruptible(stop: &AtomicBool, ms: u64) -> bool {
+    let step = 200u64;
+    let mut waited = 0u64;
+    while waited < ms {
+        if stop.load(Ordering::Relaxed) {
+            return true;
+        }
+        let nap = step.min(ms - waited);
+        std::thread::sleep(Duration::from_millis(nap));
+        waited += nap;
+    }
+    stop.load(Ordering::Relaxed)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn ack(
@@ -318,6 +381,26 @@ fn nack(
         .send()?;
     if !resp.status().is_success() {
         return Err(format!("nack failed: HTTP {}", resp.status().as_u16()).into());
+    }
+    Ok(())
+}
+
+/// POST /tasks/{id}/extend — renew the lease (heartbeat, #12).
+fn extend(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+    id: &str,
+    fence: u64,
+    extra_ms: i64,
+) -> Result<(), Box<dyn Error>> {
+    let resp = client
+        .post(format!("{base}/tasks/{id}/extend"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "fencingToken": fence, "extraMs": extra_ms }))
+        .send()?;
+    if !resp.status().is_success() {
+        return Err(format!("extend failed: HTTP {}", resp.status().as_u16()).into());
     }
     Ok(())
 }
