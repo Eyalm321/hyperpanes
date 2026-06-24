@@ -1220,6 +1220,20 @@ impl App {
             }
             return;
         }
+        // Shift+Home / Shift+End jump to the top / bottom of scrollback (the jump-to-bottom HUD's
+        // keyboard shortcut; xterm/GNOME-Terminal convention). Like the page gesture, these never
+        // reach the shell. Plain Home/End still encode to their CSI sequences.
+        if let Some(top) = keys::scroll_edge_key(&msg.text, msg.shift) {
+            let mut st = win.state.borrow_mut();
+            if let Some(p) = st.active_tab_mut().panes.get_mut(idx) {
+                if top {
+                    p.pane.scroll_to_top();
+                } else {
+                    p.pane.scroll_to_bottom();
+                }
+            }
+            return;
+        }
         // Drop bare modifiers / F-keys / special private-use keys.
         if !crate::forwardable(&msg.text) {
             return;
@@ -1973,17 +1987,64 @@ impl App {
             });
         }
         {
-            // Plain mouse-wheel over a pane body → scroll its scrollback viewport. The
-            // TerminalPane emits `scroll-requested(±lines)`; paneview forwards it here as
-            // `pane-scroll`. (Ctrl+wheel is handled separately as font-zoom.) `scroll_by`
-            // marks the grid dirty, so the render pump repaints the new viewport.
+            // Plain mouse-wheel over a pane body. The TerminalPane emits `scroll-requested(x, y,
+            // ±lines)`; paneview forwards it here as `pane-scroll`. (Ctrl+wheel is font-zoom.)
+            // `TerminalPane::wheel` either moves our scrollback viewport (marks the grid dirty so
+            // the pump repaints) OR — in the alternate screen / a mouse-grabbing app like Claude
+            // Code — returns bytes (a wheel report or arrow keys) to forward to the pty.
             let app = app.clone();
             let id = win.id;
-            win.app.on_pane_scroll(move |i, d| {
+            win.app.on_pane_scroll(move |i, x, y, d| {
+                if let Some(win) = app.window_by_id(id) {
+                    let forward = {
+                        let mut st = win.state.borrow_mut();
+                        st.active_tab_mut().panes.get_mut(i as usize).and_then(|p| {
+                            let (sw, sh) = p.surf;
+                            p.pane
+                                .wheel(d as i32, x, y, sw, sh)
+                                .map(|bytes| (p.uid.clone(), bytes))
+                        })
+                    };
+                    if let Some((uid, bytes)) = forward {
+                        app.mgr.write(&uid, &String::from_utf8_lossy(&bytes));
+                    }
+                }
+            });
+        }
+        {
+            // A pointer event over a mouse-grabbing app (Claude/vim/htop) → forward it as a mouse
+            // report so the app runs its own selection/clicks. `TerminalPane::mouse_report` decides
+            // the bytes (and returns None to drop motion the app didn't ask for); we write them to
+            // the pty. Shift+drag never reaches here — the widget routes that to local selection.
+            let app = app.clone();
+            let id = win.id;
+            win.app
+                .on_pane_pointer_report(move |i, kind, button, x, y| {
+                    if let Some(win) = app.window_by_id(id) {
+                        let forward = {
+                            let mut st = win.state.borrow_mut();
+                            st.active_tab_mut().panes.get_mut(i as usize).and_then(|p| {
+                                let (sw, sh) = p.surf;
+                                p.pane
+                                    .mouse_report(kind, button, x, y, sw, sh)
+                                    .map(|bytes| (p.uid.clone(), bytes))
+                            })
+                        };
+                        if let Some((uid, bytes)) = forward {
+                            app.mgr.write(&uid, &String::from_utf8_lossy(&bytes));
+                        }
+                    }
+                });
+        }
+        {
+            // The pane's jump-to-bottom HUD was clicked → pin the viewport back to the live edge.
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_pane_jump_bottom(move |i| {
                 if let Some(win) = app.window_by_id(id) {
                     let mut st = win.state.borrow_mut();
                     if let Some(p) = st.active_tab_mut().panes.get_mut(i as usize) {
-                        p.pane.scroll_by(d as i32);
+                        p.pane.scroll_to_bottom();
                     }
                 }
             });

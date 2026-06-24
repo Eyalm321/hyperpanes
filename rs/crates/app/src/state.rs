@@ -259,6 +259,11 @@ pub struct PaneState {
     /// copy/paste confirmations + the Ctrl-zoom font %), cached so the pump can detect a
     /// change and update/clear the row even when the surface itself isn't dirty.
     pub last_toast: String,
+    /// Whether the vim scrollbar was drawn (opacity > 0) on the previous pump tick. Lets the pump
+    /// keep re-pushing the row (and stay at the fast cadence) while the bar fades, then push one
+    /// final frame when it disappears — without it the bar would freeze mid-fade once the pane goes
+    /// otherwise-idle.
+    pub scrollbar_on: bool,
     /// Bumped each time Ctrl+F (re)invokes the in-pane search box on this pane, even while it's
     /// already open. Projected into `PaneItem::search_focus_seq` so the widget can (re)focus the
     /// query input on a reliable change signal rather than a one-shot `init`.
@@ -943,6 +948,7 @@ impl State {
             ai_muted: false,
             ai: AiLine::default(),
             last_toast: String::new(),
+            scrollbar_on: false,
             search_focus_seq: 0,
             font_px,
             font,
@@ -1151,6 +1157,7 @@ impl State {
             ai_muted: false,
             ai: AiLine::default(),
             last_toast: String::new(),
+            scrollbar_on: false,
             search_focus_seq: 0,
             font_px: det.font_px,
             font,
@@ -2671,6 +2678,8 @@ impl State {
     pub fn pane_selection_end(&mut self, idx: usize) {
         let copy_on_select = self.settings.copy_on_select;
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            // Button released → stop edge-autoscroll (the selection itself is kept/copied below).
+            p.pane.end_selection_drag();
             if p.pane.selection_is_drag() {
                 // Copy-on-select is a PREF (off by default, like Windows Terminal): when off,
                 // a finished drag only highlights — the clipboard keeps whatever you copied
@@ -2856,6 +2865,7 @@ impl State {
             ai_muted: false,
             ai: AiLine::default(),
             last_toast: String::new(),
+            scrollbar_on: false,
             search_focus_seq: 0,
             font_px: det.font_px,
             font,
@@ -3546,6 +3556,7 @@ impl State {
             ai_muted: false,
             ai: AiLine::default(),
             last_toast: String::new(),
+            scrollbar_on: false,
             search_focus_seq: 0,
             font_px,
             font,

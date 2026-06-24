@@ -168,7 +168,9 @@ export component AppWindow inherits Window {
     callback pane-link-exited(int);
     callback pane-link-activated(int, length, length, bool);
     callback pane-font-zoom(int);   // Ctrl+wheel over a pane → zoom the terminal font
-    callback pane-scroll(int, float);   // plain wheel over a pane → scroll scrollback
+    callback pane-scroll(int, length, length, float);   // plain wheel over a pane → scroll / forward
+    callback pane-jump-bottom(int);   // jump-to-bottom HUD clicked → pin to the live edge
+    callback pane-pointer-report(int, int, int, length, length);  // mouse event → forward to a grabbing app
     // text selection (drag to select; copy-on-release)
     callback pane-selection-begin(int, length, length);
     callback pane-selection-update(int, length, length);
@@ -331,7 +333,9 @@ export component AppWindow inherits Window {
                 pane-link-exited(i) => { root.pane-link-exited(i); }
                 pane-link-activated(i, x, y, ctrl) => { root.pane-link-activated(i, x, y, ctrl); }
                 pane-font-zoom(d) => { root.pane-font-zoom(d); }
-                pane-scroll(i, d) => { root.pane-scroll(i, d); }
+                pane-scroll(i, x, y, d) => { root.pane-scroll(i, x, y, d); }
+                pane-jump-bottom(i) => { root.pane-jump-bottom(i); }
+                pane-pointer-report(i, k, b, x, y) => { root.pane-pointer-report(i, k, b, x, y); }
                 pane-selection-begin(i, x, y) => { root.pane-selection-begin(i, x, y); }
                 pane-selection-update(i, x, y) => { root.pane-selection-update(i, x, y); }
                 pane-selection-end(i) => { root.pane-selection-end(i); }

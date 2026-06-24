@@ -43,14 +43,14 @@ component HaloText inherits Rectangle {
         text: root.text;
         color: root.halo;
         font-size: root.size;
-        font-family: "Consolas";
+        font-family: "JetBrainsMono Nerd Font";
         font-weight: 700;
     }
     fg := Text {
         text: root.text;
         color: root.fg-color;
         font-size: root.size;
-        font-family: "Consolas";
+        font-family: "JetBrainsMono Nerd Font";
         font-weight: 700;
     }
 }
@@ -132,6 +132,26 @@ export component TerminalPane inherits Rectangle {
     in property <bool> search-active-on: false;
     in property <HiRect> search-active-rect;  // the current match
 
+    // --- vim-style scrollbar (right edge) + jump-to-bottom HUD (controller-driven) ---
+    // The scrollbar is a thin thumb on the right edge, shown while scrolling and faded out when
+    // idle: `scrollbar-opacity` (0 = hidden) is the controller's show-then-fade alpha; the thumb
+    // height/position track the visible fraction of the scrollback. 0 opacity skips drawing it.
+    in property <float> scrollbar-opacity: 0.0;
+    in property <length> scrollbar-thumb-y;
+    in property <length> scrollbar-thumb-h;
+    // How far the viewport is scrolled up from the live edge, in lines (0 = at the bottom). When
+    // non-zero the jump-to-bottom HUD appears (a classic bottom-centre pill).
+    in property <int> scroll-offset: 0;
+
+    // Whether the running app has grabbed the mouse (DECSET 1000/1002/1003 — Claude, vim, htop).
+    // When true, pointer press/drag/release are FORWARDED to the app (its own selection/clicks)
+    // instead of doing a local terminal selection — UNLESS Shift is held (Shift+drag = local
+    // selection, the standard terminal escape hatch). Controller-driven (= pane mouse mode).
+    in property <bool> app-grabs-mouse: false;
+    // The button currently held during a forwarded drag (0=left,1=middle,2=right,3=none), so motion
+    // reports can carry it. Set on press, cleared on release.
+    property <int> held-button: 3;
+
     // --- outputs (the controller subscribes to these) ---
     // Any mouse-down inside the pane → the app should focus this pane. FROZEN CONTRACT:
     // the `pane-ux` agent connects `on_focus_requested(...)` to route focus here. Keep the
@@ -161,11 +181,19 @@ export component TerminalPane inherits Rectangle {
     // Right button pressed → paste the clipboard into this pane's session (the consumer may
     // instead copy an active selection first — the Windows-Terminal right-click nuance).
     callback paste-requested();
-    // Mouse wheel over the surface → scroll the scrollback by this many lines (positive = up /
-    // into history, negative = down / toward the live edge). The app maps it to
-    // `TerminalPane::scroll_by`. Ctrl/Cmd+wheel is NOT reported here — it bubbles up to the pane
-    // body's font-zoom handler instead, so zoom and scrollback don't fight.
-    callback scroll-requested(float);
+    // Mouse wheel over the surface → (pointer-x, pointer-y, lines). Positive lines = up / into
+    // history, negative = down / toward the live edge. The app routes it through
+    // `TerminalPane::wheel`, which either moves our scrollback OR — in the alternate screen / a
+    // mouse-grabbing app (Claude Code, vim, less) — forwards a wheel report or arrow keys to the
+    // pty; the pointer position is for the mouse report. Ctrl/Cmd+wheel is NOT reported here — it
+    // bubbles up to the pane body's font-zoom handler instead, so zoom and scrollback don't fight.
+    callback scroll-requested(length, length, float);
+    // The jump-to-bottom HUD was clicked → pin the viewport back to the live edge.
+    callback jump-to-bottom();
+    // A pointer event to FORWARD to a mouse-grabbing app (see `app-grabs-mouse`). `kind`: 0=press,
+    // 1=move, 2=release. `button`: 0=left, 1=middle, 2=right, 3=none. The controller turns this into
+    // a mouse report (`TerminalPane::mouse_report`) and writes it to the pty.
+    callback pointer-report(int, int, length, length);
 
     // --- in-pane search ---
     // The query text changed (find-as-you-type).
@@ -226,44 +254,67 @@ export component TerminalPane inherits Rectangle {
             if (!self.has-hover) { root.link-exited(); }
         }
         pointer-event(e) => {
+            // Keep the Ctrl-hover hint live off every move (see below).
             if (e.kind == PointerEventKind.move) {
-                // Hover tracking MUST ride the move pointer-events: TouchArea's `moved`
-                // callback only fires while the mouse is grabbed (a button held), so a bare
-                // hover never reaches it — routing the link hit-test through `moved` left the
-                // pointer cursor / underline / tooltip dead in the live app.
-                // Move events also carry the live modifier state, which keys can't provide
-                // when this pane isn't focused — sync the Ctrl-hover hint from it.
                 root.ctrl-held = e.modifiers.control || e.modifiers.meta;
-                if (self.pressed) {
-                    root.selection-update(self.mouse-x, self.mouse-y);
-                } else {
-                    root.link-moved(self.mouse-x, self.mouse-y);
-                }
             }
-            if (e.kind == PointerEventKind.down) {
-                // ANY mouse-down focuses the pane (the frozen `focus-requested` contract) —
-                // both app-side (focus-requested) and Slint-side (fs.focus(); fs itself has
-                // focus-on-click off so it can't swallow the press).
-                root.focus-requested();
-                fs.focus();
-                if (e.button == PointerEventButton.left) {
-                    root.selection-begin(self.mouse-x, self.mouse-y);
-                } else if (e.button == PointerEventButton.right) {
-                    // Right-click pastes the clipboard into the pane — or copies an active
-                    // selection, decided app-side (focus it first so any follow-up typing
-                    // routes here). No native context menu in the BODY — the pane menu lives
-                    // on the header right-click. Matches Windows Terminal.
-                    root.paste-requested();
+            // --- Forward to a mouse-grabbing app (Claude/vim/htop), Shift = local escape hatch ---
+            // When the app owns the mouse and Shift isn't held, pointer events go to the APP so it
+            // runs its own selection/clicks. Shift+drag falls through to the local selection below
+            // (the standard terminal convention). The button is mapped left/middle→0/1, else→2.
+            if (root.app-grabs-mouse && !e.modifiers.shift) {
+                if (e.kind == PointerEventKind.down) {
+                    root.focus-requested();
+                    fs.focus();
+                    root.held-button = e.button == PointerEventButton.left ? 0
+                                     : e.button == PointerEventButton.middle ? 1 : 2;
+                    root.pointer-report(0, root.held-button, self.mouse-x, self.mouse-y);
+                } else if (e.kind == PointerEventKind.move) {
+                    root.pointer-report(1, root.held-button, self.mouse-x, self.mouse-y);
+                } else if (e.kind == PointerEventKind.up) {
+                    root.pointer-report(2, e.button == PointerEventButton.left ? 0
+                                         : e.button == PointerEventButton.middle ? 1 : 2,
+                                        self.mouse-x, self.mouse-y);
+                    root.held-button = 3;
                 }
-            }
-            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
-                // Finish the selection first (copies it if it was a drag), then — only if it
-                // wasn't a drag — let it resolve as a link click.
-                root.selection-end();
-                // `ctrl-held` (move-modifiers + key stream) backs up the event modifiers:
-                // the up-event's modifier snapshot has proven unreliable for a held Ctrl.
-                root.link-activated(self.mouse-x, self.mouse-y,
-                                    e.modifiers.control || e.modifiers.meta || root.ctrl-held);
+            } else {
+                // --- Local terminal selection / link hit-testing (normal shells, or Shift-drag) ---
+                if (e.kind == PointerEventKind.move) {
+                    // Hover tracking MUST ride the move pointer-events: TouchArea's `moved`
+                    // callback only fires while the mouse is grabbed (a button held), so a bare
+                    // hover never reaches it — routing the link hit-test through `moved` left the
+                    // pointer cursor / underline / tooltip dead in the live app.
+                    if (self.pressed) {
+                        root.selection-update(self.mouse-x, self.mouse-y);
+                    } else {
+                        root.link-moved(self.mouse-x, self.mouse-y);
+                    }
+                }
+                if (e.kind == PointerEventKind.down) {
+                    // ANY mouse-down focuses the pane (the frozen `focus-requested` contract) —
+                    // both app-side (focus-requested) and Slint-side (fs.focus(); fs itself has
+                    // focus-on-click off so it can't swallow the press).
+                    root.focus-requested();
+                    fs.focus();
+                    if (e.button == PointerEventButton.left) {
+                        root.selection-begin(self.mouse-x, self.mouse-y);
+                    } else if (e.button == PointerEventButton.right) {
+                        // Right-click pastes the clipboard into the pane — or copies an active
+                        // selection, decided app-side (focus it first so any follow-up typing
+                        // routes here). No native context menu in the BODY — the pane menu lives
+                        // on the header right-click. Matches Windows Terminal.
+                        root.paste-requested();
+                    }
+                }
+                if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                    // Finish the selection first (copies it if it was a drag), then — only if it
+                    // wasn't a drag — let it resolve as a link click.
+                    root.selection-end();
+                    // `ctrl-held` (move-modifiers + key stream) backs up the event modifiers:
+                    // the up-event's modifier snapshot has proven unreliable for a held Ctrl.
+                    root.link-activated(self.mouse-x, self.mouse-y,
+                                        e.modifiers.control || e.modifiers.meta || root.ctrl-held);
+                }
             }
         }
         scroll-event(e) => {
@@ -272,12 +323,13 @@ export component TerminalPane inherits Rectangle {
             if (e.modifiers.control || e.modifiers.meta) {
                 return reject;
             }
-            // Plain wheel scrolls the scrollback: ~3 lines per notch, direction from the wheel
-            // sign (up = into history). The controller clamps to the history bounds.
+            // Plain wheel: ~3 lines per notch, direction from the wheel sign (up = into history).
+            // The controller decides whether that scrolls our scrollback or is forwarded to the app
+            // (alt screen / mouse grab); the pointer position rides along for mouse reports.
             if (e.delta-y > 0) {
-                root.scroll-requested(3);
+                root.scroll-requested(self.mouse-x, self.mouse-y, 3);
             } else if (e.delta-y < 0) {
-                root.scroll-requested(-3);
+                root.scroll-requested(self.mouse-x, self.mouse-y, -3);
             }
             return accept;
         }
@@ -315,6 +367,94 @@ export component TerminalPane inherits Rectangle {
         border-color: #ff9e64;
     }
 
+    // Vim-style scrollbar: a thin neutral thumb on the right edge, shown while scrolling and faded
+    // out when idle (the controller's `scrollbar-opacity` drives both presence and the fade). A
+    // neutral foreground wash (not the pane accent) so it never tints a coloured pane. Drawn over
+    // the surface but under the HUD/tooltip/chrome.
+    //
+    // A right-anchored, fully-explicit TRACK holding the THUMB: every geometry is a literal or a
+    // controller value (no `self.width` self-reference), so neither can collapse to the Slint
+    // "unsized element fills its parent" default — the bug that painted the thumb as a full-width
+    // horizontal band across the top.
+    if root.scrollbar-opacity > 0.01: Rectangle {
+        x: parent.width - 8px;
+        width: 8px;
+        y: 0;
+        height: parent.height;
+        // Sharp pixel-terminal scrollbar: a dim square rail with a solid, square-edged block thumb
+        // (no rounding) — looks like a column of lit cells, the way a terminal should.
+        Rectangle { // the rail
+            x: 2px;
+            width: 5px;
+            y: 0;
+            height: parent.height;
+            background: root.accent.with-alpha(0.1 * root.scrollbar-opacity);
+        }
+        thumb := Rectangle { // the block
+            x: 2px;
+            width: 5px;
+            y: root.scrollbar-thumb-y;
+            height: root.scrollbar-thumb-h;
+            background: root.accent.with-alpha(root.scrollbar-opacity);
+        }
+    }
+
+    // Jump-to-bottom HUD: a classic bottom-centre pill shown whenever the viewport is scrolled up
+    // off the live edge. Click it (or press Shift+End) to snap back to the bottom.
+    if root.scroll-offset > 0: Rectangle {
+        height: 18px;
+        width: hudrow.preferred-width;
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 10px;
+        // Sharp pixel-terminal HUD: a SOLID block of the theme accent (same colour as the scrollbar
+        // thumb), square corners, NO border, dark text on top, plus a hard offset drop-shadow
+        // (blur 0) — a lit terminal key, not a soft modern pill.
+        border-radius: 0px;
+        background: jump-ta.has-hover ? root.accent.brighter(0.25) : root.accent;
+        border-width: 0px;
+        drop-shadow-blur: 0px;
+        drop-shadow-offset-x: 2px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: #000000;
+        jump-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.jump-to-bottom(); }
+        }
+        hudrow := HorizontalLayout {
+            padding-left: 7px;
+            padding-right: 7px;
+            spacing: 6px;
+            Text {
+                vertical-alignment: center;
+                text: "JUMP TO BOTTOM";
+                color: #0b0e14;
+                font-size: 10px;
+                font-weight: 700;
+                font-family: "JetBrainsMono Nerd Font";
+            }
+            Text {
+                vertical-alignment: center;
+                text: "SHIFT+END";
+                color: #0b0e14.with-alpha(0.6);
+                font-size: 10px;
+                font-weight: 700;
+                font-family: "JetBrainsMono Nerd Font";
+            }
+            // Down ARROW on the RIGHT (shaft + head), drawn as geometry — Slint has no font fallback
+            // so a glyph could render blank.
+            VerticalLayout {
+                alignment: center;
+                Path {
+                    width: 7px;
+                    height: 8px;
+                    stroke: #0b0e14;
+                    stroke-width: 1.4px;
+                    commands: "M 3.5 0 L 3.5 7 M 1 4.5 L 3.5 7 L 6 4.5";
+                }
+            }
+        }
+    }
+
     // (No hover underline: the pointer cursor + tooltip are the link affordance. The
     // link-x/y/w properties stay in the contract — the controller still computes the span
     // for hit-testing, and a consumer could reintroduce an overlay without a widget change.)
@@ -339,7 +479,7 @@ export component TerminalPane inherits Rectangle {
                 text: root.link-tip;
                 color: #cdd6f4;
                 font-size: 11px;
-                font-family: "Consolas";
+                font-family: "JetBrainsMono Nerd Font";
             }
             // Hint line — emphasizes "Ctrl+click to copy" (brighter + bold) while Ctrl is held,
             // otherwise shows both actions dimmed. Mirrors the plain-click-opens / Ctrl-copies split.
@@ -464,7 +604,7 @@ export component TerminalPane inherits Rectangle {
                     vertical-alignment: center;
                     color: #c0caf5;
                     font-size: 12px * root.ind-scale;
-                    font-family: "Consolas";
+                    font-family: "JetBrainsMono Nerd Font";
                     single-line: true;
                     edited => { root.search-edited(self.text); }
                     key-pressed(e) => {
@@ -630,7 +770,7 @@ export component DemoWindow inherits Window {
                 text: root.hud;
                 color: #9ece6a;
                 font-size: 12px;
-                font-family: "Consolas";
+                font-family: "JetBrainsMono Nerd Font";
             }
         }
     }

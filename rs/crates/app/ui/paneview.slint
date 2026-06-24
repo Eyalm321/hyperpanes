@@ -260,8 +260,13 @@ export component PaneView inherits Rectangle {
     callback pane-link-activated(int, length, length, bool);
     // Ctrl+wheel over a pane body → zoom the terminal font (±1 px per notch).
     callback pane-font-zoom(int);
-    // Plain wheel over a pane body → scroll the scrollback viewport (±lines).
-    callback pane-scroll(int, float);
+    // Plain wheel over a pane body → (idx, pointer-x, pointer-y, ±lines). The controller decides
+    // whether it scrolls our scrollback or forwards a wheel report / arrow keys to the app.
+    callback pane-scroll(int, length, length, float);
+    // The pane's jump-to-bottom HUD was clicked → pin its viewport to the live edge.
+    callback pane-jump-bottom(int);
+    // A pointer event over a mouse-grabbing app → forward to the app (idx, kind, button, x, y).
+    callback pane-pointer-report(int, int, int, length, length);
     // text selection (drag to select; copy-on-release) routed from the focused pane.
     callback pane-selection-begin(int, length, length);
     callback pane-selection-update(int, length, length);
@@ -544,6 +549,12 @@ export component PaneView inherits Rectangle {
                         toast: pane.toast;
                         // live terminal font px → toast + search box scale with zoom
                         term-font-px: pane.font-px;
+                        // vim scrollbar (fades when idle) + jump-to-bottom HUD (controller-driven)
+                        scrollbar-opacity: pane.scrollbar-opacity;
+                        scrollbar-thumb-y: pane.scrollbar-thumb-y;
+                        scrollbar-thumb-h: pane.scrollbar-thumb-h;
+                        scroll-offset: pane.scroll-offset;
+                        app-grabs-mouse: pane.app-grabs-mouse;
                         selection-begin(x, y) => { root.pane-selection-begin(idx, x, y); }
                         selection-update(x, y) => { root.pane-selection-update(idx, x, y); }
                         selection-end => { root.pane-selection-end(idx); }
@@ -554,7 +565,9 @@ export component PaneView inherits Rectangle {
                         search-closed => { root.pane-search-closed(idx); }
                         key(m) => { root.key(idx, m); }
                         geometry-changed(w, h) => { root.pane-geometry(idx, w, h); }
-                        scroll-requested(d) => { root.pane-scroll(idx, d); }
+                        scroll-requested(x, y, d) => { root.pane-scroll(idx, x, y, d); }
+                        jump-to-bottom => { root.pane-jump-bottom(idx); }
+                        pointer-report(k, b, x, y) => { root.pane-pointer-report(idx, k, b, x, y); }
                         link-moved(x, y) => { root.pane-link-moved(idx, x, y); }
                         link-exited => { root.pane-link-exited(idx); }
                         // ANY mouse-down in the pane body (incl. blank terminal area) focuses

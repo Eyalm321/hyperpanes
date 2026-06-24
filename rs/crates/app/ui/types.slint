@@ -62,6 +62,16 @@ export struct PaneItem {
     // the terminal font size in effect (logical px) — the live zoom / focused-pane font-size
     // state. Drives the widget's `term-font-px` so the toast + search box scale with zoom.
     font-px: length,
+    // vim-style scrollbar (right edge): the controller's show-then-fade alpha (0 = hidden/idle)
+    // plus the thumb geometry (logical px over the pane surface), recomputed each tick.
+    scrollbar-opacity: float,
+    scrollbar-thumb-y: length,
+    scrollbar-thumb-h: length,
+    // how far the viewport is scrolled up from the live edge, in lines (0 = at the bottom).
+    // Non-zero raises the jump-to-bottom HUD.
+    scroll-offset: int,
+    // whether the running app grabbed the mouse (Claude/vim) → forward pointer events to it.
+    app-grabs-mouse: bool,
     // Whether the pane's shell has exited (drives the single-layout taskbar's "exited"
     // badge). The native app removes a pane the moment its session exits, so this is
     // structurally always false today — kept for Electron parity / a future status model.

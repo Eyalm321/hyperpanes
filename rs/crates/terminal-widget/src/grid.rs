@@ -245,6 +245,89 @@ impl TermGrid {
             .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
     }
 
+    /// Whether the application has enabled **mouse reporting** (DECSET 1000/1002/1003 — any of
+    /// click / drag / motion tracking). When on, a wheel notch should be forwarded to the pty as a
+    /// mouse event so the app (Claude Code, vim, less, htop) scrolls its own view, rather than the
+    /// terminal moving a scrollback viewport the app doesn't have. See [`crate::pane`]'s wheel path.
+    pub fn mouse_mode(&self) -> bool {
+        self.term
+            .mode()
+            .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+    }
+
+    /// Whether the application requested **SGR** (1006) mouse encoding. Picks the wheel-report
+    /// wire format: SGR (`ESC[<Cb;Cx;Cy M`) when on, else legacy X10 (`ESC[M` + 3 bytes).
+    pub fn sgr_mouse(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::SGR_MOUSE)
+    }
+
+    /// Whether **application cursor keys** (DECCKM) are active. Selects the arrow-key encoding used
+    /// for alternate-scroll (alt-screen, no mouse mode): `ESC O A/B` when on, else `ESC [ A/B`.
+    pub fn app_cursor(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::APP_CURSOR)
+    }
+
+    /// Whether the app requested **button-event (drag) tracking** (DECSET 1002): report pointer
+    /// motion only while a button is held. Gates motion-event forwarding for mouse-grab apps.
+    pub fn mouse_drag(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
+    }
+
+    /// Whether the app requested **any-event motion tracking** (DECSET 1003): report all pointer
+    /// motion, button held or not.
+    pub fn mouse_any_motion(&self) -> bool {
+        self.term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::MOUSE_MOTION)
+    }
+
+    /// Scrollback geometry for the scrollbar/HUD overlays: `(history_lines, viewport_rows,
+    /// display_offset)`. `history_lines` is how many lines sit in scrollback above the live
+    /// viewport; `display_offset` is how far the viewport is scrolled up into it (0 = pinned to the
+    /// live edge). Total buffer height = `history_lines + viewport_rows`. In the alternate screen
+    /// history is 0, so the overlays naturally vanish.
+    pub fn scroll_metrics(&self) -> (usize, usize, usize) {
+        let g = self.term.grid();
+        (g.history_size(), self.size.rows, g.display_offset())
+    }
+
+    /// The text of absolute grid `line` (negative = scrollback, `0..rows` = live viewport), one
+    /// char per cell with blanks as spaces and no right-trim, or `None` when the line is outside
+    /// the buffer. Lets selection text-extraction reach scrollback rows the viewport snapshot
+    /// can't (a selection anchored in history while scrolled).
+    pub fn line_text(&self, line: i32) -> Option<String> {
+        let grid = self.term.grid();
+        if line < grid.topmost_line().0 || line > grid.bottommost_line().0 {
+            return None;
+        }
+        let cols = grid.columns();
+        let row = &grid[Line(line)];
+        let mut s = String::with_capacity(cols);
+        for c in 0..cols {
+            let ch = row[Column(c)].c;
+            s.push(if ch == '\0' { ' ' } else { ch });
+        }
+        Some(s)
+    }
+
+    /// Whether absolute grid `line` CONTINUES onto the next line (alacritty's `WRAPLINE` on its
+    /// last cell) — the absolute-line analogue of [`row_wraps`](Self::row_wraps), for type-over
+    /// across a soft-wrapped prompt regardless of scroll position.
+    pub fn line_wraps(&self, line: i32) -> bool {
+        let grid = self.term.grid();
+        if self.size.cols == 0 || line < grid.topmost_line().0 || line > grid.bottommost_line().0 {
+            return false;
+        }
+        let last = Column(self.size.cols - 1);
+        grid[Line(line)][last].flags.contains(Flags::WRAPLINE)
+    }
+
     /// The cursor's row within the current viewport (display offset applied), or `None` when the
     /// cursor is scrolled out of view. Cheap — reads the grid cursor directly, no snapshot. Used
     /// to scope type-over-selection to the live prompt line (the cursor's own row).

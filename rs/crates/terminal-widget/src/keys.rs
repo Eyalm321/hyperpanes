@@ -23,41 +23,66 @@ pub fn encode_key(text: &str, ctrl: bool, alt: bool, shift: bool) -> Option<Vec<
         text == s.as_str()
     };
 
-    // Shift+PageUp / Shift+PageDown are the scrollback gesture — the controller turns them into
-    // a one-page viewport scroll (see [`scroll_page_key`] + `TerminalPane::scroll_page`), so they
-    // must NEVER reach the shell. Gate them here too (defense-in-depth) so a direct caller can't
-    // leak a CSI ~ into the pty. Plain (un-shifted) PageUp/Down fall through to their sequences.
-    if shift && (is(Key::PageUp) || is(Key::PageDown)) {
+    // Shift+PageUp / Shift+PageDown are the by-page scrollback gesture; Shift+Home / Shift+End jump
+    // to the top / bottom of scrollback (see [`scroll_page_key`] / [`scroll_edge_key`] +
+    // `TerminalPane::scroll_*`). All are viewport gestures, so they must NEVER reach the shell —
+    // gate them here too (defense-in-depth) so a direct caller can't leak a sequence into the pty.
+    // Plain (un-shifted) PageUp/Down/Home/End fall through to their CSI sequences below.
+    if shift && (is(Key::PageUp) || is(Key::PageDown) || is(Key::Home) || is(Key::End)) {
         return None;
     }
 
     // ---- special keys → VT/xterm sequences ----
+    //
+    // Modified cursor/edit keys carry an xterm modifier parameter: `m = 1 + Shift + 2·Alt + 4·Ctrl`
+    // (so Ctrl = 5, Shift = 2, Ctrl+Shift = 6, …). Cursor/Home/End take the `ESC[1;{m}{F}` form,
+    // the tilde keys (PageUp/Down/Delete) take `ESC[{n};{m}~`; with no modifier the unmodified
+    // sequence is sent. Without this, a chord like Claude Code's **Ctrl+End** (scroll to bottom)
+    // collapsed to a bare `ESC[F` and the app's binding never matched — the "Ctrl+End does nothing"
+    // report. (Shift+Home/End/PageUp/Down are intercepted above as the scrollback gesture, so they
+    // never reach here.)
+    let modcode = 1 + (shift as u8) + 2 * (alt as u8) + 4 * (ctrl as u8);
+    let m = if modcode > 1 { Some(modcode) } else { None };
+    // Cursor/Home/End: `ESC[{final}` unmodified, `ESC[1;{m}{final}` modified.
+    let csi_final = |final_byte: u8| -> Vec<u8> {
+        match m {
+            Some(m) => format!("\x1b[1;{m}{}", final_byte as char).into_bytes(),
+            None => vec![0x1b, b'[', final_byte],
+        }
+    };
+    // Tilde keys: `ESC[{n}~` unmodified, `ESC[{n};{m}~` modified.
+    let csi_tilde = |n: u8| -> Vec<u8> {
+        match m {
+            Some(m) => format!("\x1b[{n};{m}~").into_bytes(),
+            None => format!("\x1b[{n}~").into_bytes(),
+        }
+    };
     if is(Key::UpArrow) {
-        return Some(b"\x1b[A".to_vec());
+        return Some(csi_final(b'A'));
     }
     if is(Key::DownArrow) {
-        return Some(b"\x1b[B".to_vec());
+        return Some(csi_final(b'B'));
     }
     if is(Key::RightArrow) {
-        return Some(b"\x1b[C".to_vec());
+        return Some(csi_final(b'C'));
     }
     if is(Key::LeftArrow) {
-        return Some(b"\x1b[D".to_vec());
+        return Some(csi_final(b'D'));
     }
     if is(Key::Home) {
-        return Some(b"\x1b[H".to_vec());
+        return Some(csi_final(b'H'));
     }
     if is(Key::End) {
-        return Some(b"\x1b[F".to_vec());
+        return Some(csi_final(b'F'));
     }
     if is(Key::PageUp) {
-        return Some(b"\x1b[5~".to_vec());
+        return Some(csi_tilde(5));
     }
     if is(Key::PageDown) {
-        return Some(b"\x1b[6~".to_vec());
+        return Some(csi_tilde(6));
     }
     if is(Key::Delete) {
-        return Some(b"\x1b[3~".to_vec());
+        return Some(csi_tilde(3));
     }
     if is(Key::Return) {
         return Some(b"\r".to_vec());
@@ -133,6 +158,28 @@ pub fn scroll_page_key(text: &str, shift: bool) -> Option<bool> {
     if is(Key::PageUp) {
         Some(true)
     } else if is(Key::PageDown) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Classify a key as the **scroll-to-edge** gesture: Shift+Home jumps to the top of scrollback,
+/// Shift+End to the live bottom (the jump-to-bottom HUD's keyboard shortcut). Returns `Some(true)`
+/// for top, `Some(false)` for bottom, and `None` otherwise — including plain (un-shifted)
+/// Home/End, which still encode to their CSI sequences via [`encode_key`]. Matches the
+/// xterm/GNOME-Terminal convention (Shift+Home/End scroll to top/bottom).
+pub fn scroll_edge_key(text: &str, shift: bool) -> Option<bool> {
+    if !shift {
+        return None;
+    }
+    let is = |k: Key| -> bool {
+        let s: slint::SharedString = k.into();
+        text == s.as_str()
+    };
+    if is(Key::Home) {
+        Some(true)
+    } else if is(Key::End) {
         Some(false)
     } else {
         None
@@ -320,5 +367,41 @@ mod tests {
         assert_eq!(scroll_page_key(&special(Key::PageDown), false), None);
         // A plain printable key is never a scroll key.
         assert_eq!(scroll_page_key("a", true), None);
+    }
+
+    #[test]
+    fn modified_special_keys_carry_an_xterm_modifier() {
+        // Ctrl+End → ESC[1;5F (Claude Code's scroll-to-bottom chord; the "Ctrl+End does nothing"
+        // fix). Modifier m = 1 + Shift + 2·Alt + 4·Ctrl.
+        assert_eq!(encode_key(&special(Key::End), true, false, false), Some(b"\x1b[1;5F".to_vec()));
+        assert_eq!(encode_key(&special(Key::Home), true, false, false), Some(b"\x1b[1;5H".to_vec()));
+        // Ctrl+Right = word-right in many editors → ESC[1;5C.
+        assert_eq!(encode_key(&special(Key::RightArrow), true, false, false), Some(b"\x1b[1;5C".to_vec()));
+        // Alt = 3, Shift = 2; tilde keys take the `n;m~` form.
+        assert_eq!(encode_key(&special(Key::Delete), true, false, false), Some(b"\x1b[3;5~".to_vec()));
+        assert_eq!(encode_key(&special(Key::UpArrow), false, true, false), Some(b"\x1b[1;3A".to_vec()));
+        // Unmodified keys keep their plain sequence (no regression).
+        assert_eq!(encode_key(&special(Key::End), false, false, false), Some(b"\x1b[F".to_vec()));
+        assert_eq!(encode_key(&special(Key::UpArrow), false, false, false), Some(b"\x1b[A".to_vec()));
+    }
+
+    #[test]
+    fn scroll_edge_key_classifies_shift_home_end_only() {
+        assert_eq!(scroll_edge_key(&special(Key::Home), true), Some(true)); // → top
+        assert_eq!(scroll_edge_key(&special(Key::End), true), Some(false)); // → bottom
+        // Un-shifted Home/End are NOT edge-scroll keys (they encode CSI to the shell).
+        assert_eq!(scroll_edge_key(&special(Key::Home), false), None);
+        assert_eq!(scroll_edge_key(&special(Key::End), false), None);
+        assert_eq!(scroll_edge_key("a", true), None);
+    }
+
+    #[test]
+    fn shift_home_end_are_gated_from_the_pty() {
+        // The scroll-to-edge gesture must never leak a CSI sequence into the shell.
+        assert_eq!(encode_key(&special(Key::Home), false, false, true), None);
+        assert_eq!(encode_key(&special(Key::End), false, false, true), None);
+        // Plain Home/End still reach the shell as their cursor sequences.
+        assert_eq!(encode_key(&special(Key::Home), false, false, false), Some(b"\x1b[H".to_vec()));
+        assert_eq!(encode_key(&special(Key::End), false, false, false), Some(b"\x1b[F".to_vec()));
     }
 }

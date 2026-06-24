@@ -223,6 +223,16 @@ fn pane_item(
             },
         ),
     };
+    // Vim-style scrollbar (right edge): thumb geometry + show-then-fade opacity, hit-tested against
+    // the pane's on-screen surface height. `None` while idle/faded or with no scrollback → opacity 0.
+    let (scrollbar_opacity, scrollbar_thumb_y, scrollbar_thumb_h) = match ps.pane.scrollbar(sh) {
+        Some((y, h, op)) => (op, y, h),
+        None => (0.0, 0.0, 0.0),
+    };
+    // Jump-to-bottom HUD: shown whenever the viewport is scrolled up off the live edge.
+    let scroll_offset = ps.pane.scroll_offset() as i32;
+    // Whether the running app grabbed the mouse → forward pointer events to it (Claude/vim).
+    let app_grabs_mouse = ps.pane.app_grabs_mouse();
     // In-pane search box state (opened from the pane menu's "Search…").
     let search_open = ps.pane.search_is_open();
     let (cur, total) = ps.pane.search_count();
@@ -275,6 +285,11 @@ fn pane_item(
         toast: ps.last_toast.clone().into(),
         // The live terminal font px (logical) — drives the widget's indicator scaling.
         font_px,
+        scrollbar_opacity,
+        scrollbar_thumb_y,
+        scrollbar_thumb_h,
+        scroll_offset,
+        app_grabs_mouse,
         // The native app drops a pane the moment its session exits, so a live pane is never
         // "exited"; the field exists for the taskbar's Electron-parity badge.
         exited: false,
@@ -1142,6 +1157,12 @@ pub fn pump(
             let _ = ps.pane.take_dirty();
             continue;
         }
+        // Edge-autoscroll: if a selection drag is held at the top/bottom edge, scroll one line and
+        // grow the selection into off-screen scrollback. It marks the grid dirty (so the surface
+        // re-renders below) and warrants the fast cadence while it's moving.
+        if ps.pane.selection_autoscroll_tick() {
+            active = true;
+        }
         // Poll the transient bottom-right indicator each tick so it appears + auto-expires
         // (copy/paste confirmations + the Ctrl-zoom font %). A change alone refreshes the row.
         let toast = ps.pane.toast_text().unwrap_or_default();
@@ -1164,6 +1185,11 @@ pub fn pump(
         } else {
             false
         };
+        // Vim scrollbar fade: while the bar is showing/fading its opacity changes every tick, so
+        // re-push the row and stay fast until it disappears (then one final clearing push).
+        let bar_on = ps.pane.scrollbar(ps.surf.1).is_some();
+        let scrollbar_changed = bar_on || ps.scrollbar_on;
+        ps.scrollbar_on = bar_on;
         let focus_blink = i == focused && blink_changed;
         let pane_dirty = ps.pane.take_dirty();
         // Repaint the surface only for terminal/cursor changes; a glow-only, toast-only or
@@ -1177,11 +1203,11 @@ pub fn pump(
             if pane_dirty {
                 active = true;
             }
-        } else if !glow_changed && !toast_changed && !ai_changed {
+        } else if !glow_changed && !toast_changed && !ai_changed && !scrollbar_changed {
             continue;
         }
-        // An advancing glow/toast/typewriter animation also warrants the fast cadence.
-        if glow_changed || toast_changed || ai_changed {
+        // An advancing glow/toast/typewriter/scrollbar animation also warrants the fast cadence.
+        if glow_changed || toast_changed || ai_changed || scrollbar_changed {
             active = true;
         }
         if i < ui.panes.row_count() {

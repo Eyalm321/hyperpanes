@@ -77,7 +77,28 @@ pub struct TerminalPane {
     search_matches: Vec<Match>,
     /// Index into `search_matches` of the active (highlighted/revealed) match, if any.
     search_index: Option<usize>,
+    /// When the scrollback viewport was last moved by an explicit scroll gesture (wheel /
+    /// Shift+PageUp/Down / scroll-to-edge). Drives the vim-style scrollbar's show-then-fade: the
+    /// bar is opaque for [`SCROLLBAR_SHOW_MS`], fades over [`SCROLLBAR_FADE_MS`], then is hidden.
+    /// `None` once it has fully faded. NOT stamped by the keystroke-driven snap-to-bottom, so the
+    /// bar never flashes while you type.
+    scroll_activity: Option<Instant>,
+    /// The live drag-selection pointer `(x, y, surf_w, surf_h)` in logical px while the button is
+    /// held, for edge-autoscroll: when it sits in the top/bottom edge band, the pump's
+    /// [`selection_autoscroll_tick`](Self::selection_autoscroll_tick) scrolls the viewport and
+    /// grows the selection into off-screen scrollback. `None` when no drag is in flight.
+    drag_pointer: Option<(f32, f32, f32, f32)>,
 }
+
+/// How long the scrollbar stays fully opaque after a scroll gesture before it begins to fade.
+const SCROLLBAR_SHOW_MS: u128 = 900;
+/// How long the scrollbar takes to fade out once the show window elapses.
+const SCROLLBAR_FADE_MS: u128 = 350;
+/// Minimum scrollbar thumb height (logical px) so it stays grabbable/visible on a huge buffer.
+const SCROLLBAR_MIN_THUMB_PX: f32 = 24.0;
+/// Lines scrolled per wheel notch (mirrors the widget's `scroll-requested(±3)` magnitude) — used
+/// to collapse a notch back to one mouse-wheel report when forwarding to a mouse-grabbing app.
+const WHEEL_LINES_PER_NOTCH: i32 = 3;
 
 /// A link under the cursor — an on-disk-verified path or an http/https URL: where to draw the
 /// hover underline (in the pane's *logical* pixel space) plus the target. Returned by
@@ -175,6 +196,8 @@ impl TerminalPane {
             search_query: String::new(),
             search_matches: Vec::new(),
             search_index: None,
+            scroll_activity: None,
+            drag_pointer: None,
         }
     }
 
@@ -471,7 +494,10 @@ impl TerminalPane {
         let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
         let col = (x / cell_w).floor().clamp(0.0, (cols - 1) as f32) as usize;
         let row = (y / cell_h).floor().clamp(0.0, (rows - 1) as f32) as usize;
-        Some(selection::Cell { col, row })
+        // Anchor to the ABSOLUTE grid line so the selection stays glued to its text as the viewport
+        // scrolls: a viewport row `r` shows absolute line `r - display_offset`.
+        let line = row as i32 - self.grid.display_offset() as i32;
+        Some(selection::Cell { col, line })
     }
 
     /// Begin a drag-selection anchored at the (logical-px) press point. Replaces any prior
@@ -482,6 +508,7 @@ impl TerminalPane {
             .cell_at_clamped(x, y, surf_w, surf_h)
             .map(Selection::new);
         self.select_origin = Some((x, y));
+        self.drag_pointer = Some((x, y, surf_w, surf_h));
     }
 
     /// Extend the active selection's head to the (logical-px) cursor point during a drag.
@@ -491,6 +518,9 @@ impl TerminalPane {
     /// can't copy-on-select). This dead zone is what stops a stray click twitch — especially one
     /// that straddles a cell boundary — from clobbering the clipboard ahead of a paste.
     pub fn selection_update(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) {
+        // Track the live pointer for edge-autoscroll even below the drag threshold (autoscroll
+        // itself only kicks in once the selection is actually dragged).
+        self.drag_pointer = Some((x, y, surf_w, surf_h));
         if let Some((ox, oy)) = self.select_origin {
             if (x - ox).hypot(y - oy) < DRAG_THRESHOLD_PX {
                 return;
@@ -509,6 +539,54 @@ impl TerminalPane {
     pub fn selection_clear(&mut self) {
         self.selection = None;
         self.select_origin = None;
+        self.drag_pointer = None;
+    }
+
+    /// End the drag (button released) — stops edge-autoscroll while KEEPING any selection (the
+    /// controller may still copy it). Call from the `selection-end` handler.
+    pub fn end_selection_drag(&mut self) {
+        self.drag_pointer = None;
+        self.select_origin = None;
+    }
+
+    /// One edge-autoscroll step while a selection drag is held in the top/bottom edge band: scroll
+    /// the viewport one line toward that edge and extend the selection head to the just-revealed
+    /// edge row, so the selection grows into off-screen scrollback (the vim/iTerm/Claude drag
+    /// behavior). Returns `true` if it scrolled — the pump uses that to keep ticking + repainting.
+    /// No-op unless a real (dragged) selection is in flight with the pointer at an edge.
+    pub fn selection_autoscroll_tick(&mut self) -> bool {
+        let (x, y, sw, sh) = match self.drag_pointer {
+            Some(d) => d,
+            None => return false,
+        };
+        if !self.selection.is_some_and(|s| s.dragged) {
+            return false;
+        }
+        let (_, cell_h, _, _) = match self.cell_logical(sw, sh) {
+            Some(t) => t,
+            None => return false,
+        };
+        let edge = cell_h.max(8.0); // a one-row band (min 8px) at each edge
+        let dir = if y < edge {
+            1 // top edge → scroll up into history
+        } else if y > sh - edge {
+            -1 // bottom edge → scroll down toward the live edge
+        } else {
+            return false;
+        };
+        let before = self.grid.display_offset();
+        self.scroll_by(dir);
+        if self.grid.display_offset() == before {
+            return false; // clamped at the top/bottom of the buffer
+        }
+        // Re-map the head to the edge row at the NEW offset → the line just scrolled into view.
+        let edge_y = if dir > 0 { 0.0 } else { sh };
+        if let Some(c) = self.cell_at_clamped(x, edge_y, sw, sh) {
+            if let Some(sel) = self.selection.as_mut() {
+                sel.update(c);
+            }
+        }
+        true
     }
 
     /// Select the entire viewport (every visible cell), marked `dragged` so it renders and is
@@ -521,10 +599,12 @@ impl TerminalPane {
             self.selection = None;
             return;
         }
-        let mut sel = Selection::new(selection::Cell { col: 0, row: 0 });
+        // The visible viewport, in absolute lines: top viewport row 0 is line `-offset`.
+        let off = self.grid.display_offset() as i32;
+        let mut sel = Selection::new(selection::Cell { col: 0, line: -off });
         sel.update(selection::Cell {
             col: cols - 1,
-            row: rows - 1,
+            line: rows as i32 - 1 - off,
         });
         self.selection = Some(sel);
     }
@@ -558,10 +638,14 @@ impl TerminalPane {
             _ => return false,
         };
         let (start, end) = sel.ordered();
-        if start.row != end.row {
+        if start.line != end.line {
             return false; // a multi-row selection is never a single prompt line
         }
-        self.grid.cursor_row() == Some(start.row)
+        // Compare in absolute lines: the cursor's viewport row maps to absolute `row - offset`.
+        match self.grid.cursor_row() {
+            Some(crow) => start.line == crow as i32 - self.grid.display_offset() as i32,
+            None => false,
+        }
     }
 
     /// Type-over selection: the byte sequence that ERASES the selected prompt-line text, to be
@@ -591,34 +675,37 @@ impl TerminalPane {
         };
         let (start, end) = sel.ordered();
         let crow = self.grid.cursor_row()?;
+        let cline = crow as i32 - self.grid.display_offset() as i32;
         let (cols, _) = self.grid_size();
         if cols == 0 {
             return None;
         }
-        // The selection must lie on the SAME WRAPPED LOGICAL LINE as the cursor: every visual
-        // row between the selection and the cursor (inclusive bounds, exclusive of the last)
-        // must carry the WRAPLINE continuation flag. A single-row selection on the cursor's own
-        // row is the degenerate case (empty range). This is what makes a long soft-wrapped
-        // shell input editable across its visual rows, while a selection on a genuinely
-        // different line (scrollback, command output) still declines.
-        let lo = start.row.min(crow);
-        let hi = end.row.max(crow);
-        if (lo..hi).any(|r| !self.grid.row_wraps(r)) {
+        // The selection must lie on the SAME WRAPPED LOGICAL LINE as the cursor: every grid line
+        // between the selection and the cursor (inclusive bounds, exclusive of the last) must carry
+        // the WRAPLINE continuation flag. A single-line selection on the cursor's own line is the
+        // degenerate case (empty range). This is what makes a long soft-wrapped shell input
+        // editable across its visual rows, while a selection on a genuinely different line
+        // (scrollback, command output) still declines.
+        let lo = start.line.min(cline);
+        let hi = end.line.max(cline);
+        if (lo..hi).any(|r| !self.grid.line_wraps(r)) {
             return None;
         }
-        // Linear cell offsets within the wrapped line: a wrapped row is always `cols` cells
-        // wide, and the line editor's arrows/backspace walk straight through the wrap, so the
-        // single-row arithmetic below holds verbatim in linear space.
-        let s = start.row * cols + start.col;
-        let e = end.row * cols + end.col;
-        let c = crow * cols + self.grid.cursor_col();
+        // Linear cell offsets within the wrapped line: a wrapped row is always `cols` cells wide,
+        // and the line editor's arrows/backspace walk straight through the wrap, so the single-row
+        // arithmetic below holds verbatim in linear space. Absolute line numbers are fine — only
+        // the differences between these offsets matter.
+        let lin = |line: i32, col: usize| line * cols as i32 + col as i32;
+        let s = lin(start.line, start.col);
+        let e = lin(end.line, end.col);
+        let c = lin(cline, self.grid.cursor_col());
         const LEFT: &[u8] = b"\x1b[D";
         const RIGHT: &[u8] = b"\x1b[C";
         const BS: &[u8] = &[0x7f];
         const FDEL: &[u8] = b"\x1b[3~"; // forward delete (DeleteChar)
         let mut bytes = Vec::new();
-        let mut rep = |seq: &[u8], n: usize| {
-            for _ in 0..n {
+        let mut rep = |seq: &[u8], n: i32| {
+            for _ in 0..n.max(0) {
                 bytes.extend_from_slice(seq);
             }
         };
@@ -648,11 +735,14 @@ impl TerminalPane {
             Some(s) if s.dragged => s,
             _ => return Vec::new(),
         };
-        let (cell_w, cell_h, cols, _rows) = match self.cell_logical(surf_w, surf_h) {
+        let (cell_w, cell_h, cols, rows) = match self.cell_logical(surf_w, surf_h) {
             Some(t) => t,
             None => return Vec::new(),
         };
-        selection::selection_rects(sel, cols, cell_w, cell_h)
+        // Project the absolute-line selection back through the current scroll position so the
+        // highlight rides the content (and clips at the viewport edges) as the user scrolls.
+        let off = self.grid.display_offset() as i32;
+        selection::selection_rects(sel, cols, cell_w, cell_h, off, rows)
     }
 
     /// The text covered by the active *dragged* selection, reconstructed from the grid snapshot
@@ -665,18 +755,25 @@ impl TerminalPane {
             _ => return None,
         };
         let (start, end) = sel.ordered();
-        let snap = self.grid.snapshot();
-        if snap.cols == 0 {
+        let (cols, _) = self.grid_size();
+        if cols == 0 {
             return None;
         }
-        let last_col = snap.cols - 1;
+        let last_col = cols - 1;
+        // Read straight from the grid by ABSOLUTE line, so a selection anchored in scrollback (or
+        // straddling the history/viewport boundary) reconstructs correctly regardless of scroll.
         let mut lines = Vec::new();
-        for row in start.row..=end.row.min(snap.rows.saturating_sub(1)) {
-            let col_start = if row == start.row { start.col } else { 0 };
-            let col_end = if row == end.row { end.col } else { last_col };
+        for line_i in start.line..=end.line {
+            let row_text = match self.grid.line_text(line_i) {
+                Some(t) => t,
+                None => continue, // line outside the buffer (shouldn't happen for a live selection)
+            };
+            let chars: Vec<char> = row_text.chars().collect();
+            let col_start = if line_i == start.line { start.col } else { 0 };
+            let col_end = if line_i == end.line { end.col } else { last_col };
             let mut line = String::new();
             for col in col_start..=col_end.min(last_col) {
-                let ch = snap.cell(col, row).ch;
+                let ch = chars.get(col).copied().unwrap_or(' ');
                 line.push(if ch == '\0' { ' ' } else { ch });
             }
             lines.push(line.trim_end().to_string());
@@ -749,10 +846,10 @@ impl TerminalPane {
     }
 
     /// Scroll the scrollback viewport by `delta_lines` (positive = up into history, negative =
-    /// toward the live edge), clamped to the history bounds. Drives mouse-wheel scrolling (a few
-    /// lines per notch — see the widget's `scroll-requested` callback).
+    /// toward the live edge), clamped to the history bounds. Stamps the scrollbar's show timer.
     pub fn scroll_by(&mut self, delta_lines: i32) {
         self.grid.scroll_by(delta_lines);
+        self.scroll_activity = Some(Instant::now());
     }
 
     /// Scroll the scrollback viewport by one page (`up` = into history, else toward the live
@@ -761,7 +858,180 @@ impl TerminalPane {
     pub fn scroll_page(&mut self, up: bool) {
         let (_, rows) = self.grid_size();
         let page = (rows as i32 - 1).max(1);
-        self.grid.scroll_by(if up { page } else { -page });
+        self.scroll_by(if up { page } else { -page });
+    }
+
+    /// Jump the viewport to the very top of scrollback (Shift+Home). Stamps the scrollbar timer.
+    pub fn scroll_to_top(&mut self) {
+        let (hist, _, off) = self.grid.scroll_metrics();
+        if hist > off {
+            self.scroll_by((hist - off) as i32);
+        }
+    }
+
+    /// Handle a mouse-wheel notch over the pane. `delta_lines` is positive for wheel-up (into
+    /// history) / negative for wheel-down, in scrollback lines (the widget sends ±3). Returns the
+    /// bytes the controller should write to the pty when the wheel belongs to the **application**
+    /// instead of our scrollback:
+    ///
+    /// * a **mouse-grabbing app** (DECSET 1000/1002/1003 — vim, htop, Claude Code) → a mouse-wheel
+    ///   report at the pointer cell, so the app scrolls its own view;
+    /// * the **alternate screen** with no mouse mode (less, man, a pager) → up/down arrow keys
+    ///   (xterm's "alternate scroll"), so the pager scrolls a line at a time.
+    ///
+    /// Otherwise it scrolls our own scrollback viewport and returns `None`. This is the fix for
+    /// "can't scroll Claude": in the alt screen there is no scrollback for `scroll_by` to move, so
+    /// the wheel must be forwarded to the app.
+    pub fn wheel(&mut self, delta_lines: i32, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<Vec<u8>> {
+        if delta_lines == 0 {
+            return None;
+        }
+        if self.grid.mouse_mode() {
+            return Some(self.mouse_wheel_report(delta_lines, x, y, surf_w, surf_h));
+        }
+        if self.grid.alt_screen() {
+            return Some(alt_scroll_arrows(delta_lines, self.grid.app_cursor()));
+        }
+        self.scroll_by(delta_lines);
+        None
+    }
+
+    /// Build mouse-wheel report bytes for a mouse-grabbing app: one report per wheel notch (a notch
+    /// is [`WHEEL_LINES_PER_NOTCH`] of `delta_lines`), encoded SGR (`ESC[<Cb;Cx;Cy M`) when the app
+    /// asked for it (DECSET 1006), else legacy X10 (`ESC[M` + 3 bytes). Button 64 = wheel up, 65 =
+    /// down; the position is the 1-based cell under the pointer.
+    /// 1-based `(col, row)` of the pointer at logical px `(x, y)` over a `surf_w`×`surf_h` surface,
+    /// clamped into the grid. Shared by every mouse report.
+    fn cell_1based(&self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> (usize, usize) {
+        match self.cell_logical(surf_w, surf_h) {
+            Some((cw, ch, cols, rows)) => {
+                let c = (x / cw).floor().clamp(0.0, (cols - 1) as f32) as usize + 1;
+                let r = (y / ch).floor().clamp(0.0, (rows - 1) as f32) as usize + 1;
+                (c, r)
+            }
+            None => (1, 1),
+        }
+    }
+
+    /// Encode ONE mouse report: `cb` is the button/event code (motion already includes the +32
+    /// motion bit; wheel is 64/65), `release` picks SGR final `m`/X10 button-3. SGR (`ESC[<cb;c;r
+    /// M|m`) when the app asked for it (DECSET 1006), else legacy X10 (`ESC[M` + 3 bytes, each +32).
+    fn fmt_mouse(&self, cb: u32, col: usize, row: usize, release: bool) -> Vec<u8> {
+        if self.grid.sgr_mouse() {
+            let term = if release { 'm' } else { 'M' };
+            format!("\x1b[<{cb};{col};{row}{term}").into_bytes()
+        } else {
+            let b = if release { 3 } else { cb }; // X10 can't say which button released
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                (b + 32).min(255) as u8,
+                (col as u32 + 32).min(255) as u8,
+                (row as u32 + 32).min(255) as u8,
+            ]
+        }
+    }
+
+    fn mouse_wheel_report(&self, delta_lines: i32, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Vec<u8> {
+        let (col, row) = self.cell_1based(x, y, surf_w, surf_h);
+        let cb: u32 = if delta_lines > 0 { 64 } else { 65 };
+        let notches = (delta_lines.unsigned_abs() / WHEEL_LINES_PER_NOTCH as u32).max(1);
+        let mut out = Vec::new();
+        for _ in 0..notches {
+            out.extend_from_slice(&self.fmt_mouse(cb, col, row, false));
+        }
+        out
+    }
+
+    /// Whether the application has grabbed the mouse (DECSET 1000/1002/1003). When true the
+    /// controller forwards button/drag/release events to the app (its own selection/clicks) instead
+    /// of doing a local terminal selection — unless Shift is held (see [`mouse_report`]).
+    ///
+    /// [`mouse_report`]: Self::mouse_report
+    pub fn app_grabs_mouse(&self) -> bool {
+        self.grid.mouse_mode()
+    }
+
+    /// Bytes to forward to the pty for a pointer event over a mouse-grabbing app, or `None` to
+    /// suppress it. `kind`: 0 = button press, 1 = motion, 2 = release. `button`: 0 = left, 1 =
+    /// middle, 2 = right, 3 = none (a bare move). Motion is only reported when the app asked for it
+    /// (1002 = while a button is held, 1003 = always); press/release always report. Returns `None`
+    /// if the app isn't grabbing the mouse.
+    pub fn mouse_report(
+        &self,
+        kind: i32,
+        button: i32,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Option<Vec<u8>> {
+        if !self.grid.mouse_mode() {
+            return None;
+        }
+        let (col, row) = self.cell_1based(x, y, surf_w, surf_h);
+        let btn = button.clamp(0, 3) as u32;
+        match kind {
+            0 => Some(self.fmt_mouse(btn, col, row, false)), // press
+            2 => Some(self.fmt_mouse(btn.min(2), col, row, true)), // release
+            1 => {
+                // Motion: forward on any-motion (1003), or on drag (1002) only while a button is held.
+                let held = button != 3;
+                let want = self.grid.mouse_any_motion() || (self.grid.mouse_drag() && held);
+                if !want {
+                    return None;
+                }
+                let mb = if held { btn } else { 3 };
+                Some(self.fmt_mouse(32 + mb, col, row, false))
+            }
+            _ => None,
+        }
+    }
+
+    // ---- scroll overlays (vim scrollbar + jump-to-bottom HUD) --------------------------------
+
+    /// How far the viewport is scrolled up from the live edge, in lines (0 = pinned to the bottom).
+    /// Drives the jump-to-bottom HUD: shown whenever this is non-zero.
+    pub fn scroll_offset(&self) -> usize {
+        self.grid.scroll_metrics().2
+    }
+
+    /// The vim-style scrollbar to draw right now, or `None` when there is no scrollback or the bar
+    /// has fully faded. Returns `(thumb_y, thumb_h, opacity)` in logical px over a `surf_h`-tall
+    /// pane: the thumb height is proportional to the visible fraction of the buffer, its position to
+    /// how far down the buffer the viewport sits, and the opacity ramps from 1 down to 0 over the
+    /// show-then-fade window since the last scroll gesture (so the bar is invisible while idle).
+    pub fn scrollbar(&self, surf_h: f32) -> Option<(f32, f32, f32)> {
+        let opacity = self.scrollbar_opacity()?;
+        let (hist, rows, off) = self.grid.scroll_metrics();
+        if hist == 0 || rows == 0 || surf_h <= 0.0 {
+            return None;
+        }
+        let total = (hist + rows) as f32;
+        let thumb_h = (surf_h * rows as f32 / total).max(SCROLLBAR_MIN_THUMB_PX).min(surf_h);
+        // Fraction of the way down the buffer the viewport TOP sits: 0 at the very top of history,
+        // 1 at the live edge. `hist - off` lines sit above the viewport top, out of `hist` total.
+        let frac = if hist == 0 {
+            1.0
+        } else {
+            (hist - off) as f32 / hist as f32
+        };
+        let thumb_y = (surf_h - thumb_h) * frac;
+        Some((thumb_y, thumb_h, opacity))
+    }
+
+    /// Current scrollbar opacity from the show-then-fade timer, or `None` once it has fully faded
+    /// (so the projection can drop the bar entirely while idle).
+    fn scrollbar_opacity(&self) -> Option<f32> {
+        let e = self.scroll_activity?.elapsed().as_millis();
+        if e < SCROLLBAR_SHOW_MS {
+            Some(1.0)
+        } else if e < SCROLLBAR_SHOW_MS + SCROLLBAR_FADE_MS {
+            Some(1.0 - (e - SCROLLBAR_SHOW_MS) as f32 / SCROLLBAR_FADE_MS as f32)
+        } else {
+            None
+        }
     }
 
     // ---- Copy/paste indicator ("toast") -----------------------------------------------------
@@ -925,6 +1195,20 @@ pub fn cells_for_px(width_px: f32, height_px: f32, cell_w: u32, cell_h: u32) -> 
     let cols = ((width_px as u32) / cell_w.max(1)).max(2) as usize;
     let rows = ((height_px as u32) / cell_h.max(1)).max(1) as usize;
     (cols, rows)
+}
+
+/// Alternate-scroll arrow keys for a wheel notch in the alternate screen (no mouse mode): one
+/// Up/Down per scrollback line in `delta_lines` (positive = up). Encoded as application cursor keys
+/// (`ESC O A/B`) when DECCKM is set, else normal (`ESC [ A/B`) — what xterm sends so pagers (less,
+/// man) scroll on the wheel. This is the no-mouse-grab leg of the "can't scroll Claude" fix.
+fn alt_scroll_arrows(delta_lines: i32, app_cursor: bool) -> Vec<u8> {
+    let seq: &[u8] = match (delta_lines > 0, app_cursor) {
+        (true, false) => b"\x1b[A",
+        (false, false) => b"\x1b[B",
+        (true, true) => b"\x1bOA",
+        (false, true) => b"\x1bOB",
+    };
+    seq.repeat(delta_lines.unsigned_abs().max(1) as usize)
 }
 
 /// Turn raw clipboard text into the exact bytes to write to the pty for a paste.
@@ -1167,6 +1451,169 @@ mod tests {
             "a real drag past the threshold selects"
         );
         assert_eq!(p.selection_text().as_deref(), Some("abcdef"));
+    }
+
+    #[test]
+    fn wheel_scrolls_scrollback_on_the_main_screen() {
+        // Grow scrollback past the viewport, then wheel up: the main screen has no app mouse grab,
+        // so the wheel moves OUR viewport (no bytes forwarded) and the display offset advances.
+        let mut p = unit_pane(20, 3);
+        for _ in 0..50 {
+            p.feed("line\r\n");
+        }
+        assert_eq!(p.scroll_offset(), 0, "pinned to the live edge initially");
+        assert!(p.wheel(3, 5.0, 5.0, 20.0, 3.0).is_none(), "no pty forward on the main screen");
+        assert!(p.scroll_offset() > 0, "wheel moved the scrollback viewport up");
+    }
+
+    #[test]
+    fn wheel_in_alt_screen_without_mouse_forwards_arrow_keys() {
+        // Alt screen, no mouse mode → alternate scroll: wheel becomes Up/Down arrows so a pager
+        // scrolls. This is the "can't scroll Claude" fix's no-mouse-grab leg.
+        let mut p = unit_pane(20, 3);
+        p.feed("\x1b[?1049h"); // enter alternate screen
+        let up = p.wheel(3, 5.0, 5.0, 20.0, 3.0).expect("alt screen forwards to the pty");
+        assert_eq!(up, b"\x1b[A\x1b[A\x1b[A", "3 lines up → three normal Up arrows");
+        let down = p.wheel(-3, 5.0, 5.0, 20.0, 3.0).unwrap();
+        assert_eq!(down, b"\x1b[B\x1b[B\x1b[B");
+        // The viewport never moved (alt screen has no scrollback to scroll).
+        assert_eq!(p.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn wheel_with_app_cursor_keys_uses_ss3_arrows() {
+        let mut p = unit_pane(20, 3);
+        p.feed("\x1b[?1049h\x1b[?1h"); // alt screen + DECCKM (application cursor keys)
+        let up = p.wheel(3, 5.0, 5.0, 20.0, 3.0).unwrap();
+        assert_eq!(up, b"\x1bOA\x1bOA\x1bOA", "DECCKM → SS3 Up arrows");
+    }
+
+    #[test]
+    fn wheel_with_mouse_grab_forwards_sgr_wheel_report() {
+        // A mouse-grabbing app (DECSET 1000) with SGR encoding (1006) gets a wheel report at the
+        // pointer cell — one per notch — so it (Claude Code / vim / htop) scrolls its own view.
+        let mut p = unit_pane(20, 3);
+        p.feed("\x1b[?1000h\x1b[?1006h");
+        // Pointer over cell (col 4, row 1) → 1-based (5, 2). One notch (3 lines) → one report.
+        let up = p.wheel(3, 4.5, 1.5, 20.0, 3.0).unwrap();
+        assert_eq!(up, b"\x1b[<64;5;2M", "wheel-up SGR report, button 64");
+        let down = p.wheel(-3, 4.5, 1.5, 20.0, 3.0).unwrap();
+        assert_eq!(down, b"\x1b[<65;5;2M", "wheel-down SGR report, button 65");
+    }
+
+    #[test]
+    fn mouse_report_forwards_press_drag_release_to_a_grabbing_app() {
+        // DECSET 1002 (button-event/drag tracking) + 1006 (SGR): forward the mouse so the app
+        // (Claude) does its own selection. Pointer at cell (4,1) → 1-based (5,2).
+        let mut p = unit_pane(20, 3);
+        p.feed("\x1b[?1002h\x1b[?1006h");
+        assert!(p.app_grabs_mouse());
+        // Left press → button 0.
+        assert_eq!(p.mouse_report(0, 0, 4.5, 1.5, 20.0, 3.0).unwrap(), b"\x1b[<0;5;2M");
+        // Drag (motion, left held) → +32 motion bit.
+        assert_eq!(p.mouse_report(1, 0, 4.5, 1.5, 20.0, 3.0).unwrap(), b"\x1b[<32;5;2M");
+        // Release → SGR final 'm'.
+        assert_eq!(p.mouse_report(2, 0, 4.5, 1.5, 20.0, 3.0).unwrap(), b"\x1b[<0;5;2m");
+        // A bare move (no button) under drag-only tracking (1002) is NOT reported.
+        assert!(p.mouse_report(1, 3, 4.5, 1.5, 20.0, 3.0).is_none());
+    }
+
+    #[test]
+    fn mouse_report_is_none_when_app_has_no_mouse_mode() {
+        let mut p = unit_pane(20, 3);
+        p.feed("hi"); // plain shell, no mouse mode
+        assert!(!p.app_grabs_mouse());
+        assert!(p.mouse_report(0, 0, 4.5, 1.5, 20.0, 3.0).is_none());
+    }
+
+    #[test]
+    fn selection_text_follows_content_after_scrolling() {
+        // Select a line, then scroll up: the selection is anchored to the absolute line, so its
+        // text is unchanged even though the viewport now shows different rows. (Task: keep the
+        // selection while scrolling.)
+        let mut p = unit_pane(10, 3);
+        p.feed("AAAAA\r\n");
+        for _ in 0..20 {
+            p.feed("xxxxx\r\n");
+        }
+        // Scroll up so the "AAAAA" line is back on screen, then select its first 5 cells.
+        p.scroll_by(100); // clamps to the top of history
+        // Find AAAAA isn't necessary; just select viewport row 0 cols 0..5 and remember its text.
+        p.selection_begin(0.5, 0.5, 10.0, 3.0);
+        p.selection_update(4.5, 0.5, 10.0, 3.0);
+        let before = p.selection_text();
+        assert!(before.is_some());
+        // Scroll down one line: the same content moves, but selection_text must be identical.
+        p.scroll_by(-1);
+        assert_eq!(p.selection_text(), before, "selection text is glued to its line");
+    }
+
+    #[test]
+    fn drag_at_top_edge_autoscrolls_into_history_and_grows_selection() {
+        // 60 lines of history in a 20-row pane (so the 8px edge band leaves a middle zone).
+        let mut p = unit_pane(10, 20);
+        for i in 0..60 {
+            p.feed(&format!("L{i}\r\n"));
+        }
+        // At the live edge; begin a drag at the bottom and pull it to the top row.
+        p.selection_begin(0.5, 19.5, 10.0, 20.0);
+        p.selection_update(0.5, 0.5, 10.0, 20.0); // y < edge(8) → top band
+        assert!(p.selection_is_drag());
+        let off0 = p.scroll_offset();
+        let grew_before = p.selection_text();
+        assert!(p.selection_autoscroll_tick(), "top-edge drag autoscrolls");
+        assert!(p.scroll_offset() > off0, "scrolled up into history");
+        // The head was re-mapped to the newly revealed top line → the selection text changed.
+        assert_ne!(p.selection_text(), grew_before, "selection grew into scrollback");
+    }
+
+    #[test]
+    fn drag_at_bottom_edge_autoscrolls_toward_live_edge() {
+        let mut p = unit_pane(10, 20);
+        for i in 0..60 {
+            p.feed(&format!("L{i}\r\n"));
+        }
+        p.scroll_by(30); // scroll up into history first
+        let off0 = p.scroll_offset();
+        assert!(off0 > 0);
+        p.selection_begin(0.5, 0.5, 10.0, 20.0);
+        p.selection_update(8.5, 19.5, 10.0, 20.0); // y > sh-edge → bottom band
+        assert!(p.selection_is_drag());
+        assert!(p.selection_autoscroll_tick(), "bottom-edge drag autoscrolls");
+        assert!(p.scroll_offset() < off0, "scrolled toward the live edge");
+        // Releasing the button stops autoscroll even though the selection is kept.
+        p.end_selection_drag();
+        assert!(!p.selection_autoscroll_tick(), "no drag in flight → no autoscroll");
+    }
+
+    #[test]
+    fn no_autoscroll_when_pointer_is_in_the_middle() {
+        let mut p = unit_pane(10, 20);
+        for i in 0..60 {
+            p.feed(&format!("L{i}\r\n"));
+        }
+        p.scroll_by(15);
+        let off0 = p.scroll_offset();
+        p.selection_begin(0.5, 9.5, 10.0, 20.0);
+        p.selection_update(8.5, 10.5, 10.0, 20.0); // middle band (8..12) — no edge
+        assert!(!p.selection_autoscroll_tick(), "middle drag doesn't scroll");
+        assert_eq!(p.scroll_offset(), off0);
+    }
+
+    #[test]
+    fn scrollbar_appears_after_a_scroll_and_is_hidden_at_the_bottom_with_no_history() {
+        let mut p = unit_pane(20, 3);
+        // No history yet → no scrollbar even right after a (clamped) scroll.
+        assert!(p.scrollbar(60.0).is_none(), "no scrollback → no bar");
+        for _ in 0..50 {
+            p.feed("line\r\n");
+        }
+        // A fresh scroll shows the bar at full opacity with a thumb shorter than the track.
+        p.scroll_by(5);
+        let (thumb_y, thumb_h, op) = p.scrollbar(60.0).expect("bar shows right after a scroll");
+        assert!((op - 1.0).abs() < 1e-3, "fully opaque immediately after scrolling");
+        assert!(thumb_h < 60.0 && thumb_h >= SCROLLBAR_MIN_THUMB_PX);
+        assert!(thumb_y >= 0.0);
     }
 
     #[test]
