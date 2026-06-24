@@ -34,7 +34,6 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
-use hyperpanes_core::app::VERSION;
 use hyperpanes_core::control::readmodel::{PaneInfo, PaneStatus, TabInfo, WindowInfo};
 use hyperpanes_core::control::server::{self, notify_state, Shared};
 use hyperpanes_core::persistence::{control_settings, paths};
@@ -143,7 +142,9 @@ impl ControlHost {
         let shared = Shared::new(
             Arc::clone(mgr),
             self.allow_input.get(),
-            VERSION,
+            // The shipped app's real version (this crate's Cargo version), so `control.json` +
+            // `/health` report it accurately instead of a stale hardcoded string.
+            env!("CARGO_PKG_VERSION"),
             self.control_file.clone(),
         );
         // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.

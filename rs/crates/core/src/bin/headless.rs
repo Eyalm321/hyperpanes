@@ -17,7 +17,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(e) = runtime.block_on(hyperpanes_core::app::run()) {
+    if let Err(e) = runtime.block_on(hyperpanes_core::app::run(env!("CARGO_PKG_VERSION"))) {
         eprintln!("hyperpanes-headless: {e}");
         std::process::exit(1);
     }

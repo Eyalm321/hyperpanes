@@ -30,9 +30,6 @@ use crate::workspace::io::windows_of;
 use crate::workspace::launch::resolve_launch_workspace;
 use crate::workspace::model::{PaneSpec, WindowSpec};
 
-/// Version stamped into `/health` + `control.json` (the Electron app's `package.json` version).
-pub const VERSION: &str = "0.1.8";
-
 /// Default pane frame color for seeded panes that don't specify one.
 const DEFAULT_PANE_COLOR: &str = "#3b82f6";
 
@@ -44,7 +41,7 @@ struct MetaUpdate {
 
 /// Run the headless daemon: wire the engine + control server + AI + single-instance gate, seed the
 /// launch workspace, and serve the loopback control API until the process exits.
-pub async fn run() -> io::Result<()> {
+pub async fn run(version: &str) -> io::Result<()> {
     let control_file = std::env::var_os("HYPERPANES_CONTROL_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(paths::control_json);
@@ -59,7 +56,7 @@ pub async fn run() -> io::Result<()> {
     let shared = Shared::new(
         Arc::clone(&sessions),
         allow_input,
-        VERSION,
+        version,
         control_file.clone(),
     );
 
