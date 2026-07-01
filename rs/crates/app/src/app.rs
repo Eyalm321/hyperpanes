@@ -714,7 +714,7 @@ impl App {
     /// feed throughput in the perf log (#1).
     fn route_event(&self, windows: &[Rc<Window>], ev: SessionEvent) -> usize {
         match ev {
-            SessionEvent::Data { uid, data } => {
+            SessionEvent::Data { uid, data, .. } => {
                 // NB: the ambient-AI engine is NOT fed the raw redraw byte stream here — a
                 // repainting TUI (e.g. an agent CLI) would drown the quiescence scheduler in
                 // noise. Instead `pump_ai` feeds each pane's *rendered screen text* on a

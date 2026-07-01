@@ -55,6 +55,11 @@ impl Screen {
         self.parser.advance(&mut self.term, bytes);
     }
 
+    /// Current grid dimensions `(cols, rows)` — what remote clients must emulate at.
+    pub fn dims(&self) -> (u16, u16) {
+        (self.cols as u16, self.rows as u16)
+    }
+
     /// Resize the screen grid. No-op if unchanged dimensions are passed.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = (cols as usize).max(1);

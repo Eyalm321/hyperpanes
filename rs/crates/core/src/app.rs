@@ -59,6 +59,16 @@ pub async fn run(version: &str) -> io::Result<()> {
         version,
         control_file.clone(),
     );
+    // Remote-access bind (mobile client): honor bindAddress/port from control-settings.json.
+    if settings.bind_address.is_some() || settings.port.is_some() {
+        shared.set_bind(
+            settings
+                .bind_address
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            settings.port.unwrap_or(0),
+        );
+    }
 
     // Seed the read-model from the launch workspace (argv only — no last-session restore, so the
     // daemon starts clean and deterministic). Always leaves ≥1 window for open_pane to target.
@@ -341,7 +351,7 @@ async fn ai_loop(
     loop {
         tokio::select! {
             maybe = ai_rx.recv() => match maybe {
-                Some(SessionEvent::Data { uid, data }) => ai.on_data(&uid, &data),
+                Some(SessionEvent::Data { uid, data, .. }) => ai.on_data(&uid, &data),
                 Some(SessionEvent::Cwd { uid, cwd }) => ai.on_cwd(&uid, &cwd, None),
                 Some(SessionEvent::Exit { uid, .. }) => ai.on_session_exit(&uid),
                 // Phase-4 semantic markers are not part of the AI tap's input model.

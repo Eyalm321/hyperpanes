@@ -72,6 +72,10 @@ struct PaneSnap {
 pub struct ControlHost {
     enabled: Cell<bool>,
     allow_input: Cell<bool>,
+    /// Requested bind `(address, port)` from `control-settings.json` (`None` = loopback
+    /// ephemeral). Read once at construction; a settings-file edit needs a restart (or an
+    /// Enabled toggle) to re-bind.
+    bind: RefCell<(Option<String>, Option<u16>)>,
     control_file: PathBuf,
     /// The tokio runtime the server tasks run on. Captured once (the app enters the runtime
     /// guard before building the host) and used for every `spawn`, so a spawn from the UI thread
@@ -110,6 +114,7 @@ impl ControlHost {
         let host = ControlHost {
             enabled: Cell::new(settings.enabled),
             allow_input: Cell::new(allow_input),
+            bind: RefCell::new((settings.bind_address.clone(), settings.port)),
             control_file,
             // The app enters the tokio runtime guard before constructing the host, so the current
             // handle is always available here.
@@ -149,6 +154,19 @@ impl ControlHost {
         );
         // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.
         shared.set_runtime(self.runtime.clone());
+        // Remote-access bind (mobile client): re-read the settings file so an edit takes
+        // effect on the next Enabled toggle without an app restart.
+        {
+            let fresh = control_settings::load();
+            let mut bind = self.bind.borrow_mut();
+            *bind = (fresh.bind_address, fresh.port);
+            if bind.0.is_some() || bind.1.is_some() {
+                shared.set_bind(
+                    bind.0.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
+                    bind.1.unwrap_or(0),
+                );
+            }
+        }
         let task = self.runtime.spawn(server::run_server(Arc::clone(&shared)));
         let ticker = self
             .runtime
@@ -207,10 +225,12 @@ impl ControlHost {
     }
 
     fn persist(&self) {
-        let _ = control_settings::save(&control_settings::ControlSettings {
-            enabled: self.enabled.get(),
-            allow_input: self.allow_input.get(),
-        });
+        // Preserve fields this host doesn't own (bindAddress/port live only in the file):
+        // load-modify-save so toggling the booleans can't erase a remote-access config.
+        let mut settings = control_settings::load();
+        settings.enabled = self.enabled.get();
+        settings.allow_input = self.allow_input.get();
+        let _ = control_settings::save(&settings);
     }
 
     /// `(enabled, allow_input, port-if-running)` for the Preferences status line.

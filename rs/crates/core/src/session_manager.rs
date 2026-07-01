@@ -74,7 +74,16 @@ fn next_inproc_uid() -> String {
 pub enum SessionEvent {
     /// A flushed (batched) output chunk. The renderer/control writes this to its
     /// terminal; it is also what the replay buffer and `output_bytes` accumulate.
-    Data { uid: String, data: String },
+    /// `cursor` is the monotonic `output_bytes` value AFTER this chunk (UTF-16 code
+    /// units), computed atomically at flush time — remote clients use it to splice a
+    /// live stream onto a `GET /output` snapshot without gaps or duplicates.
+    /// `#[serde(default)]` keeps the daemon proto readable from pre-cursor peers.
+    Data {
+        uid: String,
+        data: String,
+        #[serde(default)]
+        cursor: u64,
+    },
     /// The pane's working directory changed (from an OSC 7 / OSC 9;9 sniff). De-duped:
     /// fires only on an actual change.
     Cwd { uid: String, cwd: String },
@@ -434,6 +443,25 @@ impl SessionRegistry {
         })
     }
 
+    /// Current pty grid `(cols, rows)` — the width a remote client must emulate at.
+    pub fn dims(&self, uid: &str) -> Option<(u16, u16)> {
+        let map = self.sessions.lock().unwrap();
+        map.get(uid).map(|s| s.shared.screen.lock().unwrap().dims())
+    }
+
+    /// The replay buffer + the byte cursor as an ATOMIC pair (both read under the
+    /// replay lock, which `flush_into` also holds while bumping the cursor). Remote
+    /// clients splice a live `output` frame stream onto this snapshot; a torn pair
+    /// would drop or duplicate bytes at the seam.
+    pub fn replay_with_cursor(&self, uid: &str) -> Option<(String, u64)> {
+        let map = self.sessions.lock().unwrap();
+        map.get(uid).map(|s| {
+            let replay = s.shared.replay.lock().unwrap();
+            let cursor = s.shared.output_bytes.load(Ordering::Relaxed);
+            (replay.get().to_string(), cursor)
+        })
+    }
+
     /// Write input to the pane's pty.
     pub fn write(&self, uid: &str, data: &str) {
         let map = self.sessions.lock().unwrap();
@@ -679,6 +707,25 @@ impl SessionManager {
         match self {
             SessionManager::InProcess(r) => r.resize(uid, cols, rows),
             SessionManager::Daemon(d) => d.resize(uid, cols, rows),
+        }
+    }
+
+    /// Current pty grid `(cols, rows)`, or `None` when unknown. Daemon-backed panes
+    /// return `None` for now (dims live daemon-side; mirroring them into the shadow is
+    /// a follow-up, like `liveness`) — `/state` simply omits cols/rows for them.
+    pub fn dims(&self, uid: &str) -> Option<(u16, u16)> {
+        match self {
+            SessionManager::InProcess(r) => r.dims(uid),
+            SessionManager::Daemon(_) => None,
+        }
+    }
+
+    /// The replay buffer + byte cursor as an ATOMIC pair (see the in-process impl) —
+    /// what remote clients seed from before splicing the live `output` frame stream.
+    pub fn replay_with_cursor(&self, uid: &str) -> Option<(String, u64)> {
+        match self {
+            SessionManager::InProcess(r) => r.replay_with_cursor(uid),
+            SessionManager::Daemon(d) => d.replay_with_cursor(uid),
         }
     }
 
@@ -981,19 +1028,26 @@ impl SessionPipeline {
     // the screen. See `Shared::screen_pending`.
     fn flush_into(&mut self, data: String, now_epoch_ms: u64, out: &mut Vec<SessionEvent>) {
         let n = data.encode_utf16().count() as u64;
-        self.shared.replay.lock().unwrap().append(&data);
+        // Bump the cursor while HOLDING the replay lock: `replay_with_cursor` reads the
+        // pair under the same lock, so a snapshot can never see one without the other
+        // (a torn pair would drop or duplicate bytes on a remote attach splice).
+        let cursor = {
+            let mut replay = self.shared.replay.lock().unwrap();
+            replay.append(&data);
+            self.shared.output_bytes.fetch_add(n, Ordering::Relaxed) + n
+        };
         self.shared
             .screen_pending
             .lock()
             .unwrap()
             .extend_from_slice(data.as_bytes());
-        self.shared.output_bytes.fetch_add(n, Ordering::Relaxed);
         self.shared
             .last_output_at
             .store(now_epoch_ms, Ordering::Relaxed);
         out.push(SessionEvent::Data {
             uid: self.uid.clone(),
             data,
+            cursor,
         });
     }
 }
@@ -1192,7 +1246,8 @@ mod tests {
             evs,
             vec![SessionEvent::Data {
                 uid: "u1".into(),
-                data: "abcde".into()
+                data: "abcde".into(),
+                cursor: 5,
             }]
         );
         assert_eq!(sh.replay.lock().unwrap().get(), "abcde");
@@ -1221,7 +1276,8 @@ mod tests {
             evs,
             vec![SessionEvent::Data {
                 uid: "u1".into(),
-                data: big.clone()
+                data: big.clone(),
+                cursor: (BATCH_MAX_SIZE - 1) as u64,
             }]
         );
         // The new chunk remains buffered until its own flush.
@@ -1230,7 +1286,8 @@ mod tests {
             evs2,
             vec![SessionEvent::Data {
                 uid: "u1".into(),
-                data: "yy".into()
+                data: "yy".into(),
+                cursor: (BATCH_MAX_SIZE + 1) as u64,
             }]
         );
     }
@@ -1248,7 +1305,8 @@ mod tests {
             vec![
                 SessionEvent::Data {
                     uid: "u1".into(),
-                    data: "tail".into()
+                    data: "tail".into(),
+                    cursor: 4,
                 },
                 SessionEvent::Exit {
                     uid: "u1".into(),
@@ -1346,7 +1404,8 @@ mod tests {
             recv(&mut rx).await,
             Some(SessionEvent::Data {
                 uid: "u1".into(),
-                data: "hello".into()
+                data: "hello".into(),
+                cursor: 5,
             })
         );
         assert_eq!(mgr.output_bytes("u1"), Some(5));

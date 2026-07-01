@@ -396,6 +396,7 @@ mod tests {
             DaemonMsg::Event(SessionEvent::Data {
                 uid: "s1".into(),
                 data: "hi".into(),
+                cursor: 2,
             }),
             DaemonMsg::Event(SessionEvent::Cwd {
                 uid: "s1".into(),

@@ -181,7 +181,11 @@ async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respons
         Err(e) => return e,
     };
     let m = shared.model.lock().unwrap();
-    let out = m.state_for_scope(info.scope.as_ref(), &|p| shared.compute_activity(p));
+    let out = m.state_for_scope_with_dims(
+        info.scope.as_ref(),
+        &|p| shared.compute_activity(p),
+        &|p| shared.sessions.dims(&p.session_uid),
+    );
     ok_json(out)
 }
 
@@ -238,7 +242,10 @@ async fn tokens(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Byt
         .mint(requested.clone(), ttl, now_ms());
     let port = shared.port();
     let (port_field, events) = if port != 0 {
-        (Some(port), Value::String(events_url(port, &token)))
+        (
+            Some(port),
+            Value::String(events_url(&shared.advertised_host(), port, &token)),
+        )
     } else {
         (None, Value::Null)
     };
@@ -315,12 +322,13 @@ fn read_output_body(
     uid: &str,
     q: &HashMap<String, String>,
 ) -> Value {
-    let raw = shared.sessions.replay(uid).unwrap_or_default();
-    let total = shared
+    // Atomic pair: a torn replay/cursor read would drop or duplicate bytes when a
+    // remote client splices the live `output` frame stream onto this snapshot.
+    let (raw, total) = shared
         .sessions
-        .output_bytes(uid)
-        .map(|b| b as i64)
-        .unwrap_or_else(|| raw.encode_utf16().count() as i64);
+        .replay_with_cursor(uid)
+        .map(|(r, c)| (r, c as i64))
+        .unwrap_or_default();
     let since = non_neg_num(q.get("since"));
     let mut text = raw.clone();
     let mut cursor = total;

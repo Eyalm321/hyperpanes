@@ -35,6 +35,9 @@ pub enum ControlEvent {
         session_uid: String,
         pane_id: Option<String>,
         data: String,
+        /// Monotonic byte cursor (UTF-16 code units) AFTER this chunk — additive
+        /// (mobile-client attach splicing); legacy clients ignore unknown fields.
+        cursor: u64,
     },
     #[serde(rename_all = "camelCase")]
     Exit {
@@ -202,9 +205,10 @@ mod tests {
                 session_uid: "u1".into(),
                 pane_id: Some("p1".into()),
                 data: "hi".into(),
+                cursor: 2,
             }
             .to_json(),
-            r#"{"type":"output","sessionUid":"u1","paneId":"p1","data":"hi"}"#
+            r#"{"type":"output","sessionUid":"u1","paneId":"p1","data":"hi","cursor":2}"#
         );
         // null paneId is preserved (older frames).
         assert_eq!(
@@ -338,6 +342,7 @@ mod tests {
             session_uid: "u1".into(),
             pane_id: Some("p1".into()),
             data: "x".into(),
+            cursor: 1,
         };
         hub.broadcast_for_pane(Some(&coords("p1", "t1", 1)), &in_scope);
         assert!(master.try_recv().is_ok());
@@ -347,6 +352,7 @@ mod tests {
             session_uid: "u2".into(),
             pane_id: Some("p2".into()),
             data: "y".into(),
+            cursor: 1,
         };
         hub.broadcast_for_pane(Some(&coords("p2", "t1", 1)), &sibling);
         assert!(master.try_recv().is_ok());
