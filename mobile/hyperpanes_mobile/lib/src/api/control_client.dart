@@ -175,14 +175,23 @@ class EventsChannel {
           if (state.value != EventsState.connected) {
             state.value = EventsState.connected;
             _attempt = 0;
+            debugPrint('hp.events: connected');
           }
           if (msg is String) _frames.add(ControlFrame.parse(msg));
         },
-        onError: (_) => _scheduleReconnect(),
-        onDone: _scheduleReconnect,
+        onError: (Object e) {
+          debugPrint('hp.events: error $e');
+          _scheduleReconnect();
+        },
+        onDone: () {
+          debugPrint(
+              'hp.events: closed (code=${ch.closeCode} reason=${ch.closeReason})');
+          _scheduleReconnect();
+        },
         cancelOnError: true,
       );
-    } catch (_) {
+    } catch (e) {
+      debugPrint('hp.events: connect threw $e');
       _scheduleReconnect();
     }
   }

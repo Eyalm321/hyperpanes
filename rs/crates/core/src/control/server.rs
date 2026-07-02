@@ -367,11 +367,42 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
     let port = listener.local_addr()?.port();
     shared.port.store(port, Ordering::SeqCst);
 
-    shared.tokens.lock().unwrap().set_master(random_token());
+    shared.tokens.lock().unwrap().set_master(master_token(&shared));
     write_discovery(&shared)?;
 
     let app = routes::router(Arc::clone(&shared));
     axum::serve(listener, app).await
+}
+
+/// The master token for this server run. Loopback (the frozen default) mints a fresh
+/// one per start, exactly like the TS source. A REMOTE bind persists it in a 0600
+/// `control-token` file next to control.json instead — a paired phone must survive
+/// host restarts, or every reboot strands it until the user is back at the desk to
+/// re-scan a QR.
+fn master_token(shared: &Arc<Shared>) -> String {
+    let (addr, _) = shared.bind_config();
+    if addr == "127.0.0.1" {
+        return random_token();
+    }
+    let path = shared.control_file.with_file_name("control-token");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        // Same sanity shape as minted tokens (64 hex chars) — anything else re-mints.
+        if existing.len() == 64 && existing.chars().all(|c| c.is_ascii_hexdigit()) {
+            return existing.to_string();
+        }
+    }
+    let token = random_token();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = crate::persistence::paths::write_atomic(&path, token.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    token
 }
 
 /// Recompute each pane's activity every tick and broadcast a scope-filtered `activity` frame on
@@ -821,6 +852,39 @@ mod tests {
             events_url("100.71.2.9", 51888, "abc"),
             "ws://100.71.2.9:51888/events?token=abc"
         );
+    }
+
+    #[test]
+    fn master_token_persists_only_for_remote_binds() {
+        let dir = std::env::temp_dir().join(format!("hp-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let control = dir.join("control.json");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+        let sessions = Arc::new(SessionManager::new(tx));
+        let shared = Shared::new(sessions, false, "0.0.0", control);
+
+        // Loopback default: fresh token every start (frozen legacy behaviour).
+        let a = master_token(&shared);
+        let b = master_token(&shared);
+        assert_ne!(a, b);
+        assert!(!dir.join("control-token").exists());
+
+        // Remote bind: minted once, then stable across restarts.
+        shared.set_bind("100.71.2.9", 51888);
+        let c = master_token(&shared);
+        let d = master_token(&shared);
+        assert_eq!(c, d);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("control-token")).unwrap().trim(),
+            c
+        );
+
+        // Corrupt file re-mints instead of serving garbage.
+        std::fs::write(dir.join("control-token"), "not-a-token").unwrap();
+        let e = master_token(&shared);
+        assert_ne!(e, "not-a-token");
+        assert_eq!(e.len(), 64);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
