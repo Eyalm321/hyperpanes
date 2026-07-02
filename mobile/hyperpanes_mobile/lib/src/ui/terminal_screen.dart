@@ -110,8 +110,6 @@ class _TerminalScreenState extends State<TerminalScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            if (liveness == 'awaiting-input')
-              _AwaitingInputBanner(pane: pane!),
             Expanded(child: _FittedTerminal(pane: pane!)),
             _QuickKeysBar(pane: pane!),
             if (_composerMode) _composer(),
@@ -154,9 +152,10 @@ class _TerminalScreenState extends State<TerminalScreen> {
   }
 }
 
-/// Renders the fixed host grid, scaled so its WIDTH fits the screen; taller grids
-/// pan vertically. `autoResize: false` keeps the emulator at host cols×rows no matter
-/// what size the widget gets.
+/// Renders the fixed host grid edge-to-edge: measure the terminal font's real glyph
+/// width, then pick the exact font size that makes `hostCols` span the full screen
+/// width. `autoResize: false` keeps the emulator at host cols×rows no matter what
+/// size the widget gets — a pty stream only renders correctly at its own width.
 class _FittedTerminal extends StatelessWidget {
   const _FittedTerminal({required this.pane});
 
@@ -164,36 +163,29 @@ class _FittedTerminal extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Base cell size at font 14 for JetBrains-class monospace; the FittedBox scale
-    // corrects any drift, so this only sets the render resolution.
-    const baseFont = 14.0;
-    const cellW = baseFont * 0.6;
-    const cellH = baseFont * 1.4;
-    final gridW = pane.hostCols * cellW;
-    final gridH = pane.hostRows * cellH;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final scale = (constraints.maxWidth / gridW).clamp(0.2, 2.0);
-        return SingleChildScrollView(
-          child: SizedBox(
-            width: constraints.maxWidth,
-            height: gridH * scale,
-            child: FittedBox(
-              fit: BoxFit.fill,
-              child: SizedBox(
-                width: gridW,
-                height: gridH,
-                child: TerminalView(
-                  pane.terminal,
-                  theme: hpTerminalTheme,
-                  autoResize: false,
-                  textStyle: const TerminalStyle(fontSize: baseFont),
-                  backgroundOpacity: 0,
-                  hardwareKeyboardOnly: false,
-                ),
-              ),
-            ),
+        // Glyph width per font-size unit for xterm's monospace (measured, not
+        // estimated — estimates drift per platform font and leave side gutters).
+        const ref = 100.0;
+        final tp = TextPainter(
+          text: const TextSpan(
+            text: '0',
+            style: TextStyle(fontFamily: 'monospace', fontSize: ref),
           ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        final cellPerUnit = tp.width / ref;
+        final fontSize = (constraints.maxWidth / (pane.hostCols * cellPerUnit))
+            .clamp(3.0, 32.0)
+            .toDouble();
+        return TerminalView(
+          pane.terminal,
+          theme: hpTerminalTheme,
+          autoResize: false,
+          textStyle: TerminalStyle(fontSize: fontSize),
+          backgroundOpacity: 0,
+          hardwareKeyboardOnly: false,
         );
       },
     );
@@ -227,47 +219,6 @@ class _QuickKeysBar extends StatelessWidget {
                 ),
               ),
             ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Red banner when the agent is blocked on input: one-tap replies (1/2/3, y/n, Esc).
-class _AwaitingInputBanner extends StatelessWidget {
-  const _AwaitingInputBanner({required this.pane});
-
-  final PaneSession pane;
-
-  @override
-  Widget build(BuildContext context) {
-    final red = livenessColors['awaiting-input']!;
-    return Container(
-      color: red.withValues(alpha: 0.15),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Row(
-        children: [
-          Icon(Icons.pan_tool_alt_outlined, size: 16, color: red),
-          const SizedBox(width: 8),
-          const Expanded(
-            child: Text('Waiting for input', style: TextStyle(fontSize: 12)),
-          ),
-          for (final r in ['1', '2', '3', 'y', 'n'])
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: ActionChip(
-                label: Text(r, style: const TextStyle(fontSize: 12)),
-                visualDensity: VisualDensity.compact,
-                onPressed: () =>
-                    unawaited(pane.sendText(r, submit: true).catchError((_) {})),
-              ),
-            ),
-          ActionChip(
-            label: const Text('esc', style: TextStyle(fontSize: 12)),
-            visualDensity: VisualDensity.compact,
-            onPressed: () =>
-                unawaited(pane.sendKeys(['escape']).catchError((_) {})),
-          ),
         ],
       ),
     );

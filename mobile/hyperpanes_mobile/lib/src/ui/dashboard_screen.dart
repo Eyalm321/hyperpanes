@@ -65,6 +65,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  Future<void> _newPane() async {
+    // Projects for the picker; a fetch failure just means no dropdown.
+    List<ProjectInfo> projects = const [];
+    try {
+      projects = await session.client.getProjects();
+    } catch (_) {}
+    if (!mounted) return;
+    final spec = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _NewPaneDialog(projects: projects),
+    );
+    if (spec == null || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final res =
+          await session.client.command({'type': 'newPane', 'pane': spec});
+      await session.refresh();
+      // newPane returns {ok, result: "<paneId>"} — jump straight in.
+      final paneId = res['result'];
+      if (paneId is String && mounted) {
+        final pane = session.state.paneById(paneId);
+        if (pane != null) _openPane(pane);
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('New pane failed: $e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -92,6 +120,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ),
             ],
+          ),
+          floatingActionButton: FloatingActionButton(
+            onPressed: _newPane,
+            tooltip: 'New pane',
+            child: const Icon(Icons.add),
           ),
           body: RefreshIndicator(
             onRefresh: session.refresh,
@@ -137,6 +170,96 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         );
       },
+    );
+  }
+}
+
+/// New-pane dialog: quick presets (Shell / Claude), optional custom command, and a
+/// project picker (opens in the project's cwd with its color). Pops the `pane` spec
+/// for `{type: "newPane"}` or null on cancel.
+class _NewPaneDialog extends StatefulWidget {
+  const _NewPaneDialog({required this.projects});
+
+  final List<ProjectInfo> projects;
+
+  @override
+  State<_NewPaneDialog> createState() => _NewPaneDialogState();
+}
+
+class _NewPaneDialogState extends State<_NewPaneDialog> {
+  final _commandCtl = TextEditingController();
+  String? _project;
+
+  @override
+  void dispose() {
+    _commandCtl.dispose();
+    super.dispose();
+  }
+
+  void _create({String? command}) {
+    final custom = _commandCtl.text.trim();
+    final cmd = command ?? (custom.isEmpty ? null : custom);
+    Navigator.of(context).pop(<String, dynamic>{
+      'command': ?cmd,
+      'project': ?_project,
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('New pane'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.projects.isNotEmpty)
+            DropdownButtonFormField<String?>(
+              initialValue: _project,
+              decoration: const InputDecoration(labelText: 'Project'),
+              items: [
+                const DropdownMenuItem(value: null, child: Text('(none)')),
+                for (final p in widget.projects)
+                  DropdownMenuItem(value: p.name, child: Text(p.name)),
+              ],
+              onChanged: (v) => setState(() => _project = v),
+            ),
+          TextField(
+            controller: _commandCtl,
+            decoration: const InputDecoration(
+              labelText: 'Command (empty = shell)',
+              hintText: 'claude --continue',
+            ),
+            autocorrect: false,
+            onSubmitted: (_) => _create(),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _create(command: null),
+                  child: const Text('Shell'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _create(command: 'claude'),
+                  child: const Text('Claude'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _create, child: const Text('Create')),
+      ],
     );
   }
 }
