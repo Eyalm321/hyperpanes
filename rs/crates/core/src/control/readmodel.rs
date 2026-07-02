@@ -442,6 +442,17 @@ impl ReadModel {
         scope: Option<&Scope>,
         activity: &dyn Fn(&PaneInfo) -> Activity,
     ) -> StateOut {
+        self.state_for_scope_with_dims(scope, activity, &|_| None)
+    }
+
+    /// [`Self::state_for_scope`] + per-pane grid dims (`cols`/`rows`, omitted when the
+    /// resolver returns `None`) — additive, for remote clients that emulate the pane.
+    pub fn state_for_scope_with_dims(
+        &self,
+        scope: Option<&Scope>,
+        activity: &dyn Fn(&PaneInfo) -> Activity,
+        dims: &dyn Fn(&PaneInfo) -> Option<(u16, u16)>,
+    ) -> StateOut {
         let mut windows = Vec::new();
         for w in &self.windows {
             let mut tabs = Vec::new();
@@ -459,7 +470,7 @@ impl ReadModel {
                     if !in_scope {
                         continue;
                     }
-                    panes.push(pane_out(p, activity(p)));
+                    panes.push(pane_out(p, activity(p), dims(p)));
                 }
                 // Scoped views drop tabs/windows left empty; the master view keeps them verbatim.
                 if scope.is_some() && panes.is_empty() {
@@ -546,9 +557,15 @@ pub struct PaneOut {
     pub activity: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<BTreeMap<String, String>>,
+    /// Grid dims — additive (remote clients emulate at the host's width); omitted when
+    /// unknown (daemon-backed panes) so the legacy shape is untouched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
 }
 
-fn pane_out(p: &PaneInfo, activity: Activity) -> PaneOut {
+fn pane_out(p: &PaneInfo, activity: Activity, dims: Option<(u16, u16)>) -> PaneOut {
     PaneOut {
         id: p.id.clone(),
         session_uid: p.session_uid.clone(),
@@ -565,6 +582,8 @@ fn pane_out(p: &PaneInfo, activity: Activity) -> PaneOut {
         // the new `liveness` frame, not `/state`).
         activity: activity.legacy_str(),
         meta: p.meta.clone(),
+        cols: dims.map(|(c, _)| c),
+        rows: dims.map(|(_, r)| r),
     }
 }
 

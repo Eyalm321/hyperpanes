@@ -336,6 +336,16 @@ impl DaemonSessionManager {
             .map(|s| s.output_bytes)
     }
 
+    /// Replay + cursor as an atomic pair — one shadows lock, so the pair can't tear
+    /// (`apply_event_to_shadow` updates both under the same lock).
+    pub fn replay_with_cursor(&self, uid: &str) -> Option<(String, u64)> {
+        self.shadows
+            .lock()
+            .unwrap()
+            .get(uid)
+            .map(|s| (s.replay.get().to_string(), s.output_bytes))
+    }
+
     /// Epoch-ms of the last output flush — from the shadow (no I/O); `None` if nothing
     /// has flushed yet, mirroring the in-process accessor.
     pub fn last_output_at(&self, uid: &str) -> Option<u64> {
@@ -460,7 +470,7 @@ fn reader_loop(
 fn apply_event_to_shadow(shadows: &Mutex<HashMap<String, Shadow>>, ev: &SessionEvent) {
     let mut shadows = shadows.lock().unwrap();
     match ev {
-        SessionEvent::Data { uid, data } => {
+        SessionEvent::Data { uid, data, .. } => {
             let shadow = shadows.entry(uid.clone()).or_insert_with(Shadow::new);
             shadow.replay.append(data);
             shadow.output_bytes += data.encode_utf16().count() as u64;
@@ -736,6 +746,9 @@ impl DaemonSessionManager {
     pub fn output_bytes(&self, _uid: &str) -> Option<u64> {
         unreachable!("daemon backend is unix-only")
     }
+    pub fn replay_with_cursor(&self, _uid: &str) -> Option<(String, u64)> {
+        unreachable!("daemon backend is unix-only")
+    }
     pub fn last_output_at(&self, _uid: &str) -> Option<u64> {
         unreachable!("daemon backend is unix-only")
     }
@@ -827,6 +840,7 @@ mod tests {
             &SessionEvent::Data {
                 uid: "u1".into(),
                 data: "ab".into(),
+                cursor: 2,
             },
         );
         apply_event_to_shadow(
@@ -834,6 +848,7 @@ mod tests {
             &SessionEvent::Data {
                 uid: "u1".into(),
                 data: "😀".into(),
+                cursor: 4,
             },
         );
         let g = s.lock().unwrap();
@@ -867,6 +882,7 @@ mod tests {
             &SessionEvent::Data {
                 uid: "u1".into(),
                 data: "x".into(),
+                cursor: 1,
             },
         );
         assert!(s.lock().unwrap().contains_key("u1"));
@@ -972,7 +988,7 @@ mod tests {
         let data = recv_event_until(
             &mut rx,
             Dur::from_secs(10),
-            |e| matches!(e, SessionEvent::Data { uid, data } if uid == "p1" && data.contains("HELLO_MARKER")),
+            |e| matches!(e, SessionEvent::Data { uid, data, .. } if uid == "p1" && data.contains("HELLO_MARKER")),
         );
         assert!(
             data.is_some(),
@@ -1024,7 +1040,7 @@ mod tests {
         let data = recv_event_until(
             &mut rx,
             Dur::from_secs(10),
-            |e| matches!(e, SessionEvent::Data { uid, data } if uid == "q1" && data.contains("hi")),
+            |e| matches!(e, SessionEvent::Data { uid, data, .. } if uid == "q1" && data.contains("hi")),
         );
         assert!(data.is_some(), "expected Data{{hi}} on the GUI channel");
 
@@ -1060,7 +1076,7 @@ mod tests {
         let saw = recv_event_until(
             &mut rx,
             Dur::from_secs(10),
-            |e| matches!(e, SessionEvent::Data { uid, data } if uid == "p1" && data.contains("SCREEN_MARKER")),
+            |e| matches!(e, SessionEvent::Data { uid, data, .. } if uid == "p1" && data.contains("SCREEN_MARKER")),
         );
         assert!(saw.is_some(), "marker should stream");
 
@@ -1100,7 +1116,7 @@ mod tests {
         mgr1.write("surv", "echo SURVIVOR_MARKER\n");
         assert!(
             recv_event_until(&mut rx1, Dur::from_secs(10), |e| {
-                matches!(e, SessionEvent::Data { uid, data } if uid == "surv" && data.contains("SURVIVOR_MARKER"))
+                matches!(e, SessionEvent::Data { uid, data, .. } if uid == "surv" && data.contains("SURVIVOR_MARKER"))
             })
             .is_some(),
             "marker should stream to the first manager"
@@ -1182,7 +1198,7 @@ mod tests {
             mgr1.write(&uid, "echo REATTACH_MARKER\n");
             assert!(
                 recv_event_until(&mut rx1, Dur::from_secs(10), |e| {
-                    matches!(e, SessionEvent::Data { uid: u, data } if *u == uid && data.contains("REATTACH_MARKER"))
+                    matches!(e, SessionEvent::Data { uid: u, data, .. } if *u == uid && data.contains("REATTACH_MARKER"))
                 })
                 .is_some(),
                 "marker should stream into the live session"
@@ -1275,7 +1291,7 @@ mod tests {
         run_a.write(&surv, "echo STABLE_SURVIVOR\n");
         assert!(
             recv_event_until(&mut rx_a, Dur::from_secs(10), |e| {
-                matches!(e, SessionEvent::Data { uid: u, data } if *u == surv && data.contains("STABLE_SURVIVOR"))
+                matches!(e, SessionEvent::Data { uid: u, data, .. } if *u == surv && data.contains("STABLE_SURVIVOR"))
             })
             .is_some(),
             "the minted-uid session is live daemon-side before we drop"
@@ -1392,7 +1408,7 @@ mod tests {
             let got = recv_event_until(
                 rx,
                 Dur::from_secs(5),
-                |e| matches!(e, SessionEvent::Data { uid: u, data } if u == uid && data.contains(&marker)),
+                |e| matches!(e, SessionEvent::Data { uid: u, data, .. } if u == uid && data.contains(&marker)),
             );
             let dt = t0.elapsed();
             assert!(got.is_some(), "echo {marker} timed out");
@@ -1475,7 +1491,7 @@ mod tests {
         mgr.write("pm", "echo PROBE_OK\n");
         assert!(
             recv_event_until(&mut rx, Dur::from_secs(10), |e| {
-                matches!(e, SessionEvent::Data { uid, data } if uid == "pm" && data.contains("PROBE_OK"))
+                matches!(e, SessionEvent::Data { uid, data, .. } if uid == "pm" && data.contains("PROBE_OK"))
             })
             .is_some(),
             "the manager must stream normally after the version probe"

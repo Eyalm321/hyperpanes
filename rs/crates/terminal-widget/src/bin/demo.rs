@@ -577,7 +577,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut rx = erx.borrow_mut();
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
-                        SessionEvent::Data { uid, data } => {
+                        SessionEvent::Data { uid, data, .. } => {
                             if let Some(i) = uids.iter().position(|u| *u == uid) {
                                 let pc = &mut st.panes[i];
                                 pc.pane.feed(&data);

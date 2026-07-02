@@ -38,6 +38,7 @@ mod tetris;
 mod theme;
 mod update;
 mod window;
+mod pair;
 mod worker;
 
 use std::sync::Arc;
@@ -327,6 +328,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // then return without launching a GUI. Worker runner MVP (#10); the loop lives in `worker`.
     if worker::wants_worker(&argv0) {
         return worker::run(&argv0);
+    }
+
+    // `pair` mode: print mobile-app pairing URLs + a terminal QR from control.json, then
+    // return without launching a GUI (docs/mobile-client-plan.md).
+    if pair::wants_pair(&argv0) {
+        return pair::run().map_err(Into::into);
     }
 
     // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.

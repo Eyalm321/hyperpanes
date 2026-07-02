@@ -205,3 +205,93 @@ jobs:
         run: |
           shopt -s failglob
           gh release upload "${{ needs.version.outputs.tag }}" rs/packaging/out/*.dmg --clobber
+
+  # Mobile client (Flutter, mobile/hyperpanes_mobile). The mobile test suite runs in
+  # its own gate job (like the Rust `test` matrix) so neither store build starts on a
+  # red protocol layer. Version is stamped via --build-name (pubspec stays untouched).
+  test-mobile:
+    needs: [version]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/hyperpanes_mobile
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # Android APK — debug-signed (see android/app/build.gradle.kts): installable by
+  # sideload/adb, which matches the pairing model (no store distribution yet).
+  build-android:
+    needs: [version, release, test-mobile]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        working-directory: mobile/hyperpanes_mobile
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build APK
+        run: |
+          flutter pub get
+          flutter build apk --release \
+            --build-name "${{ needs.version.outputs.version }}" \
+            --build-number "${{ github.run_number }}"
+
+      - name: Upload APK to release
+        run: |
+          shopt -s failglob
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             "hyperpanes-mobile-${{ needs.version.outputs.version }}.apk"
+          gh release upload "${{ needs.version.outputs.tag }}" \
+            "hyperpanes-mobile-${{ needs.version.outputs.version }}.apk" --clobber
+
+  # iOS — UNSIGNED (no Apple team on CI): the zipped Runner.app installs via Xcode or
+  # a re-signing sideloader (AltStore/Sideloadly). A signed IPA needs local Xcode.
+  build-ios:
+    needs: [version, release, test-mobile]
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        working-directory: mobile/hyperpanes_mobile
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build iOS app (no codesign)
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign \
+            --build-name "${{ needs.version.outputs.version }}" \
+            --build-number "${{ github.run_number }}"
+
+      - name: Zip + upload Runner.app to release
+        run: |
+          shopt -s failglob
+          cd build/ios/iphoneos
+          zip -qry "hyperpanes-mobile-ios-${{ needs.version.outputs.version }}-unsigned.zip" Runner.app
+          gh release upload "${{ needs.version.outputs.tag }}" \
+            "hyperpanes-mobile-ios-${{ needs.version.outputs.version }}-unsigned.zip" --clobber

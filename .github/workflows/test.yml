@@ -85,3 +85,29 @@ jobs:
       - name: Rustfmt (check)
         continue-on-error: true
         run: cd ${{ matrix.workspace }} && cargo fmt -- --check
+
+  # Mobile client (Flutter, mobile/hyperpanes_mobile): analyze is blocking (the tree is
+  # lint-clean from day one, unlike the Rust side) and the unit suite gates the protocol
+  # layer (pairing parse, /events frame decode, output-splice dedupe, path detection).
+  mobile:
+    name: mobile (flutter analyze + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/hyperpanes_mobile
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test

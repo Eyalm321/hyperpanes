@@ -72,6 +72,11 @@ pub struct Shared {
     /// `ControlHost::sync`) to reload the sidebar rail live; in the headless bin it is simply
     /// never read. A plain flag, not coalesced — the UI tick polls it cheaply.
     projects_dirty: AtomicBool,
+    /// Requested bind `(address, port)` for the listener. Defaults to `("127.0.0.1", 0)` —
+    /// loopback, ephemeral — the frozen legacy behaviour. An embedder sets this from
+    /// `control_settings` BEFORE `run_server` to allow remote clients (mobile app over
+    /// Tailscale/LAN). Port `0` = OS-assigned.
+    bind: Mutex<(String, u16)>,
     /// The runtime to spawn background tasks on (the coalescer in [`notify_state`]). Set once by
     /// an embedder that wants spawns bound to an explicit runtime rather than the ambient
     /// thread-local — the GUI host sets this so a `notify_state` from the UI thread can never
@@ -105,8 +110,33 @@ impl Shared {
             control_file,
             state_scheduled: AtomicBool::new(false),
             projects_dirty: AtomicBool::new(false),
+            bind: Mutex::new(("127.0.0.1".to_string(), 0)),
             runtime: OnceLock::new(),
         })
+    }
+
+    /// Set the requested bind address/port (from `control_settings`) BEFORE `run_server`.
+    /// `address` must be a bare IP (the settings loader already validated it); `port` 0 =
+    /// ephemeral.
+    pub fn set_bind(&self, address: impl Into<String>, port: u16) {
+        *self.bind.lock().unwrap() = (address.into(), port);
+    }
+
+    /// The requested `(address, port)` to bind.
+    pub fn bind_config(&self) -> (String, u16) {
+        self.bind.lock().unwrap().clone()
+    }
+
+    /// The host to advertise in `control.json` / `POST /tokens` events URLs: the bind
+    /// address itself, except unspecified (`0.0.0.0` / `::`) — which listens on loopback
+    /// too — where the legacy `127.0.0.1` stays correct for local readers.
+    pub fn advertised_host(&self) -> String {
+        let (addr, _) = self.bind_config();
+        match addr.parse::<std::net::IpAddr>() {
+            Ok(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+            Ok(_) => addr,
+            Err(_) => "127.0.0.1".to_string(),
+        }
     }
 
     /// Flag that the project registry changed off-thread (a `/projects` write or a
@@ -271,6 +301,8 @@ pub fn notify_state(shared: &Arc<Shared>) {
 }
 
 /// The control.json discovery shape — field order + 2-space pretty JSON match TS `writeDiscovery`.
+/// `bindAddress` is additive (mobile-client remote access) and OMITTED for the default
+/// loopback bind, keeping the legacy shape byte-identical.
 #[derive(Serialize)]
 struct Discovery<'a> {
     port: u16,
@@ -278,11 +310,13 @@ struct Discovery<'a> {
     pid: u32,
     version: &'a str,
     events: String,
+    #[serde(rename = "bindAddress", skip_serializing_if = "Option::is_none")]
+    bind_address: Option<&'a str>,
 }
 
-/// Build the WS events URL for a port + token (also used by `POST /tokens`).
-pub fn events_url(port: u16, token: &str) -> String {
-    format!("ws://127.0.0.1:{port}/events?token={token}")
+/// Build the WS events URL for a host + port + token (also used by `POST /tokens`).
+pub fn events_url(host: &str, port: u16, token: &str) -> String {
+    format!("ws://{host}:{port}/events?token={token}")
 }
 
 fn write_discovery(shared: &Arc<Shared>) -> io::Result<()> {
@@ -291,12 +325,15 @@ fn write_discovery(shared: &Arc<Shared>) -> io::Result<()> {
     let Some(token) = token else {
         return Ok(());
     };
+    let (bind_addr, _) = shared.bind_config();
+    let host = shared.advertised_host();
     let discovery = Discovery {
         port,
         token: &token,
         pid: shared.pid,
         version: &shared.version,
-        events: events_url(port, &token),
+        events: events_url(&host, port, &token),
+        bind_address: (bind_addr != "127.0.0.1").then_some(bind_addr.as_str()),
     };
     let json = serde_json::to_string_pretty(&discovery)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -313,15 +350,59 @@ pub fn remove_discovery(shared: &Arc<Shared>) {
 /// SEPARATE task ([`run_activity_ticker`]) the embedder spawns alongside this one, so its
 /// lifetime can be torn down independently (the GUI host aborts it on stop — see `control_host`).
 pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let (addr, req_port) = shared.bind_config();
+    let listener = match tokio::net::TcpListener::bind((addr.as_str(), req_port)).await {
+        Ok(l) => l,
+        Err(e) if addr != "127.0.0.1" || req_port != 0 => {
+            // A configured remote bind that fails (port taken, iface gone) must not brick
+            // the LOCAL control API — fall back to the frozen loopback/ephemeral default.
+            eprintln!(
+                "[control] bind {addr}:{req_port} failed ({e}); falling back to 127.0.0.1:0"
+            );
+            shared.set_bind("127.0.0.1", 0);
+            tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?
+        }
+        Err(e) => return Err(e),
+    };
     let port = listener.local_addr()?.port();
     shared.port.store(port, Ordering::SeqCst);
 
-    shared.tokens.lock().unwrap().set_master(random_token());
+    shared.tokens.lock().unwrap().set_master(master_token(&shared));
     write_discovery(&shared)?;
 
     let app = routes::router(Arc::clone(&shared));
     axum::serve(listener, app).await
+}
+
+/// The master token for this server run. Loopback (the frozen default) mints a fresh
+/// one per start, exactly like the TS source. A REMOTE bind persists it in a 0600
+/// `control-token` file next to control.json instead — a paired phone must survive
+/// host restarts, or every reboot strands it until the user is back at the desk to
+/// re-scan a QR.
+fn master_token(shared: &Arc<Shared>) -> String {
+    let (addr, _) = shared.bind_config();
+    if addr == "127.0.0.1" {
+        return random_token();
+    }
+    let path = shared.control_file.with_file_name("control-token");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        // Same sanity shape as minted tokens (64 hex chars) — anything else re-mints.
+        if existing.len() == 64 && existing.chars().all(|c| c.is_ascii_hexdigit()) {
+            return existing.to_string();
+        }
+    }
+    let token = random_token();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = crate::persistence::paths::write_atomic(&path, token.as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    token
 }
 
 /// Recompute each pane's activity every tick and broadcast a scope-filtered `activity` frame on
@@ -372,7 +453,7 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
 /// any subscriber guard, so `since`/`waitForIdle` work with zero clients (the ordering invariant).
 pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
     match ev {
-        SessionEvent::Data { uid, data } => {
+        SessionEvent::Data { uid, data, cursor } => {
             if !shared.events.has_clients() {
                 return;
             }
@@ -388,6 +469,7 @@ pub fn process_session_event(shared: &Arc<Shared>, ev: SessionEvent) {
                     session_uid: uid,
                     pane_id,
                     data,
+                    cursor,
                 },
             );
         }
@@ -763,9 +845,62 @@ mod tests {
     #[test]
     fn discovery_url_shape() {
         assert_eq!(
-            events_url(54321, "abc"),
+            events_url("127.0.0.1", 54321, "abc"),
             "ws://127.0.0.1:54321/events?token=abc"
         );
+        assert_eq!(
+            events_url("100.71.2.9", 51888, "abc"),
+            "ws://100.71.2.9:51888/events?token=abc"
+        );
+    }
+
+    #[test]
+    fn master_token_persists_only_for_remote_binds() {
+        let dir = std::env::temp_dir().join(format!("hp-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let control = dir.join("control.json");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+        let sessions = Arc::new(SessionManager::new(tx));
+        let shared = Shared::new(sessions, false, "0.0.0", control);
+
+        // Loopback default: fresh token every start (frozen legacy behaviour).
+        let a = master_token(&shared);
+        let b = master_token(&shared);
+        assert_ne!(a, b);
+        assert!(!dir.join("control-token").exists());
+
+        // Remote bind: minted once, then stable across restarts.
+        shared.set_bind("100.71.2.9", 51888);
+        let c = master_token(&shared);
+        let d = master_token(&shared);
+        assert_eq!(c, d);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("control-token")).unwrap().trim(),
+            c
+        );
+
+        // Corrupt file re-mints instead of serving garbage.
+        std::fs::write(dir.join("control-token"), "not-a-token").unwrap();
+        let e = master_token(&shared);
+        assert_ne!(e, "not-a-token");
+        assert_eq!(e.len(), 64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advertised_host_rules() {
+        let (shared, _uid) = shared_with_pane();
+        // Default loopback bind advertises loopback.
+        assert_eq!(shared.advertised_host(), "127.0.0.1");
+        // A specific address advertises itself (local readers can reach the machine's
+        // own LAN/Tailscale IP).
+        shared.set_bind("100.71.2.9", 51888);
+        assert_eq!(shared.advertised_host(), "100.71.2.9");
+        // Unspecified listens on loopback too — keep the legacy local URL.
+        shared.set_bind("0.0.0.0", 51888);
+        assert_eq!(shared.advertised_host(), "127.0.0.1");
+        shared.set_bind("::", 51888);
+        assert_eq!(shared.advertised_host(), "127.0.0.1");
     }
 
     #[tokio::test]

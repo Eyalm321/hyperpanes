@@ -74,6 +74,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/tasks/{id}/ack", post(task_ack))
         .route("/tasks/{id}/nack", post(task_nack))
         .route("/tasks/{id}/extend", post(task_extend))
+        .route("/fs/read", get(fs_read))
         .route("/events", get(events_ws))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
@@ -181,7 +182,11 @@ async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respons
         Err(e) => return e,
     };
     let m = shared.model.lock().unwrap();
-    let out = m.state_for_scope(info.scope.as_ref(), &|p| shared.compute_activity(p));
+    let out = m.state_for_scope_with_dims(
+        info.scope.as_ref(),
+        &|p| shared.compute_activity(p),
+        &|p| shared.sessions.dims(&p.session_uid),
+    );
     ok_json(out)
 }
 
@@ -238,7 +243,10 @@ async fn tokens(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Byt
         .mint(requested.clone(), ttl, now_ms());
     let port = shared.port();
     let (port_field, events) = if port != 0 {
-        (Some(port), Value::String(events_url(port, &token)))
+        (
+            Some(port),
+            Value::String(events_url(&shared.advertised_host(), port, &token)),
+        )
     } else {
         (None, Value::Null)
     };
@@ -286,6 +294,94 @@ async fn output(
     ok_json(build_output_body(&shared, &id, &uid, &q))
 }
 
+// ---- /fs/read (mobile clickable paths) ------------------------------------------------------
+
+/// Read a text file off the host disk for a remote viewer (the mobile app's tap-a-path
+/// feature). MASTER token only: scoped tokens are for sandboxed agents and must not
+/// grow a filesystem read primitive. Query: `path` (absolute or `~/...`), optional
+/// `maxBytes` (default 256 KiB, capped 2 MiB). Non-UTF-8 content 415s rather than
+/// mangling bytes; oversized files return the head with `truncated: true`.
+async fn fs_read(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if info.scope.is_some() {
+        return jstatus(403, json!({ "error": "master token required" }));
+    }
+    let Some(raw_path) = q.get("path").filter(|p| !p.is_empty()) else {
+        return jstatus(400, json!({ "error": "missing path" }));
+    };
+    // `~` expansion matches the desktop clickable-paths behaviour.
+    let path = if let Some(rest) = raw_path.strip_prefix("~/") {
+        match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            Some(home) => std::path::PathBuf::from(home).join(rest),
+            None => return jstatus(400, json!({ "error": "cannot expand ~ (no HOME)" })),
+        }
+    } else {
+        std::path::PathBuf::from(raw_path)
+    };
+    if !path.is_absolute() {
+        return jstatus(400, json!({ "error": "path must be absolute (or ~/...)" }));
+    }
+    let max_bytes = q
+        .get("maxBytes")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(256 * 1024)
+        .min(2 * 1024 * 1024);
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return jstatus(404, json!({ "error": "not found" })),
+    };
+    if !meta.is_file() {
+        return jstatus(400, json!({ "error": "not a regular file" }));
+    }
+    let size = meta.len();
+    let bytes = {
+        use std::io::Read;
+        let mut f = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => return jstatus(403, json!({ "error": "cannot open" })),
+        };
+        let mut buf = vec![0u8; max_bytes.min(size as usize)];
+        let mut read = 0;
+        while read < buf.len() {
+            match f.read(&mut buf[read..]) {
+                Ok(0) => break,
+                Ok(n) => read += n,
+                Err(_) => return jstatus(500, json!({ "error": "read failed" })),
+            }
+        }
+        buf.truncate(read);
+        buf
+    };
+    let truncated = (bytes.len() as u64) < size;
+    // Lop a torn trailing UTF-8 sequence off a truncated read before validating.
+    let content = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) if truncated => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut b = e.into_bytes();
+            b.truncate(valid);
+            match String::from_utf8(b) {
+                Ok(s) => s,
+                Err(_) => return jstatus(415, json!({ "error": "not a text file" })),
+            }
+        }
+        Err(_) => return jstatus(415, json!({ "error": "not a text file" })),
+    };
+    ok_json(json!({
+        "path": path.display().to_string(),
+        "size": size,
+        "truncated": truncated,
+        "content": content,
+    }))
+}
+
 fn pane_status_str(shared: &Arc<Shared>, pane_id: &str) -> &'static str {
     shared
         .model
@@ -315,12 +411,13 @@ fn read_output_body(
     uid: &str,
     q: &HashMap<String, String>,
 ) -> Value {
-    let raw = shared.sessions.replay(uid).unwrap_or_default();
-    let total = shared
+    // Atomic pair: a torn replay/cursor read would drop or duplicate bytes when a
+    // remote client splices the live `output` frame stream onto this snapshot.
+    let (raw, total) = shared
         .sessions
-        .output_bytes(uid)
-        .map(|b| b as i64)
-        .unwrap_or_else(|| raw.encode_utf16().count() as i64);
+        .replay_with_cursor(uid)
+        .map(|(r, c)| (r, c as i64))
+        .unwrap_or_default();
     let since = non_neg_num(q.get("since"));
     let mut text = raw.clone();
     let mut cursor = total;
@@ -1386,6 +1483,71 @@ mod golden {
 
     fn client() -> reqwest::Client {
         reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn fs_read_serves_text_master_only() {
+        let s = boot(true).await;
+        let dir = std::env::temp_dir().join(format!("hp-fsread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let path = file.display().to_string();
+
+        // Master token reads the file.
+        let r = client()
+            .get(format!("{}/fs/read?path={}", s.base, path))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        let v: Value = r.json().await.unwrap();
+        assert_eq!(v["content"], json!("fn main() {}\n"));
+        assert_eq!(v["truncated"], json!(false));
+
+        // Missing file → 404; relative path → 400; no auth → 401.
+        let r = client()
+            .get(format!("{}/fs/read?path={}/nope.txt", s.base, dir.display()))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 404);
+        let r = client()
+            .get(format!("{}/fs/read?path=relative.txt", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 400);
+        let r = client()
+            .get(format!("{}/fs/read?path={}", s.base, path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+
+        // A scoped token is refused outright.
+        let mint: Value = client()
+            .post(format!("{}/tokens", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .json(&json!({"scope": {"tabIds": ["t1"]}}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let scoped = mint["token"].as_str().unwrap();
+        let r = client()
+            .get(format!("{}/fs/read?path={}", s.base, path))
+            .header("authorization", format!("Bearer {scoped}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
