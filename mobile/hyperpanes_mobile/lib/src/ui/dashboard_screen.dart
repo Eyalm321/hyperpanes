@@ -65,7 +65,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Future<void> _newPane() async {
+  Future<void> _newPane(int windowId) async {
     // Projects for the picker; a fetch failure just means no dropdown.
     List<ProjectInfo> projects = const [];
     try {
@@ -79,8 +79,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (spec == null || !mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final res =
-          await session.client.command({'type': 'newPane', 'pane': spec});
+      final res = await session.client.command(
+          {'type': 'newPane', 'windowId': windowId, 'pane': spec});
       await session.refresh();
       // newPane returns {ok, result: "<paneId>"} — jump straight in.
       final paneId = res['result'];
@@ -121,11 +121,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ],
           ),
-          floatingActionButton: FloatingActionButton(
-            onPressed: _newPane,
-            tooltip: 'New pane',
-            child: const Icon(Icons.add),
-          ),
           body: RefreshIndicator(
             onRefresh: session.refresh,
             child: session.lastError != null && s.windows.isEmpty
@@ -146,15 +141,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       for (final w in s.windows)
                         for (final t in w.tabs) ...[
                           Padding(
-                            padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
-                            child: Text(
-                              s.windows.length > 1
-                                  ? 'window ${w.windowId} · ${t.title.isEmpty ? t.id : t.title}'
-                                  : (t.title.isEmpty ? t.id : t.title),
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .labelLarge
-                                  ?.copyWith(color: hpTextDim),
+                            padding: const EdgeInsets.fromLTRB(4, 4, 0, 0),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    s.windows.length > 1
+                                        ? 'window ${w.windowId} · ${t.title.isEmpty ? t.id : t.title}'
+                                        : (t.title.isEmpty ? t.id : t.title),
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelLarge
+                                        ?.copyWith(color: hpTextDim),
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.add,
+                                      size: 18, color: hpTextDim),
+                                  tooltip: 'New pane here',
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () => _newPane(w.windowId),
+                                ),
+                              ],
                             ),
                           ),
                           for (final p in t.panes)
