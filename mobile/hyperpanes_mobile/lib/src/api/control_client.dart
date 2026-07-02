@@ -46,6 +46,20 @@ class OutputSnapshot {
   final bool truncated;
 }
 
+/// One host file fetched via `GET /fs/read`.
+class HostFile {
+  const HostFile({
+    required this.path,
+    required this.content,
+    required this.size,
+    required this.truncated,
+  });
+  final String path;
+  final String content;
+  final int size;
+  final bool truncated;
+}
+
 class ControlClient {
   ControlClient(this.pairing, {http.Client? httpClient})
       : _http = httpClient ?? http.Client();
@@ -137,6 +151,21 @@ class ControlClient {
   /// `recolorPane`, `focusPane`, `setLayout`, …).
   Future<Map<String, dynamic>> command(Map<String, dynamic> cmd) =>
       _post('/command', cmd);
+
+  /// Read a text file off the host disk (tap-a-path viewer). Master token only;
+  /// hosts older than the /fs/read feature 404.
+  Future<HostFile> readFile(String path, {int? maxBytes}) async {
+    final j = await _get('/fs/read', {
+      'path': path,
+      if (maxBytes != null) 'maxBytes': '$maxBytes',
+    });
+    return HostFile(
+      path: j['path'] as String? ?? path,
+      content: j['content'] as String? ?? '',
+      size: (j['size'] as num?)?.toInt() ?? 0,
+      truncated: j['truncated'] == true,
+    );
+  }
 
   void dispose() => _http.close();
 }

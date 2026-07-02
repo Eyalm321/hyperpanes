@@ -12,7 +12,9 @@ import 'package:xterm/xterm.dart';
 import '../api/models.dart';
 import '../state/host_session.dart';
 import '../term/pane_session.dart';
+import '../term/path_detect.dart';
 import '../term/quick_keys.dart';
+import 'file_viewer_screen.dart';
 import 'theme.dart';
 
 class TerminalScreen extends StatefulWidget {
@@ -57,6 +59,18 @@ class _TerminalScreenState extends State<TerminalScreen> {
     pane?.dispose();
     _composerCtl.dispose();
     super.dispose();
+  }
+
+  void _openPath(PathHit hit) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => FileViewerScreen(
+          client: widget.session.client,
+          path: hit.path,
+          line: hit.line,
+        ),
+      ),
+    );
   }
 
   Future<void> _sendComposer() async {
@@ -110,7 +124,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            Expanded(child: _FittedTerminal(pane: pane!)),
+            Expanded(
+              child: _FittedTerminal(pane: pane!, onTapPath: _openPath),
+            ),
             _QuickKeysBar(pane: pane!),
             if (_composerMode) _composer(),
           ],
@@ -157,9 +173,12 @@ class _TerminalScreenState extends State<TerminalScreen> {
 /// width. `autoResize: false` keeps the emulator at host cols×rows no matter what
 /// size the widget gets — a pty stream only renders correctly at its own width.
 class _FittedTerminal extends StatelessWidget {
-  const _FittedTerminal({required this.pane});
+  const _FittedTerminal({required this.pane, required this.onTapPath});
 
   final PaneSession pane;
+
+  /// Fired when a tap lands on a file-path-like token (clickable paths).
+  final void Function(PathHit) onTapPath;
 
   @override
   Widget build(BuildContext context) {
@@ -186,6 +205,13 @@ class _FittedTerminal extends StatelessWidget {
           textStyle: TerminalStyle(fontSize: fontSize),
           backgroundOpacity: 0,
           hardwareKeyboardOnly: false,
+          onTapUp: (details, cell) {
+            // cell.y is buffer-absolute (scroll included) — the tapped line.
+            final lines = pane.terminal.buffer.lines;
+            if (cell.y < 0 || cell.y >= lines.length) return;
+            final hit = pathAt(lines[cell.y].toString(), cell.x);
+            if (hit != null) onTapPath(hit);
+          },
         );
       },
     );
