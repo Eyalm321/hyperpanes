@@ -130,4 +130,16 @@ void main() {
     expect(h.session.terminal.viewWidth, 20);
     expect(h.session.terminal.viewHeight, 5);
   });
+
+  test('updateDims follows a host-side resize (and ignores null/no-op)', () {
+    final h = _Harness();
+    h.session.updateDims(null, null);
+    h.session.updateDims(20, 5);
+    expect(h.session.terminal.viewWidth, 20);
+    h.session.updateDims(120, 30);
+    expect(h.session.hostCols, 120);
+    expect(h.session.hostRows, 30);
+    expect(h.session.terminal.viewWidth, 120);
+    expect(h.session.terminal.viewHeight, 30);
+  });
 }

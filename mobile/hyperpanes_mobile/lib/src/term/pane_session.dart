@@ -73,8 +73,9 @@ class PaneSession {
   final Future<void> Function(String paneId, List<String> keys) _sendKeys;
 
   /// The host pane's grid — the only width this byte stream renders correctly at.
-  final int hostCols;
-  final int hostRows;
+  /// Mutable: a desktop-side pane resize flows in via `/state` → [updateDims].
+  int hostCols;
+  int hostRows;
 
   late final Terminal terminal;
   final ValueNotifier<PaneSessionState> state =
@@ -141,6 +142,16 @@ class PaneSession {
     if (_disposed) return;
     // Fire-and-forget; input errors surface via the connection banner, not per-key.
     unawaited(_sendData(paneId, data).catchError((_) {}));
+  }
+
+  /// Follow a host-side pane resize: re-grid the emulator so absolute-cursor
+  /// output keeps lining up (the resizing TUI repaints itself right after).
+  void updateDims(int? cols, int? rows) {
+    if (cols == null || rows == null) return;
+    if (cols == hostCols && rows == hostRows) return;
+    hostCols = cols;
+    hostRows = rows;
+    terminal.resize(cols, rows);
   }
 
   /// Send named keys via the control API's `keys` vocabulary (quick-keys bar).

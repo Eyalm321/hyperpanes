@@ -82,7 +82,16 @@ class _TerminalScreenState extends State<TerminalScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Rebuild on host-state changes: live liveness chip + follow pane resizes.
+    return AnimatedBuilder(
+      animation: widget.session,
+      builder: (context, child) => _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     final p = info;
+    pane?.updateDims(p?.cols, p?.rows);
     final liveness = widget.session.liveness[widget.paneId] ?? 'done';
     final chipColor = livenessColors[liveness] ?? hpTextDim;
     return Scaffold(
