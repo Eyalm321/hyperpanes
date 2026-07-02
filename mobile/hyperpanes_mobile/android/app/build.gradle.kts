@@ -32,6 +32,15 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // R8 minification strips ML Kit classes mobile_scanner resolves reflectively
+            // → NPE on scanner open in release builds. Keep rules in proguard-rules.pro;
+            // minify stays off until size matters (68MB APK is fine for sideloading).
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
