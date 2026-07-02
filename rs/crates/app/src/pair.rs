@@ -20,7 +20,10 @@ pub fn wants_pair(argv: &[String]) -> bool {
 }
 
 pub fn run() -> std::io::Result<()> {
+    // Panes inherit HYPERPANES_CONTROL_FILE set-but-EMPTY from the app; treat empty as
+    // unset or `pair` run inside a pane resolves a blank path instead of the state dir.
     let control_file = std::env::var_os("HYPERPANES_CONTROL_FILE")
+        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(paths::control_json);
     let Some((port, token)) = read_discovery(&control_file) else {
