@@ -2113,6 +2113,7 @@ impl App {
                             show_frame: Some(frame),
                             show_dot: Some(dot),
                             env: None,
+                            startup: None,
                         };
                         app.run_command(&w, Command::SubmitNewPane(opts));
                     }
@@ -2798,6 +2799,7 @@ impl App {
                     show_frame: None,
                     show_dot: None,
                     env: None,
+                    startup: None,
                 };
                 app.run_command(&w, Command::SubmitNewPane(opts));
             });
