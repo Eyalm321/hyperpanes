@@ -88,6 +88,8 @@ pub struct ControlHost {
     /// The activity-ticker task handle (aborted on stop — it would otherwise loop forever holding
     /// an `Arc<Shared>`, leaking one ticker per disable→enable toggle).
     ticker: RefCell<Option<JoinHandle<()>>>,
+    /// The work-queue reaper-ticker handle (aborted on stop, same leak reasoning as `ticker`).
+    reaper: RefCell<Option<JoinHandle<()>>>,
     // ---- sync baselines (UI thread only) ----
     /// Stable control pane-id per GUI session uid (GUI panes use the uid itself; a control-
     /// created pane keeps the uuid `dispatch` minted).
@@ -122,6 +124,7 @@ impl ControlHost {
             shared: RefCell::new(None),
             task: RefCell::new(None),
             ticker: RefCell::new(None),
+            reaper: RefCell::new(None),
             pane_ids: RefCell::new(HashMap::new()),
             ctl: RefCell::new(HashMap::new()),
             prev: RefCell::new(HashMap::new()),
@@ -208,6 +211,9 @@ impl ControlHost {
         );
         // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.
         shared.set_runtime(self.runtime.clone());
+        // Back the work queue with the durable on-disk DB and recover in-flight tasks left by
+        // workers that died with the previous session.
+        shared.attach_durable_work_queue();
         // Remote-access bind (mobile client): re-read the settings file so an edit takes
         // effect on the next Enabled toggle without an app restart.
         {
@@ -225,9 +231,13 @@ impl ControlHost {
         let ticker = self
             .runtime
             .spawn(server::run_activity_ticker(Arc::clone(&shared)));
+        let reaper = self
+            .runtime
+            .spawn(server::run_reaper_ticker(Arc::clone(&shared)));
         *self.shared.borrow_mut() = Some(shared);
         *self.task.borrow_mut() = Some(task);
         *self.ticker.borrow_mut() = Some(ticker);
+        *self.reaper.borrow_mut() = Some(reaper);
     }
 
     /// Stop the server: abort the serve task AND the activity ticker, drop every WS client (so
@@ -238,6 +248,9 @@ impl ControlHost {
             t.abort();
         }
         if let Some(t) = self.ticker.borrow_mut().take() {
+            t.abort();
+        }
+        if let Some(t) = self.reaper.borrow_mut().take() {
             t.abort();
         }
         if let Some(s) = self.shared.borrow_mut().take() {

@@ -159,6 +159,13 @@ pub fn projects_json() -> PathBuf {
     data_dir().join("projects.json")
 }
 
+/// The durable work-queue DB (SQLite/WAL) backing the `/queues` + `/tasks` routes. A
+/// real embedder opens this via `WorkQueue::open` (tests stay in-memory). Durable user
+/// data → [`data_dir`], alongside `projects.json`.
+pub fn work_db() -> PathBuf {
+    data_dir().join("work.db")
+}
+
 /// Ambient-AI settings. User setting → [`config_dir`].
 pub fn ai_settings_json() -> PathBuf {
     config_dir().join("ai-settings.json")
