@@ -39,6 +39,10 @@ pub const IDLE_THRESHOLD_MS: i64 = 10_000;
 /// How often the activity ticker re-evaluates liveness and fans out busy⇄idle flips.
 const ACTIVITY_TICK_MS: u64 = 500;
 
+/// How often the work-queue reaper sweeps for expired leases (recovering dead/wedged workers).
+/// Coarser than the activity tick — leases are seconds-to-minutes, so a 5s sweep is ample.
+const REAPER_TICK_MS: u64 = 5_000;
+
 /// Coalescing window for structure-only `state` pings (TS `notifyState`).
 const STATE_COALESCE_MS: u64 = 100;
 
@@ -163,6 +167,40 @@ impl Shared {
     /// Idempotent — only the first set takes effect.
     pub fn set_runtime(&self, handle: Handle) {
         let _ = self.runtime.set(handle);
+    }
+
+    /// Swap the (default in-memory) work queue for the durable on-disk DB at
+    /// [`paths::work_db`](crate::persistence::paths::work_db) and run boot recovery. A real
+    /// embedder (GUI control host / headless daemon) calls this once after [`Shared::new`];
+    /// tests never do, so they keep the ephemeral in-memory queue. Failure is non-fatal — we
+    /// log and keep the in-memory queue rather than take down the control plane over a queue
+    /// that many sessions never touch.
+    pub fn attach_durable_work_queue(&self) {
+        let path = crate::persistence::paths::work_db();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match crate::control::work::WorkQueue::open(&path) {
+            Ok(mut wq) => {
+                // Every worker pane is a child of this process, so on restart all in-flight
+                // claims belong to dead workers — requeue them (exhausted ones dead-letter).
+                let recovered = wq.recover_in_flight(now_ms());
+                if !recovered.is_empty() {
+                    eprintln!(
+                        "[work] durable queue opened ({}); recovered {} in-flight task(s)",
+                        path.display(),
+                        recovered.len()
+                    );
+                }
+                *self.work.lock().unwrap() = wq;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[work] could not open durable queue at {} ({e}); staying in-memory",
+                    path.display()
+                );
+            }
+        }
     }
 
     /// Spawn a background task on the stored runtime handle if set, else the ambient runtime.
@@ -453,6 +491,21 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
             }
         }
         last.retain(|id, _| seen.contains(id));
+    }
+}
+
+/// The work-queue visibility-timeout sweep. On its own interval (a separate task the embedder
+/// spawns alongside [`run_activity_ticker`] and aborts on stop), it requeues every `claimed`
+/// task whose lease has expired — recovering a worker that died without a clean `Exit`, or one
+/// wedged past its lease. Exhausted tasks dead-letter. No-op (cheap indexed scan) when idle.
+pub async fn run_reaper_ticker(shared: Arc<Shared>) {
+    let mut interval = tokio::time::interval(Duration::from_millis(REAPER_TICK_MS));
+    loop {
+        interval.tick().await;
+        let reaped = shared.work.lock().unwrap().reap_expired(now_ms());
+        if !reaped.is_empty() {
+            eprintln!("[work] reaper requeued/dead-lettered {} task(s)", reaped.len());
+        }
     }
 }
 
