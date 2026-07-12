@@ -169,6 +169,15 @@ pub fn ai_memory_json() -> PathBuf {
     data_dir().join("ai-memory.json")
 }
 
+/// Persisted control-pane id map (session uid → external pane id). Written by the GUI's
+/// control host whenever the map changes and reloaded on start, so a relaunch can still
+/// resolve a re-attached control-spawned pane's `HYPERPANES_PANE_ID` (which is baked into
+/// the pane's environment at spawn and keys the Claude session markers below).
+/// Runtime state → [`state_dir`].
+pub fn control_pane_ids_json() -> PathBuf {
+    state_dir().join("control-pane-ids.json")
+}
+
 /// Directory of per-pane Claude session markers (`<pane-id>.json`), written by the
 /// Claude Code SessionStart/SessionEnd hook (`resources/claude/hp-claude-session-hook.sh`)
 /// and read by the relaunch snapshot so a restored pane can `claude --resume` its

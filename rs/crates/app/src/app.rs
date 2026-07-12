@@ -235,6 +235,33 @@ impl App {
         })
     }
 
+    /// Stamp each snapshotted pane that has a live Claude conversation with its session id
+    /// (pane meta "claude.session"), so restore can `claude --resume` it when the session
+    /// itself did not survive. The hook's marker files are keyed by the pane's external id
+    /// (`HYPERPANES_PANE_ID`): the control host's alias for a control-spawned pane, the
+    /// session uid itself for a GUI-native one — hence the lookup lives here, above both.
+    fn embed_claude_sessions(&self, file: &mut hyperpanes_core::workspace::model::WorkspaceFile) {
+        use hyperpanes_core::claude_panes;
+        let groups = match file.groups.as_mut() {
+            Some(g) => g,
+            None => return,
+        };
+        for g in groups {
+            for p in &mut g.panes {
+                let Some(uid) = p.uid.as_deref() else { continue };
+                let pane_id = self
+                    .control
+                    .pane_id_for_uid(uid)
+                    .unwrap_or_else(|| uid.to_string());
+                if let Some(s) = claude_panes::read_pane_session(&pane_id) {
+                    p.meta
+                        .get_or_insert_with(Default::default)
+                        .insert(claude_panes::META_KEY.to_string(), s.session_id);
+                }
+            }
+        }
+    }
+
     /// Crash-recovery autosave (#2): periodically snapshot the current session to
     /// `last-workspace.json` so a crash — or any relaunch — restores the workspace as it was.
     /// Reuses the same writer + restore path as the clean-close save; throttled to a few seconds
@@ -250,7 +277,11 @@ impl App {
             }
         }
         let file = match self.windows.borrow().first() {
-            Some(w) => w.state.borrow().to_session_file(),
+            Some(w) => {
+                let mut f = w.state.borrow().to_session_file();
+                self.embed_claude_sessions(&mut f);
+                f
+            }
             None => return,
         };
         // Never clobber a good save with a transient empty snapshot (e.g. mid window-close).
@@ -651,7 +682,9 @@ impl App {
             let mut last_session = None;
             for w in self.windows.borrow().iter() {
                 if w.closing.get() {
-                    last_session = Some(w.state.borrow().to_session_file());
+                    let mut f = w.state.borrow().to_session_file();
+                    self.embed_claude_sessions(&mut f);
+                    last_session = Some(f);
                     // Tell the AI engine to forget this window's panes, and drop its context sig.
                     self.ai.send(crate::ai::AiMsg::DropWindow {
                         window_id: w.id as i64,

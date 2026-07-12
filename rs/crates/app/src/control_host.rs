@@ -134,6 +134,29 @@ impl ControlHost {
         host
     }
 
+    /// The external pane id a control-spawned pane advertises (its `HYPERPANES_PANE_ID` and the
+    /// key the Claude session hook writes markers under). `None` for GUI-native panes, whose
+    /// pane id IS their session uid.
+    pub fn pane_id_for_uid(&self, uid: &str) -> Option<String> {
+        self.pane_ids.borrow().get(uid).cloned()
+    }
+
+    /// Mirror `pane_ids` to disk. A pane's `HYPERPANES_PANE_ID` is baked into its environment
+    /// at spawn, but this uid→pane-id map lived only in the GUI's memory — so after a GUI
+    /// relaunch re-attached a control-spawned pane, nothing could resolve its external id
+    /// (Claude session markers are keyed by it). Best-effort; reloaded by [`Self::start`].
+    fn persist_pane_ids(&self) {
+        let sorted: std::collections::BTreeMap<_, _> = self
+            .pane_ids
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Ok(json) = serde_json::to_vec_pretty(&sorted) {
+            let _ = paths::write_atomic(&paths::control_pane_ids_json(), &json);
+        }
+    }
+
     // ---- lifecycle ----
 
     /// Bind + serve on a fresh `Shared` over the shared engine (mirrors `server::run_server`:
@@ -143,6 +166,17 @@ impl ControlHost {
     fn start(&self, mgr: &Arc<SessionManager>) {
         if self.shared.borrow().is_some() {
             return;
+        }
+        // Recover the uid→pane-id map from the previous GUI generation, so re-attached
+        // control-spawned panes keep resolving their external id (env `HYPERPANES_PANE_ID`,
+        // the Claude session-marker key). Live in-memory entries win; stale uids are pruned
+        // by the next reconcile pass.
+        if self.pane_ids.borrow().is_empty() {
+            if let Ok(text) = std::fs::read_to_string(paths::control_pane_ids_json()) {
+                if let Ok(saved) = serde_json::from_str::<HashMap<String, String>>(&text) {
+                    self.pane_ids.borrow_mut().extend(saved);
+                }
+            }
         }
         let shared = Shared::new(
             Arc::clone(mgr),
@@ -446,9 +480,14 @@ impl ControlHost {
         // Prune side-store entries for panes that no longer exist in the GUI.
         let live = gui_uids(windows);
         ctl.retain(|uid, _| live.contains(uid));
+        let ids_before = self.pane_ids.borrow().len();
         self.pane_ids
             .borrow_mut()
             .retain(|uid, _| live.contains(uid));
+        // One choke point covers every map mutation this pass (insert, respawn re-pin, prune).
+        if structural || self.pane_ids.borrow().len() != ids_before {
+            self.persist_pane_ids();
+        }
         structural
     }
 

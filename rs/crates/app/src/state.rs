@@ -3250,20 +3250,6 @@ impl State {
                     .iter()
                     .map(|p| {
                         let px = p.font_px.round() as u32;
-                        // A live Claude conversation in this pane (per the session hook's
-                        // marker, keyed by pane id == session uid) rides the snapshot as pane
-                        // meta, so a restore whose session did not survive can
-                        // `claude --resume` it instead of coming back as a bare shell.
-                        let meta = hyperpanes_core::claude_panes::read_pane_session(&p.uid).map(
-                            |s| {
-                                let mut m = std::collections::BTreeMap::new();
-                                m.insert(
-                                    hyperpanes_core::claude_panes::META_KEY.to_string(),
-                                    s.session_id,
-                                );
-                                m
-                            },
-                        );
                         PaneSpec {
                             label: Some(p.title.to_string()),
                             color: p.pinned_accent.map(color_hex),
@@ -3271,13 +3257,15 @@ impl State {
                             // instead of a default shell — and the live session uid so a future
                             // session-daemon relaunch can re-attach a surviving session by uid
                             // before falling back to a re-spawn (session-daemon plan, M2).
+                            // Live-Claude meta ("claude.session") is embedded at the App layer
+                            // (`App::embed_claude_sessions`) — only the control host knows a
+                            // control-spawned pane's external pane id (the hook-marker key).
                             command: p.spawn_command.clone(),
                             args: p.spawn_args.clone(),
                             shell: p.spawn_shell.clone(),
                             cwd: p.cwd.clone(),
                             font_size: (px != base).then_some(px),
                             uid: Some(p.uid.clone()),
-                            meta,
                             ..Default::default()
                         }
                     })
