@@ -545,6 +545,10 @@ pub struct State {
     /// goal) instead of spawning a duplicate. NOT persisted — orchestrator panes don't survive
     /// a relaunch; the entry is re-established on the next "New goal" for the project.
     pub goal_orchestrators: std::collections::HashMap<String, String>,
+    /// Goals system: images attached to the in-progress New-goal dialog (step 2), held as file
+    /// paths (clipboard images are captured to temp PNGs) until submit, when their paths are
+    /// written into the goal prompt. Cleared on open and on submit.
+    pub goal_draft_images: Vec<std::path::PathBuf>,
     /// Whether the sidebar bell's reminder-list panel is expanded.
     pub reminders_open: bool,
 }
@@ -638,6 +642,7 @@ impl State {
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
             goal_orchestrators: std::collections::HashMap::new(),
+            goal_draft_images: Vec::new(),
             sidebar_open: false,
             palette_entries: Vec::new(),
             palette_view: Vec::new(),
@@ -1735,9 +1740,10 @@ impl State {
     }
 
     /// Open the "New goal" dialog (command palette → "New goal…"). Refreshes the project list
-    /// first so the picker reflects any just-added projects.
+    /// first so the picker reflects any just-added projects, and clears any leftover draft images.
     pub fn open_new_goal(&mut self) {
         self.projects = sidebar::list();
+        self.goal_draft_images.clear();
         self.overlay = Overlay::NewGoal;
         self.dirty = true;
     }
@@ -2351,17 +2357,38 @@ impl State {
     ///
     /// Returns `false` (with an eprintln) only if the orchestrator persona file can't be found —
     /// the one external dependency (packaging TODO: bundle it, or symlink into ~/.claude/skills).
-    pub fn submit_new_goal(&mut self, mgr: &SessionManager, project_path: &str, intent: &str) -> bool {
+    pub fn submit_new_goal(
+        &mut self,
+        mgr: &SessionManager,
+        project_path: &str,
+        intent: &str,
+        orch_model: &str,
+        spec_model: &str,
+        impl_model: &str,
+    ) -> bool {
         let intent = intent.trim();
         if intent.is_empty() || project_path.is_empty() {
             return false;
         }
 
+        // Build the goal payload: the intent + any attached image paths (Claude reads image
+        // files referenced by path — the reliable delivery; a live clipboard-paste of the same
+        // images is best-effort on top) + the per-goal spec/impl model tiers as a hint the
+        // orchestrator honors when it spawns those agents.
+        let mut payload = intent.to_string();
+        for img in &self.goal_draft_images {
+            payload.push_str(&format!("\n[image: {}]", img.display()));
+        }
+        payload.push_str(&format!(
+            "\n(models — spec: {spec_model}, implementation: {impl_model})"
+        ));
+
         // Existing orchestrator for this project still live? Type the goal into it.
         if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
             let alive = self.tabs.iter().flat_map(|t| &t.panes).any(|p| p.uid == uid);
             if alive {
-                mgr.write(&uid, &format!("{intent}\r"));
+                mgr.write(&uid, &format!("{payload}\r"));
+                self.goal_draft_images.clear();
                 self.close_overlay();
                 self.dirty = true;
                 return true;
@@ -2405,25 +2432,80 @@ impl State {
             return false;
         };
 
-        // Spawn a fresh orchestrator in the project cwd; the goal rides in as the startup prompt.
+        // Spawn a fresh orchestrator in the project cwd. `--model` = the orchestrator tier; the
+        // spec/impl tiers ride in as env so the persona spawns those agents with the chosen
+        // models. The goal (+ image paths + model hint) rides in as the startup prompt.
         let command = format!(
-            "claude --append-system-prompt-file {} --model claude-opus-4-8[1m]",
+            "claude --append-system-prompt-file {} --model {orch_model}",
             persona.display()
         );
+        let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
+        env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
+        env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
         let opts = NewPaneOpts {
             label: Some("goals".to_string()),
             cwd: Some(project_path.to_string()),
             command: Some(command),
-            startup: Some(format!("{intent}\r")),
+            startup: Some(format!("{payload}\r")),
+            env: Some(env),
             ..Default::default()
         };
         if let Some(uid) = self.add_pane_opts(mgr, opts) {
             self.goal_orchestrators
                 .insert(project_path.to_string(), uid);
         }
+        self.goal_draft_images.clear();
         self.close_overlay();
         self.dirty = true;
         true
+    }
+
+    /// Goals system: open the OS file picker to attach one or more images to the in-progress
+    /// goal (step 2 of the New-goal dialog). Held as file paths until submit, when their paths
+    /// are written into the goal prompt (Claude reads image files by path).
+    pub fn goal_attach_images(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+            .set_title("Attach image(s) to the goal")
+            .pick_files()
+        {
+            self.goal_draft_images.extend(paths);
+            self.dirty = true;
+        }
+    }
+
+    /// Goals system: capture the current OS-clipboard image (if any) into a temp PNG and attach
+    /// it to the in-progress goal. No-op (returns false) when the clipboard holds no image.
+    pub fn goal_paste_image(&mut self) -> bool {
+        let Ok(mut cb) = arboard::Clipboard::new() else {
+            return false;
+        };
+        let Ok(img) = cb.get_image() else {
+            return false;
+        };
+        // Encode RGBA8 → PNG into a temp file the goal prompt can reference.
+        let path = std::env::temp_dir().join(format!(
+            "hp-goal-{}-{}.png",
+            std::process::id(),
+            self.goal_draft_images.len()
+        ));
+        let Some(buf) = image_rgba_to_png(&img) else {
+            return false;
+        };
+        if std::fs::write(&path, buf).is_ok() {
+            self.goal_draft_images.push(path);
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// Goals system: drop one attached image from the in-progress goal (its ✕ chip).
+    pub fn goal_remove_image(&mut self, idx: usize) {
+        if idx < self.goal_draft_images.len() {
+            self.goal_draft_images.remove(idx);
+            self.dirty = true;
+        }
     }
 
     /// Record an Escape key event and decide what to do with it. A lone tap
@@ -3900,6 +3982,20 @@ fn layout_from_name(name: &str) -> Layout {
         "main-stack" => Layout::MainStack,
         _ => Layout::Auto,
     }
+}
+
+/// Encode an `arboard` clipboard image (RGBA8) to PNG bytes. Returns `None` if the encoder
+/// rejects the buffer (e.g. a zero-sized image). Used when attaching a pasted image to a goal.
+fn image_rgba_to_png(img: &arboard::ImageData) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, img.width as u32, img.height as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(&img.bytes).ok()?;
+    }
+    Some(out)
 }
 
 /// Parse a `#rrggbb` hex string (the project palette format) into a Slint [`Color`],

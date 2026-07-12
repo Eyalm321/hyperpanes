@@ -51,6 +51,8 @@ pub struct Ui {
     // ---- Wave-2 overlay models ----
     pub palette: Rc<VecModel<PaletteItem>>,
     pub projects: Rc<VecModel<ProjectItem>>,
+    /// New-goal dialog: filenames of images attached to the in-progress goal.
+    pub goal_images: Rc<VecModel<slint::SharedString>>,
     pub families: Rc<VecModel<PrefOption>>,
     pub palettes: Rc<VecModel<FramePaletteOption>>,
     pub shells: Rc<VecModel<PrefOption>>,
@@ -87,6 +89,7 @@ impl Ui {
             layouts: Rc::new(VecModel::default()),
             palette: Rc::new(VecModel::default()),
             projects: Rc::new(VecModel::default()),
+            goal_images: Rc::new(VecModel::default()),
             families: Rc::new(VecModel::default()),
             palettes: Rc::new(VecModel::default()),
             shells: Rc::new(VecModel::default()),
@@ -112,6 +115,7 @@ impl Ui {
         app.set_layouts(ModelRc::from(self.layouts.clone()));
         app.set_palette(ModelRc::from(self.palette.clone()));
         app.set_projects(ModelRc::from(self.projects.clone()));
+        app.set_goal_images(ModelRc::from(self.goal_images.clone()));
         app.set_pref_families(ModelRc::from(self.families.clone()));
         app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
         app.set_pref_shells(ModelRc::from(self.shells.clone()));
@@ -874,6 +878,19 @@ pub fn resync(
             .retain(|k, _| live.contains(k.as_str()));
     }
     sync_model(&ui.projects, projects);
+
+    // ---- new-goal dialog: attached-image filenames ----
+    let goal_image_names: Vec<slint::SharedString> = state
+        .goal_draft_images
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+                .into()
+        })
+        .collect();
+    sync_model(&ui.goal_images, goal_image_names);
 
     // ---- context menu (pane header / tab strip) ----
     let ctx_kind = match state.ctx.as_ref() {

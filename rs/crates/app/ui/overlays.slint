@@ -384,9 +384,13 @@ export component OverlayLayer inherits Rectangle {
     callback palette-activate();
     callback palette-pick(int);      // hover/click row i
 
-    // New-goal dialog (kind 5): the project list to pick from + the submit callback.
+    // New-goal dialog (kind 5): the project list + attached-image filenames + callbacks.
     in property <[ProjectItem]> projects;
-    callback new-goal-submit(int, string);   // (selected project index, goal text)
+    in property <[string]> goal-images;
+    callback new-goal-submit(int, string, int, int, int); // proj idx, goal, orch/spec/impl model idx
+    callback goal-attach-image();
+    callback goal-paste-image();
+    callback goal-remove-image(int);
 
     // preferences
     in property <[PrefOption]> families;
@@ -1437,7 +1441,11 @@ export component OverlayLayer inherits Rectangle {
         width: 100%;
         height: 100%;
         projects: root.projects;
-        submit(i, g) => { root.new-goal-submit(i, g); }
+        goal-images: root.goal-images;
+        submit(p, g, o, s, im) => { root.new-goal-submit(p, g, o, s, im); }
+        attach-image => { root.goal-attach-image(); }
+        paste-image => { root.goal-paste-image(); }
+        remove-image(i) => { root.goal-remove-image(i); }
         cancel => { root.dismiss(); }
     }
 }

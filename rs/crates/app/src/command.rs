@@ -14,6 +14,16 @@ use hyperpanes_core::session_manager::SessionManager;
 use crate::state::{DetachedPane, DetachedTab, NewPaneOpts, ReminderOffset, Setting, State};
 use crate::theme;
 
+/// The `--model` ids for the goals-system model pickers, indexed by the New-goal dialog's model
+/// pills. ORDER MUST MATCH the pill labels in `ui/newgoal.slint` (opus[1m] · sonnet[1m] · fable-5
+/// · haiku). Defaults per tier: orchestrator/spec = index 0 (opus), implementation = 1 (sonnet).
+pub const GOAL_MODELS: [&str; 4] = [
+    "claude-opus-4-8[1m]",
+    "claude-sonnet-5[1m]",
+    "claude-fable-5[1m]",
+    "claude-haiku-4-5",
+];
+
 /// An action against the workspace. Construct these from any input source.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -26,9 +36,15 @@ pub enum Command {
     SubmitNewPane(NewPaneOpts),
     /// Open the "New goal" dialog (command palette → "New goal…").
     OpenNewGoal,
-    /// Submit the New Goal dialog: `(project index into state.projects, goal text)`. Routes to
-    /// [`State::submit_new_goal`] after resolving the index to the project path.
-    SubmitNewGoal(usize, String),
+    /// Submit the New Goal dialog: `(project index, goal text, orchestrator/spec/impl model
+    /// indices into [`GOAL_MODELS`])`. Routes to [`State::submit_new_goal`].
+    SubmitNewGoal(usize, String, usize, usize, usize),
+    /// New-goal dialog (step 2): attach image(s) via the OS file picker.
+    GoalAttachImage,
+    /// New-goal dialog (step 2): capture the clipboard image (if any) as an attachment.
+    GoalPasteImage,
+    /// New-goal dialog (step 2): remove attached image `i`.
+    GoalRemoveImage(usize),
     CloseFocused,
     ClosePane(usize),
     FocusPane(usize),
@@ -261,15 +277,22 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             state.close_overlay();
         }
         Command::OpenNewGoal => state.open_new_goal(),
-        Command::SubmitNewGoal(idx, intent) => {
-            // Resolve the picker index (into state.projects) to the project path, then hand the
-            // goal to that project's orchestrator. submit_new_goal closes the overlay itself.
+        Command::SubmitNewGoal(idx, intent, orch, spec, implm) => {
+            // Resolve the picker index (into state.projects) to the project path + the model
+            // indices to their ids, then hand the goal to that project's orchestrator.
+            // submit_new_goal closes the overlay itself.
             if let Some(path) = state.projects.get(idx).map(|p| p.path.clone()) {
-                state.submit_new_goal(mgr, &path, &intent);
+                let m = |i: usize| *GOAL_MODELS.get(i).unwrap_or(&GOAL_MODELS[0]);
+                state.submit_new_goal(mgr, &path, &intent, m(orch), m(spec), m(implm));
             } else {
                 state.close_overlay();
             }
         }
+        Command::GoalAttachImage => state.goal_attach_images(),
+        Command::GoalPasteImage => {
+            state.goal_paste_image();
+        }
+        Command::GoalRemoveImage(i) => state.goal_remove_image(i),
         Command::CloseFocused => {
             let f = state.active_tab().focused;
             if !state.close_pane(f, mgr) {
