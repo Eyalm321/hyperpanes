@@ -30,6 +30,22 @@ use crate::persistence::paths;
 /// Pane-meta key under which the snapshot records the pane's live Claude session id.
 pub const META_KEY: &str = "claude.session";
 
+/// Pane-meta key for the conversation's working directory. `claude --resume <id>` only
+/// finds sessions belonging to the CURRENT directory's project, and a pane's own cwd
+/// snapshot can be stale (a shell parked inside a TUI never re-emits OSC 7 after a GUI
+/// re-attach) — so the hook-reported cwd is authoritative and restore must `cd` first.
+pub const META_CWD_KEY: &str = "claude.cwd";
+
+/// Is `cwd` safe to interpolate into a single-quoted `cd '<cwd>'`? Absolute, no control
+/// characters, and no single quotes (rather than escaping, refuse — real project paths
+/// never contain them, and refusing keeps the injection reasoning trivial).
+pub fn valid_resume_cwd(cwd: &str) -> bool {
+    cwd.starts_with('/')
+        && cwd.len() < 1024
+        && !cwd.contains('\'')
+        && !cwd.chars().any(|c| c.is_control())
+}
+
 /// One pane's live Claude conversation, as reported by the session hook.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +94,16 @@ mod tests {
         assert!(!valid_session_id("$(boom)"));
         assert!(!valid_session_id("ab")); // too short
         assert!(!valid_session_id(&"a".repeat(65))); // too long
+    }
+
+    #[test]
+    fn resume_cwd_gate() {
+        assert!(valid_resume_cwd("/home/me/dev/x"));
+        assert!(valid_resume_cwd("/tmp/a b/c")); // spaces fine inside single quotes
+        assert!(!valid_resume_cwd("relative/path"));
+        assert!(!valid_resume_cwd("/has'quote"));
+        assert!(!valid_resume_cwd("/has\nnewline"));
+        assert!(!valid_resume_cwd(""));
     }
 
     #[test]

@@ -254,9 +254,15 @@ impl App {
                     .pane_id_for_uid(uid)
                     .unwrap_or_else(|| uid.to_string());
                 if let Some(s) = claude_panes::read_pane_session(&pane_id) {
-                    p.meta
-                        .get_or_insert_with(Default::default)
-                        .insert(claude_panes::META_KEY.to_string(), s.session_id);
+                    let meta = p.meta.get_or_insert_with(Default::default);
+                    meta.insert(claude_panes::META_KEY.to_string(), s.session_id);
+                    // The hook-reported cwd is authoritative for a claude pane: `--resume`
+                    // only finds sessions in the current directory's project, and the pane's
+                    // own cwd can be stale (no OSC 7 re-emit inside a TUI after re-attach).
+                    if claude_panes::valid_resume_cwd(&s.cwd) {
+                        meta.insert(claude_panes::META_CWD_KEY.to_string(), s.cwd.clone());
+                        p.cwd = Some(s.cwd);
+                    }
                 }
             }
         }

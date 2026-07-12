@@ -3505,15 +3505,32 @@ impl State {
         // its own spawn; a shell pane instead has the resume line typed at first output (through
         // the interactive shell, so a user's `claude` alias — wrapper/scope included — applies).
         // A pane running some other program ignores the marker rather than typing into it.
+        // The conversation's own cwd (claude_panes::META_CWD_KEY) overrides the pane cwd and
+        // prefixes the typed line with a `cd`: `--resume` only finds sessions in the current
+        // directory's project, and the snapshot cwd has been observed stale (OSC 7 silence
+        // inside a TUI across a GUI re-attach).
+        let resume_cwd = (!reattach)
+            .then(|| spec.meta.as_ref())
+            .flatten()
+            .and_then(|m| m.get(hyperpanes_core::claude_panes::META_CWD_KEY))
+            .filter(|c| hyperpanes_core::claude_panes::valid_resume_cwd(c))
+            .cloned();
         let mut spawn_command = spec.command.clone();
         let mut spawn_args = spec.args.clone();
+        let mut spawn_cwd = spec.cwd.clone();
         let mut startup = None;
         if let Some(id) = &resume_id {
             let head = spawn_command.as_deref().unwrap_or("").split_whitespace().next().unwrap_or("");
             let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
             if spawn_command.is_none() {
-                startup = Some(format!("claude --resume {id}\r"));
+                startup = Some(match &resume_cwd {
+                    Some(cwd) => format!("cd '{cwd}' && claude --resume {id}\r"),
+                    None => format!("claude --resume {id}\r"),
+                });
             } else if head == "claude" || head == "claude.exe" {
+                if resume_cwd.is_some() {
+                    spawn_cwd = resume_cwd.clone();
+                }
                 match &mut spawn_args {
                     // Direct-argv spawn: extend the argv.
                     Some(a) => a.extend(["--resume".to_string(), id.clone()]),
@@ -3544,7 +3561,7 @@ impl State {
                     cols: Some(cols),
                     rows: Some(rows),
                     pane_id: Some(uid.clone()),
-                    cwd: spec.cwd.clone(),
+                    cwd: spawn_cwd,
                     // Cloned so the resolved shell is also kept on the PaneState (below) for a
                     // subsequent relaunch snapshot.
                     shell: shell.clone(),
