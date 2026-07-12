@@ -178,6 +178,13 @@ pub fn control_pane_ids_json() -> PathBuf {
     state_dir().join("control-pane-ids.json")
 }
 
+/// Durable session→prompt queue (see [`crate::resume_queue`]): messages waiting for a
+/// Claude conversation to (re)appear — typed into its pane on the next SessionStart
+/// marker. Runtime state → [`state_dir`].
+pub fn resume_prompts_json() -> PathBuf {
+    state_dir().join("resume-prompts.json")
+}
+
 /// Directory of per-pane Claude session markers (`<pane-id>.json`), written by the
 /// Claude Code SessionStart/SessionEnd hook (`resources/claude/hp-claude-session-hook.sh`)
 /// and read by the relaunch snapshot so a restored pane can `claude --resume` its

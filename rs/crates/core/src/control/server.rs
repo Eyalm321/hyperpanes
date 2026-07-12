@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -72,6 +72,13 @@ pub struct Shared {
     /// `ControlHost::sync`) to reload the sidebar rail live; in the headless bin it is simply
     /// never read. A plain flag, not coalesced — the UI tick polls it cheaply.
     projects_dirty: AtomicBool,
+    /// App-restart request from the `restartApp` command: 0 = none, 1 = gui (relaunch the GUI,
+    /// panes survive via daemon re-attach), 2 = full (also shut the session daemon down —
+    /// every pane dies and the restore path resurrects the workspace + Claude conversations
+    /// from the snapshot). Set by dispatch off the UI thread; the GUI host polls + clears it
+    /// each tick and performs the teardown (snapshot flush, detached relauncher, quit) on the
+    /// UI thread. In the headless bin it is simply never read.
+    pub restart_app: AtomicU8,
     /// Requested bind `(address, port)` for the listener. Defaults to `("127.0.0.1", 0)` —
     /// loopback, ephemeral — the frozen legacy behaviour. An embedder sets this from
     /// `control_settings` BEFORE `run_server` to allow remote clients (mobile app over
@@ -110,6 +117,7 @@ impl Shared {
             control_file,
             state_scheduled: AtomicBool::new(false),
             projects_dirty: AtomicBool::new(false),
+            restart_app: AtomicU8::new(0),
             bind: Mutex::new(("127.0.0.1".to_string(), 0)),
             runtime: OnceLock::new(),
         })

@@ -10,6 +10,7 @@ pub mod ansi_strip;
 pub mod app;
 pub mod claude_history;
 pub mod claude_panes;
+pub mod resume_queue;
 pub mod cli;
 pub mod control;
 pub mod layout;

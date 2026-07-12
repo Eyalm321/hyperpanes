@@ -73,6 +73,24 @@ fn persist_last_session(file: &hyperpanes_core::workspace::model::WorkspaceFile)
     }
 }
 
+/// Absolute path to `systemd-run` if this is a systemd host, else `None`. Used to launch
+/// the self-restart relauncher in its OWN cgroup so our scope's teardown can't kill it.
+#[cfg(unix)]
+fn which_systemd_run() -> Option<std::path::PathBuf> {
+    for dir in ["/usr/bin", "/bin", "/usr/local/bin"] {
+        let p = std::path::Path::new(dir).join("systemd-run");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn which_systemd_run() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Sentinel "row" the context-menu click-away catcher hands to `ctx-pick` to request a
 /// right-click *chain* (Task 7): close the open menu and reopen the one under the new cursor
 /// in a single action. `app.slint` is owned by another track and can't gain a dedicated
@@ -194,6 +212,8 @@ pub struct App {
     /// wrote — so [`App::autosave_session`] throttles to a few seconds and skips unchanged writes.
     last_autosave: Cell<Option<std::time::Instant>>,
     last_autosave_json: RefCell<String>,
+    /// Throttle for the queued-prompt delivery tick (claude-resume speak-first).
+    last_prompt_delivery: Cell<Option<std::time::Instant>>,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -232,6 +252,7 @@ impl App {
             handoffs: RefCell::new(None),
             last_autosave: Cell::new(None),
             last_autosave_json: RefCell::new(String::new()),
+            last_prompt_delivery: Cell::new(None),
         })
     }
 
@@ -266,6 +287,140 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Deliver queued speak-first prompts (see `hyperpanes_core::resume_queue`): for each
+    /// live Claude marker whose session has queued messages, type them into the owning pane.
+    /// Readiness = the marker is a few seconds old (SessionStart fires early in boot; the
+    /// TUI needs a beat before it accepts input). Deliver-once: `take_for` removes them.
+    fn deliver_queued_prompts(&self) {
+        use hyperpanes_core::resume_queue;
+        const EVERY: Duration = Duration::from_secs(2);
+        /// Markers younger than this may belong to a claude whose input box isn't up yet.
+        const READY_AGE_SECS: u64 = 4;
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_prompt_delivery.get() {
+            if now.duration_since(last) < EVERY {
+                return;
+            }
+        }
+        self.last_prompt_delivery.set(Some(now));
+        if resume_queue::is_empty() {
+            return;
+        }
+        let dir = hyperpanes_core::persistence::paths::claude_sessions_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(pane_id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(marker) = hyperpanes_core::claude_panes::read_pane_session(pane_id) else {
+                continue;
+            };
+            let ready = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() >= READY_AGE_SECS);
+            if !ready {
+                continue;
+            }
+            let pending = resume_queue::take_for(&marker.session_id);
+            if pending.is_empty() {
+                continue;
+            }
+            // The marker filename is the pane's external id; the session manager wants the
+            // uid — identical for GUI-native panes, aliased for control-spawned ones.
+            let uid = self
+                .control
+                .uid_for_pane_id(pane_id)
+                .unwrap_or_else(|| pane_id.to_string());
+            if !self.mgr.has(&uid) {
+                // Session gone between marker and delivery — requeue rather than drop.
+                for p in &pending {
+                    let _ = resume_queue::enqueue(&p.session_id, &p.text);
+                }
+                continue;
+            }
+            // Drive the writes off the UI thread: a freshly-resumed claude needs a generous
+            // gap between the text and the submitting Enter (bracketed-paste TUIs read
+            // text+CR in one read as a paste, the CR landing in the box instead of
+            // submitting — the exact "prompt sits unsubmitted" failure). One detached
+            // thread per pane keeps ordering for the (rare) multi-prompt case and never
+            // blocks rendering. A second Enter after a longer beat is insurance: on the
+            // now-submitted (empty) box a stray CR is a harmless no-op, but if the first
+            // Enter raced claude's boot the second one still lands the submit.
+            let mgr = self.mgr.clone();
+            let uid_for_thread = uid.clone();
+            std::thread::spawn(move || {
+                for p in pending {
+                    mgr.write(&uid_for_thread, &p.text);
+                    std::thread::sleep(Duration::from_millis(250));
+                    mgr.write(&uid_for_thread, "\r");
+                    std::thread::sleep(Duration::from_millis(600));
+                    mgr.write(&uid_for_thread, "\r");
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+            });
+        }
+    }
+
+    /// Execute a pending `restartApp` control command (flag set by the route; see
+    /// `Shared::restart_app`): flush a final snapshot, spawn a detached relauncher of our
+    /// own binary, optionally shut the session daemon down (scope "full" — every pane dies
+    /// and the restore path resurrects the workspace), then quit the event loop.
+    fn service_restart_request(&self) {
+        let scope = self.control.take_restart_request();
+        if scope == 0 {
+            return;
+        }
+        // Final snapshot NOW — don't rely on the last autosave tick being fresh.
+        if let Some(w) = self.windows.borrow().first() {
+            let mut f = w.state.borrow().to_session_file();
+            self.embed_claude_sessions(&mut f);
+            persist_last_session(&f);
+        }
+        // Detached relauncher. It must outlive us AND escape our cgroup: `setsid` alone
+        // frees the session/controlling-terminal but NOT the cgroup, so when our process
+        // exits and systemd tears the scope down (KillMode=control-group), a same-cgroup
+        // child is SIGTERM'd mid-`sleep` before it can exec — the observed failure. Prefer
+        // `systemd-run --user --scope` (own transient scope = own cgroup, survives our
+        // teardown); fall back to a bare setsid spawn on non-systemd hosts. The brief sleep
+        // lets the old single-instance socket be released before the new GUI binds it.
+        if let Ok(exe) = std::env::current_exe() {
+            let relaunch = format!("sleep 2; exec '{}'", exe.display());
+            let systemd_run = which_systemd_run();
+            let mut cmd = if let Some(sr) = &systemd_run {
+                let mut c = std::process::Command::new(sr);
+                c.args(["--user", "--quiet", "--collect", "--scope", "--", "/bin/sh", "-c"])
+                    .arg(&relaunch);
+                c
+            } else {
+                let mut c = std::process::Command::new("/bin/sh");
+                c.arg("-c").arg(&relaunch);
+                c
+            };
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(unix)]
+            if systemd_run.is_none() {
+                use std::os::unix::process::CommandExt;
+                unsafe {
+                    cmd.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+            }
+            let _ = cmd.spawn();
+        }
+        if scope == 2 {
+            // Full teardown: daemon exits, killing every pane. The relaunched GUI finds no
+            // daemon, spawns a fresh one, and restores from the snapshot we just wrote.
+            self.mgr.shutdown_daemon();
+        }
+        let _ = slint::quit_event_loop();
     }
 
     /// Crash-recovery autosave (#2): periodically snapshot the current session to
@@ -717,6 +872,11 @@ impl App {
         // 5. Crash-recovery autosave (#2): keep `last-workspace.json` fresh (throttled) so a crash
         //    loses at most a few seconds and a relaunch restores the workspace as it was.
         self.autosave_session();
+
+        // 5b. Queued-prompt delivery + app-restart requests (claude-resume "speak-first" and
+        //     the restartApp control command). Both throttled/cheap no-ops in the common case.
+        self.deliver_queued_prompts();
+        self.service_restart_request();
 
         // ---- adaptive idle cadence (#3) ----
         // A tick "did work" if it drained any session output, animated/rendered real pane

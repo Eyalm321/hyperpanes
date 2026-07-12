@@ -78,6 +78,22 @@ pub fn handle_command(
         return DispatchResult::err(403, &denied);
     }
 
+    // `queuePrompt` targets a Claude *session*, not a pane/window — handle it before
+    // window resolution (the queue is file-backed; delivery finds the pane later).
+    if ty == "queuePrompt" {
+        let (session_id, text) = match (
+            cmd.get("sessionId").and_then(Value::as_str),
+            cmd.get("text").and_then(Value::as_str),
+        ) {
+            (Some(s), Some(t)) => (s, t),
+            _ => return DispatchResult::err(400, "queuePrompt needs sessionId and text"),
+        };
+        return match crate::resume_queue::enqueue(session_id, text) {
+            Ok(()) => DispatchResult::ok(None, false),
+            Err(e) => DispatchResult::err(400, &e),
+        };
+    }
+
     // Resolve a target window: explicit windowId, else the pane's window.
     let window_id = cmd.get("windowId").and_then(Value::as_i64).or_else(|| {
         cmd.get("paneId")
@@ -200,6 +216,26 @@ fn exec(
                 .pane(&pane_id)
                 .ok_or_else(|| format!("no such pane: {pane_id}"))?;
             let old_uid = pane.session_uid.clone();
+            // `resume:true`: after the respawn, type `cd + claude --resume` for the
+            // conversation this pane was hosting, per its SessionStart marker — read
+            // BEFORE the kill (SessionEnd may remove it). The write can go out right
+            // after create: pty input queues until the shell reads it. An optional
+            // `prompt` rides the resume queue and is typed once the resumed claude's
+            // fresh marker appears (the speak-first path). An agent may target its
+            // OWN pane: the command returns before the kill lands on its process.
+            let resume = matches!(cmd.get("resume"), Some(Value::Bool(true)));
+            let marker = if resume {
+                match crate::claude_panes::read_pane_session(&pane_id) {
+                    Some(m) => Some(m),
+                    None => {
+                        return Err(format!(
+                            "resume requested but no live Claude marker for pane {pane_id}"
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
             let new_uid = new_id();
             let opts = SpawnOptions {
                 uid: new_uid.clone(),
@@ -217,6 +253,17 @@ fn exec(
             sessions.kill(&old_uid);
             sessions.create(opts).map_err(|e| e.to_string())?;
             model.respawn_pane(&pane_id, &new_uid);
+            if let Some(m) = marker {
+                let line = if crate::claude_panes::valid_resume_cwd(&m.cwd) {
+                    format!("cd '{}' && claude --resume {}\r", m.cwd, m.session_id)
+                } else {
+                    format!("claude --resume {}\r", m.session_id)
+                };
+                sessions.write(&new_uid, &line);
+                if let Some(Value::String(p)) = cmd.get("prompt") {
+                    crate::resume_queue::enqueue(&m.session_id, p)?;
+                }
+            }
             Ok((None, true))
         }
         "setLayout" => {

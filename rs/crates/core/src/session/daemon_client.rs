@@ -660,40 +660,80 @@ fn connect_or_spawn(socket: &Path, salt: &str) -> io::Result<std::os::unix::net:
     }
 }
 
-/// Launch `current_exe --session-daemon <salt>` fully detached: a new session (`setsid`,
-/// so a GUI crash/SIGHUP never reaches it) with null stdio. Best-effort reap-avoidance:
-/// the child re-parents to init once we don't wait on it.
+/// Path to `systemd-run` on a systemd host, else `None`.
+#[cfg(unix)]
+fn systemd_run_path() -> Option<std::path::PathBuf> {
+    for dir in ["/usr/bin", "/bin", "/usr/local/bin"] {
+        let p = std::path::Path::new(dir).join("systemd-run");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Launch `current_exe --session-daemon <salt>` fully detached from the GUI's lifetime AND
+/// cgroup. Cgroup independence matters: the GUI may itself run inside a systemd scope (it
+/// does after any self-restart — the relauncher uses `systemd-run --scope`), and a daemon
+/// merely `setsid`-detached would inherit that scope's cgroup and die when the scope is torn
+/// down on the NEXT GUI restart (a chained-restart bug: gui-scope restart would silently
+/// kill every pane). So prefer `systemd-run --user --scope` (own transient scope, owned by
+/// systemd, survives any GUI teardown); fall back to a bare `setsid` spawn on non-systemd
+/// hosts. Either way we drop the handle — the daemon is long-lived and re-parents to init.
 #[cfg(unix)]
 fn spawn_daemon_detached(salt: &str) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let exe = std::env::current_exe()?;
+    if let Some(sr) = systemd_run_path() {
+        let ok = Command::new(sr)
+            .args(["--user", "--quiet", "--collect", "--scope", "--"])
+            .arg(&exe)
+            .arg("--session-daemon")
+            .arg(salt)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok();
+        if ok {
+            return Ok(());
+        }
+        // systemd-run present but the spawn failed — fall through to the setsid path rather
+        // than leaving the caller with no daemon.
+    }
+    spawn_daemon_setsid(&exe, salt)
+}
+
+/// Bare-`setsid` daemon spawn — the non-systemd fallback (and the safety net when
+/// `systemd-run` is present but fails to launch). New session so a GUI crash/SIGHUP never
+/// reaches it; null stdio; handle dropped so it re-parents to init.
+#[cfg(unix)]
+fn spawn_daemon_setsid(exe: &std::path::Path, salt: &str) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
     let mut cmd = Command::new(exe);
     cmd.arg("--session-daemon")
         .arg(salt)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // `setsid(2)` after fork detaches the child into its own session/process group so it
-    // outlives the GUI (no controlling terminal, no SIGHUP on our exit). Declared inline as
-    // a raw libc extern to avoid adding a `libc` direct dependency for one call — it's an
+    // `setsid(2)` after fork detaches the child into its own session/process group. Declared
+    // inline as a raw libc extern to avoid a direct `libc` dependency for one call — it's an
     // async-signal-safe syscall wrapper with no allocation, which is the bar for `pre_exec`.
     extern "C" {
         fn setsid() -> i32;
     }
     // SAFETY: `setsid` is async-signal-safe (no allocation, no locks); the closure runs in
     // the forked child between `fork` and `exec`, which is exactly where `pre_exec` allows
-    // only such calls. We ignore its result (a failure just leaves us in the parent's
-    // session, which is harmless — the daemon still runs, only slightly less isolated).
+    // only such calls. A failure just leaves us in the parent's session — harmless.
     unsafe {
         cmd.pre_exec(|| {
             setsid();
             Ok(())
         });
     }
-    // Spawn and immediately drop the handle — we never wait on the daemon (it's long-lived
-    // and detached). On unix the dropped child re-parents to init, so it isn't zombied.
     cmd.spawn().map(|_child| ())
 }
 

@@ -1191,6 +1191,30 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
         Err(e) => return e,
     };
     let cmd: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    // `restartApp` is handled here, not in dispatch: it needs `Shared` (the GUI host polls
+    // the flag each tick and performs the teardown on the UI thread). An optional
+    // `sessionId` + `prompt` pair pre-queues a speak-first message for a conversation the
+    // restore will resurrect. Root scope only — this takes the whole app down.
+    if cmd.get("type").and_then(Value::as_str) == Some("restartApp") {
+        if info.scope.is_some() {
+            return jstatus(403, serde_json::json!({"error": "restartApp needs a root token"}));
+        }
+        let scope = match cmd.get("scope").and_then(Value::as_str).unwrap_or("gui") {
+            "gui" => 1u8,
+            "full" => 2u8,
+            other => return jstatus(400, serde_json::json!({"error": format!("unknown scope: {other}")})),
+        };
+        if let (Some(sid), Some(text)) = (
+            cmd.get("sessionId").and_then(Value::as_str),
+            cmd.get("prompt").and_then(Value::as_str),
+        ) {
+            if let Err(e) = crate::resume_queue::enqueue(sid, text) {
+                return jstatus(400, serde_json::json!({"error": e}));
+            }
+        }
+        shared.restart_app.store(scope, std::sync::atomic::Ordering::SeqCst);
+        return jstatus(200, serde_json::json!({"ok": true, "scope": if scope == 1 {"gui"} else {"full"}}));
+    }
     let control_file = shared.control_file.to_str().map(str::to_string);
     let result = {
         let mut m = shared.model.lock().unwrap();

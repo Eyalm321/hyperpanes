@@ -141,6 +141,26 @@ impl ControlHost {
         self.pane_ids.borrow().get(uid).cloned()
     }
 
+    /// Inverse of [`Self::pane_id_for_uid`]: the session uid hosting the pane that advertises
+    /// `pane_id` externally. `None` when no alias exists — for GUI-native panes the caller
+    /// falls back to identity (uid == pane id).
+    pub fn uid_for_pane_id(&self, pane_id: &str) -> Option<String> {
+        self.pane_ids
+            .borrow()
+            .iter()
+            .find(|(_, v)| v.as_str() == pane_id)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Take (and clear) a pending `restartApp` request: 0 = none, 1 = gui, 2 = full.
+    /// Set by the control route off the UI thread; the App tick executes it.
+    pub fn take_restart_request(&self) -> u8 {
+        self.shared
+            .borrow()
+            .as_ref()
+            .map_or(0, |s| s.restart_app.swap(0, std::sync::atomic::Ordering::SeqCst))
+    }
+
     /// Mirror `pane_ids` to disk. A pane's `HYPERPANES_PANE_ID` is baked into its environment
     /// at spawn, but this uid→pane-id map lived only in the GUI's memory — so after a GUI
     /// relaunch re-attached a control-spawned pane, nothing could resolve its external id
@@ -481,9 +501,14 @@ impl ControlHost {
         let live = gui_uids(windows);
         ctl.retain(|uid, _| live.contains(uid));
         let ids_before = self.pane_ids.borrow().len();
+        // The pane-id aliases also honor DAEMON liveness: right after a GUI relaunch this
+        // pass can run before the surviving sessions are re-adopted (zero GUI panes), and
+        // a GUI-presence-only prune would wipe the just-reloaded persisted map — orphaning
+        // every control-spawned pane's external id (its env HYPERPANES_PANE_ID is baked at
+        // spawn and keys the Claude session markers).
         self.pane_ids
             .borrow_mut()
-            .retain(|uid, _| live.contains(uid));
+            .retain(|uid, _| live.contains(uid) || mgr.has(uid));
         // One choke point covers every map mutation this pass (insert, respawn re-pin, prune).
         if structural || self.pane_ids.borrow().len() != ids_before {
             self.persist_pane_ids();
