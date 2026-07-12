@@ -1,0 +1,202 @@
+// The "New goal" dialog — opened from the command palette ("New goal…").
+//
+// A centred modal card (same overlay-panel pattern as newpane.slint / addproject.slint,
+// mounted by overlays.slint when `kind == 5`): pick the project the goal is for, type the
+// goal as free text, and submit. Submitting routes through `State::submit_new_goal`, which
+// hands the goal to the project's goals orchestrator (spawning one if needed). The project
+// picker returns the SELECTED INDEX into the `projects` model; Rust maps it back to the
+// project path. Esc closes; Ctrl/Cmd+Enter or the Create button submits. Local state
+// (selected row + text) is reset every open via re-instantiation.
+
+import { Theme } from "theme.slint";
+import { ProjectItem } from "types.slint";
+
+// A small footer button — mirrors addproject.slint's `ApButton`.
+component NgButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 32px;
+    min-width: 84px;
+    border-radius: 7px;
+    background: !root.enabled
+        ? Theme.surface
+        : (root.primary ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface));
+    border-width: 1px;
+    border-color: root.primary && root.enabled ? Theme.accent : Theme.border;
+    opacity: root.enabled ? 1.0 : 0.5;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.label;
+            color: root.primary && root.enabled ? #11111b : Theme.text;
+            font-size: 13px;
+            font-weight: root.primary ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { if (root.enabled) { root.clicked(); } } }
+}
+
+// One selectable project row in the picker (color dot + name).
+component NgProjectRow inherits Rectangle {
+    in property <string> name;
+    in property <color> dot;
+    in property <bool> selected;
+    callback clicked;
+    height: 30px;
+    border-radius: 6px;
+    background: root.selected ? Theme.surface2 : (ta.has-hover ? Theme.surface : transparent);
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : transparent;
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        spacing: 8px;
+        Rectangle {
+            width: 9px;
+            height: 9px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 5px;
+            background: root.dot;
+        }
+        Text {
+            text: root.name;
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component NewGoalDialog inherits Rectangle {
+    in property <[ProjectItem]> projects;
+    callback submit(int, string);   // (selected project index, goal text)
+    callback cancel();
+
+    property <int> selected: 0;
+
+    // eat scrim clicks behind the card
+    TouchArea {}
+
+    card := Rectangle {
+        width: 500px;
+        x: (parent.width - self.width) / 2;
+        y: max(60px, (parent.height - self.height) / 2);
+        height: body.preferred-height;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        TouchArea {} // keep clicks on the card from dismissing
+
+        body := VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: "New goal";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 700;
+            }
+
+            // ---- project picker ----
+            VerticalLayout {
+                spacing: 5px;
+                Text { text: "Project"; color: Theme.faint; font-size: 11px; }
+                if root.projects.length == 0 : Text {
+                    text: "No projects yet — add one from the sidebar first.";
+                    color: Theme.faint;
+                    font-size: 12px;
+                }
+                Rectangle {
+                    visible: root.projects.length > 0;
+                    height: min(160px, root.projects.length * 32px);
+                    border-radius: 7px;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    Flickable {
+                        viewport-height: list.preferred-height;
+                        list := VerticalLayout {
+                            padding: 4px;
+                            spacing: 2px;
+                            for p[i] in root.projects : NgProjectRow {
+                                name: p.name;
+                                dot: p.color;
+                                selected: i == root.selected;
+                                clicked => { root.selected = i; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- goal text ----
+            VerticalLayout {
+                spacing: 5px;
+                Text { text: "Goal"; color: Theme.faint; font-size: 11px; }
+                Rectangle {
+                    height: 84px;
+                    border-radius: 7px;
+                    background: Theme.bg;
+                    border-width: 1px;
+                    border-color: ti.has-focus ? Theme.accent : Theme.border;
+                    Flickable {
+                        viewport-height: ti.preferred-height;
+                        ti := TextInput {
+                            width: parent.width - 20px;
+                            x: 10px;
+                            y: 8px;
+                            color: Theme.text;
+                            font-size: 13px;
+                            single-line: false;
+                            wrap: word-wrap;
+                            init => { ti.focus(); }
+                            key-pressed(e) => {
+                                // Ctrl/Cmd+Enter submits; Esc cancels; plain Enter = newline.
+                                if (e.text == Key.Return && (e.modifiers.control || e.modifiers.meta)) {
+                                    if (root.projects.length > 0) { root.submit(root.selected, ti.text); }
+                                    return EventResult.accept;
+                                }
+                                if (e.text == Key.Escape) { root.cancel(); return EventResult.accept; }
+                                return EventResult.reject;
+                            }
+                        }
+                    }
+                    Text {
+                        x: 10px;
+                        y: 8px;
+                        text: "What should the agents accomplish? (Ctrl+Enter to submit)";
+                        color: Theme.faint;
+                        font-size: 13px;
+                        visible: ti.text == "";
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                NgButton { label: "Cancel"; clicked => { root.cancel(); } }
+                NgButton {
+                    label: "Create goal";
+                    primary: true;
+                    enabled: root.projects.length > 0 && ti.text != "";
+                    clicked => { root.submit(root.selected, ti.text); }
+                }
+            }
+        }
+    }
+}

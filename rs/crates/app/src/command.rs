@@ -24,6 +24,11 @@ pub enum Command {
     OpenNewPane,
     /// Submit the New Pane dialog: spawn a pane from the configured options + close the dialog.
     SubmitNewPane(NewPaneOpts),
+    /// Open the "New goal" dialog (command palette → "New goal…").
+    OpenNewGoal,
+    /// Submit the New Goal dialog: `(project index into state.projects, goal text)`. Routes to
+    /// [`State::submit_new_goal`] after resolving the index to the project path.
+    SubmitNewGoal(usize, String),
     CloseFocused,
     ClosePane(usize),
     FocusPane(usize),
@@ -254,6 +259,16 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SubmitNewPane(opts) => {
             state.add_pane_opts(mgr, opts);
             state.close_overlay();
+        }
+        Command::OpenNewGoal => state.open_new_goal(),
+        Command::SubmitNewGoal(idx, intent) => {
+            // Resolve the picker index (into state.projects) to the project path, then hand the
+            // goal to that project's orchestrator. submit_new_goal closes the overlay itself.
+            if let Some(path) = state.projects.get(idx).map(|p| p.path.clone()) {
+                state.submit_new_goal(mgr, &path, &intent);
+            } else {
+                state.close_overlay();
+            }
         }
         Command::CloseFocused => {
             let f = state.active_tab().focused;

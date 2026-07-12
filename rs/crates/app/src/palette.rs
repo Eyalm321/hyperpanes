@@ -111,6 +111,12 @@ pub fn build(state: &State) -> Vec<Entry> {
         "add create terminal shell",
         Command::NewPane,
     ));
+    cmds.push(Entry::new(
+        "New goal",
+        "Set an autonomous goal for a project (spawns its goals orchestrator)",
+        "goal agent orchestrator autonomous objective",
+        Command::OpenNewGoal,
+    ));
 
     // ---- windows ----
     cmds.push(Entry::new(

@@ -13,9 +13,10 @@
 // chords/text route here (not the panes) while open.
 
 import { Theme } from "theme.slint";
-import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem } from "types.slint";
+import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem, ProjectItem } from "types.slint";
 import { NewPaneDialog } from "newpane.slint";
 import { AddProjectDialog } from "addproject.slint";
+import { NewGoalDialog } from "newgoal.slint";
 
 // A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
 // used to mark the active option in the pickers. Same Path-with-commands pattern the window
@@ -382,6 +383,10 @@ export component OverlayLayer inherits Rectangle {
     in property <string> query-text: "";
     callback palette-activate();
     callback palette-pick(int);      // hover/click row i
+
+    // New-goal dialog (kind 5): the project list to pick from + the submit callback.
+    in property <[ProjectItem]> projects;
+    callback new-goal-submit(int, string);   // (selected project index, goal text)
 
     // preferences
     in property <[PrefOption]> families;
@@ -1424,6 +1429,15 @@ export component OverlayLayer inherits Rectangle {
         height: 100%;
         error: root.ap-error;
         submit(p) => { root.add-project-submit(p); }
+        cancel => { root.dismiss(); }
+    }
+
+    // ===== New Goal dialog =====
+    if root.kind == 5 : NewGoalDialog {
+        width: 100%;
+        height: 100%;
+        projects: root.projects;
+        submit(i, g) => { root.new-goal-submit(i, g); }
         cancel => { root.dismiss(); }
     }
 }

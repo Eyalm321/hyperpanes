@@ -546,6 +546,7 @@ pub fn resync(
         Overlay::Prefs => 2,
         Overlay::NewPane => 3,
         Overlay::AddProject => 4,
+        Overlay::NewGoal => 5,
     };
     app.set_overlay_kind(kind);
 

@@ -234,6 +234,7 @@ export component AppWindow inherits Window {
     callback resume-session(int, string); // resume Claude session <id> for project <idx> in a new pane
     callback open-add-project();          // the ＋ on the PROJECTS header → open the dialog
     callback submit-add-project(string);  // Add-Project dialog submit (directory path)
+    callback submit-new-goal(int, string); // New-Goal dialog submit (project index, goal text)
     // top-bar menu → overlays
     callback open-palette();
     callback open-prefs();
@@ -527,6 +528,8 @@ export component AppWindow inherits Window {
             }
             ap-error: root.ap-error;
             add-project-submit(p) => { root.submit-add-project(p); }
+            projects: root.projects;
+            new-goal-submit(i, g) => { root.submit-new-goal(i, g); }
             palette-activate => { root.palette-activate(); }
             palette-pick(i) => { root.palette-pick(i); }
             pref-action(k, a) => { root.pref-action(k, a); }

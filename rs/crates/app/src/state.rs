@@ -48,6 +48,9 @@ pub enum Overlay {
     /// path to add it as a project explicitly; submitting routes through
     /// [`State::submit_add_project`].
     AddProject,
+    /// The "New goal" dialog (command palette → "New goal…"): pick a project + type a goal;
+    /// submitting routes through [`State::submit_new_goal`].
+    NewGoal,
 }
 
 // Pane/session uid minting moved to the backend: `SessionManager::fresh_uid` picks the
@@ -1728,6 +1731,14 @@ impl State {
     /// Open the "New pane" options dialog (Shift+＋ / the menus' "New pane…").
     pub fn open_new_pane(&mut self) {
         self.overlay = Overlay::NewPane;
+        self.dirty = true;
+    }
+
+    /// Open the "New goal" dialog (command palette → "New goal…"). Refreshes the project list
+    /// first so the picker reflects any just-added projects.
+    pub fn open_new_goal(&mut self) {
+        self.projects = sidebar::list();
+        self.overlay = Overlay::NewGoal;
         self.dirty = true;
     }
 
