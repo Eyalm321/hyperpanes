@@ -36,3 +36,4 @@ _mw2_win*.png
 
 # packaging artifacts (AppImage/dmg staging)
 rs/packaging/out/
+.tokensave
