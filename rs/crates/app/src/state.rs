@@ -149,6 +149,10 @@ pub struct NewPaneOpts {
     pub show_dot: Option<bool>,
     /// Per-pane env overrides layered over the fresh spawn base (#27 linked terminal).
     pub env: Option<hyperpanes_core::session::spawn::EnvMap>,
+    /// Text typed into the pane once it produces its first output (the boot-safe inject the
+    /// resume path uses). Used to hand a freshly-spawned agent its opening prompt without a
+    /// PTY timing race. `None` ⇒ nothing typed.
+    pub startup: Option<String>,
 }
 
 /// The in-dialog draft of the **appearance** settings. While Preferences is open these edit
@@ -533,6 +537,11 @@ pub struct State {
     /// tab and removes its entry. NOT persisted — sessions don't survive a relaunch, so
     /// reminders die with them (matching the session lifecycle).
     pub reminders: Vec<Reminder>,
+    /// Goals system: project canonical path → the session uid of that project's live
+    /// goals-orchestrator pane. Lets "New goal" route to the existing orchestrator (inject the
+    /// goal) instead of spawning a duplicate. NOT persisted — orchestrator panes don't survive
+    /// a relaunch; the entry is re-established on the next "New goal" for the project.
+    pub goal_orchestrators: std::collections::HashMap<String, String>,
     /// Whether the sidebar bell's reminder-list panel is expanded.
     pub reminders_open: bool,
 }
@@ -625,6 +634,7 @@ impl State {
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
+            goal_orchestrators: std::collections::HashMap::new(),
             sidebar_open: false,
             palette_entries: Vec::new(),
             palette_view: Vec::new(),
@@ -938,7 +948,7 @@ impl State {
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
             started: false,
-            startup: None,
+            startup: opts.startup.clone(),
             pinned_accent: accent,
             surf: (0.0, 0.0),
             link: None,
@@ -992,11 +1002,13 @@ impl State {
 
     /// Spawn a new pane in the active tab from the full [`NewPaneOpts`] (the New Pane
     /// dialog's payload), and focus it.
-    pub fn add_pane_opts(&mut self, mgr: &SessionManager, opts: NewPaneOpts) {
+    /// Spawn a configured pane in the active tab. Returns the new pane's session `uid`
+    /// (`None` if the spawn failed), so callers that need to address the pane later — e.g.
+    /// the goals launcher registering its orchestrator — can record it.
+    pub fn add_pane_opts(&mut self, mgr: &SessionManager, opts: NewPaneOpts) -> Option<String> {
         let idx = self.active_tab().panes.len();
-        let Some(ps) = self.make_pane(mgr, idx, opts) else {
-            return;
-        };
+        let ps = self.make_pane(mgr, idx, opts)?;
+        let uid = ps.uid.clone();
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
         t.sizes = if auto {
@@ -1008,6 +1020,7 @@ impl State {
         t.focused = idx;
         t.zoomed = None;
         self.dirty = true;
+        Some(uid)
     }
 
     /// Close pane `idx` in the active tab (see [`Self::close_pane_in`]).
@@ -2316,6 +2329,90 @@ impl State {
         self.projects = sidebar::list();
         self.close_overlay();
         self.dirty = true;
+    }
+
+    /// Goals system: hand a free-text goal to the project's goals orchestrator, spawning one if
+    /// it isn't already live. If an orchestrator pane for `project_path` exists, the goal is typed
+    /// into it (it's a running interactive `claude` at its prompt); otherwise a new headless
+    /// orchestrator pane is spawned in the project cwd with the goal as its boot-safe `startup`
+    /// prompt (typed at first output). The orchestrator self-registers `role`/`project` meta and
+    /// drives spec agents → impl agents from there (see the goal-orchestrator skill).
+    ///
+    /// Returns `false` (with an eprintln) only if the orchestrator persona file can't be found —
+    /// the one external dependency (packaging TODO: bundle it, or symlink into ~/.claude/skills).
+    pub fn submit_new_goal(&mut self, mgr: &SessionManager, project_path: &str, intent: &str) -> bool {
+        let intent = intent.trim();
+        if intent.is_empty() || project_path.is_empty() {
+            return false;
+        }
+
+        // Existing orchestrator for this project still live? Type the goal into it.
+        if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
+            let alive = self.tabs.iter().flat_map(|t| &t.panes).any(|p| p.uid == uid);
+            if alive {
+                mgr.write(&uid, &format!("{intent}\r"));
+                self.close_overlay();
+                self.dirty = true;
+                return true;
+            }
+            self.goal_orchestrators.remove(project_path); // stale (pane closed) — respawn below
+        }
+
+        // Locate the goal-orchestrator persona: bundled beside the exe (packaging TODO), else a
+        // ~/.claude/skills symlink, else the dev skills-repo checkout.
+        let persona = {
+            let mut found = None;
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    let p = dir.join("resources/claude/goal-orchestrator/SKILL.md");
+                    if p.is_file() {
+                        found = Some(p);
+                    }
+                }
+            }
+            if found.is_none() {
+                if let Some(home) = std::env::var_os("HOME") {
+                    for rel in [
+                        ".claude/skills/goal-orchestrator/SKILL.md",
+                        "dev/agent-orchestration-skills/skills/goal-orchestrator/SKILL.md",
+                    ] {
+                        let p = std::path::Path::new(&home).join(rel);
+                        if p.is_file() {
+                            found = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+            found
+        };
+        let Some(persona) = persona else {
+            eprintln!(
+                "[goals] orchestrator persona not found — bundle resources/claude/goal-orchestrator/ \
+                 or symlink the skill into ~/.claude/skills; goal not started"
+            );
+            return false;
+        };
+
+        // Spawn a fresh orchestrator in the project cwd; the goal rides in as the startup prompt.
+        let command = format!(
+            "claude --append-system-prompt-file {} --model claude-opus-4-8[1m]",
+            persona.display()
+        );
+        let opts = NewPaneOpts {
+            label: Some("goals".to_string()),
+            cwd: Some(project_path.to_string()),
+            command: Some(command),
+            startup: Some(format!("{intent}\r")),
+            ..Default::default()
+        };
+        if let Some(uid) = self.add_pane_opts(mgr, opts) {
+            self.goal_orchestrators
+                .insert(project_path.to_string(), uid);
+        }
+        self.close_overlay();
+        self.dirty = true;
+        true
     }
 
     /// Record an Escape key event and decide what to do with it. A lone tap
