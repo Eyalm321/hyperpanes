@@ -169,6 +169,15 @@ pub fn ai_memory_json() -> PathBuf {
     data_dir().join("ai-memory.json")
 }
 
+/// Directory of per-pane Claude session markers (`<pane-id>.json`), written by the
+/// Claude Code SessionStart/SessionEnd hook (`resources/claude/hp-claude-session-hook.sh`)
+/// and read by the relaunch snapshot so a restored pane can `claude --resume` its
+/// conversation. Runtime state → [`state_dir`]: a marker only describes a live pane,
+/// so it must not survive into backups/dotfile syncs as durable data.
+pub fn claude_sessions_dir() -> PathBuf {
+    state_dir().join("claude-sessions")
+}
+
 /// Write `contents` to `path` atomically: create the parent dir, write to a sibling
 /// temp file, then rename over the target (a single filesystem op — readers never see
 /// a half-written file). `std::fs::rename` replaces the destination on Windows.

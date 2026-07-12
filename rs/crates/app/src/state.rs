@@ -3250,6 +3250,20 @@ impl State {
                     .iter()
                     .map(|p| {
                         let px = p.font_px.round() as u32;
+                        // A live Claude conversation in this pane (per the session hook's
+                        // marker, keyed by pane id == session uid) rides the snapshot as pane
+                        // meta, so a restore whose session did not survive can
+                        // `claude --resume` it instead of coming back as a bare shell.
+                        let meta = hyperpanes_core::claude_panes::read_pane_session(&p.uid).map(
+                            |s| {
+                                let mut m = std::collections::BTreeMap::new();
+                                m.insert(
+                                    hyperpanes_core::claude_panes::META_KEY.to_string(),
+                                    s.session_id,
+                                );
+                                m
+                            },
+                        );
                         PaneSpec {
                             label: Some(p.title.to_string()),
                             color: p.pinned_accent.map(color_hex),
@@ -3263,6 +3277,7 @@ impl State {
                             cwd: p.cwd.clone(),
                             font_size: (px != base).then_some(px),
                             uid: Some(p.uid.clone()),
+                            meta,
                             ..Default::default()
                         }
                     })
@@ -3484,6 +3499,42 @@ impl State {
             _ => mgr.fresh_uid(),
         };
 
+        // ---- Claude conversation resume (the dead-session fallback) ----
+        // The snapshot carries the pane's live conversation id as meta (claude_panes::META_KEY,
+        // fed by the Claude Code SessionStart hook). A re-attached survivor still HAS that
+        // conversation running — only a re-spawn needs to pick it back up. Re-validated here
+        // because workspace.json is user-editable and the id lands on a command line.
+        let resume_id = if reattach {
+            None
+        } else {
+            spec.meta
+                .as_ref()
+                .and_then(|m| m.get(hyperpanes_core::claude_panes::META_KEY))
+                .filter(|id| hyperpanes_core::claude_panes::valid_session_id(id))
+                .cloned()
+        };
+        // Two resume shapes: a pane whose *program* is claude gets `--resume <id>` appended to
+        // its own spawn; a shell pane instead has the resume line typed at first output (through
+        // the interactive shell, so a user's `claude` alias — wrapper/scope included — applies).
+        // A pane running some other program ignores the marker rather than typing into it.
+        let mut spawn_command = spec.command.clone();
+        let mut spawn_args = spec.args.clone();
+        let mut startup = None;
+        if let Some(id) = &resume_id {
+            let head = spawn_command.as_deref().unwrap_or("").split_whitespace().next().unwrap_or("");
+            let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
+            if spawn_command.is_none() {
+                startup = Some(format!("claude --resume {id}\r"));
+            } else if head == "claude" || head == "claude.exe" {
+                match &mut spawn_args {
+                    // Direct-argv spawn: extend the argv.
+                    Some(a) => a.extend(["--resume".to_string(), id.clone()]),
+                    // Shell-string spawn: extend the command line.
+                    None => spawn_command = spawn_command.map(|c| format!("{c} --resume {id}")),
+                }
+            }
+        }
+
         let mut pane = TerminalPane::new(
             cols as usize,
             rows as usize,
@@ -3509,8 +3560,8 @@ impl State {
                     // Cloned so the resolved shell is also kept on the PaneState (below) for a
                     // subsequent relaunch snapshot.
                     shell: shell.clone(),
-                    command: spec.command.clone(),
-                    args: spec.args.clone(),
+                    command: spawn_command,
+                    args: spawn_args,
                     integration,
                     ..Default::default()
                 },
@@ -3546,7 +3597,7 @@ impl State {
             // pane); a freshly spawned pane starts unstarted so its first-output startup
             // pump tracks the new shell coming up.
             started: reattach,
-            startup: None,
+            startup,
             pinned_accent: pinned,
             surf: (0.0, 0.0),
             link: None,
