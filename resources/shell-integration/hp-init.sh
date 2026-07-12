@@ -60,6 +60,26 @@ __hyperpanes_osc133_preexec() {
   printf '\033]133;C\007'
 }
 
+# 4) hp-gui: run a GUI app OUTSIDE the pane's cgroup (Linux/systemd only) ----------
+# Panes — and agent scopes inside them (e.g. a claude under agents.slice) — live in
+# memory-accounted cgroups that systemd-oomd culls whole under pressure (Fedora's
+# systemd-oomd-defaults applies ManagedOOMMemoryPressure=kill to EVERY user slice).
+# A heavy GUI child (headed chromium, electron) launched in-pane bills its memory to
+# the pane's cgroup and can take the whole pane down with it. hp-gui detaches the
+# app into its own transient unit under app-graphical.slice: its memory can't
+# pressure the pane's cgroup, an oomd kill hits only the app, and app and pane
+# survive each other's death. Guarded: absent on non-systemd hosts (git-bash, macOS).
+if [ -z "${HYPERPANES_NO_GUI_HELPER:-}" ] && command -v systemd-run >/dev/null 2>&1; then
+  hp-gui() {
+    if [ $# -eq 0 ]; then
+      echo "usage: hp-gui <command> [args...]   # detached, own cgroup, survives pane close" >&2
+      return 2
+    fi
+    systemd-run --user --quiet --collect --slice=app-graphical.slice --same-dir \
+      --setenv=WAYLAND_DISPLAY --setenv=DISPLAY --setenv=XAUTHORITY -- "$@"
+  }
+fi
+
 if [ -n "$ZSH_VERSION" ]; then
   # zsh has no PROMPT_COMMAND — hook precmd instead. add-zsh-hook is idempotent;
   # fall back to a guarded precmd_functions append if it is unavailable.
