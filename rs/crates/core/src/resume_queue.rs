@@ -28,6 +28,13 @@ pub struct QueuedPrompt {
 }
 
 fn queue_file() -> PathBuf {
+    // Test seam: an explicit path override, honored only when set. Production never sets it,
+    // so the queue always lives at the real state-dir path. Tests use it to get a hermetic,
+    // guaranteed-writable file independent of `state_dir()`'s platform behavior (on macOS
+    // that path ignores XDG_STATE_HOME, so env-based isolation there is a no-op).
+    if let Some(p) = std::env::var_os("HP_RESUME_PROMPTS_FILE") {
+        return PathBuf::from(p);
+    }
     paths::resume_prompts_json()
 }
 
@@ -93,25 +100,33 @@ pub fn list() -> Vec<QueuedPrompt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
 
-    /// Queue tests share one process-global state dir (paths reads env), so serialize them.
+    /// The queue path is a process-global (an env var), so the tests that point it at their
+    /// own file must not run concurrently — serialize them on one mutex.
     fn lock() -> std::sync::MutexGuard<'static, ()> {
         static L: OnceLock<Mutex<()>> = OnceLock::new();
         L.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
-    fn scratch_state_dir() {
-        let dir = std::env::temp_dir().join(format!("hp-rq-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("XDG_STATE_HOME", &dir);
+    /// Point the queue at a unique, empty temp file for this test — hermetic and
+    /// platform-independent (no reliance on `state_dir()` honoring XDG_STATE_HOME).
+    fn use_scratch_queue() {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let f = std::env::temp_dir().join(format!(
+            "hp-rq-{}-{}.json",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_file(&f);
+        std::env::set_var("HP_RESUME_PROMPTS_FILE", &f);
     }
 
     #[test]
     fn enqueue_take_roundtrip_is_fifo_and_deliver_once() {
         let _g = lock();
-        scratch_state_dir();
+        use_scratch_queue();
         assert!(is_empty());
         enqueue("deadbeef-0000", "first").unwrap();
         enqueue("deadbeef-0000", "second").unwrap();
@@ -132,7 +147,7 @@ mod tests {
     #[test]
     fn rejects_invalid_ids_and_empty_text() {
         let _g = lock();
-        scratch_state_dir();
+        use_scratch_queue();
         assert!(enqueue("$(boom)", "hi").is_err());
         assert!(enqueue("deadbeef-0000", "   ").is_err());
         assert!(is_empty());
