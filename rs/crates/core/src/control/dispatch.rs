@@ -237,13 +237,22 @@ fn exec(
                 None
             };
             let new_uid = new_id();
+            // Optional `env` override, layered over the base spawn env (same shape as
+            // `openPane`). The account-rotation path uses this to respawn a pane under a
+            // different `CLAUDE_CONFIG_DIR` when its Claude account hits a limit, while
+            // `resume:true` keeps the conversation (transcripts are on a shared store).
+            let env_override = cmd.get("env").and_then(Value::as_object).map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<EnvMap>()
+            });
             let opts = SpawnOptions {
                 uid: new_uid.clone(),
                 shell: pane.shell.clone(),
                 args: pane.args.clone(),
                 command: pane.command.clone(),
                 cwd: pane.cwd.clone(),
-                env: None,
+                env: env_override,
                 cols: None,
                 rows: None,
                 pane_id: Some(pane_id.clone()),
