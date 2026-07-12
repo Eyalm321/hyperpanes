@@ -48,6 +48,9 @@ raw-window-handle = "0.6"
 # Clipboard writes from the crash reporter ("Send diagnostics" → copy full report). The
 # terminal-widget already vendors arboard; the crash reporter is a separate code path here.
 arboard = "3"
+# Encode a clipboard image (arboard RGBA) → PNG when attaching it to a goal (already in the
+# dep tree via slint). Pure Rust, no C deps.
+png = "0.18"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # Wave-2 preferences persistence (a small native-settings.json blob).
 serde = { version = "1", features = ["derive"] }

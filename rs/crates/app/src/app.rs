@@ -2119,20 +2119,30 @@ impl App {
                     }
                 });
         }
-        // New Goal dialog submit: (selected project index, goal text) → route to the project's
-        // goals orchestrator (resolved from the index in the command dispatch).
+        // New Goal dialog submit: (project index, goal text, orchestrator/spec/impl model
+        // indices) → route to the project's goals orchestrator (resolved in the dispatch).
         {
             let app = app.clone();
             let id = win.id;
-            win.app.on_submit_new_goal(move |proj_idx, goal| {
-                if let Some(w) = app.window_by_id(id) {
-                    app.run_command(
-                        &w,
-                        Command::SubmitNewGoal(proj_idx.max(0) as usize, goal.to_string()),
-                    );
-                }
-            });
+            win.app
+                .on_submit_new_goal(move |proj_idx, goal, orch, spec, implm| {
+                    if let Some(w) = app.window_by_id(id) {
+                        app.run_command(
+                            &w,
+                            Command::SubmitNewGoal(
+                                proj_idx.max(0) as usize,
+                                goal.to_string(),
+                                orch.max(0) as usize,
+                                spec.max(0) as usize,
+                                implm.max(0) as usize,
+                            ),
+                        );
+                    }
+                });
         }
+        cb0!(on_goal_attach_image, Command::GoalAttachImage);
+        cb0!(on_goal_paste_image, Command::GoalPasteImage);
+        cb_usize!(on_goal_remove_image, Command::GoalRemoveImage);
         cb0!(on_close_focused, Command::CloseFocused);
         cb0!(on_toggle_zoom, Command::ToggleZoom);
         cb0!(on_toggle_fullscreen, Command::ToggleFullscreen);

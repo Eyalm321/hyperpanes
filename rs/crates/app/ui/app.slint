@@ -234,7 +234,11 @@ export component AppWindow inherits Window {
     callback resume-session(int, string); // resume Claude session <id> for project <idx> in a new pane
     callback open-add-project();          // the ＋ on the PROJECTS header → open the dialog
     callback submit-add-project(string);  // Add-Project dialog submit (directory path)
-    callback submit-new-goal(int, string); // New-Goal dialog submit (project index, goal text)
+    callback submit-new-goal(int, string, int, int, int); // proj idx, goal, orch/spec/impl model idx
+    callback goal-attach-image();          // New-Goal dialog: attach image(s) via file picker
+    callback goal-paste-image();           // New-Goal dialog: attach the clipboard image
+    callback goal-remove-image(int);       // New-Goal dialog: remove attached image i
+    in property <[string]> goal-images;    // attached-image filenames for the New-Goal dialog
     // top-bar menu → overlays
     callback open-palette();
     callback open-prefs();
@@ -529,7 +533,11 @@ export component AppWindow inherits Window {
             ap-error: root.ap-error;
             add-project-submit(p) => { root.submit-add-project(p); }
             projects: root.projects;
-            new-goal-submit(i, g) => { root.submit-new-goal(i, g); }
+            goal-images: root.goal-images;
+            new-goal-submit(p, g, o, s, im) => { root.submit-new-goal(p, g, o, s, im); }
+            goal-attach-image => { root.goal-attach-image(); }
+            goal-paste-image => { root.goal-paste-image(); }
+            goal-remove-image(i) => { root.goal-remove-image(i); }
             palette-activate => { root.palette-activate(); }
             palette-pick(i) => { root.palette-pick(i); }
             pref-action(k, a) => { root.pref-action(k, a); }
