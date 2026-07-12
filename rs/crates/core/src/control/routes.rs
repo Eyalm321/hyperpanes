@@ -848,7 +848,7 @@ async fn task_enqueue(
         None => {
             return jstatus(
                 400,
-                json!({ "error": "expected { payload: string, kind?, title?, priority?, maxAttempts?, visibilityTimeoutMs?, delayMs?|availableAt?, dedupeKey? }" }),
+                json!({ "error": "expected { payload: string, kind?, title?, priority?, maxAttempts?, visibilityTimeoutMs?, delayMs?|availableAt?, dedupeKey?, goalId?, dependsOn?: string[] }" }),
             )
         }
     };
@@ -885,6 +885,18 @@ async fn task_enqueue(
     }
     if let Some(k) = b.get("dedupeKey").and_then(Value::as_str) {
         opts.dedupe_key = Some(k.to_string());
+    }
+    // Goals system: `goalId` tags the task to a goal; `dependsOn` (array of task ids) gates the
+    // task's claim until every listed task is `done` (see WorkQueue::claim).
+    if let Some(g) = b.get("goalId").and_then(Value::as_str) {
+        opts.goal_id = Some(g.to_string());
+    }
+    if let Some(deps) = b.get("dependsOn").and_then(Value::as_array) {
+        opts.depends_on = Some(
+            deps.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        );
     }
     let task = shared
         .work

@@ -65,7 +65,7 @@ pub const BACKOFF_BASE_MS: i64 = 1_000;
 pub const BACKOFF_CAP_MS: i64 = 60_000;
 
 /// Bump on any schema change; gates forward migrations on open (doc 01 §3.4).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 // ---------------------------------------------------------------------------
 // Pure value types + rules (no DB — unit-tested with plain values, inbox-style)
@@ -180,6 +180,14 @@ pub struct Task {
     pub dedupe_key: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The goal this task belongs to (goals system), if any. Free-form id owned by the
+    /// orchestrator; the queue only stores + echoes it (and indexes it for per-goal listing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    /// Task ids this task depends on: it stays unclaimable until EVERY listed task is `Done`
+    /// (a missing/purged dep id counts as unsatisfied, so it blocks). Empty/None ⇒ no deps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// Options for [`WorkQueue::enqueue`]. `Default` mirrors the doc's defaults.
@@ -194,6 +202,10 @@ pub struct EnqueueOpts {
     /// Schedule for the future (ms epoch); `None` ⇒ available now.
     pub available_at: Option<i64>,
     pub dedupe_key: Option<String>,
+    /// Goal this task belongs to (goals system); stored + echoed, not interpreted.
+    pub goal_id: Option<String>,
+    /// Task ids that must all be `Done` before this task becomes claimable.
+    pub depends_on: Option<Vec<String>>,
 }
 
 impl Default for EnqueueOpts {
@@ -206,6 +218,8 @@ impl Default for EnqueueOpts {
             visibility_timeout_ms: DEFAULT_VISIBILITY_MS,
             available_at: None,
             dedupe_key: None,
+            goal_id: None,
+            depends_on: None,
         }
     }
 }
@@ -304,7 +318,8 @@ pub struct QueueSummary {
 /// `visibility_timeout_ms`, an internal column only `claim` reads.)
 const COLS: &str = "id, queue, seq, kind, title, state, payload, priority, attempts, \
                     max_attempts, available_at, claimed_by, fencing_token, \
-                    visibility_deadline, result, error, dedupe_key, created_at, updated_at";
+                    visibility_deadline, result, error, dedupe_key, created_at, updated_at, \
+                    goal_id, depends_on";
 
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
@@ -328,7 +343,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     error                 TEXT,
     dedupe_key            TEXT,
     created_at            INTEGER NOT NULL,
-    updated_at            INTEGER NOT NULL
+    updated_at            INTEGER NOT NULL,
+    goal_id               TEXT,
+    depends_on            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_claimable  ON tasks(queue, state, available_at, priority, seq);
 CREATE INDEX IF NOT EXISTS idx_visibility ON tasks(state, visibility_deadline);
@@ -373,15 +390,35 @@ impl WorkQueue {
              PRAGMA busy_timeout=2000;",
         )?;
         conn.execute_batch(SCHEMA)?;
-        // Record the schema version once (migration guard for future versions).
-        let versioned: i64 =
-            conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))?;
-        if versioned == 0 {
+        // Migrations. `SCHEMA`'s `CREATE TABLE IF NOT EXISTS` gives a *fresh* DB every current
+        // column, but leaves an *existing* older table untouched — so forward-migrate by the
+        // recorded version. Read it (0 = fresh), apply each step, then stamp the current version.
+        let current: i64 = conn
+            .query_row("SELECT COALESCE(MAX(v),0) FROM schema_version", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+        if current == 0 {
             conn.execute(
                 "INSERT INTO schema_version (v) VALUES (?1)",
                 params![SCHEMA_VERSION],
             )?;
+        } else if current < SCHEMA_VERSION {
+            // v1 -> v2: goal-DAG columns. Only an existing v1 table is missing them (a fresh DB
+            // got them from `SCHEMA`), so ADD COLUMN never hits a duplicate here.
+            if current < 2 {
+                conn.execute_batch(
+                    "ALTER TABLE tasks ADD COLUMN goal_id TEXT;
+                     ALTER TABLE tasks ADD COLUMN depends_on TEXT;",
+                )?;
+            }
+            conn.execute("UPDATE schema_version SET v = ?1", params![SCHEMA_VERSION])?;
         }
+        // Indexes over migration-added columns: create AFTER the ALTER, so `goal_id` exists on
+        // both a fresh DB (created by SCHEMA) and a migrated v1 DB (added just above).
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_goal ON tasks(goal_id) WHERE goal_id IS NOT NULL;",
+        )?;
         // Resume the monotonic counters. `seq` survives on every row; `fencing_token` is
         // never nulled on requeue (only overwritten by the next claim), so MAX never regresses.
         let seq: i64 =
@@ -413,13 +450,18 @@ impl WorkQueue {
         let seq = self.seq;
         let id = uuid::Uuid::new_v4().to_string();
         let available_at = opts.available_at.unwrap_or(now);
+        // depends_on is stored as a JSON array string (queried via json_each in `claim`).
+        let depends_on_json = opts
+            .depends_on
+            .as_ref()
+            .map(|d| serde_json::to_string(d).unwrap_or_else(|_| "[]".to_string()));
         self.conn
             .execute(
                 "INSERT INTO tasks
                  (id, queue, seq, kind, title, state, payload, priority, attempts,
                   max_attempts, visibility_timeout_ms, available_at, dedupe_key,
-                  created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?12)",
+                  created_at, updated_at, goal_id, depends_on)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
                 params![
                     id,
                     queue,
@@ -433,6 +475,8 @@ impl WorkQueue {
                     available_at,
                     opts.dedupe_key,
                     now,
+                    opts.goal_id,
+                    depends_on_json,
                 ],
             )
             .expect("enqueue insert");
@@ -458,6 +502,15 @@ impl WorkQueue {
             .query_row(
                 "SELECT id, visibility_timeout_ms FROM tasks
                  WHERE queue = ?1 AND state = 'queued' AND available_at <= ?2
+                   AND (
+                     depends_on IS NULL
+                     OR NOT EXISTS (
+                       SELECT 1 FROM json_each(tasks.depends_on) AS dep
+                       WHERE NOT EXISTS (
+                         SELECT 1 FROM tasks d WHERE d.id = dep.value AND d.state = 'done'
+                       )
+                     )
+                   )
                  ORDER BY priority DESC, available_at ASC, seq ASC
                  LIMIT 1",
                 params![queue, now],
@@ -808,6 +861,11 @@ fn row_to_task(r: &Row) -> rusqlite::Result<Task> {
         dedupe_key: r.get(16)?,
         created_at: r.get(17)?,
         updated_at: r.get(18)?,
+        goal_id: r.get(19)?,
+        // depends_on is stored as a JSON array string; parse back to Vec (None on NULL/garbage).
+        depends_on: r
+            .get::<_, Option<String>>(20)?
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()),
     })
 }
 
@@ -952,6 +1010,46 @@ mod tests {
             "high-b"
         );
         assert_eq!(wq.claim("build", "w", 1000, 3).unwrap().task.payload, "low");
+    }
+
+    #[test]
+    fn depends_on_gates_claim_until_every_dep_is_done() {
+        let mut wq = q();
+        // A has no deps; B waits on A; C waits on a task id that never exists.
+        let a = wq.enqueue("g1", "build-a", EnqueueOpts::default(), 0);
+        let b = wq.enqueue(
+            "g1",
+            "build-b",
+            EnqueueOpts {
+                depends_on: Some(vec![a.id.clone()]),
+                ..Default::default()
+            },
+            0,
+        );
+        wq.enqueue(
+            "g1",
+            "build-c",
+            EnqueueOpts {
+                depends_on: Some(vec!["no-such-task".into()]),
+                ..Default::default()
+            },
+            0,
+        );
+        // Only A is claimable: B is blocked by A (still queued), C by a missing dep.
+        let first = wq.claim("g1", "w", 1000, 1).unwrap();
+        assert_eq!(first.task.id, a.id);
+        assert!(wq.claim("g1", "w", 1000, 2).is_none());
+        // Finish A → B's dependency is satisfied and B becomes claimable.
+        assert!(matches!(
+            wq.ack(&a.id, first.fencing_token, None, 3),
+            LeaseOutcome::Ok(_)
+        ));
+        let second = wq.claim("g1", "w", 1000, 4).unwrap();
+        assert_eq!(second.task.id, b.id);
+        // B's dependsOn round-trips through storage/row mapping.
+        assert_eq!(second.task.depends_on.as_deref(), Some(&[a.id][..]));
+        // C's missing dependency never resolves — it stays unclaimable.
+        assert!(wq.claim("g1", "w", 1000, 5).is_none());
     }
 
     #[test]
@@ -1218,6 +1316,63 @@ mod tests {
         // The fence counter resumed from MAX, so the next claim is strictly higher.
         let c2 = wq.claim("build", "w2", 100_000, 2000).unwrap();
         assert_eq!(c2.fencing_token, 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opens_and_migrates_a_v1_database_preserving_rows() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("hp-work-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // Hand-build a v1 DB: the pre-DAG schema (no goal_id/depends_on) + a live row.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (v INTEGER NOT NULL);
+                 CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY, queue TEXT NOT NULL, seq INTEGER NOT NULL UNIQUE,
+                     kind TEXT NOT NULL, title TEXT NOT NULL, state TEXT NOT NULL,
+                     payload TEXT NOT NULL, priority INTEGER NOT NULL, attempts INTEGER NOT NULL,
+                     max_attempts INTEGER NOT NULL, visibility_timeout_ms INTEGER NOT NULL,
+                     available_at INTEGER NOT NULL, claimed_by TEXT, fencing_token INTEGER,
+                     visibility_deadline INTEGER, result TEXT, error TEXT, dedupe_key TEXT,
+                     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                 INSERT INTO schema_version (v) VALUES (1);
+                 INSERT INTO tasks (id, queue, seq, kind, title, state, payload, priority,
+                     attempts, max_attempts, visibility_timeout_ms, available_at, created_at,
+                     updated_at)
+                 VALUES ('old1','g1',1,'manual','','queued','p',0,0,5,30000,0,0,0);",
+            )
+            .unwrap();
+        }
+
+        // Opening with current code migrates v1 -> v2 (ADD COLUMN) without losing the row.
+        let mut wq = WorkQueue::open(&path).unwrap();
+        let old = wq.get("old1").expect("v1 row survived migration");
+        assert_eq!(old.state, TaskState::Queued);
+        assert_eq!(old.depends_on, None); // new column reads as NULL for the old row
+
+        // The DAG columns are usable post-migration: a new task can depend on the old one.
+        let b = wq.enqueue(
+            "g1",
+            "needs-old1",
+            EnqueueOpts {
+                depends_on: Some(vec!["old1".into()]),
+                ..Default::default()
+            },
+            0,
+        );
+        // old1 (no deps) is claimable; B is gated until old1 is done.
+        let first = wq.claim("g1", "w", 1000, 1).unwrap();
+        assert_eq!(first.task.id, "old1");
+        assert!(wq.claim("g1", "w", 1000, 2).is_none());
+        assert!(matches!(
+            wq.ack("old1", first.fencing_token, None, 3),
+            LeaseOutcome::Ok(_)
+        ));
+        assert_eq!(wq.claim("g1", "w", 1000, 4).unwrap().task.id, b.id);
 
         let _ = std::fs::remove_file(&path);
     }
