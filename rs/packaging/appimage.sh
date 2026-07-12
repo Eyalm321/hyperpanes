@@ -65,6 +65,9 @@ install -m 644 "$SHELL_INT/hp-init.ps1" "$APPDIR/usr/bin/resources/shell-integra
 mkdir -p "$APPDIR/usr/bin/resources/shell-integration/zdotdir"
 install -m 644 "$SHELL_INT/zdotdir/.zshenv" "$APPDIR/usr/bin/resources/shell-integration/zdotdir/.zshenv"
 install -m 644 "$SHELL_INT/zdotdir/.zshrc"  "$APPDIR/usr/bin/resources/shell-integration/zdotdir/.zshrc"
+# Claude Code session hook (claude-resume feature) — same exe_dir/resources layout.
+mkdir -p "$APPDIR/usr/bin/resources/claude"
+install -m 755 "$ROOT/resources/claude/hp-claude-session-hook.sh" "$APPDIR/usr/bin/resources/claude/hp-claude-session-hook.sh"
 
 # Desktop entry + MIME info (registered by appimaged/AppImageLauncher or a
 # package manager hook via update-mime-database on integration).
