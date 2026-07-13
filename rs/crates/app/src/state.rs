@@ -133,6 +133,25 @@ pub enum Setting {
     KeepAlive(bool),
 }
 
+/// A goal awaiting robust delivery into its orchestrator pane's Claude TUI. Rather than the
+/// fragile first-output `startup` write (which fires mid-boot, when Claude's bracketed-paste
+/// input box swallows the CR), a goal is queued here and drained by the app tick
+/// (`deliver_pending_goals`) once the pane's Claude is ready — signalled by its SessionStart
+/// marker (aged a few seconds), or after a fallback timeout when no hook/marker exists. Delivery
+/// reuses the proven resume-queue cadence (type text, gap, CR, insurance CR).
+#[derive(Debug, Clone)]
+pub struct PendingGoal {
+    /// The orchestrator pane's session uid (also its `HYPERPANES_PANE_ID` / marker filename).
+    pub uid: String,
+    /// The goal prompt (intent + image path references + model hint), sans trailing CR.
+    pub text: String,
+    /// Attached image files, re-pasted via the OS clipboard on delivery (best-effort; the paths
+    /// are already in `text`, which is the guaranteed delivery).
+    pub images: Vec<std::path::PathBuf>,
+    /// When the goal was queued — drives the no-marker fallback timeout.
+    pub queued_at: std::time::Instant,
+}
+
 /// The "New pane" dialog's payload — full spawn options for a configured pane. The simple
 /// [`State::add_pane`] / [`State::add_pane_cwd`] paths build a default of this. The native
 /// port of the Electron `addPane({ label, color, showFrame, showDot, command, cwd, shell })`.
@@ -549,6 +568,9 @@ pub struct State {
     /// paths (clipboard images are captured to temp PNGs) until submit, when their paths are
     /// written into the goal prompt. Cleared on open and on submit.
     pub goal_draft_images: Vec<std::path::PathBuf>,
+    /// Goals system: goals queued for robust delivery into their orchestrator panes (drained by
+    /// the app tick once each pane's Claude is ready). See [`PendingGoal`].
+    pub pending_goals: Vec<PendingGoal>,
     /// Whether the sidebar bell's reminder-list panel is expanded.
     pub reminders_open: bool,
 }
@@ -643,6 +665,7 @@ impl State {
             projects: sidebar::list(),
             goal_orchestrators: std::collections::HashMap::new(),
             goal_draft_images: Vec::new(),
+            pending_goals: Vec::new(),
             sidebar_open: false,
             palette_entries: Vec::new(),
             palette_view: Vec::new(),
@@ -2349,14 +2372,14 @@ impl State {
     }
 
     /// Goals system: hand a free-text goal to the project's goals orchestrator, spawning one if
-    /// it isn't already live. If an orchestrator pane for `project_path` exists, the goal is typed
-    /// into it (it's a running interactive `claude` at its prompt); otherwise a new headless
-    /// orchestrator pane is spawned in the project cwd with the goal as its boot-safe `startup`
-    /// prompt (typed at first output). The orchestrator self-registers `role`/`project` meta and
-    /// drives spec agents → impl agents from there (see the goal-orchestrator skill).
+    /// it isn't already live. Either way the goal is not written to the pty immediately — it is
+    /// queued as a [`PendingGoal`] and delivered by the app tick (`deliver_pending_goals`) once the
+    /// pane's Claude TUI is ready (marker-gated, with a fallback timeout), reusing the resume
+    /// queue's proven gap+CR cadence. For an existing orchestrator that's near-instant (its marker
+    /// is already old); for a fresh spawn it waits out the boot. The orchestrator self-registers
+    /// `role`/`project` meta and drives spec agents → impl agents (see the goal-orchestrator skill).
     ///
-    /// Returns `false` (with an eprintln) only if the orchestrator persona file can't be found —
-    /// the one external dependency (packaging TODO: bundle it, or symlink into ~/.claude/skills).
+    /// Returns `false` (with an eprintln) only if the orchestrator persona file can't be found.
     pub fn submit_new_goal(
         &mut self,
         mgr: &SessionManager,
@@ -2383,12 +2406,12 @@ impl State {
             "\n(models — spec: {spec_model}, implementation: {impl_model})"
         ));
 
-        // Existing orchestrator for this project still live? Type the goal into it.
+        // Existing orchestrator for this project still live? Queue the goal for it (delivered on
+        // the next tick — its Claude is already up, so the marker gate passes immediately).
         if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
             let alive = self.tabs.iter().flat_map(|t| &t.panes).any(|p| p.uid == uid);
             if alive {
-                mgr.write(&uid, &format!("{payload}\r"));
-                self.goal_draft_images.clear();
+                self.queue_pending_goal(uid, payload);
                 self.close_overlay();
                 self.dirty = true;
                 return true;
@@ -2435,7 +2458,8 @@ impl State {
 
         // Spawn a fresh orchestrator in the project cwd. `--model` = the orchestrator tier; the
         // spec/impl tiers ride in as env so the persona spawns those agents with the chosen
-        // models. The goal (+ image paths + model hint) rides in as the startup prompt.
+        // models. The goal is NOT set as `startup` (that fires mid-boot, when Claude swallows it);
+        // it's queued for marker-gated delivery once the pane's Claude is ready.
         let command = format!(
             "claude --append-system-prompt-file {} --model {orch_model}",
             persona.display()
@@ -2447,18 +2471,28 @@ impl State {
             label: Some("goals".to_string()),
             cwd: Some(project_path.to_string()),
             command: Some(command),
-            startup: Some(format!("{payload}\r")),
             env: Some(env),
             ..Default::default()
         };
         if let Some(uid) = self.add_pane_opts(mgr, opts) {
             self.goal_orchestrators
-                .insert(project_path.to_string(), uid);
+                .insert(project_path.to_string(), uid.clone());
+            self.queue_pending_goal(uid, payload);
         }
-        self.goal_draft_images.clear();
         self.close_overlay();
         self.dirty = true;
         true
+    }
+
+    /// Enqueue a goal for robust delivery into pane `uid` (see [`PendingGoal`] /
+    /// `deliver_pending_goals`). Snapshots the current draft images and clears the draft.
+    fn queue_pending_goal(&mut self, uid: String, text: String) {
+        self.pending_goals.push(PendingGoal {
+            uid,
+            text,
+            images: std::mem::take(&mut self.goal_draft_images),
+            queued_at: std::time::Instant::now(),
+        });
     }
 
     /// Goals system: open the OS file picker to attach one or more images to the in-progress
