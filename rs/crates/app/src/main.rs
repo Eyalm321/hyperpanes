@@ -410,6 +410,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SessionManager::new(etx)
     });
 
+    // Auto-register the Claude SessionStart/SessionEnd hook (best-effort, idempotent) so the
+    // pane→conversation marker is written reliably — backing claude-resume and the goals
+    // system's marker-gated delivery without the user hand-editing settings.json. Only touches
+    // existing Claude config dirs; a missing bundled hook or any write error is a silent no-op.
+    if let Some(hook) = hyperpanes_core::claude_hook::bundled_hook_path() {
+        hyperpanes_core::claude_hook::ensure_registered(&hook);
+    }
+
     // The app owns the window registry + the shared session stream.
     let application = App::new(mgr.clone(), erx);
 
