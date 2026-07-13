@@ -365,6 +365,81 @@ impl App {
         }
     }
 
+    /// Deliver queued goals (New-goal dialog) into their orchestrator panes once each pane's
+    /// Claude TUI is ready. Readiness = the pane's SessionStart marker is a few seconds old (the
+    /// same signal `deliver_queued_prompts` uses); if no marker appears within a fallback window
+    /// (e.g. the user never installed the hook), deliver anyway. Delivery reuses the resume-queue
+    /// cadence — type text, gap, CR, insurance CR — then best-effort re-pastes any attached images
+    /// via the OS clipboard (their paths are already in the text, which is the guaranteed delivery).
+    fn deliver_pending_goals(&self) {
+        const READY_AGE_SECS: u64 = 4;
+        const FALLBACK_SECS: u64 = 12;
+        let dir = hyperpanes_core::persistence::paths::claude_sessions_dir();
+        let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        for w in &windows {
+            // Drain the ready goals under a short state borrow (nothing blocking held across it).
+            let ready: Vec<crate::state::PendingGoal> = {
+                let mut st = w.state.borrow_mut();
+                if st.pending_goals.is_empty() {
+                    continue;
+                }
+                // Snapshot live pane uids first (can't borrow st.tabs inside retain on
+                // st.pending_goals — that's a second borrow of st).
+                let alive: std::collections::HashSet<String> = st
+                    .tabs
+                    .iter()
+                    .flat_map(|t| &t.panes)
+                    .map(|p| p.uid.clone())
+                    .collect();
+                let mut ready = Vec::new();
+                st.pending_goals.retain(|g| {
+                    // Drop a goal whose orchestrator pane vanished before delivery.
+                    if !alive.contains(&g.uid) {
+                        return false;
+                    }
+                    let marker_ready = std::fs::metadata(dir.join(format!("{}.json", g.uid)))
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age.as_secs() >= READY_AGE_SECS);
+                    let timed_out = g.queued_at.elapsed().as_secs() >= FALLBACK_SECS;
+                    if marker_ready || timed_out {
+                        ready.push(g.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                ready
+            };
+            for g in ready {
+                let mgr = self.mgr.clone();
+                std::thread::spawn(move || {
+                    // Text via the proven resume-queue cadence (bracketed-paste TUIs need the gap
+                    // + an insurance CR — the now-submitted line makes the second CR a no-op).
+                    mgr.write(&g.uid, &g.text);
+                    std::thread::sleep(Duration::from_millis(250));
+                    mgr.write(&g.uid, "\r");
+                    std::thread::sleep(Duration::from_millis(600));
+                    mgr.write(&g.uid, "\r");
+                    std::thread::sleep(Duration::from_millis(400));
+                    // Best-effort image re-paste: set the OS clipboard to each image, then Ctrl+V.
+                    // The paths are already in the text above, so this is additive — if Claude's
+                    // clipboard-image paste isn't available the goal still carries the paths.
+                    for img in &g.images {
+                        if set_clipboard_image_from_file(img) {
+                            std::thread::sleep(Duration::from_millis(150));
+                            mgr.write(&g.uid, "\u{16}"); // Ctrl+V
+                            std::thread::sleep(Duration::from_millis(700));
+                            mgr.write(&g.uid, "\r");
+                            std::thread::sleep(Duration::from_millis(400));
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     /// Execute a pending `restartApp` control command (flag set by the route; see
     /// `Shared::restart_app`): flush a final snapshot, spawn a detached relauncher of our
     /// own binary, optionally shut the session daemon down (scope "full" — every pane dies
@@ -876,6 +951,7 @@ impl App {
         // 5b. Queued-prompt delivery + app-restart requests (claude-resume "speak-first" and
         //     the restartApp control command). Both throttled/cheap no-ops in the common case.
         self.deliver_queued_prompts();
+        self.deliver_pending_goals();
         self.service_restart_request();
 
         // ---- adaptive idle cadence (#3) ----
@@ -3093,6 +3169,26 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
     windows
         .iter()
         .find(|w| w.state.borrow_mut().hosts_session(uid))
+}
+
+/// Decode an image file (any of the goal picker's formats) to RGBA8 and place it on the OS
+/// clipboard, so a following Ctrl+V into a Claude pane pastes the actual image. Returns `false`
+/// (a no-op) on a read/decode/clipboard error — the goal's text already carries the file path,
+/// which is the guaranteed delivery, so a failure here is non-fatal.
+fn set_clipboard_image_from_file(path: &std::path::Path) -> bool {
+    let Ok(img) = image::open(path) else {
+        return false;
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let data = arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    };
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_image(data))
+        .is_ok()
 }
 
 /// Cheap FNV-1a hash of a string — used to detect when a pane's rendered screen text

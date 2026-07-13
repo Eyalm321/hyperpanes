@@ -51,6 +51,9 @@ arboard = "3"
 # Encode a clipboard image (arboard RGBA) → PNG when attaching it to a goal (already in the
 # dep tree via slint). Pure Rust, no C deps.
 png = "0.18"
+# Decode attached goal images (any of the picker's formats) back to RGBA to re-paste them via
+# the OS clipboard on goal delivery. Already in the tree via slint; decoders only.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # Wave-2 preferences persistence (a small native-settings.json blob).
 serde = { version = "1", features = ["derive"] }
