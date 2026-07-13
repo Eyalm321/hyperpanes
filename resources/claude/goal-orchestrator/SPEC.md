@@ -34,6 +34,11 @@ agent per subtask, competing-consumers):
   (or the bare `hyperpanes worker --queue <q> --count N --worktree -- …`). Impl agents run on
   `$HP_GOAL_IMPL_MODEL` (the tier the user picked in the New-goal dialog; default
   `claude-sonnet-5[1m]`), each in its own git worktree off HEAD.
+  - **Account rotation:** if `HP_GOAL_ACCOUNTS` is set (newline-separated `CLAUDE_CONFIG_DIR`s
+    the orchestrator passed down), set each impl agent's `CLAUDE_CONFIG_DIR` to a different dir
+    from the list (round-robin) — e.g. prefix the command `CLAUDE_CONFIG_DIR=<dir> claude …` or
+    set it in the worker env — so impl agents spread across accounts. Transcripts are shared, so
+    `--resume` still works if one is later restarted under another account.
 
 ## 3. Integrate & verify
 

@@ -40,9 +40,11 @@ pub fn bundled_hook_path() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-/// `settings.json` files to register in: `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`, plus any
-/// sibling multi-account dirs (`~/.claude-alt`, `~/.claude-alt2`) that already exist — so the
-/// marker keeps working after Claude-account rotation. Only existing config dirs are targeted.
+/// `settings.json` files to register in: every account in the registry
+/// ([`crate::claude_accounts::config_dirs`] — the `claude-accounts.json` list, else discovered
+/// `~/.claude*` dirs, else `~/.claude`), plus `$CLAUDE_CONFIG_DIR` if set — so the marker keeps
+/// working across every account the goals system rotates through. Only existing config dirs are
+/// targeted (`ensure_in_file` skips a missing parent).
 fn target_settings_files() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut push = |d: PathBuf, dirs: &mut Vec<PathBuf>| {
@@ -53,11 +55,8 @@ fn target_settings_files() -> Vec<PathBuf> {
     if let Some(cfg) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         push(PathBuf::from(cfg), &mut dirs);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let h = Path::new(&home);
-        for name in [".claude", ".claude-alt", ".claude-alt2"] {
-            push(h.join(name), &mut dirs);
-        }
+    for dir in crate::claude_accounts::config_dirs() {
+        push(dir, &mut dirs);
     }
     dirs.into_iter().map(|d| d.join("settings.json")).collect()
 }

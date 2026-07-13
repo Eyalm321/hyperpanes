@@ -571,6 +571,9 @@ pub struct State {
     /// Goals system: goals queued for robust delivery into their orchestrator panes (drained by
     /// the app tick once each pane's Claude is ready). See [`PendingGoal`].
     pub pending_goals: Vec<PendingGoal>,
+    /// Goals system: round-robin cursor over the Claude-account registry, advanced each time a
+    /// fresh orchestrator is spawned so consecutive goal orgs start on different accounts.
+    pub goal_account_cursor: usize,
     /// Whether the sidebar bell's reminder-list panel is expanded.
     pub reminders_open: bool,
 }
@@ -666,6 +669,7 @@ impl State {
             goal_orchestrators: std::collections::HashMap::new(),
             goal_draft_images: Vec::new(),
             pending_goals: Vec::new(),
+            goal_account_cursor: 0,
             sidebar_open: false,
             palette_entries: Vec::new(),
             palette_view: Vec::new(),
@@ -2467,6 +2471,25 @@ impl State {
         let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
         env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
         env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
+        // Account rotation: assign this orchestrator the next account (round-robin over the
+        // registry) via CLAUDE_CONFIG_DIR, and hand it the full ordered list (HP_GOAL_ACCOUNTS,
+        // newline-separated) so the persona can spread + rotate its spec/impl agents across
+        // accounts. No registry / single account ⇒ nothing injected (Claude uses its default).
+        let accounts = hyperpanes_core::claude_accounts::config_dirs();
+        if !accounts.is_empty() {
+            let chosen = &accounts[self.goal_account_cursor % accounts.len()];
+            self.goal_account_cursor = self.goal_account_cursor.wrapping_add(1);
+            env.insert(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                chosen.to_string_lossy().into_owned(),
+            );
+            let list = accounts
+                .iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("\n");
+            env.insert("HP_GOAL_ACCOUNTS".to_string(), list);
+        }
         let opts = NewPaneOpts {
             label: Some("goals".to_string()),
             cwd: Some(project_path.to_string()),

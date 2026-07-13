@@ -166,6 +166,13 @@ pub fn work_db() -> PathBuf {
     data_dir().join("work.db")
 }
 
+/// The Claude-account registry (goals system account rotation): the list of `CLAUDE_CONFIG_DIR`s
+/// to rotate agents across. Optional — absent falls back to discovery (see
+/// [`crate::claude_accounts::load`]). Durable user data → [`data_dir`].
+pub fn claude_accounts_json() -> PathBuf {
+    data_dir().join("claude-accounts.json")
+}
+
 /// Ambient-AI settings. User setting → [`config_dir`].
 pub fn ai_settings_json() -> PathBuf {
     config_dir().join("ai-settings.json")
