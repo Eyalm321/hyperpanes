@@ -69,6 +69,12 @@ install -m 644 "$SHELL_INT/zdotdir/.zshrc"  "$APPDIR/usr/bin/resources/shell-int
 mkdir -p "$APPDIR/usr/bin/resources/claude"
 install -m 755 "$ROOT/resources/claude/hp-claude-session-hook.sh" "$APPDIR/usr/bin/resources/claude/hp-claude-session-hook.sh"
 
+# Goal-orchestrator personas (goals system) — resolved as exe_dir/resources/claude/goal-orchestrator.
+mkdir -p "$APPDIR/usr/bin/resources/claude/goal-orchestrator"
+for f in SKILL.md SPEC.md IMPL.md; do
+  install -m 644 "$ROOT/resources/claude/goal-orchestrator/$f" "$APPDIR/usr/bin/resources/claude/goal-orchestrator/$f"
+done
+
 # Desktop entry + MIME info (registered by appimaged/AppImageLauncher or a
 # package manager hook via update-mime-database on integration).
 install -m 644 "$LINUX_DIR/hyperpanes.desktop" "$APPDIR/usr/share/applications/hyperpanes.desktop"

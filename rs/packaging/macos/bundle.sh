@@ -68,6 +68,16 @@ for d in "$APP/Contents/MacOS/resources/shell-integration" "$APP/Contents/Resour
     cp -R "$ROOT/resources/shell-integration/zdotdir" "$d/"
 done
 
+# Goal-orchestrator personas (goals system). submit_new_goal resolves both
+# exe_dir/resources/claude/goal-orchestrator (Contents/MacOS/...) and the bundle-aware
+# exe_dir/../Resources/claude/goal-orchestrator (Contents/Resources/...) — ship both.
+for d in "$APP/Contents/MacOS/resources/claude/goal-orchestrator" "$APP/Contents/Resources/claude/goal-orchestrator"; do
+    mkdir -p "$d"
+    cp "$ROOT/resources/claude/goal-orchestrator/SKILL.md" "$d/"
+    cp "$ROOT/resources/claude/goal-orchestrator/SPEC.md" "$d/"
+    cp "$ROOT/resources/claude/goal-orchestrator/IMPL.md" "$d/"
+done
+
 echo "==> generating hyperpanes.icns from build/icon.png"
 # Source icon is 512x512 (build/icon.png — same art as the Windows icon.ico).
 # Standard iconset, every size derived with sips; 512@2x needs a 1024 source so

@@ -25,17 +25,28 @@ fn main() {
     // builds — including cross-compiles — never look for or ship conpty.dll.
     let target_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let conpty = manifest.join("../../../resources/conpty");
+    // Goal-orchestrator personas (goals system): deploy beside the binary so
+    // `State::submit_new_goal`'s `exe_dir/resources/claude/goal-orchestrator` candidate
+    // resolves at dev runtime, matching what packaging ships. Best-effort.
+    let personas = manifest.join("../../../resources/claude/goal-orchestrator");
     if let Ok(out_dir) = std::env::var("OUT_DIR") {
         // OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out → profile dir is 3 up.
         if let Some(profile) = Path::new(&out_dir).ancestors().nth(3) {
             let dst = profile.join("resources").join("shell-integration");
             let _ = copy_dir(&scripts, &dst);
+            let _ = copy_dir(
+                &personas,
+                &profile.join("resources").join("claude").join("goal-orchestrator"),
+            );
             if target_windows {
                 for f in ["conpty.dll", "OpenConsole.exe"] {
                     let _ = std::fs::copy(conpty.join(f), profile.join(f));
                 }
             }
         }
+    }
+    for f in ["SKILL.md", "SPEC.md", "IMPL.md"] {
+        println!("cargo:rerun-if-changed={}", personas.join(f).display());
     }
     for f in [
         "hp-init.ps1",
