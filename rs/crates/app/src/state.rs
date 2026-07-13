@@ -2396,33 +2396,34 @@ impl State {
             self.goal_orchestrators.remove(project_path); // stale (pane closed) — respawn below
         }
 
-        // Locate the goal-orchestrator persona: bundled beside the exe (packaging TODO), else a
-        // ~/.claude/skills symlink, else the dev skills-repo checkout.
+        // Locate the goal-orchestrator persona `SKILL.md`. Bundled with the app under
+        // `resources/claude/goal-orchestrator/` — mirror the packaged layouts
+        // `shell_integration_dir()` handles (exe-relative, macOS `.app` Resources, and FHS
+        // deb/rpm `share`/`lib`), then fall back to a `~/.claude/skills` symlink and finally the
+        // dev skills-repo checkout so it works uninstalled.
         let persona = {
-            let mut found = None;
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    let p = dir.join("resources/claude/goal-orchestrator/SKILL.md");
-                    if p.is_file() {
-                        found = Some(p);
-                    }
+            let rel = std::path::Path::new("resources")
+                .join("claude")
+                .join("goal-orchestrator")
+                .join("SKILL.md");
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(dir) = &exe_dir {
+                candidates.push(dir.join(&rel));
+                if let Some(prefix) = dir.parent() {
+                    candidates.push(prefix.join("Resources").join("claude").join("goal-orchestrator").join("SKILL.md"));
+                    candidates.push(prefix.join("share").join("hyperpanes").join(&rel));
+                    candidates.push(prefix.join("lib").join("hyperpanes").join(&rel));
                 }
             }
-            if found.is_none() {
-                if let Some(home) = std::env::var_os("HOME") {
-                    for rel in [
-                        ".claude/skills/goal-orchestrator/SKILL.md",
-                        "dev/agent-orchestration-skills/skills/goal-orchestrator/SKILL.md",
-                    ] {
-                        let p = std::path::Path::new(&home).join(rel);
-                        if p.is_file() {
-                            found = Some(p);
-                            break;
-                        }
-                    }
-                }
+            if let Some(home) = std::env::var_os("HOME") {
+                let h = std::path::Path::new(&home);
+                candidates.push(h.join(".claude/skills/goal-orchestrator/SKILL.md"));
+                candidates.push(h.join("dev/agent-orchestration-skills/skills/goal-orchestrator/SKILL.md"));
             }
-            found
+            candidates.into_iter().find(|p| p.is_file())
         };
         let Some(persona) = persona else {
             eprintln!(

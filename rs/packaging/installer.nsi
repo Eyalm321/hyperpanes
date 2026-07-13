@@ -110,6 +110,13 @@ Section "Install"
   SetOutPath "$INSTDIR\resources\shell-integration\zdotdir"
   File "${RESOURCES}\shell-integration\zdotdir\.zshenv"
   File "${RESOURCES}\shell-integration\zdotdir\.zshrc"
+
+  ; Goal-orchestrator personas (goals system). The app resolves
+  ; exe_dir\resources\claude\goal-orchestrator when you create a goal.
+  SetOutPath "$INSTDIR\resources\claude\goal-orchestrator"
+  File "${RESOURCES}\claude\goal-orchestrator\SKILL.md"
+  File "${RESOURCES}\claude\goal-orchestrator\SPEC.md"
+  File "${RESOURCES}\claude\goal-orchestrator\IMPL.md"
   SetOutPath "$INSTDIR"
 
   CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}.lnk" "$INSTDIR\${MAIN_BINARY}" "" "$INSTDIR\icon.ico" 0
