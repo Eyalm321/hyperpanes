@@ -99,17 +99,24 @@ plan doc), so you don't babysit individual tasks — you watch goals and health.
 ## Account rotation (24/7)
 
 Spec and impl agents run `claude` under a rotating account so a weekly/session limit on one account
-doesn't stall the project:
-- Each pane is spawned with `CLAUDE_CONFIG_DIR=<a healthy account dir>` (per-pane, via the spawn
-  env; `restart_pane` accepts an `env` override for rotating an in-flight pane). Transcripts are on
-  a shared store, so `--resume` works across accounts.
-- When you see a pane hit the rate/weekly-limit message (via `read_pane`), mark that account
-  exhausted in your ledger and `restart_pane resume:true` under the next healthy account. If **all**
-  accounts are exhausted, pause spawning and surface it — there's no budget breaker, so exhaustion
-  is the only hard stop besides human cancel.
+doesn't stall the project. The app hands you the account list; you distribute + rotate it.
 
-(The account-dir list + health tracking are project config; see the plan doc's account-rotation
-section. Until that's wired, run single-account and just pause on the limit message.)
+- **The list** is in your env: `HP_GOAL_ACCOUNTS` = newline-separated `CLAUDE_CONFIG_DIR`s (empty
+  or unset ⇒ single-account, skip all of this). Your own pane already runs on the first of them
+  (the app set your `CLAUDE_CONFIG_DIR`). Transcripts are on a shared store, so `--resume` works
+  across accounts.
+- **Spread on spawn:** when you spawn a spec agent, and when the spec agent fans out impl agents,
+  set each pane's `CLAUDE_CONFIG_DIR` to the next dir in `HP_GOAL_ACCOUNTS` (round-robin) — pass it
+  in the `open_pane`/`spawn_workers` env, or `CLAUDE_CONFIG_DIR=<dir> claude …` in the command.
+  Different agents on different accounts = more headroom before any one limit bites.
+- **Rotate on exhaustion:** when you see a pane hit the rate/weekly-limit message (`read_pane`),
+  mark that dir exhausted in your ledger and `restart_pane` it with `resume:true` and
+  `env:{ "CLAUDE_CONFIG_DIR": "<next non-exhausted dir>" }` — the shared transcript store lets the
+  conversation continue under the new account. If **all** dirs are exhausted, pause spawning and
+  surface it — there's no budget breaker, so exhaustion is the only hard stop besides human cancel.
+
+Pass `HP_GOAL_ACCOUNTS` down to each spec agent (env or prompt) so it can rotate its own impl
+agents the same way.
 
 ## Loop discipline
 
