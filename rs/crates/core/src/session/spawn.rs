@@ -293,7 +293,39 @@ pub struct EnvInputs<'a> {
     pub pane_id: Option<&'a str>,
     /// Path to `control.json` — set as `HYPERPANES_CONTROL_FILE` UNLESS a scoped
     /// `HYPERPANES_CONTROL_TOKEN` was injected (scoped child must not read master).
-    pub control_file: &'a str,
+    /// `None` (or empty) omits the var entirely rather than injecting an empty string
+    /// — see [`resolve_control_file`], which callers should use to produce this.
+    pub control_file: Option<&'a str>,
+}
+
+/// Resolve the `HYPERPANES_CONTROL_FILE` value for a spawned child: `explicit` (e.g.
+/// `SpawnOptions.control_file`) wins if non-empty; otherwise fall back to this
+/// process's own `HYPERPANES_CONTROL_FILE` env var if non-empty; otherwise the
+/// default `control.json` path — the same discovery default every consumer
+/// (worker/pair/MCP) assumes, and absent-while-control-is-off by contract — so
+/// GUI-native panes are self-describing too. Never an empty string a child might
+/// mistake for "unset but present" (see `hyperpanes pair`'s workaround for that
+/// symptom).
+pub fn resolve_control_file(explicit: Option<&str>) -> Option<String> {
+    resolve_control_file_with(explicit, |name| std::env::var(name).ok()).or_else(|| {
+        Some(
+            crate::persistence::paths::control_json()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    })
+}
+
+fn resolve_control_file_with(
+    explicit: Option<&str>,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if let Some(v) = explicit {
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    env_lookup("HYPERPANES_CONTROL_FILE").filter(|v| !v.is_empty())
 }
 
 /// Assemble the child's environment exactly as the TS `Session` constructor does:
@@ -329,12 +361,12 @@ pub fn build_env(inputs: &EnvInputs<'_>) -> EnvMap {
 
     // A pane handed a SCOPED control token via env (capability scoping, leg F) must
     // NOT also be able to read the master token from control.json — so only point at
-    // the discovery file when no scoped token was injected.
+    // the discovery file when no scoped token was injected, and only when a
+    // (non-empty) path is actually known.
     if !env.contains_key("HYPERPANES_CONTROL_TOKEN") {
-        env.insert(
-            "HYPERPANES_CONTROL_FILE".into(),
-            inputs.control_file.to_string(),
-        );
+        if let Some(control_file) = inputs.control_file.filter(|v| !v.is_empty()) {
+            env.insert("HYPERPANES_CONTROL_FILE".into(), control_file.to_string());
+        }
     }
 
     env
@@ -571,7 +603,64 @@ mod tests {
         );
     }
 
+    // ---- resolve_control_file (hermetic — env injected, never touches real process env) ----
+
+    #[test]
+    fn resolve_control_file_prefers_explicit_non_empty() {
+        let resolved = resolve_control_file_with(Some("/explicit/control.json"), |_| {
+            Some("/env/control.json".to_string())
+        });
+        assert_eq!(resolved.as_deref(), Some("/explicit/control.json"));
+    }
+
+    #[test]
+    fn resolve_control_file_falls_back_to_env_when_explicit_empty_or_absent() {
+        let via_empty =
+            resolve_control_file_with(Some(""), |_| Some("/env/control.json".to_string()));
+        assert_eq!(via_empty.as_deref(), Some("/env/control.json"));
+
+        let via_none = resolve_control_file_with(None, |_| Some("/env/control.json".to_string()));
+        assert_eq!(via_none.as_deref(), Some("/env/control.json"));
+    }
+
+    #[test]
+    fn resolve_control_file_none_when_explicit_and_env_both_empty_or_absent() {
+        assert_eq!(resolve_control_file_with(None, |_| None), None);
+        assert_eq!(
+            resolve_control_file_with(Some(""), |_| Some(String::new())),
+            None
+        );
+    }
+
     // ---- build_env (scoped-token suppression + GOOGLE_API_KEY + paneId) ----
+
+    #[test]
+    fn build_env_omits_control_file_when_none() {
+        let proc_env = map(&[]);
+        let integ = map(&[]);
+        let env = build_env(&EnvInputs {
+            process_env: &proc_env,
+            opts_env: None,
+            integration_env: &integ,
+            pane_id: None,
+            control_file: None,
+        });
+        assert!(!env.contains_key("HYPERPANES_CONTROL_FILE"));
+    }
+
+    #[test]
+    fn build_env_omits_control_file_when_empty_string() {
+        let proc_env = map(&[]);
+        let integ = map(&[]);
+        let env = build_env(&EnvInputs {
+            process_env: &proc_env,
+            opts_env: None,
+            integration_env: &integ,
+            pane_id: None,
+            control_file: Some(""),
+        });
+        assert!(!env.contains_key("HYPERPANES_CONTROL_FILE"));
+    }
 
     #[test]
     fn build_env_points_at_control_file_when_no_scoped_token() {
@@ -582,7 +671,7 @@ mod tests {
             opts_env: None,
             integration_env: &integ,
             pane_id: Some("pane-7"),
-            control_file: "/data/control.json",
+            control_file: Some("/data/control.json"),
         });
         assert_eq!(
             env.get("HYPERPANES_CONTROL_FILE").map(String::as_str),
@@ -606,7 +695,7 @@ mod tests {
             opts_env: Some(&opts),
             integration_env: &integ,
             pane_id: None,
-            control_file: "/data/control.json",
+            control_file: Some("/data/control.json"),
         });
         assert_eq!(
             env.get("HYPERPANES_CONTROL_TOKEN").map(String::as_str),
@@ -624,7 +713,7 @@ mod tests {
             opts_env: None,
             integration_env: &integ,
             pane_id: None,
-            control_file: "/data/control.json",
+            control_file: Some("/data/control.json"),
         });
         assert!(!env.contains_key("GOOGLE_API_KEY"));
     }
@@ -640,7 +729,7 @@ mod tests {
             opts_env: Some(&opts),
             integration_env: &integ,
             pane_id: None,
-            control_file: "/data/control.json",
+            control_file: Some("/data/control.json"),
         });
         assert_eq!(
             env.get("GOOGLE_API_KEY").map(String::as_str),

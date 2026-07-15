@@ -109,7 +109,10 @@ impl ControlHost {
     /// server immediately if it is enabled.
     pub fn new(mgr: &Arc<SessionManager>) -> Self {
         let settings = control_settings::load();
+        // Panes may inherit `HYPERPANES_CONTROL_FILE` set-but-empty from the app; treat
+        // empty as unset (see `hyperpanes pair`'s identical workaround).
         let control_file = std::env::var_os("HYPERPANES_CONTROL_FILE")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(paths::control_json);
         let allow_input = settings.allow_input || env_truthy("HYPERPANES_ALLOW_INPUT");

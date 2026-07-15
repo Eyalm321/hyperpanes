@@ -182,11 +182,10 @@ async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respons
         Err(e) => return e,
     };
     let m = shared.model.lock().unwrap();
-    let out = m.state_for_scope_with_dims(
-        info.scope.as_ref(),
-        &|p| shared.compute_activity(p),
-        &|p| shared.sessions.dims(&p.session_uid),
-    );
+    let out =
+        m.state_for_scope_with_dims(info.scope.as_ref(), &|p| shared.compute_activity(p), &|p| {
+            shared.sessions.dims(&p.session_uid)
+        });
     ok_json(out)
 }
 
@@ -1209,12 +1208,20 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
     // restore will resurrect. Root scope only — this takes the whole app down.
     if cmd.get("type").and_then(Value::as_str) == Some("restartApp") {
         if info.scope.is_some() {
-            return jstatus(403, serde_json::json!({"error": "restartApp needs a root token"}));
+            return jstatus(
+                403,
+                serde_json::json!({"error": "restartApp needs a root token"}),
+            );
         }
         let scope = match cmd.get("scope").and_then(Value::as_str).unwrap_or("gui") {
             "gui" => 1u8,
             "full" => 2u8,
-            other => return jstatus(400, serde_json::json!({"error": format!("unknown scope: {other}")})),
+            other => {
+                return jstatus(
+                    400,
+                    serde_json::json!({"error": format!("unknown scope: {other}")}),
+                )
+            }
         };
         if let (Some(sid), Some(text)) = (
             cmd.get("sessionId").and_then(Value::as_str),
@@ -1224,8 +1231,13 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
                 return jstatus(400, serde_json::json!({"error": e}));
             }
         }
-        shared.restart_app.store(scope, std::sync::atomic::Ordering::SeqCst);
-        return jstatus(200, serde_json::json!({"ok": true, "scope": if scope == 1 {"gui"} else {"full"}}));
+        shared
+            .restart_app
+            .store(scope, std::sync::atomic::Ordering::SeqCst);
+        return jstatus(
+            200,
+            serde_json::json!({"ok": true, "scope": if scope == 1 {"gui"} else {"full"}}),
+        );
     }
     let control_file = shared.control_file.to_str().map(str::to_string);
     let result = {
@@ -1544,7 +1556,11 @@ mod golden {
 
         // Missing file → 404; relative path → 400; no auth → 401.
         let r = client()
-            .get(format!("{}/fs/read?path={}/nope.txt", s.base, dir.display()))
+            .get(format!(
+                "{}/fs/read?path={}/nope.txt",
+                s.base,
+                dir.display()
+            ))
             .header("authorization", format!("Bearer {}", s.token))
             .send()
             .await

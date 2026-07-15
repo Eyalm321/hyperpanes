@@ -47,7 +47,7 @@ pub fn bundled_hook_path() -> Option<PathBuf> {
 /// targeted (`ensure_in_file` skips a missing parent).
 fn target_settings_files() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut push = |d: PathBuf, dirs: &mut Vec<PathBuf>| {
+    let push = |d: PathBuf, dirs: &mut Vec<PathBuf>| {
         if d.is_dir() && !dirs.iter().any(|x| x == &d) {
             dirs.push(d);
         }
@@ -69,7 +69,10 @@ pub fn ensure_registered(hook_path: &Path) -> usize {
     for file in target_settings_files() {
         match ensure_in_file(&file, &cmd) {
             Ok(true) => {
-                eprintln!("[claude-hook] registered SessionStart/End in {}", file.display());
+                eprintln!(
+                    "[claude-hook] registered SessionStart/End in {}",
+                    file.display()
+                );
                 changed += 1;
             }
             Ok(false) => {}
@@ -119,12 +122,10 @@ fn ensure_event(root: &mut Value, event: &str, cmd: &str) -> bool {
         return false;
     };
     let present = groups.iter().any(|g| {
-        g.get("hooks")
-            .and_then(Value::as_array)
-            .is_some_and(|hs| {
-                hs.iter()
-                    .any(|h| h.get("command").and_then(Value::as_str) == Some(cmd))
-            })
+        g.get("hooks").and_then(Value::as_array).is_some_and(|hs| {
+            hs.iter()
+                .any(|h| h.get("command").and_then(Value::as_str) == Some(cmd))
+        })
     });
     if present {
         return false;
@@ -173,7 +174,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("settings.json");
         // Pre-existing user settings we must preserve.
-        std::fs::write(&file, r#"{"model":"opus","permissions":{"allow":["Bash"]}}"#).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"model":"opus","permissions":{"allow":["Bash"]}}"#,
+        )
+        .unwrap();
 
         // First call writes both events + keeps the user's settings.
         assert_eq!(ensure_in_file(&file, "/hook.sh"), Ok(true));

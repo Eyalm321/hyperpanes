@@ -402,9 +402,7 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
         Err(e) if addr != "127.0.0.1" || req_port != 0 => {
             // A configured remote bind that fails (port taken, iface gone) must not brick
             // the LOCAL control API — fall back to the frozen loopback/ephemeral default.
-            eprintln!(
-                "[control] bind {addr}:{req_port} failed ({e}); falling back to 127.0.0.1:0"
-            );
+            eprintln!("[control] bind {addr}:{req_port} failed ({e}); falling back to 127.0.0.1:0");
             shared.set_bind("127.0.0.1", 0);
             tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?
         }
@@ -413,7 +411,11 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
     let port = listener.local_addr()?.port();
     shared.port.store(port, Ordering::SeqCst);
 
-    shared.tokens.lock().unwrap().set_master(master_token(&shared));
+    shared
+        .tokens
+        .lock()
+        .unwrap()
+        .set_master(master_token(&shared));
     write_discovery(&shared)?;
 
     let app = routes::router(Arc::clone(&shared));
@@ -504,7 +506,10 @@ pub async fn run_reaper_ticker(shared: Arc<Shared>) {
         interval.tick().await;
         let reaped = shared.work.lock().unwrap().reap_expired(now_ms());
         if !reaped.is_empty() {
-            eprintln!("[work] reaper requeued/dead-lettered {} task(s)", reaped.len());
+            eprintln!(
+                "[work] reaper requeued/dead-lettered {} task(s)",
+                reaped.len()
+            );
         }
     }
 }
@@ -936,7 +941,9 @@ mod tests {
         let d = master_token(&shared);
         assert_eq!(c, d);
         assert_eq!(
-            std::fs::read_to_string(dir.join("control-token")).unwrap().trim(),
+            std::fs::read_to_string(dir.join("control-token"))
+                .unwrap()
+                .trim(),
             c
         );
 

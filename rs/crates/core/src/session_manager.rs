@@ -47,7 +47,8 @@ use crate::session::pty::{spawn_pty, Pty, PtyEvent, PtySpec};
 use crate::session::replay::Replay;
 use crate::session::screen::Screen;
 use crate::session::spawn::{
-    build_env, default_shell, resolve_spawn, resolve_windows_command, EnvInputs, EnvMap,
+    build_env, default_shell, resolve_control_file, resolve_spawn, resolve_windows_command,
+    EnvInputs, EnvMap,
 };
 
 /// Process-global counter for the in-process backend's `pane-N` uids (see
@@ -801,12 +802,13 @@ fn build_spec(opts: &SpawnOptions) -> PtySpec {
     // changes made after app launch reach new panes — not the process env frozen at
     // startup. See `session::env`.
     let process_env: EnvMap = crate::session::env::fresh_env();
+    let resolved_control_file = resolve_control_file(opts.control_file.as_deref());
     let env = build_env(&EnvInputs {
         process_env: &process_env,
         opts_env: opts.env.as_ref(),
         integration_env: &integration_env,
         pane_id: opts.pane_id.as_deref(),
-        control_file: opts.control_file.as_deref().unwrap_or(""),
+        control_file: resolved_control_file.as_deref(),
     });
 
     PtySpec {

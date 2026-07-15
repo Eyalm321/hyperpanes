@@ -108,14 +108,15 @@ mod tests {
 
     #[test]
     fn parses_marker_json_shape() {
-        let parsed: PaneClaudeSession =
-            serde_json::from_str(r#"{ "sessionId": "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a", "cwd": "/w" }"#)
-                .unwrap();
+        let parsed: PaneClaudeSession = serde_json::from_str(
+            r#"{ "sessionId": "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a", "cwd": "/w" }"#,
+        )
+        .unwrap();
         assert_eq!(parsed.session_id, "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a");
         assert_eq!(parsed.cwd, "/w");
         // cwd is optional — an older/minimal hook payload still parses.
-        let bare: PaneClaudeSession = serde_json::from_str(r#"{ "sessionId": "deadbeef" }"#).unwrap();
+        let bare: PaneClaudeSession =
+            serde_json::from_str(r#"{ "sessionId": "deadbeef" }"#).unwrap();
         assert_eq!(bare.cwd, "");
     }
-
 }
