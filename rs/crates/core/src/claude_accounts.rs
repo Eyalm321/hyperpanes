@@ -120,7 +120,12 @@ fn discover(home: Option<&Path>) -> Vec<Account> {
         })
         .collect();
     found.sort_by(|a, b| {
-        let key = |c: &PathBuf| (c.file_name().map(|f| f.to_os_string()) != Some(".claude".into()), c.clone());
+        let key = |c: &PathBuf| {
+            (
+                c.file_name().map(|f| f.to_os_string()) != Some(".claude".into()),
+                c.clone(),
+            )
+        };
         key(&a.config_dir).cmp(&key(&b.config_dir))
     });
     found
@@ -168,7 +173,13 @@ mod tests {
         ]});
         let a = accounts_from_json(&v, Some(&home));
         assert_eq!(a.len(), 3);
-        assert_eq!(a[0], Account { name: "primary".into(), config_dir: PathBuf::from("/home/me/.claude") });
+        assert_eq!(
+            a[0],
+            Account {
+                name: "primary".into(),
+                config_dir: PathBuf::from("/home/me/.claude")
+            }
+        );
         assert_eq!(a[1].name, ".claude-alt"); // basename of the expanded path
         assert_eq!(a[1].config_dir, PathBuf::from("/home/me/.claude-alt"));
         assert_eq!(a[2].config_dir, PathBuf::from("/opt/claude"));
@@ -177,9 +188,18 @@ mod tests {
     #[test]
     fn dedups_by_config_dir_preserving_order() {
         let a = dedup(vec![
-            Account { name: "a".into(), config_dir: "/x".into() },
-            Account { name: "b".into(), config_dir: "/y".into() },
-            Account { name: "c".into(), config_dir: "/x".into() },
+            Account {
+                name: "a".into(),
+                config_dir: "/x".into(),
+            },
+            Account {
+                name: "b".into(),
+                config_dir: "/y".into(),
+            },
+            Account {
+                name: "c".into(),
+                config_dir: "/x".into(),
+            },
         ]);
         assert_eq!(a.len(), 2);
         assert_eq!(a[0].name, "a");

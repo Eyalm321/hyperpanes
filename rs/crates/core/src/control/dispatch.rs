@@ -123,10 +123,7 @@ pub fn handle_command(
                     "newPane \"pane\" must be an object, e.g. { \"type\": \"newPane\", \"windowId\": 0, \"pane\": { \"command\": … } }",
                 );
             }
-        } else if NEW_PANE_SPEC_KEYS
-            .iter()
-            .any(|k| cmd.get(*k).is_some())
-        {
+        } else if NEW_PANE_SPEC_KEYS.iter().any(|k| cmd.get(*k).is_some()) {
             return DispatchResult::err(
                 400,
                 "newPane spec fields (command/args/cwd/label/subtitle/color/shell/env/meta/project) must be nested under \"pane\", not top-level, e.g. { \"type\": \"newPane\", \"windowId\": 0, \"pane\": { \"command\": … } }",
@@ -575,8 +572,10 @@ fn str_field(cmd: &Value, key: &str) -> Result<String, String> {
 /// that build the request by hand (e.g. `jq -r '.windows[0].windowId'` → the string `"0"`) would
 /// otherwise fail the strict `as_i64` and hit the misleading "needs a paneId or windowId".
 fn window_id_field(cmd: &Value) -> Option<i64> {
-    cmd.get("windowId")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+    cmd.get("windowId").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+    })
 }
 
 fn new_id() -> String {
@@ -750,7 +749,11 @@ mod tests {
         let s = sessions();
         let cmd = json!({ "type": "newPane", "windowId": "1", "pane": {} });
         let r = handle_command(&mut m, &s, None, None, &cmd);
-        assert_eq!(r.status, 200, "string windowId should resolve, got {:?}", r.body);
+        assert_eq!(
+            r.status, 200,
+            "string windowId should resolve, got {:?}",
+            r.body
+        );
         assert!(r.body["result"].is_string());
     }
 

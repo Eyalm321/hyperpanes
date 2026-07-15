@@ -607,10 +607,9 @@ mod tests {
 
     #[test]
     fn resolve_control_file_prefers_explicit_non_empty() {
-        let resolved =
-            resolve_control_file_with(Some("/explicit/control.json"), |_| {
-                Some("/env/control.json".to_string())
-            });
+        let resolved = resolve_control_file_with(Some("/explicit/control.json"), |_| {
+            Some("/env/control.json".to_string())
+        });
         assert_eq!(resolved.as_deref(), Some("/explicit/control.json"));
     }
 
@@ -620,15 +619,17 @@ mod tests {
             resolve_control_file_with(Some(""), |_| Some("/env/control.json".to_string()));
         assert_eq!(via_empty.as_deref(), Some("/env/control.json"));
 
-        let via_none =
-            resolve_control_file_with(None, |_| Some("/env/control.json".to_string()));
+        let via_none = resolve_control_file_with(None, |_| Some("/env/control.json".to_string()));
         assert_eq!(via_none.as_deref(), Some("/env/control.json"));
     }
 
     #[test]
     fn resolve_control_file_none_when_explicit_and_env_both_empty_or_absent() {
         assert_eq!(resolve_control_file_with(None, |_| None), None);
-        assert_eq!(resolve_control_file_with(Some(""), |_| Some(String::new())), None);
+        assert_eq!(
+            resolve_control_file_with(Some(""), |_| Some(String::new())),
+            None
+        );
     }
 
     // ---- build_env (scoped-token suppression + GOOGLE_API_KEY + paneId) ----

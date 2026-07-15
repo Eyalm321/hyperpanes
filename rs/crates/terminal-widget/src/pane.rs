@@ -770,7 +770,11 @@ impl TerminalPane {
             };
             let chars: Vec<char> = row_text.chars().collect();
             let col_start = if line_i == start.line { start.col } else { 0 };
-            let col_end = if line_i == end.line { end.col } else { last_col };
+            let col_end = if line_i == end.line {
+                end.col
+            } else {
+                last_col
+            };
             let mut line = String::new();
             for col in col_start..=col_end.min(last_col) {
                 let ch = chars.get(col).copied().unwrap_or(' ');
@@ -882,7 +886,14 @@ impl TerminalPane {
     /// Otherwise it scrolls our own scrollback viewport and returns `None`. This is the fix for
     /// "can't scroll Claude": in the alt screen there is no scrollback for `scroll_by` to move, so
     /// the wheel must be forwarded to the app.
-    pub fn wheel(&mut self, delta_lines: i32, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<Vec<u8>> {
+    pub fn wheel(
+        &mut self,
+        delta_lines: i32,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Option<Vec<u8>> {
         if delta_lines == 0 {
             return None;
         }
@@ -933,7 +944,14 @@ impl TerminalPane {
         }
     }
 
-    fn mouse_wheel_report(&self, delta_lines: i32, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Vec<u8> {
+    fn mouse_wheel_report(
+        &self,
+        delta_lines: i32,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Vec<u8> {
         let (col, row) = self.cell_1based(x, y, surf_w, surf_h);
         let cb: u32 = if delta_lines > 0 { 64 } else { 65 };
         let notches = (delta_lines.unsigned_abs() / WHEEL_LINES_PER_NOTCH as u32).max(1);
@@ -1009,7 +1027,9 @@ impl TerminalPane {
             return None;
         }
         let total = (hist + rows) as f32;
-        let thumb_h = (surf_h * rows as f32 / total).max(SCROLLBAR_MIN_THUMB_PX).min(surf_h);
+        let thumb_h = (surf_h * rows as f32 / total)
+            .max(SCROLLBAR_MIN_THUMB_PX)
+            .min(surf_h);
         // Fraction of the way down the buffer the viewport TOP sits: 0 at the very top of history,
         // 1 at the live edge. `hist - off` lines sit above the viewport top, out of `hist` total.
         let frac = if hist == 0 {
@@ -1462,8 +1482,14 @@ mod tests {
             p.feed("line\r\n");
         }
         assert_eq!(p.scroll_offset(), 0, "pinned to the live edge initially");
-        assert!(p.wheel(3, 5.0, 5.0, 20.0, 3.0).is_none(), "no pty forward on the main screen");
-        assert!(p.scroll_offset() > 0, "wheel moved the scrollback viewport up");
+        assert!(
+            p.wheel(3, 5.0, 5.0, 20.0, 3.0).is_none(),
+            "no pty forward on the main screen"
+        );
+        assert!(
+            p.scroll_offset() > 0,
+            "wheel moved the scrollback viewport up"
+        );
     }
 
     #[test]
@@ -1472,8 +1498,13 @@ mod tests {
         // scrolls. This is the "can't scroll Claude" fix's no-mouse-grab leg.
         let mut p = unit_pane(20, 3);
         p.feed("\x1b[?1049h"); // enter alternate screen
-        let up = p.wheel(3, 5.0, 5.0, 20.0, 3.0).expect("alt screen forwards to the pty");
-        assert_eq!(up, b"\x1b[A\x1b[A\x1b[A", "3 lines up → three normal Up arrows");
+        let up = p
+            .wheel(3, 5.0, 5.0, 20.0, 3.0)
+            .expect("alt screen forwards to the pty");
+        assert_eq!(
+            up, b"\x1b[A\x1b[A\x1b[A",
+            "3 lines up → three normal Up arrows"
+        );
         let down = p.wheel(-3, 5.0, 5.0, 20.0, 3.0).unwrap();
         assert_eq!(down, b"\x1b[B\x1b[B\x1b[B");
         // The viewport never moved (alt screen has no scrollback to scroll).
@@ -1509,11 +1540,20 @@ mod tests {
         p.feed("\x1b[?1002h\x1b[?1006h");
         assert!(p.app_grabs_mouse());
         // Left press → button 0.
-        assert_eq!(p.mouse_report(0, 0, 4.5, 1.5, 20.0, 3.0).unwrap(), b"\x1b[<0;5;2M");
+        assert_eq!(
+            p.mouse_report(0, 0, 4.5, 1.5, 20.0, 3.0).unwrap(),
+            b"\x1b[<0;5;2M"
+        );
         // Drag (motion, left held) → +32 motion bit.
-        assert_eq!(p.mouse_report(1, 0, 4.5, 1.5, 20.0, 3.0).unwrap(), b"\x1b[<32;5;2M");
+        assert_eq!(
+            p.mouse_report(1, 0, 4.5, 1.5, 20.0, 3.0).unwrap(),
+            b"\x1b[<32;5;2M"
+        );
         // Release → SGR final 'm'.
-        assert_eq!(p.mouse_report(2, 0, 4.5, 1.5, 20.0, 3.0).unwrap(), b"\x1b[<0;5;2m");
+        assert_eq!(
+            p.mouse_report(2, 0, 4.5, 1.5, 20.0, 3.0).unwrap(),
+            b"\x1b[<0;5;2m"
+        );
         // A bare move (no button) under drag-only tracking (1002) is NOT reported.
         assert!(p.mouse_report(1, 3, 4.5, 1.5, 20.0, 3.0).is_none());
     }
@@ -1538,14 +1578,18 @@ mod tests {
         }
         // Scroll up so the "AAAAA" line is back on screen, then select its first 5 cells.
         p.scroll_by(100); // clamps to the top of history
-        // Find AAAAA isn't necessary; just select viewport row 0 cols 0..5 and remember its text.
+                          // Find AAAAA isn't necessary; just select viewport row 0 cols 0..5 and remember its text.
         p.selection_begin(0.5, 0.5, 10.0, 3.0);
         p.selection_update(4.5, 0.5, 10.0, 3.0);
         let before = p.selection_text();
         assert!(before.is_some());
         // Scroll down one line: the same content moves, but selection_text must be identical.
         p.scroll_by(-1);
-        assert_eq!(p.selection_text(), before, "selection text is glued to its line");
+        assert_eq!(
+            p.selection_text(),
+            before,
+            "selection text is glued to its line"
+        );
     }
 
     #[test]
@@ -1564,7 +1608,11 @@ mod tests {
         assert!(p.selection_autoscroll_tick(), "top-edge drag autoscrolls");
         assert!(p.scroll_offset() > off0, "scrolled up into history");
         // The head was re-mapped to the newly revealed top line → the selection text changed.
-        assert_ne!(p.selection_text(), grew_before, "selection grew into scrollback");
+        assert_ne!(
+            p.selection_text(),
+            grew_before,
+            "selection grew into scrollback"
+        );
     }
 
     #[test]
@@ -1579,11 +1627,17 @@ mod tests {
         p.selection_begin(0.5, 0.5, 10.0, 20.0);
         p.selection_update(8.5, 19.5, 10.0, 20.0); // y > sh-edge → bottom band
         assert!(p.selection_is_drag());
-        assert!(p.selection_autoscroll_tick(), "bottom-edge drag autoscrolls");
+        assert!(
+            p.selection_autoscroll_tick(),
+            "bottom-edge drag autoscrolls"
+        );
         assert!(p.scroll_offset() < off0, "scrolled toward the live edge");
         // Releasing the button stops autoscroll even though the selection is kept.
         p.end_selection_drag();
-        assert!(!p.selection_autoscroll_tick(), "no drag in flight → no autoscroll");
+        assert!(
+            !p.selection_autoscroll_tick(),
+            "no drag in flight → no autoscroll"
+        );
     }
 
     #[test]
@@ -1611,8 +1665,11 @@ mod tests {
         // A fresh scroll shows the bar at full opacity with a thumb shorter than the track.
         p.scroll_by(5);
         let (thumb_y, thumb_h, op) = p.scrollbar(60.0).expect("bar shows right after a scroll");
-        assert!((op - 1.0).abs() < 1e-3, "fully opaque immediately after scrolling");
-        assert!(thumb_h < 60.0 && thumb_h >= SCROLLBAR_MIN_THUMB_PX);
+        assert!(
+            (op - 1.0).abs() < 1e-3,
+            "fully opaque immediately after scrolling"
+        );
+        assert!((SCROLLBAR_MIN_THUMB_PX..60.0).contains(&thumb_h));
         assert!(thumb_y >= 0.0);
     }
 

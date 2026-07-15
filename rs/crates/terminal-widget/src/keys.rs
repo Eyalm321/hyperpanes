@@ -373,23 +373,44 @@ mod tests {
     fn modified_special_keys_carry_an_xterm_modifier() {
         // Ctrl+End → ESC[1;5F (Claude Code's scroll-to-bottom chord; the "Ctrl+End does nothing"
         // fix). Modifier m = 1 + Shift + 2·Alt + 4·Ctrl.
-        assert_eq!(encode_key(&special(Key::End), true, false, false), Some(b"\x1b[1;5F".to_vec()));
-        assert_eq!(encode_key(&special(Key::Home), true, false, false), Some(b"\x1b[1;5H".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::End), true, false, false),
+            Some(b"\x1b[1;5F".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::Home), true, false, false),
+            Some(b"\x1b[1;5H".to_vec())
+        );
         // Ctrl+Right = word-right in many editors → ESC[1;5C.
-        assert_eq!(encode_key(&special(Key::RightArrow), true, false, false), Some(b"\x1b[1;5C".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::RightArrow), true, false, false),
+            Some(b"\x1b[1;5C".to_vec())
+        );
         // Alt = 3, Shift = 2; tilde keys take the `n;m~` form.
-        assert_eq!(encode_key(&special(Key::Delete), true, false, false), Some(b"\x1b[3;5~".to_vec()));
-        assert_eq!(encode_key(&special(Key::UpArrow), false, true, false), Some(b"\x1b[1;3A".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::Delete), true, false, false),
+            Some(b"\x1b[3;5~".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::UpArrow), false, true, false),
+            Some(b"\x1b[1;3A".to_vec())
+        );
         // Unmodified keys keep their plain sequence (no regression).
-        assert_eq!(encode_key(&special(Key::End), false, false, false), Some(b"\x1b[F".to_vec()));
-        assert_eq!(encode_key(&special(Key::UpArrow), false, false, false), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::End), false, false, false),
+            Some(b"\x1b[F".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::UpArrow), false, false, false),
+            Some(b"\x1b[A".to_vec())
+        );
     }
 
     #[test]
     fn scroll_edge_key_classifies_shift_home_end_only() {
         assert_eq!(scroll_edge_key(&special(Key::Home), true), Some(true)); // → top
         assert_eq!(scroll_edge_key(&special(Key::End), true), Some(false)); // → bottom
-        // Un-shifted Home/End are NOT edge-scroll keys (they encode CSI to the shell).
+                                                                            // Un-shifted Home/End are NOT edge-scroll keys (they encode CSI to the shell).
         assert_eq!(scroll_edge_key(&special(Key::Home), false), None);
         assert_eq!(scroll_edge_key(&special(Key::End), false), None);
         assert_eq!(scroll_edge_key("a", true), None);
@@ -401,7 +422,13 @@ mod tests {
         assert_eq!(encode_key(&special(Key::Home), false, false, true), None);
         assert_eq!(encode_key(&special(Key::End), false, false, true), None);
         // Plain Home/End still reach the shell as their cursor sequences.
-        assert_eq!(encode_key(&special(Key::Home), false, false, false), Some(b"\x1b[H".to_vec()));
-        assert_eq!(encode_key(&special(Key::End), false, false, false), Some(b"\x1b[F".to_vec()));
+        assert_eq!(
+            encode_key(&special(Key::Home), false, false, false),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(
+            encode_key(&special(Key::End), false, false, false),
+            Some(b"\x1b[F".to_vec())
+        );
     }
 }
