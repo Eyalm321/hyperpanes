@@ -197,8 +197,10 @@ fn short(id: &str) -> &str {
 }
 
 /// Read `control.json` (env override `HYPERPANES_CONTROL_FILE`, else the state-dir default).
+/// Panes may inherit `HYPERPANES_CONTROL_FILE` set-but-empty from the app; treat empty as unset.
 fn load_discovery() -> Result<Discovery, Box<dyn Error>> {
     let path = std::env::var_os("HYPERPANES_CONTROL_FILE")
+        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(hyperpanes_core::persistence::paths::control_json);
     let raw = std::fs::read_to_string(&path).map_err(|e| {
