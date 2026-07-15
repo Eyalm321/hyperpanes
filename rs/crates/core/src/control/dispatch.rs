@@ -23,6 +23,12 @@ use crate::session_manager::{SessionManager, SpawnOptions};
 /// Default pane frame color when a spawn spec omits one (cosmetic; `/state` requires a string).
 const DEFAULT_PANE_COLOR: &str = "#3b82f6";
 
+/// Top-level keys that indicate a `newPane` spawn spec was mistakenly flattened instead of
+/// nested under `pane` (see the `newPane` guard in `handle_command`).
+const NEW_PANE_SPEC_KEYS: &[&str] = &[
+    "command", "args", "cwd", "label", "subtitle", "color", "shell", "env", "meta", "project",
+];
+
 /// The HTTP outcome of a `/command` POST: a status, a JSON body, and whether the structure
 /// changed (so the caller fires the coalesced `state` ping).
 pub struct DispatchResult {
@@ -104,6 +110,29 @@ pub fn handle_command(
         return DispatchResult::err(400, "command needs a paneId or windowId");
     }
     let window_id = window_id.unwrap();
+
+    // `newPane` spawn spec must be nested under `pane`; a flat top-level spec
+    // (a common hand-authored mistake) would otherwise fall through to the
+    // `unwrap_or_else(|| json!({}))` default in `exec` and silently spawn the
+    // default shell instead of the caller's intended command.
+    if ty == "newPane" {
+        if let Some(pane) = cmd.get("pane") {
+            if !pane.is_object() {
+                return DispatchResult::err(
+                    400,
+                    "newPane \"pane\" must be an object, e.g. { \"type\": \"newPane\", \"windowId\": 0, \"pane\": { \"command\": … } }",
+                );
+            }
+        } else if NEW_PANE_SPEC_KEYS
+            .iter()
+            .any(|k| cmd.get(*k).is_some())
+        {
+            return DispatchResult::err(
+                400,
+                "newPane spec fields (command/args/cwd/label/subtitle/color/shell/env/meta/project) must be nested under \"pane\", not top-level, e.g. { \"type\": \"newPane\", \"windowId\": 0, \"pane\": { \"command\": … } }",
+            );
+        }
+    }
 
     match exec(ty, cmd, model, sessions, control_file, window_id) {
         Ok((result, notify)) => {
@@ -592,6 +621,52 @@ mod tests {
         let id = r.body["result"].as_str().unwrap().to_string();
         assert!(m.pane(&id).is_some());
         assert_eq!(m.pane(&id).unwrap().label, "w");
+    }
+
+    #[tokio::test]
+    async fn new_pane_with_flat_spec_fields_is_400() {
+        let mut m = model_one_window();
+        let s = sessions();
+        // Spawn spec fields at the top level instead of nested under "pane" — a common
+        // hand-authored mistake that must be rejected, not silently spawn a default shell.
+        let cmd = json!({ "type": "newPane", "windowId": 1, "command": "claude" });
+        let r = handle_command(&mut m, &s, None, None, &cmd);
+        assert_eq!(r.status, 400);
+        assert!(r.body["error"].as_str().unwrap().contains("pane"));
+        assert!(m.panes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_pane_with_non_object_pane_is_400() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "newPane", "windowId": 1, "pane": "claude" });
+        let r = handle_command(&mut m, &s, None, None, &cmd);
+        assert_eq!(r.status, 400);
+        assert!(r.body["error"].as_str().unwrap().contains("pane"));
+        assert!(m.panes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_pane_with_empty_pane_object_still_spawns_default_shell() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "newPane", "windowId": 1, "pane": {} });
+        let r = handle_command(&mut m, &s, None, None, &cmd);
+        assert_eq!(r.status, 200);
+        let id = r.body["result"].as_str().unwrap().to_string();
+        assert!(m.pane(&id).is_some());
+    }
+
+    #[tokio::test]
+    async fn new_pane_with_no_pane_key_at_all_still_spawns_default_shell() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "newPane", "windowId": 1 });
+        let r = handle_command(&mut m, &s, None, None, &cmd);
+        assert_eq!(r.status, 200);
+        let id = r.body["result"].as_str().unwrap().to_string();
+        assert!(m.pane(&id).is_some());
     }
 
     #[tokio::test]
