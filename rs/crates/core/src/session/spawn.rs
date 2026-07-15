@@ -300,11 +300,20 @@ pub struct EnvInputs<'a> {
 
 /// Resolve the `HYPERPANES_CONTROL_FILE` value for a spawned child: `explicit` (e.g.
 /// `SpawnOptions.control_file`) wins if non-empty; otherwise fall back to this
-/// process's own `HYPERPANES_CONTROL_FILE` env var if non-empty; otherwise `None` so
-/// the var is omitted rather than set to an empty string a child might mistake for
-/// "unset but present" (see `hyperpanes pair`'s workaround for that symptom).
+/// process's own `HYPERPANES_CONTROL_FILE` env var if non-empty; otherwise the
+/// default `control.json` path — the same discovery default every consumer
+/// (worker/pair/MCP) assumes, and absent-while-control-is-off by contract — so
+/// GUI-native panes are self-describing too. Never an empty string a child might
+/// mistake for "unset but present" (see `hyperpanes pair`'s workaround for that
+/// symptom).
 pub fn resolve_control_file(explicit: Option<&str>) -> Option<String> {
-    resolve_control_file_with(explicit, |name| std::env::var(name).ok())
+    resolve_control_file_with(explicit, |name| std::env::var(name).ok()).or_else(|| {
+        Some(
+            crate::persistence::paths::control_json()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    })
 }
 
 fn resolve_control_file_with(
