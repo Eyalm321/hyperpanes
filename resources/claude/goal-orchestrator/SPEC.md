@@ -25,15 +25,23 @@ context; you own it.
 ## 2. Fan out impl agents
 
 Enqueue the subtasks on your goal's queue and run **sonnet impl agents** (one worktree-isolated
-agent per subtask, competing-consumers):
+agent per subtask, competing-consumers). Impl agents are **hyperpanes panes** (`spawn_workers` /
+worker panes) — NEVER in-process subagents (no Task tool, no bare `claude -p` inside your own
+pane): panes are observable (`read_pane`), watchdoggable, and restartable; subagents are not.
+Every `claude` you spawn carries `--dangerously-skip-permissions` (unattended org — a permission
+prompt wedges the pane).
 - `enqueue_task {queue, title, payload, dependsOn?: [taskId...]}` per subtask — payload = a
   self-contained instruction derived from the spec (what to build, where, its own "done when").
   Use `dependsOn` to encode the DAG: a task with unfinished deps stays unclaimable until they're
   `done` (the queue enforces this), so you can enqueue the whole graph up front.
-- `spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file <this dir>/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+- `spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file <this dir>/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
   (or the bare `hyperpanes worker --queue <q> --count N --worktree -- …`). Impl agents run on
   `$HP_GOAL_IMPL_MODEL` (the tier the user picked in the New-goal dialog; default
   `claude-sonnet-5[1m]`), each in its own git worktree off HEAD.
+  - **Pane identity:** worker panes wear the project's colors too — pass
+    `color: $HP_GOAL_PROJECT_COLOR` and `cwd: <project path>` to `spawn_workers`, then
+    `rename_pane {paneId, label: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>"}` on the
+    returned pane id, so a glance at the workspace reads project → task.
   - **Account rotation:** if `HP_GOAL_ACCOUNTS` is set (newline-separated `CLAUDE_CONFIG_DIR`s
     the orchestrator passed down), set each impl agent's `CLAUDE_CONFIG_DIR` to a different dir
     from the list (round-robin) — e.g. prefix the command `CLAUDE_CONFIG_DIR=<dir> claude …` or

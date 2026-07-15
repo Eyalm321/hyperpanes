@@ -53,6 +53,10 @@ pub struct Ui {
     pub projects: Rc<VecModel<ProjectItem>>,
     /// New-goal dialog: filenames of images attached to the in-progress goal.
     pub goal_images: Rc<VecModel<slint::SharedString>>,
+    /// New-goal box: the focused field's ↓-option rows (history / projects / model tiers).
+    pub goal_menu: Rc<VecModel<PaletteItem>>,
+    /// New-goal box: the four chip labels (project + orch/spec/impl models).
+    pub goal_chips: Rc<VecModel<slint::SharedString>>,
     pub families: Rc<VecModel<PrefOption>>,
     pub palettes: Rc<VecModel<FramePaletteOption>>,
     pub shells: Rc<VecModel<PrefOption>>,
@@ -90,6 +94,8 @@ impl Ui {
             palette: Rc::new(VecModel::default()),
             projects: Rc::new(VecModel::default()),
             goal_images: Rc::new(VecModel::default()),
+            goal_menu: Rc::new(VecModel::default()),
+            goal_chips: Rc::new(VecModel::default()),
             families: Rc::new(VecModel::default()),
             palettes: Rc::new(VecModel::default()),
             shells: Rc::new(VecModel::default()),
@@ -116,6 +122,8 @@ impl Ui {
         app.set_palette(ModelRc::from(self.palette.clone()));
         app.set_projects(ModelRc::from(self.projects.clone()));
         app.set_goal_images(ModelRc::from(self.goal_images.clone()));
+        app.set_goal_menu(ModelRc::from(self.goal_menu.clone()));
+        app.set_goal_chips(ModelRc::from(self.goal_chips.clone()));
         app.set_pref_families(ModelRc::from(self.families.clone()));
         app.set_pref_palettes(ModelRc::from(self.palettes.clone()));
         app.set_pref_shells(ModelRc::from(self.shells.clone()));
@@ -283,6 +291,7 @@ fn pane_item(
         search_open,
         search_count,
         search_focus_seq: ps.search_focus_seq,
+        refocus_seq: ps.refocus_seq,
         search_rects: ModelRc::from(Rc::new(VecModel::from(search_rects))),
         search_active_on,
         search_active_rect,
@@ -891,6 +900,31 @@ pub fn resync(
         })
         .collect();
     sync_model(&ui.goal_images, goal_image_names);
+
+    // ---- new-goal box: controller-owned mirrors (text, field focus, option list, chips) ----
+    app.set_goal_text(state.goal_text.as_str().into());
+    app.set_goal_field(state.goal_field as i32);
+    app.set_goal_menu_open(state.goal_menu_open);
+    app.set_goal_menu_sel(state.goal_menu_sel as i32);
+    app.set_goal_focus_tick(state.goal_focus_seq);
+    app.set_goal_settext_value(state.goal_text.as_str().into());
+    app.set_goal_settext_tick(state.goal_settext_seq);
+    app.set_goal_options_open(state.goal_options_open);
+    let goal_menu: Vec<PaletteItem> = state
+        .goal_menu_rows()
+        .into_iter()
+        .map(|(title, subtitle)| PaletteItem {
+            title: title.into(),
+            subtitle: subtitle.into(),
+        })
+        .collect();
+    sync_model(&ui.goal_menu, goal_menu);
+    let goal_chips: Vec<slint::SharedString> = state
+        .goal_chip_labels()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    sync_model(&ui.goal_chips, goal_chips);
 
     // ---- context menu (pane header / tab strip) ----
     let ctx_kind = match state.ctx.as_ref() {

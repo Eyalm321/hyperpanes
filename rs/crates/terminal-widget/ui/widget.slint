@@ -127,6 +127,9 @@ export component TerminalPane inherits Rectangle {
     // Bumped by the controller each time Ctrl+F (re)invokes search — even while the box is
     // already open — so the query input gets (re)focused on a reliable change signal.
     in property <int> search-focus-tick;
+    // Bumped by the controller when a keyboard-driven overlay (New-goal box) opens, to (re)focus
+    // this pane's terminal FocusScope — the key route to `on_key` — on a reliable change signal.
+    in property <int> refocus-tick;
     in property <string> search-count: "";   // e.g. "2 / 5" / "No results"
     in property <[HiRect]> search-rects;      // inactive matches in the viewport
     in property <bool> search-active-on: false;
@@ -223,6 +226,10 @@ export component TerminalPane inherits Rectangle {
         if (root.search-open) { query.focus(); } else { fs.focus(); }
     }
     changed search-focus-tick => { if (root.search-open) { query.focus(); } }
+    // Bumped when a keyboard-driven overlay (the New-goal box) opens: re-focus the terminal
+    // FocusScope so its `key-pressed` routes keys to `on_key` (and thence to the overlay's
+    // controller-owned-mirror handler). Skipped while the in-pane search box owns the keyboard.
+    changed refocus-tick => { if (!root.search-open) { fs.focus(); } }
 
     // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
     //

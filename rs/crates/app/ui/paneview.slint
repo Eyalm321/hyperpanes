@@ -539,6 +539,8 @@ export component PaneView inherits Rectangle {
                         search-count: pane.search-count;
                         // bump → (re)focus the query input (reliable across an already-open box)
                         search-focus-tick: pane.search-focus-seq;
+                        // bump → (re)focus this pane's FocusScope (keyboard-driven overlay opened)
+                        refocus-tick: pane.refocus-seq;
                         // match highlights painted over the terminal (controller-driven, per tick)
                         search-rects: pane.search-rects;
                         search-active-on: pane.search-active-on;

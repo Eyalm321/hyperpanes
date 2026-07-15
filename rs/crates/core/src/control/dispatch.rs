@@ -94,8 +94,8 @@ pub fn handle_command(
         };
     }
 
-    // Resolve a target window: explicit windowId, else the pane's window.
-    let window_id = cmd.get("windowId").and_then(Value::as_i64).or_else(|| {
+    // Resolve a target window: explicit windowId (number or numeric string), else the pane's window.
+    let window_id = window_id_field(cmd).or_else(|| {
         cmd.get("paneId")
             .and_then(Value::as_str)
             .and_then(|p| model.coords_of(p).map(|c| c.window_id))
@@ -519,7 +519,7 @@ pub fn command_scope_error(
             }
         };
     }
-    if let Some(window_id) = cmd.get("windowId").and_then(Value::as_i64) {
+    if let Some(window_id) = window_id_field(cmd) {
         if window_in_scope(Some(scope), window_id) {
             return None;
         }
@@ -540,6 +540,14 @@ fn str_field(cmd: &Value, key: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("missing string field: {key}"))
+}
+
+/// Read `windowId` from a command, accepting either a JSON number OR a numeric string. Clients
+/// that build the request by hand (e.g. `jq -r '.windows[0].windowId'` → the string `"0"`) would
+/// otherwise fail the strict `as_i64` and hit the misleading "needs a paneId or windowId".
+fn window_id_field(cmd: &Value) -> Option<i64> {
+    cmd.get("windowId")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
 }
 
 fn new_id() -> String {
@@ -657,6 +665,18 @@ mod tests {
         );
         assert_eq!(r.status, 400);
         assert_eq!(r.body["error"], json!("command needs a paneId or windowId"));
+    }
+
+    #[tokio::test]
+    async fn window_id_accepts_a_numeric_string() {
+        // A hand-built request (e.g. `jq -r` stringifies windowId) must still resolve, not hit
+        // the misleading "needs a paneId or windowId".
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "newPane", "windowId": "1", "pane": {} });
+        let r = handle_command(&mut m, &s, None, None, &cmd);
+        assert_eq!(r.status, 200, "string windowId should resolve, got {:?}", r.body);
+        assert!(r.body["result"].is_string());
     }
 
     #[test]

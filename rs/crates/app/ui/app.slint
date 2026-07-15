@@ -234,11 +234,27 @@ export component AppWindow inherits Window {
     callback resume-session(int, string); // resume Claude session <id> for project <idx> in a new pane
     callback open-add-project();          // the ＋ on the PROJECTS header → open the dialog
     callback submit-add-project(string);  // Add-Project dialog submit (directory path)
-    callback submit-new-goal(int, string, int, int, int); // proj idx, goal, orch/spec/impl model idx
-    callback goal-attach-image();          // New-Goal dialog: attach image(s) via file picker
-    callback goal-paste-image();           // New-Goal dialog: attach the clipboard image
-    callback goal-remove-image(int);       // New-Goal dialog: remove attached image i
-    in property <[string]> goal-images;    // attached-image filenames for the New-Goal dialog
+    // New-goal box (controller-owned mirrors — the Rust key router drives the keyboard;
+    // these callbacks are the mouse affordances)
+    callback goal-field-click(int);        // chip click: focus field i + toggle its options
+    callback goal-menu-click(int);         // option-row click: apply row i
+    callback goal-submit();                // the Start button
+    callback goal-attach-image();          // New-Goal box: attach image(s) via file picker
+    callback goal-paste-image();           // New-Goal box: attach the clipboard image
+    callback goal-remove-image(int);       // New-Goal box: remove attached image i
+    in property <[string]> goal-images;    // attached-image filenames for the New-Goal box
+    in property <string> goal-text;        // the goal free text (state.goal_text mirror)
+    in property <int> goal-field;          // ←/→-focused field (0 goal · 1 project · 2-4 models)
+    in property <bool> goal-menu-open;     // the focused field's ↓-option list is showing
+    in property <int> goal-menu-sel;       // selected option row
+    in property <[PaletteItem]> goal-menu; // option rows (history / projects / model tiers)
+    in property <[string]> goal-chips;     // chip labels: project + orch/spec/impl models
+    in property <int> goal-focus-tick;     // bump → (re)focus the goal TextInput
+    in property <string> goal-settext-value; // text to force into the TextInput (history pick)
+    in property <int> goal-settext-tick;   // bump → push goal-settext-value into the TextInput
+    in property <bool> goal-options-open;  // option chips revealed (Ctrl+O)
+    callback goal-key(KeyMsg);             // forwarded nav/submit/dismiss keys → goal_key
+    callback goal-text-changed(string);    // TextInput edited → controller goal_text mirror
     // top-bar menu → overlays
     callback open-palette();
     callback open-prefs();
@@ -532,9 +548,22 @@ export component AppWindow inherits Window {
             }
             ap-error: root.ap-error;
             add-project-submit(p) => { root.submit-add-project(p); }
-            projects: root.projects;
             goal-images: root.goal-images;
-            new-goal-submit(p, g, o, s, im) => { root.submit-new-goal(p, g, o, s, im); }
+            goal-text: root.goal-text;
+            goal-field: root.goal-field;
+            goal-menu-open: root.goal-menu-open;
+            goal-menu-sel: root.goal-menu-sel;
+            goal-menu: root.goal-menu;
+            goal-chips: root.goal-chips;
+            goal-focus-tick: root.goal-focus-tick;
+            goal-settext-value: root.goal-settext-value;
+            goal-settext-tick: root.goal-settext-tick;
+            goal-options-open: root.goal-options-open;
+            goal-key(m) => { root.goal-key(m); }
+            goal-text-changed(t) => { root.goal-text-changed(t); }
+            goal-field-click(i) => { root.goal-field-click(i); }
+            goal-menu-click(i) => { root.goal-menu-click(i); }
+            goal-submit => { root.goal-submit(); }
             goal-attach-image => { root.goal-attach-image(); }
             goal-paste-image => { root.goal-paste-image(); }
             goal-remove-image(i) => { root.goal-remove-image(i); }

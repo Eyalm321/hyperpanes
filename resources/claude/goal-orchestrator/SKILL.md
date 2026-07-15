@@ -27,6 +27,14 @@ the hyperpanes MCP (see the `use-hyperpanes` skill) — no bespoke tooling.
   `claude --resume`). The work queue holds the *execution*; you hold the *intent*. Keep a compact
   running ledger in your replies: each goal's `id`, one-line intent, status, and its spec-agent
   pane id. Re-derive it from `list_panes` + `list_tasks` after any resume.
+- **Agents are panes, never subagents.** Every spec agent and every impl agent runs in its own
+  hyperpanes pane (`open_pane` / `spawn_workers` via the hyperpanes MCP) — NEVER as an in-process
+  subagent (no Task tool, no bare `claude -p` inside your own pane). Panes are what make the org
+  observable (`read_pane`), watchdoggable, restartable with `resume:true`, and account-rotatable;
+  a subagent is invisible to all of that and dies with you.
+- **Always pass `--dangerously-skip-permissions`** on every `claude` you spawn (spec agents, impl
+  agents, judges). The org runs unattended — a permission prompt wedges the pane and swallows any
+  prompt delivered into it.
 
 ## Goal lifecycle
 
@@ -36,8 +44,9 @@ For each goal you're given (free text):
    intent + explicit **acceptance criteria** (what "done" means — a command that must pass, a file
    that must exist, or a rubric to judge). If acceptance is unclear, infer the tightest reasonable
    check and state it; don't block.
-2. **Spawn a spec agent** — one dedicated pane per goal, in the project cwd, running `claude` with
-   the spec-agent persona (this skill's `SPEC.md`) via `--append-system-prompt-file`. Model:
+2. **Spawn a spec agent** — one dedicated pane per goal (`open_pane`, NOT a subagent), in the
+   project cwd, running `claude --dangerously-skip-permissions` with the spec-agent persona (this
+   skill's `SPEC.md`) via `--append-system-prompt-file`. Model:
    use **`$HP_GOAL_SPEC_MODEL`** if it's set in your env (the user picked it in the New-goal
    dialog); otherwise `claude-opus-4-8[1m]` for a hard/large goal, `claude-fable-5[1m]` for a
    lighter one. Pass the impl-agent model down to the spec agent too (env `HP_GOAL_IMPL_MODEL`, or
@@ -45,6 +54,13 @@ For each goal you're given (free text):
    `set_meta` the pane: `role=spec`, `project=<path>`, `parent=<your pane id>`, `goal=<goal id>`.
    Then `prompt_pane` it the goal intent + acceptance criteria + your pane id + the goal's queue
    name (e.g. `g1`) so it can `send_to_parent` and fan out.
+   **Pane identity:** every pane you spawn wears the project's colors — pass
+   `project:"<project name or id>"` to `open_pane` (that defaults the cwd AND the project frame
+   color from the registry), set `label` = the project name (`$HP_GOAL_PROJECT_NAME` in your env;
+   `$HP_GOAL_PROJECT_COLOR` has the hex if you need an explicit `color`), and set the pane's
+   subtitle to its task — `rename_pane {paneId, label:<project name>, subtitle:"<goal one-liner>"}`.
+   Your own pane already carries this identity (the app set it); keep the scheme for everything
+   you spawn so a glance at the workspace reads project → task.
 3. **Ingest reports.** Read spec-agent messages (`read_messages` on your pane; spec agents
    `send_to_parent`). A report is one of: `progress` (incl. `spec:`/`respec:`), `blocked <reason>`,
    `needs-decision <q>`, `done <evidence>`, `failed <reason>`. Act:
@@ -67,8 +83,9 @@ Do not accept a spec agent's `done` on its word. Gate it:
   work queue and require exit 0. Or run it yourself if cheap.
 - **File/artifact criterion** — verify presence/shape via `read_pane` on a quick shell, or the
   control API `fs/read`.
-- **Rubric criterion** — spawn a short-lived judge (`claude -p "<rubric>\n<evidence>"`, must exit 0
-  iff satisfied).
+- **Rubric criterion** — spawn a short-lived judge pane (`open_pane` running
+  `claude --dangerously-skip-permissions -p "<rubric>\n<evidence>"`, must exit 0 iff satisfied),
+  then `close_pane` it.
 Only flip a goal to `Done` when its criteria pass. On failure, bounce it back to the spec agent
 with the specific gap.
 

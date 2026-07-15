@@ -325,16 +325,26 @@ impl App {
             if !ready {
                 continue;
             }
-            let pending = resume_queue::take_for(&marker.session_id);
-            if pending.is_empty() {
-                continue;
-            }
             // The marker filename is the pane's external id; the session manager wants the
             // uid — identical for GUI-native panes, aliased for control-spawned ones.
             let uid = self
                 .control
                 .uid_for_pane_id(pane_id)
                 .unwrap_or_else(|| pane_id.to_string());
+            // Hold while an interactive selector (trust prompt, model picker…) is on screen —
+            // typed text would land in the form and be swallowed. The queue keeps the prompt.
+            if self
+                .mgr
+                .render_screen(&uid)
+                .as_deref()
+                .is_some_and(screen_shows_option_form)
+            {
+                continue;
+            }
+            let pending = resume_queue::take_for(&marker.session_id);
+            if pending.is_empty() {
+                continue;
+            }
             if !self.mgr.has(&uid) {
                 // Session gone between marker and delivery — requeue rather than drop.
                 for p in &pending {
@@ -368,9 +378,12 @@ impl App {
     /// Deliver queued goals (New-goal dialog) into their orchestrator panes once each pane's
     /// Claude TUI is ready. Readiness = the pane's SessionStart marker is a few seconds old (the
     /// same signal `deliver_queued_prompts` uses); if no marker appears within a fallback window
-    /// (e.g. the user never installed the hook), deliver anyway. Delivery reuses the resume-queue
-    /// cadence — type text, gap, CR, insurance CR — then best-effort re-pastes any attached images
-    /// via the OS clipboard (their paths are already in the text, which is the guaranteed delivery).
+    /// (e.g. the user never installed the hook), deliver anyway — UNLESS the pane is showing an
+    /// interactive multi-option form (trust prompt, theme/model picker, permission dialog): typed
+    /// text lands in the form and is silently swallowed, so the goal stays queued (no timeout)
+    /// until the form clears. Delivery reuses the resume-queue cadence — type text, gap, CR,
+    /// insurance CR — then best-effort re-pastes any attached images via the OS clipboard (their
+    /// paths are already in the text, which is the guaranteed delivery).
     fn deliver_pending_goals(&self) {
         const READY_AGE_SECS: u64 = 4;
         const FALLBACK_SECS: u64 = 12;
@@ -404,6 +417,17 @@ impl App {
                         .is_some_and(|age| age.as_secs() >= READY_AGE_SECS);
                     let timed_out = g.queued_at.elapsed().as_secs() >= FALLBACK_SECS;
                     if marker_ready || timed_out {
+                        // Hold while an interactive selector is on screen — writing now would
+                        // type the goal into the form (swallowed on the user's next pick).
+                        // No timeout on this hold: the goal outlives the form.
+                        if self
+                            .mgr
+                            .render_screen(&g.uid)
+                            .as_deref()
+                            .is_some_and(screen_shows_option_form)
+                        {
+                            return true;
+                        }
                         ready.push(g.clone());
                         false
                     } else {
@@ -1237,6 +1261,10 @@ impl App {
                             "sidebar" => {
                                 dispatch(st, Command::ToggleProjects, &self.mgr);
                             }
+                            // The New-goal box (palette-style card; goals system).
+                            "newgoal" => {
+                                dispatch(st, Command::OpenNewGoal, &self.mgr);
+                            }
                             // Open a context menu at a fixed anchor (screenshot scaffold).
                             "panemenu" => {
                                 dispatch(st, Command::OpenPaneContext(0, 380.0, 150.0), &self.mgr);
@@ -1448,6 +1476,21 @@ impl App {
             let st = win.state.borrow();
             if st.overlay == Overlay::Palette {
                 let cmd = crate::palette_key(&st.palette_query, &msg);
+                drop(st); // RefCell rule: no live borrow across dispatch
+                if let Some(cmd) = cmd {
+                    self.run_command(win, cmd);
+                }
+                return;
+            }
+        }
+        // The New-goal box owns its keyboard via its own TextInput (which forwards nav keys to
+        // `on_goal_key`), so keys normally don't reach the terminal FocusScope while it's open.
+        // But if the box isn't focused yet, swallow here so nothing leaks to the shell — a
+        // forwarded nav key still routes to `goal_key`; text keys return None and are dropped.
+        {
+            let st = win.state.borrow();
+            if st.overlay == Overlay::NewGoal {
+                let cmd = crate::goal_key(st.goal_field, st.goal_menu_open, &msg);
                 drop(st); // RefCell rule: no live borrow across dispatch
                 if let Some(cmd) = cmd {
                     self.run_command(win, cmd);
@@ -2195,27 +2238,11 @@ impl App {
                     }
                 });
         }
-        // New Goal dialog submit: (project index, goal text, orchestrator/spec/impl model
-        // indices) → route to the project's goals orchestrator (resolved in the dispatch).
-        {
-            let app = app.clone();
-            let id = win.id;
-            win.app
-                .on_submit_new_goal(move |proj_idx, goal, orch, spec, implm| {
-                    if let Some(w) = app.window_by_id(id) {
-                        app.run_command(
-                            &w,
-                            Command::SubmitNewGoal(
-                                proj_idx.max(0) as usize,
-                                goal.to_string(),
-                                orch.max(0) as usize,
-                                spec.max(0) as usize,
-                                implm.max(0) as usize,
-                            ),
-                        );
-                    }
-                });
-        }
+        // New-goal box (mouse affordances; the keyboard routes through `goal_key`): chip click
+        // focuses a field + toggles its option list, row click applies an option, Start submits.
+        cb_usize!(on_goal_field_click, Command::GoalFieldClick);
+        cb_usize!(on_goal_menu_click, Command::GoalMenuClick);
+        cb0!(on_goal_submit, Command::GoalSubmit);
         cb0!(on_goal_attach_image, Command::GoalAttachImage);
         cb0!(on_goal_paste_image, Command::GoalPasteImage);
         cb_usize!(on_goal_remove_image, Command::GoalRemoveImage);
@@ -3121,6 +3148,35 @@ impl App {
             });
         }
 
+        // New-goal box: its TextInput forwards the navigation/submit/dismiss keys here (it
+        // handles text editing + cursor motion itself). Route them through `goal_key`.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_goal_key(move |msg: KeyMsg| {
+                if let Some(w) = app.window_by_id(id) {
+                    let cmd = {
+                        let st = w.state.borrow();
+                        crate::goal_key(st.goal_field, st.goal_menu_open, &msg)
+                    };
+                    if let Some(cmd) = cmd {
+                        app.run_command(&w, cmd);
+                    }
+                }
+            });
+        }
+
+        // New-goal box: the TextInput's native edits push the full text back to the mirror.
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_goal_text_changed(move |t| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::GoalQuery(t.to_string()));
+                }
+            });
+        }
+
         // window controls (Win32) — act on this window's HWND.
         {
             let app = app.clone();
@@ -3169,6 +3225,36 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
     windows
         .iter()
         .find(|w| w.state.borrow_mut().hosts_session(uid))
+}
+
+/// True when a Claude-style interactive multi-option form is on the pane's rendered screen —
+/// the trust-folder prompt, theme/model pickers, permission dialogs, `/login` account select.
+/// Those render a `❯`-pointed row over a numbered option list ("❯ 1. Yes, proceed" / "2. No…");
+/// anything typed while one is up lands in the form and is swallowed on the user's next pick,
+/// so goal delivery holds while this returns true. The ordinary Claude input box (`>` prompt)
+/// has no `❯` pointer, so it never matches.
+fn screen_shows_option_form(screen: &str) -> bool {
+    let mut pointer = false;
+    let mut numbered = 0;
+    for line in screen.lines() {
+        // Forms may render inside a box border — strip a leading `│` before testing.
+        let t = line
+            .trim_start()
+            .trim_start_matches(['│', '║'])
+            .trim_start();
+        let opt = match t.strip_prefix('❯') {
+            Some(rest) => {
+                pointer = true;
+                rest.trim_start()
+            }
+            None => t,
+        };
+        let digits = opt.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && opt.chars().nth(digits) == Some('.') {
+            numbered += 1;
+        }
+    }
+    pointer && numbered >= 2
 }
 
 /// Decode an image file (any of the goal picker's formats) to RGBA8 and place it on the OS
@@ -3234,5 +3320,33 @@ fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> S
     match port {
         Some(p) => format!("Running · http://127.0.0.1:{p} · {input}"),
         None => format!("Starting… · {input}"),
+    }
+}
+
+#[cfg(test)]
+mod option_form_tests {
+    use super::screen_shows_option_form;
+
+    #[test]
+    fn detects_claude_style_selectors() {
+        // Trust-folder prompt (pointer on the highlighted row, numbered options).
+        let trust = "Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n";
+        assert!(screen_shows_option_form(trust));
+        // Boxed permission dialog (rows inside a │ border).
+        let boxed = "│ Do you want to proceed?      │\n│ ❯ 1. Yes                     │\n│   2. No, and tell Claude why │\n";
+        assert!(screen_shows_option_form(boxed));
+    }
+
+    #[test]
+    fn ignores_the_ordinary_input_box_and_plain_output() {
+        // Claude's normal prompt box — a `>` prompt, no `❯` pointer.
+        let prompt = "╭─────────────────╮\n│ > Try \"help\"    │\n╰─────────────────╯\n  ? for shortcuts\n";
+        assert!(!screen_shows_option_form(prompt));
+        // A numbered list in ordinary output (no pointer) is not a form.
+        let list = "Plan:\n 1. do a thing\n 2. do another\n";
+        assert!(!screen_shows_option_form(list));
+        // A stray `❯` shell prompt without numbered options is not a form.
+        let shell = "❯ ls\nsrc  target\n";
+        assert!(!screen_shows_option_form(shell));
     }
 }

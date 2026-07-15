@@ -51,6 +51,10 @@ export struct PaneItem {
     // (Ctrl+F), even while already open. The widget watches it to (re)focus the query input —
     // a reliable signal that survives the box already being open (unlike a one-shot `init`).
     search-focus-seq: int,
+    // Bumped when a keyboard-driven overlay (the New-goal box) opens on this pane's window, so
+    // the widget re-focuses this pane's terminal FocusScope (the key route to `on_key`) even
+    // when the overlay was opened by mouse/menu with no prior chord.
+    refocus-seq: int,
     // Search match highlights projected into the viewport (logical px, hit-tested by the
     // controller from the pane surface): every visible match dimmed, plus the active match drawn
     // distinctly. Without these the box found matches + showed the counter but painted nothing.

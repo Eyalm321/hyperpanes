@@ -1,150 +1,100 @@
-// The "New goal" dialog — a 3-step stepper opened from the command palette ("New goal…").
+// The "New goal" box — a command-palette-style card (560px wide, y 90px) opened from the
+// palette's "New goal…". ONLY the goal text field is framed: it's a real Slint TextInput (`gi`,
+// the single keyboard-focus target) with an attach-image icon and a submit icon inside it. The
+// option chips (project + model tiers) are hidden until Ctrl+O reveals them; the focused chip
+// auto-shows its dropdown. Chips + dropdowns are flat (no border/background). Ctrl+V pastes an
+// image attachment directly (no button). Slint has no font fallback → icons are drawn geometry.
 //
-//   1/3 Project   — pick the project the goal is for (rows from the projects model; the submit
-//                    returns the SELECTED INDEX, mapped back to a path Rust-side).
-//   2/3 Goal      — free-text goal + attached images (Attach = file picker, Paste image = OS
-//                    clipboard; several allowed). Images are held Rust-side as file paths and
-//                    written into the goal prompt.
-//   3/3 Models    — pick the orchestrator / spec / implementation model tiers (defaults:
-//                    opus[1m] / opus[1m] / sonnet[1m]).
+//   ┌ [ goal text … ]                    (img) (send) ┐  ← only this is framed
+//   Project  hyperpanes        (revealed by Ctrl+O; flat; focused chip shows its options)
+//     hyperpanes
+//     clawdpanel
+//   Orch  opus[1m]   Spec  opus[1m]   Impl  sonnet[1m]
 //
-// Submitting routes through `State::submit_new_goal`. Esc closes; step buttons navigate. Local
-// draft state (step, selections, goal text) lives here; the image list is Rust-owned. Slint has
-// no font fallback, so all affordances are drawn shapes or ASCII — never emoji/glyph icons.
+// Keys: type + Left/Right/Home/End/⌫ edit natively; Ctrl+O reveal options; Tab/Shift+Tab cycle
+// chips (each auto-shows its dropdown); Up/Down select (chips apply live); Enter submit (or pick a
+// history row); Esc collapse options then close; click outside dismisses. Routing: `goal_key`.
 
 import { Theme } from "theme.slint";
-import { ProjectItem } from "types.slint";
+import { PaletteItem } from "types.slint";
+import { KeyMsg } from "@widgets";
 
-component NgButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> primary: false;
-    in property <bool> enabled: true;
-    callback clicked;
-    height: 32px;
-    min-width: 84px;
-    border-radius: 7px;
-    background: !root.enabled
-        ? Theme.surface
-        : (root.primary ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface));
-    border-width: 1px;
-    border-color: root.primary && root.enabled ? Theme.accent : Theme.border;
-    opacity: root.enabled ? 1.0 : 0.5;
-    HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
-        Text {
-            text: root.label;
-            color: root.primary && root.enabled ? #11111b : Theme.text;
-            font-size: 13px;
-            font-weight: root.primary ? 700 : 400;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-            horizontal-stretch: 1;
-        }
-    }
-    ta := TouchArea { clicked => { if (root.enabled) { root.clicked(); } } }
+// A paperclip — the "attach image" affordance. A single stroked outline (outer loop + inner
+// return), composed from absolute M/L/C commands only (Slint garbles raw Material SVG data —
+// relative q/v + negative viewbox-y — so icons are hand-built from absolute commands).
+component AttachGlyph inherits Path {
+    in property <color> ink: Theme.subtext;
+    width: 13px;
+    height: 16px;
+    viewbox-width: 14;
+    viewbox-height: 18;
+    stroke: root.ink;
+    stroke-width: 1.4px;
+    fill: transparent;
+    commands: "M 10 6 L 10 12 C 10 13.66 8.66 15 7 15 C 5.34 15 4 13.66 4 12 L 4 5 C 4 3.9 4.9 3 6 3 C 7.1 3 8 3.9 8 5 L 8 12 C 8 12.55 7.55 13 7 13 C 6.45 13 6 12.55 6 12 L 6 6";
 }
 
-component NgProjectRow inherits Rectangle {
-    in property <string> name;
-    in property <color> dot;
-    in property <bool> selected;
+// The "enter / return" (↵) glyph — the submit affordance: a corner line with a left arrowhead.
+component EnterGlyph inherits Path {
+    in property <color> ink: Theme.accent;
+    width: 15px;
+    height: 13px;
+    viewbox-width: 15;
+    viewbox-height: 13;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: "M 13 2 L 13 8 L 3 8 M 6 5 L 3 8 L 6 11";
+}
+
+// A clickable icon slot (hover background) hosting a drawn glyph.
+component IconSlot inherits Rectangle {
     callback clicked;
-    height: 30px;
+    width: 28px;
+    height: 28px;
     border-radius: 6px;
-    background: root.selected ? Theme.surface2 : (ta.has-hover ? Theme.surface : transparent);
-    border-width: 1px;
-    border-color: root.selected ? Theme.accent : transparent;
-    HorizontalLayout {
-        padding-left: 9px;
-        padding-right: 9px;
-        spacing: 8px;
-        Rectangle {
-            width: 9px;
-            height: 9px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 5px;
-            background: root.dot;
-        }
-        Text {
-            text: root.name;
-            color: Theme.text;
-            font-size: 13px;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-            overflow: elide;
-        }
-    }
+    background: ta.has-hover ? Theme.surface2 : transparent;
     ta := TouchArea { clicked => { root.clicked(); } }
-}
-
-// One model-tier pill (a small toggle in a segmented row).
-component NgModelPill inherits Rectangle {
-    in property <string> label;
-    in property <bool> on;
-    callback clicked;
-    height: 26px;
-    border-radius: 6px;
-    background: root.on ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface);
-    border-width: 1px;
-    border-color: root.on ? Theme.accent : Theme.border;
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        Text {
-            text: root.label;
-            color: root.on ? #11111b : Theme.text;
-            font-size: 12px;
-            font-weight: root.on ? 700 : 400;
-            vertical-alignment: center;
-        }
-    }
-    ta := TouchArea { clicked => { root.clicked(); } }
-}
-
-// One "tier: [pill pill pill pill]" row.
-component NgModelRow inherits VerticalLayout {
-    in property <string> tier;
-    in property <[string]> options;
-    in property <int> selected;
-    callback pick(int);
-    spacing: 5px;
-    Text { text: root.tier; color: Theme.faint; font-size: 11px; }
-    HorizontalLayout {
-        spacing: 6px;
-        for opt[i] in root.options : NgModelPill {
-            label: opt;
-            on: i == root.selected;
-            clicked => { root.pick(i); }
-        }
-        Rectangle { horizontal-stretch: 1; }
-    }
 }
 
 export component NewGoalDialog inherits Rectangle {
-    in property <[ProjectItem]> projects;
-    in property <[string]> goal-images;   // attached image filenames (Rust-owned)
-    callback submit(int, string, int, int, int); // proj idx, goal, orch/spec/impl model idx
+    in property <string> goal-text;      // (unused for display; the TextInput owns the text)
+    in property <int> field;             // 0 goal text · 1 project · 2 orch · 3 spec · 4 impl
+    in property <bool> menu-open;        // the focused field's option list is showing
+    in property <bool> options-open;     // the option chips are revealed (Ctrl+O)
+    in property <int> menu-sel;
+    in property <[PaletteItem]> menu;    // history / projects / model tiers for the focused field
+    in property <[string]> chips;        // display values: [project, orch, spec, impl]
+    in property <[string]> goal-images;  // attached image filenames (Rust-owned)
+    in property <int> focus-tick;        // bump → (re)focus the goal TextInput
+    in property <string> settext-value;  // push into the TextInput on `settext-tick`
+    in property <int> settext-tick;
+    callback text-changed(string);       // TextInput edited → controller goal_text mirror
+    callback key(KeyMsg);                // forwarded nav/options/submit/dismiss keys → goal_key
+    callback field-click(int);           // chip / text-field click: focus it
+    callback menu-click(int);            // option-row click: apply row
+    callback submit();
     callback cancel();
     callback attach-image();
-    callback paste-image();
+    callback paste-image();              // (retained for wiring; pasting is Ctrl+V now)
     callback remove-image(int);
 
-    property <int> step: 0;                 // 0 project · 1 goal · 2 models
-    property <int> selected: 0;             // project row
-    property <string> goal-text;
-    property <int> orch-sel: 0;             // opus[1m]
-    property <int> spec-sel: 0;             // opus[1m]
-    property <int> impl-sel: 1;             // sonnet[1m]
-    property <[string]> model-labels: ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku"];
+    property <[string]> chip-names: ["Project", "Orch", "Spec", "Impl"];
 
-    // eat scrim clicks behind the card
-    TouchArea {}
+    // The goal TextInput (`gi`) is the single keyboard-focus target. It edits natively and its
+    // `key-pressed` forwards only the nav/options/submit/dismiss keys to `goal_key`. Focus is
+    // grabbed on mount, on `focus-tick`, and on every click (the reliable path in Slint).
+    forward-focus: gi;
+    changed focus-tick => { gi.focus(); }
+    changed settext-tick => { gi.text = root.settext-value; }
+
+    // Click outside the card dismisses (the card is a later sibling, so its area hit-tests first).
+    TouchArea { clicked => { root.cancel(); } }
 
     card := Rectangle {
-        width: 520px;
+        width: 560px;
         x: (parent.width - self.width) / 2;
-        y: max(60px, (parent.height - self.height) / 2);
+        y: 90px;
         height: body.preferred-height;
         background: Theme.mantle;
         border-radius: 12px;
@@ -153,213 +103,246 @@ export component NewGoalDialog inherits Rectangle {
         drop-shadow-blur: 48px;
         drop-shadow-color: Theme.scrim;
         drop-shadow-offset-y: 18px;
-        TouchArea {} // keep clicks on the card from dismissing
+        TouchArea { clicked => { gi.focus(); } }
 
         body := VerticalLayout {
-            padding: 18px;
-            spacing: 12px;
+            padding: 8px;
+            spacing: 6px;
 
-            // ---- header: title + step ----
-            HorizontalLayout {
-                Text {
-                    text: "New goal";
-                    color: Theme.text;
-                    font-size: 15px;
-                    font-weight: 700;
-                    horizontal-stretch: 1;
-                }
-                Text {
-                    text: root.step == 0 ? "Project · 1/3" : (root.step == 1 ? "Goal · 2/3" : "Models · 3/3");
-                    color: Theme.faint;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
-            }
-
-            // ===== step 1: project =====
-            if root.step == 0 : VerticalLayout {
-                spacing: 12px;
-                VerticalLayout {
-                    spacing: 5px;
-                    Text { text: "Which project?"; color: Theme.faint; font-size: 11px; }
-                    if root.projects.length == 0 : Text {
-                        text: "No projects yet — add one from the sidebar first.";
-                        color: Theme.faint;
-                        font-size: 12px;
-                    }
-                    Rectangle {
-                        visible: root.projects.length > 0;
-                        height: min(200px, root.projects.length * 32px);
-                        border-radius: 7px;
-                        background: Theme.bg;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        Flickable {
-                            viewport-height: plist.preferred-height;
-                            plist := VerticalLayout {
-                                padding: 4px;
-                                spacing: 2px;
-                                for p[i] in root.projects : NgProjectRow {
-                                    name: p.name;
-                                    dot: p.color;
-                                    selected: i == root.selected;
-                                    clicked => { root.selected = i; }
-                                }
-                            }
-                        }
-                    }
-                }
+            // ---- the goal text field: the ONLY framed element (attach + submit icons inside).
+            //      Multi-line: it wraps and GROWS in height as the goal overflows, never clipping.
+            Rectangle {
+                border-radius: 10px;
+                background: Theme.bg;
+                border-width: 1px;
+                border-color: root.field == 0 ? Theme.accent : Theme.border;
+                clip: true;
                 HorizontalLayout {
-                    spacing: 8px;
-                    Rectangle { horizontal-stretch: 1; }
-                    NgButton { label: "Cancel"; clicked => { root.cancel(); } }
-                    NgButton {
-                        label: "Next";
-                        primary: true;
-                        enabled: root.projects.length > 0;
-                        clicked => { root.step = 1; }
-                    }
-                }
-            }
-
-            // ===== step 2: goal + images =====
-            if root.step == 1 : VerticalLayout {
-                spacing: 12px;
-                VerticalLayout {
-                    spacing: 5px;
-                    Text { text: "Goal"; color: Theme.faint; font-size: 11px; }
+                    padding-left: 12px;
+                    padding-right: 6px;
+                    padding-top: 9px;
+                    padding-bottom: 9px;
+                    spacing: 4px;
+                    // text + placeholder — a layout so the TextInput's wrapped height drives the frame
                     Rectangle {
-                        height: 96px;
-                        border-radius: 7px;
-                        background: Theme.bg;
-                        border-width: 1px;
-                        border-color: ti.has-focus ? Theme.accent : Theme.border;
-                        Flickable {
-                            viewport-height: ti.preferred-height;
-                            ti := TextInput {
-                                width: parent.width - 20px;
-                                x: 10px;
-                                y: 8px;
-                                text <=> root.goal-text;
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            alignment: center;
+                            gi := TextInput {
+                                width: 100%;
                                 color: Theme.text;
-                                font-size: 13px;
+                                font-size: 14px;
                                 single-line: false;
                                 wrap: word-wrap;
-                                init => { ti.focus(); }
+                                edited => { root.text-changed(self.text); }
                                 key-pressed(e) => {
-                                    if (e.text == Key.Escape) { root.cancel(); return EventResult.accept; }
-                                    return EventResult.reject;
+                                // Forward nav / options / submit / dismiss + Ctrl+O / Ctrl+V. NOT
+                                // Left/Right (native cursor) nor Ctrl+A/C/X (native text ops).
+                                if (e.text == Key.Tab || e.text == Key.Escape || e.text == Key.Return
+                                    || e.text == Key.UpArrow || e.text == Key.DownArrow
+                                    || (e.modifiers.control && (e.text == "o" || e.text == "v"
+                                        || e.text == "\u{0f}" || e.text == "\u{16}"))) {
+                                    root.key({
+                                        text: e.text,
+                                        control: e.modifiers.control,
+                                        alt: e.modifiers.alt,
+                                        shift: e.modifiers.shift,
+                                    });
+                                    return accept;
                                 }
+                                // On a chip (options open), Left/Right navigate categories → forward.
+                                if (root.field != 0
+                                    && (e.text == Key.LeftArrow || e.text == Key.RightArrow)) {
+                                    root.key({
+                                        text: e.text,
+                                        control: e.modifiers.control,
+                                        alt: e.modifiers.alt,
+                                        shift: e.modifiers.shift,
+                                    });
+                                    return accept;
+                                }
+                                // On a chip field, or with a list open, the text box is read-only.
+                                if (root.field != 0 || root.menu-open) { return accept; }
+                                return reject;
+                            }
                             }
                         }
+                        // placeholder — centered like the text, shown while empty
                         Text {
-                            x: 10px;
-                            y: 8px;
+                            x: 0;
+                            width: 100%;
+                            height: 100%;
                             text: "What should the agents accomplish?";
                             color: Theme.faint;
-                            font-size: 13px;
-                            visible: root.goal-text == "";
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            visible: gi.text == "";
+                        }
+                        TouchArea { clicked => { gi.focus(); root.field-click(0); } }
+                    }
+                    // attach image
+                    VerticalLayout {
+                        alignment: center;
+                        IconSlot {
+                            clicked => { gi.focus(); root.attach-image(); }
+                            AttachGlyph { }
+                        }
+                    }
+                    // submit (Enter)
+                    VerticalLayout {
+                        alignment: center;
+                        IconSlot {
+                            clicked => { gi.focus(); root.submit(); }
+                            EnterGlyph { ink: gi.text == "" ? Theme.faint : Theme.accent; }
                         }
                     }
                 }
-                // attached images
-                if root.goal-images.length > 0 : VerticalLayout {
-                    spacing: 4px;
-                    for name[i] in root.goal-images : Rectangle {
-                        height: 28px;
-                        border-radius: 6px;
-                        background: Theme.surface;
-                        border-width: 1px;
-                        border-color: Theme.border;
+            }
+
+            // ---- attached images (flat) ----
+            if root.goal-images.length > 0 : VerticalLayout {
+                spacing: 4px;
+                for name[i] in root.goal-images : Rectangle {
+                    height: 24px;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        spacing: 8px;
+                        Rectangle {
+                            width: 14px;
+                            height: 14px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 3px;
+                            background: Theme.accent;
+                        }
+                        Text {
+                            text: name;
+                            color: Theme.subtext;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            width: 20px;
+                            border-radius: 4px;
+                            background: rmta.has-hover ? Theme.surface2 : transparent;
+                            Text {
+                                text: "x";
+                                color: Theme.faint;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            rmta := TouchArea { clicked => { root.remove-image(i); } }
+                        }
+                    }
+                }
+            }
+
+            // ---- option chips (revealed by Ctrl+O; flat). The categories are ONE ROW; the
+            //      focused chip's dropdown appears below the row. ----
+            if root.options-open : VerticalLayout {
+                spacing: 2px;
+                // the categories row
+                HorizontalLayout {
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    spacing: 12px;
+                    for value[i] in root.chips : Rectangle {
+                        horizontal-stretch: 1;
                         HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 6px;
-                            spacing: 8px;
-                            // drawn "image" swatch (no glyph font-fallback in Slint)
-                            Rectangle {
-                                width: 16px;
-                                height: 16px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 3px;
-                                background: Theme.accent;
+                            spacing: 5px;
+                            Text {
+                                text: root.chip-names[i];
+                                color: Theme.faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
                             }
                             Text {
-                                text: name;
-                                color: Theme.text;
+                                text: value;
+                                color: root.field == i + 1 ? Theme.accent : Theme.text;
                                 font-size: 12px;
+                                font-weight: root.field == i + 1 ? 700 : 400;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                                 overflow: elide;
                             }
-                            rm := Rectangle {
-                                width: 22px;
-                                background: rmta.has-hover ? Theme.surface2 : transparent;
-                                border-radius: 4px;
-                                Text {
-                                    text: "x";
-                                    color: Theme.faint;
-                                    font-size: 13px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                rmta := TouchArea { clicked => { root.remove-image(i); } }
-                            }
                         }
+                        TouchArea { clicked => { gi.focus(); root.field-click(i + 1); } }
                     }
                 }
-                HorizontalLayout {
-                    spacing: 8px;
-                    NgButton { label: "Attach image"; clicked => { root.attach-image(); } }
-                    NgButton { label: "Paste image"; clicked => { root.paste-image(); } }
-                    Rectangle { horizontal-stretch: 1; }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    NgButton { label: "Back"; clicked => { root.step = 0; } }
-                    Rectangle { horizontal-stretch: 1; }
-                    NgButton { label: "Cancel"; clicked => { root.cancel(); } }
-                    NgButton {
-                        label: "Next";
-                        primary: true;
-                        enabled: root.goal-text != "";
-                        clicked => { root.step = 2; }
+                // the focused chip's dropdown (flat, below the row)
+                if root.field != 0 && root.menu-open : VerticalLayout {
+                    spacing: 0px;
+                    for row[j] in root.menu : Rectangle {
+                        height: 26px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            spacing: 8px;
+                            Text {
+                                text: j == root.menu-sel ? "›" : " ";
+                                color: Theme.accent;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                width: 10px;
+                            }
+                            Text {
+                                text: row.title;
+                                color: j == root.menu-sel ? Theme.accent : Theme.subtext;
+                                font-size: 13px;
+                                font-weight: j == root.menu-sel ? 700 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: row.subtitle;
+                                color: Theme.faint;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                        }
+                        TouchArea { clicked => { gi.focus(); root.menu-click(j); } }
                     }
                 }
             }
 
-            // ===== step 3: models =====
-            if root.step == 2 : VerticalLayout {
-                spacing: 12px;
-                NgModelRow {
-                    tier: "Orchestrator";
-                    options: root.model-labels;
-                    selected: root.orch-sel;
-                    pick(i) => { root.orch-sel = i; }
-                }
-                NgModelRow {
-                    tier: "Spec agent";
-                    options: root.model-labels;
-                    selected: root.spec-sel;
-                    pick(i) => { root.spec-sel = i; }
-                }
-                NgModelRow {
-                    tier: "Implementation";
-                    options: root.model-labels;
-                    selected: root.impl-sel;
-                    pick(i) => { root.impl-sel = i; }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    NgButton { label: "Back"; clicked => { root.step = 1; } }
-                    Rectangle { horizontal-stretch: 1; }
-                    NgButton { label: "Cancel"; clicked => { root.cancel(); } }
-                    NgButton {
-                        label: "Create goal";
-                        primary: true;
-                        clicked => {
-                            root.submit(root.selected, root.goal-text, root.orch-sel, root.spec-sel, root.impl-sel);
+            // ---- history dropdown for the text field (Down on an empty/typed goal; flat) ----
+            if root.field == 0 && root.menu-open : VerticalLayout {
+                spacing: 0px;
+                for row[j] in root.menu : Rectangle {
+                    height: 26px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        spacing: 8px;
+                        Text {
+                            text: j == root.menu-sel ? "›" : " ";
+                            color: Theme.accent;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            width: 10px;
+                        }
+                        Text {
+                            text: row.title;
+                            color: j == root.menu-sel ? Theme.accent : Theme.subtext;
+                            font-size: 13px;
+                            font-weight: j == root.menu-sel ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: row.subtitle;
+                            color: Theme.faint;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
                         }
                     }
+                    TouchArea { clicked => { gi.focus(); root.menu-click(j); } }
                 }
             }
         }

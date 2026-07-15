@@ -706,6 +706,69 @@ pub(crate) fn palette_key(query: &str, msg: &KeyMsg) -> Option<Command> {
     None
 }
 
+/// Translate a FORWARDED key event from the New-goal box into a command. The goal field is a
+/// real Slint `TextInput` that owns text editing (typing, Left/Right/Home/End cursor motion,
+/// Backspace) natively; it forwards ONLY the navigation/options/submit/dismiss keys here.
+/// `field` is the focused field (0 = text, 1..=4 = chips), `menu_open` whether the focused
+/// field's option list is showing.
+///
+/// Layout: Ctrl+O reveals/hides the option chips; Tab / Shift+Tab cycle chip focus (each chip
+/// auto-shows its dropdown); ↓/↑ move the open list (chips apply live); Enter picks a history
+/// row, else submits; Esc collapses the options/list, then closes the box; Ctrl+V pastes an
+/// image attachment (or text). Left/Right never reach here — the TextInput moves its cursor.
+pub(crate) fn goal_key(field: usize, menu_open: bool, msg: &KeyMsg) -> Option<Command> {
+    // Ctrl+O toggles the option chips (Slint may deliver the letter or the control char).
+    if msg.control && !msg.alt && (msg.text == "o" || msg.text == "O" || msg.text == "\u{0f}") {
+        return Some(Command::GoalToggleOptions);
+    }
+    // Ctrl+V pastes: an image on the clipboard becomes an attachment, otherwise text.
+    if msg.control && !msg.alt && (msg.text == "v" || msg.text == "V" || msg.text == "\u{16}") {
+        return Some(Command::GoalPasteClipboard);
+    }
+    if is_key(&msg.text, Key::Escape) {
+        return Some(if menu_open || field != 0 {
+            Command::GoalCollapse
+        } else {
+            Command::CloseOverlay
+        });
+    }
+    if is_key(&msg.text, Key::Tab) {
+        return Some(Command::GoalNav(if msg.shift { -1 } else { 1 }));
+    }
+    // With a chip focused (options open), Left/Right move between the category chips. On the text
+    // field they never reach here — the TextInput moves its cursor with them.
+    if field != 0 {
+        if is_key(&msg.text, Key::LeftArrow) {
+            return Some(Command::GoalNav(-1));
+        }
+        if is_key(&msg.text, Key::RightArrow) {
+            return Some(Command::GoalNav(1));
+        }
+    }
+    if is_key(&msg.text, Key::DownArrow) {
+        return Some(if menu_open {
+            Command::GoalMenuNav(1)
+        } else {
+            Command::GoalMenu(true)
+        });
+    }
+    if is_key(&msg.text, Key::UpArrow) {
+        return menu_open.then_some(Command::GoalMenuNav(-1));
+    }
+    if is_key(&msg.text, Key::Return) {
+        // On a history row (text field, list open) → pick it. On a chip (options open) → confirm
+        // the live-applied selection and collapse the options. On the bare text field → submit.
+        return Some(if field == 0 && menu_open {
+            Command::GoalMenuPick
+        } else if field != 0 {
+            Command::GoalCollapse
+        } else {
+            Command::GoalSubmit
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,5 +947,103 @@ mod tests {
         assert!(palette_key("q", &msg("x", false, true, false)).is_none());
         // Bare modifier presses carry control/private-use text — swallowed.
         assert!(palette_key("q", &msg("\u{11}", false, false, false)).is_none());
+    }
+
+    // ---- goal_key(field, menu_open, msg): only the forwarded nav/options/submit/dismiss keys
+    // (the TextInput owns text + cursor; Left/Right never reach here). ----
+
+    #[test]
+    fn goal_key_options_toggle_and_tab() {
+        let tab: slint::SharedString = Key::Tab.into();
+        // Ctrl+O reveals/hides the option chips (letter or control-char form).
+        assert!(matches!(
+            goal_key(0, false, &msg("o", true, false, false)),
+            Some(Command::GoalToggleOptions)
+        ));
+        assert!(matches!(
+            goal_key(0, false, &msg("\u{0f}", true, false, false)),
+            Some(Command::GoalToggleOptions)
+        ));
+        // Tab / Shift+Tab move field focus (reveal-then-cycle handled in state).
+        assert!(matches!(
+            goal_key(0, false, &msg(tab.as_str(), false, false, false)),
+            Some(Command::GoalNav(1))
+        ));
+        assert!(matches!(
+            goal_key(1, false, &msg(tab.as_str(), false, false, true)),
+            Some(Command::GoalNav(-1))
+        ));
+        // With a chip focused, Left/Right also move between categories; on the text field they
+        // don't reach goal_key (native cursor) — so they're not nav there.
+        let left: slint::SharedString = Key::LeftArrow.into();
+        let right: slint::SharedString = Key::RightArrow.into();
+        assert!(matches!(
+            goal_key(2, false, &msg(right.as_str(), false, false, false)),
+            Some(Command::GoalNav(1))
+        ));
+        assert!(matches!(
+            goal_key(2, false, &msg(left.as_str(), false, false, false)),
+            Some(Command::GoalNav(-1))
+        ));
+        assert!(goal_key(0, false, &msg(left.as_str(), false, false, false)).is_none());
+    }
+
+    #[test]
+    fn goal_key_paste_menu_submit_dismiss() {
+        let up: slint::SharedString = Key::UpArrow.into();
+        let down: slint::SharedString = Key::DownArrow.into();
+        let enter: slint::SharedString = Key::Return.into();
+        let esc: slint::SharedString = Key::Escape.into();
+        // Ctrl+V pastes (image → attachment, else text).
+        assert!(matches!(
+            goal_key(0, false, &msg("v", true, false, false)),
+            Some(Command::GoalPasteClipboard)
+        ));
+        // ↓ opens the focused field's list, then navigates it; ↑ only navigates an open list.
+        assert!(matches!(
+            goal_key(0, false, &msg(down.as_str(), false, false, false)),
+            Some(Command::GoalMenu(true))
+        ));
+        assert!(matches!(
+            goal_key(1, true, &msg(down.as_str(), false, false, false)),
+            Some(Command::GoalMenuNav(1))
+        ));
+        assert!(matches!(
+            goal_key(1, true, &msg(up.as_str(), false, false, false)),
+            Some(Command::GoalMenuNav(-1))
+        ));
+        assert!(goal_key(0, false, &msg(up.as_str(), false, false, false)).is_none());
+        // Enter picks a HISTORY row (text field + list open); submits everywhere else.
+        assert!(matches!(
+            goal_key(0, true, &msg(enter.as_str(), false, false, false)),
+            Some(Command::GoalMenuPick)
+        ));
+        // Enter on a chip confirms the live selection and collapses the options.
+        assert!(matches!(
+            goal_key(2, true, &msg(enter.as_str(), false, false, false)),
+            Some(Command::GoalCollapse)
+        ));
+        // Enter on the bare text field submits.
+        assert!(matches!(
+            goal_key(0, false, &msg(enter.as_str(), false, false, false)),
+            Some(Command::GoalSubmit)
+        ));
+        // Esc collapses the options/list first (chip focused, or a list open), then closes the box.
+        assert!(matches!(
+            goal_key(1, true, &msg(esc.as_str(), false, false, false)),
+            Some(Command::GoalCollapse)
+        ));
+        assert!(matches!(
+            goal_key(0, false, &msg(esc.as_str(), false, false, false)),
+            Some(Command::CloseOverlay)
+        ));
+    }
+
+    #[test]
+    fn goal_key_ignores_text_keys() {
+        // Printable text + backspace are the TextInput's job — goal_key returns None for them.
+        assert!(goal_key(0, false, &msg("x", false, false, false)).is_none());
+        let bs: slint::SharedString = Key::Backspace.into();
+        assert!(goal_key(0, false, &msg(bs.as_str(), false, false, false)).is_none());
     }
 }

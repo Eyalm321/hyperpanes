@@ -15,14 +15,17 @@ use crate::state::{DetachedPane, DetachedTab, NewPaneOpts, ReminderOffset, Setti
 use crate::theme;
 
 /// The `--model` ids for the goals-system model pickers, indexed by the New-goal dialog's model
-/// pills. ORDER MUST MATCH the pill labels in `ui/newgoal.slint` (opus[1m] · sonnet[1m] · fable-5
-/// · haiku). Defaults per tier: orchestrator/spec = index 0 (opus), implementation = 1 (sonnet).
+/// options. ORDER MUST MATCH [`GOAL_MODEL_LABELS`]. Defaults per tier: orchestrator/spec =
+/// index 0 (opus), implementation = 1 (sonnet).
 pub const GOAL_MODELS: [&str; 4] = [
     "claude-opus-4-8[1m]",
     "claude-sonnet-5[1m]",
     "claude-fable-5[1m]",
     "claude-haiku-4-5",
 ];
+
+/// Display labels for [`GOAL_MODELS`] (the New-goal dialog's chips + option rows).
+pub const GOAL_MODEL_LABELS: [&str; 4] = ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku"];
 
 /// An action against the workspace. Construct these from any input source.
 #[derive(Debug, Clone)]
@@ -34,16 +37,37 @@ pub enum Command {
     OpenNewPane,
     /// Submit the New Pane dialog: spawn a pane from the configured options + close the dialog.
     SubmitNewPane(NewPaneOpts),
-    /// Open the "New goal" dialog (command palette → "New goal…").
+    /// Open the "New goal" box (command palette → "New goal…").
     OpenNewGoal,
-    /// Submit the New Goal dialog: `(project index, goal text, orchestrator/spec/impl model
-    /// indices into [`GOAL_MODELS`])`. Routes to [`State::submit_new_goal`].
-    SubmitNewGoal(usize, String, usize, usize, usize),
-    /// New-goal dialog (step 2): attach image(s) via the OS file picker.
+    /// New-goal box: set the goal text — the mirror of the box's TextInput (pushed on `edited`).
+    GoalQuery(String),
+    /// New-goal box: Tab / Shift+Tab — reveal the option chips, then cycle focus among them.
+    GoalNav(i32),
+    /// New-goal box: reveal / hide the option chips (Ctrl+O).
+    GoalToggleOptions,
+    /// New-goal box: hide the option chips + any open list, back to the text field (Esc).
+    GoalCollapse,
+    /// New-goal box: open (`true`, ↓) / close (`false`) the focused field's option list
+    /// (goal field = history; project field = projects; model fields = tiers).
+    GoalMenu(bool),
+    /// New-goal box: move the open option list's selection by ±1 (chip fields apply live).
+    GoalMenuNav(i32),
+    /// New-goal box: apply the option list's selected row to the focused field.
+    GoalMenuPick,
+    /// New-goal box (mouse): focus field `i` and open its option list.
+    GoalFieldClick(usize),
+    /// New-goal box (mouse): apply option row `i`.
+    GoalMenuClick(usize),
+    /// Submit the New-goal box (Enter / the submit icon). Routes to [`State::goal_submit`].
+    GoalSubmit,
+    /// New-goal box: paste the clipboard into the goal — an image becomes an attachment,
+    /// text is appended to the goal text (Ctrl+V).
+    GoalPasteClipboard,
+    /// New-goal box: attach image(s) via the OS file picker.
     GoalAttachImage,
-    /// New-goal dialog (step 2): capture the clipboard image (if any) as an attachment.
+    /// New-goal box: capture the clipboard image (if any) as an attachment.
     GoalPasteImage,
-    /// New-goal dialog (step 2): remove attached image `i`.
+    /// New-goal box: remove attached image `i`.
     GoalRemoveImage(usize),
     CloseFocused,
     ClosePane(usize),
@@ -277,17 +301,17 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             state.close_overlay();
         }
         Command::OpenNewGoal => state.open_new_goal(),
-        Command::SubmitNewGoal(idx, intent, orch, spec, implm) => {
-            // Resolve the picker index (into state.projects) to the project path + the model
-            // indices to their ids, then hand the goal to that project's orchestrator.
-            // submit_new_goal closes the overlay itself.
-            if let Some(path) = state.projects.get(idx).map(|p| p.path.clone()) {
-                let m = |i: usize| *GOAL_MODELS.get(i).unwrap_or(&GOAL_MODELS[0]);
-                state.submit_new_goal(mgr, &path, &intent, m(orch), m(spec), m(implm));
-            } else {
-                state.close_overlay();
-            }
-        }
+        Command::GoalQuery(q) => state.goal_set_text(q),
+        Command::GoalNav(d) => state.goal_nav(d),
+        Command::GoalToggleOptions => state.goal_toggle_options(),
+        Command::GoalCollapse => state.goal_collapse(),
+        Command::GoalMenu(open) => state.goal_menu_toggle(open),
+        Command::GoalMenuNav(d) => state.goal_menu_nav(d),
+        Command::GoalMenuPick => state.goal_menu_pick(),
+        Command::GoalFieldClick(i) => state.goal_field_click(i),
+        Command::GoalMenuClick(i) => state.goal_menu_click(i),
+        Command::GoalSubmit => state.goal_submit(mgr),
+        Command::GoalPasteClipboard => state.goal_paste_clipboard(),
         Command::GoalAttachImage => state.goal_attach_images(),
         Command::GoalPasteImage => {
             state.goal_paste_image();

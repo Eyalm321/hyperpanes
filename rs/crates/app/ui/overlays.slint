@@ -13,7 +13,8 @@
 // chords/text route here (not the panes) while open.
 
 import { Theme } from "theme.slint";
-import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem, ProjectItem } from "types.slint";
+import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem } from "types.slint";
+import { KeyMsg } from "@widgets";
 import { NewPaneDialog } from "newpane.slint";
 import { AddProjectDialog } from "addproject.slint";
 import { NewGoalDialog } from "newgoal.slint";
@@ -384,10 +385,24 @@ export component OverlayLayer inherits Rectangle {
     callback palette-activate();
     callback palette-pick(int);      // hover/click row i
 
-    // New-goal dialog (kind 5): the project list + attached-image filenames + callbacks.
-    in property <[ProjectItem]> projects;
+    // New-goal box (kind 5): controller-owned mirrors (the Rust key router owns the keyboard;
+    // the callbacks are mouse affordances) + attached-image filenames.
     in property <[string]> goal-images;
-    callback new-goal-submit(int, string, int, int, int); // proj idx, goal, orch/spec/impl model idx
+    in property <string> goal-text: "";
+    in property <int> goal-field: 0;
+    in property <bool> goal-menu-open: false;
+    in property <int> goal-menu-sel: 0;
+    in property <[PaletteItem]> goal-menu;
+    in property <[string]> goal-chips;
+    in property <int> goal-focus-tick;
+    in property <string> goal-settext-value;
+    in property <int> goal-settext-tick;
+    in property <bool> goal-options-open;
+    callback goal-key(KeyMsg);
+    callback goal-text-changed(string);
+    callback goal-field-click(int);
+    callback goal-menu-click(int);
+    callback goal-submit();
     callback goal-attach-image();
     callback goal-paste-image();
     callback goal-remove-image(int);
@@ -1436,13 +1451,26 @@ export component OverlayLayer inherits Rectangle {
         cancel => { root.dismiss(); }
     }
 
-    // ===== New Goal dialog =====
+    // ===== New Goal box =====
     if root.kind == 5 : NewGoalDialog {
         width: 100%;
         height: 100%;
-        projects: root.projects;
+        goal-text: root.goal-text;
+        field: root.goal-field;
+        menu-open: root.goal-menu-open;
+        menu-sel: root.goal-menu-sel;
+        menu: root.goal-menu;
+        chips: root.goal-chips;
         goal-images: root.goal-images;
-        submit(p, g, o, s, im) => { root.new-goal-submit(p, g, o, s, im); }
+        focus-tick: root.goal-focus-tick;
+        settext-value: root.goal-settext-value;
+        settext-tick: root.goal-settext-tick;
+        options-open: root.goal-options-open;
+        key(m) => { root.goal-key(m); }
+        text-changed(t) => { root.goal-text-changed(t); }
+        field-click(i) => { root.goal-field-click(i); }
+        menu-click(i) => { root.goal-menu-click(i); }
+        submit => { root.goal-submit(); }
         attach-image => { root.goal-attach-image(); }
         paste-image => { root.goal-paste-image(); }
         remove-image(i) => { root.goal-remove-image(i); }

@@ -152,6 +152,61 @@ pub struct PendingGoal {
     pub queued_at: std::time::Instant,
 }
 
+/// One remembered "New goal" submission — the ↓-history of the New-goal box. Persisted (most
+/// recent first, capped) in `goal_history.json` next to `projects.json`, so past goals survive
+/// relaunch and can be recalled/edited/resubmitted from the free-text field.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoalHistoryEntry {
+    /// The goal intent as typed (no image/model suffixes).
+    pub text: String,
+    /// Canonical path of the project it was submitted against.
+    pub project: String,
+}
+
+/// Fields of the New-goal box, in ←/→ navigation order (`State::goal_field` indexes this):
+/// 0 = the free-text goal, then the project + the three model-tier chips.
+pub const GOAL_FIELDS: usize = 5;
+
+/// Most-recent-first cap on the persisted goal history.
+const GOAL_HISTORY_CAP: usize = 50;
+
+/// Where the goal history persists — sibling of `projects.json` in the app data dir.
+fn goal_history_path() -> std::path::PathBuf {
+    hyperpanes_core::persistence::paths::data_dir().join("goal_history.json")
+}
+
+/// Load the persisted goal history (missing/corrupt file → empty; history is a convenience,
+/// never load-bearing).
+fn load_goal_history() -> Vec<GoalHistoryEntry> {
+    std::fs::read_to_string(goal_history_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// A goal intent squeezed into a pane subtitle: first line only, elided past 60 chars (the
+/// header has one secondary line; the full task is in the pane's conversation).
+fn goal_subtitle(intent: &str) -> String {
+    let line = intent.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= 60 {
+        line.to_string()
+    } else {
+        let cut: String = line.chars().take(59).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Persist the goal history (best-effort — a write failure only loses recall convenience).
+fn save_goal_history(history: &[GoalHistoryEntry]) {
+    if let Ok(json) = serde_json::to_string_pretty(history) {
+        let path = goal_history_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, json);
+    }
+}
+
 /// The "New pane" dialog's payload — full spawn options for a configured pane. The simple
 /// [`State::add_pane`] / [`State::add_pane_cwd`] paths build a default of this. The native
 /// port of the Electron `addPane({ label, color, showFrame, showDot, command, cwd, shell })`.
@@ -294,6 +349,11 @@ pub struct PaneState {
     /// already open. Projected into `PaneItem::search_focus_seq` so the widget can (re)focus the
     /// query input on a reliable change signal rather than a one-shot `init`.
     pub search_focus_seq: i32,
+    /// Bumped when the New-goal box CLOSES, to hand keyboard focus back to this pane's terminal
+    /// `FocusScope` (the box owns its own scope while open — see [`State::goal_focus_seq`]).
+    /// Projected into `PaneItem::refocus_seq`; the widget's `changed refocus-tick` calls
+    /// `fs.focus()`.
+    pub refocus_seq: i32,
     /// The pane's OWN terminal font size (logical px) — per-pane zoom. Ctrl+= / − / 0 adjust
     /// the FOCUSED pane only (Electron parity); a new pane starts at the configured base
     /// (`Settings::font_px`). Drives both the rendered glyphs and the indicator scaling.
@@ -564,10 +624,42 @@ pub struct State {
     /// goal) instead of spawning a duplicate. NOT persisted — orchestrator panes don't survive
     /// a relaunch; the entry is re-established on the next "New goal" for the project.
     pub goal_orchestrators: std::collections::HashMap<String, String>,
-    /// Goals system: images attached to the in-progress New-goal dialog (step 2), held as file
+    /// Goals system: images attached to the in-progress New-goal dialog, held as file
     /// paths (clipboard images are captured to temp PNGs) until submit, when their paths are
     /// written into the goal prompt. Cleared on open and on submit.
     pub goal_draft_images: Vec<std::path::PathBuf>,
+    /// New-goal box: the goal text — a controller-owned mirror the key router edits while the
+    /// overlay is open (same pattern as `palette_query`; no focused Slint `TextInput`).
+    pub goal_text: String,
+    /// New-goal box: the ←/→-focused field (0 goal text · 1 project · 2 orch · 3 spec · 4 impl).
+    pub goal_field: usize,
+    /// New-goal box: whether the focused field's ↓-option list is open.
+    pub goal_menu_open: bool,
+    /// New-goal box: selected row in the open option list.
+    pub goal_menu_sel: usize,
+    /// New-goal box: selected project (index into `projects`).
+    pub goal_proj_sel: usize,
+    /// New-goal box: selected model per tier (orch/spec/impl; indices into
+    /// [`crate::command::GOAL_MODELS`]). Defaults opus/opus/sonnet.
+    pub goal_model_sel: [usize; 3],
+    /// Past goal submissions (most recent first) — the goal field's ↓-options. Loaded from
+    /// disk on open, appended + saved on submit.
+    pub goal_history: Vec<GoalHistoryEntry>,
+    /// Bumped when the New-goal box opens, to (re)focus the box's OWN `FocusScope` (which
+    /// captures every key and forwards it to `goal_key`). Projected into `goal-focus-tick`; the
+    /// dialog's `changed focus-tick` calls `keyscope.focus()`. This is what makes the box
+    /// keyboard-live regardless of how it was opened (palette, menu, mouse, boot scaffold) — the
+    /// terminal `FocusScope` can't be grabbed reliably on demand while the overlay covers it.
+    pub goal_focus_seq: i32,
+    /// Bumped when the controller sets the goal text itself (a history pick) so the box's
+    /// TextInput — which is otherwise the source of truth for typing — takes the new value.
+    /// Projected into `goal-settext-tick` (with `goal_text` as `goal-settext-value`); the
+    /// dialog's `changed settext-tick` assigns `gi.text`.
+    pub goal_settext_seq: i32,
+    /// New-goal box: whether the option chips (project + model tiers) are revealed. Hidden by
+    /// default — the box is just the text field — and toggled by Ctrl+O (or Tab from the text
+    /// field). While open, the focused chip's dropdown is always shown and Up/Down apply live.
+    pub goal_options_open: bool,
     /// Goals system: goals queued for robust delivery into their orchestrator panes (drained by
     /// the app tick once each pane's Claude is ready). See [`PendingGoal`].
     pub pending_goals: Vec<PendingGoal>,
@@ -668,6 +760,16 @@ impl State {
             projects: sidebar::list(),
             goal_orchestrators: std::collections::HashMap::new(),
             goal_draft_images: Vec::new(),
+            goal_text: String::new(),
+            goal_field: 0,
+            goal_menu_open: false,
+            goal_menu_sel: 0,
+            goal_proj_sel: 0,
+            goal_model_sel: [0, 0, 1],
+            goal_history: Vec::new(),
+            goal_focus_seq: 0,
+            goal_settext_seq: 0,
+            goal_options_open: false,
             pending_goals: Vec::new(),
             goal_account_cursor: 0,
             sidebar_open: false,
@@ -995,6 +1097,7 @@ impl State {
             last_toast: String::new(),
             scrollbar_on: false,
             search_focus_seq: 0,
+            refocus_seq: 0,
             font_px,
             font,
             font_dirty: false,
@@ -1207,6 +1310,7 @@ impl State {
             last_toast: String::new(),
             scrollbar_on: false,
             search_focus_seq: 0,
+            refocus_seq: 0,
             font_px: det.font_px,
             font,
             font_dirty: false,
@@ -1747,6 +1851,9 @@ impl State {
     /// Actually tear down the overlay (clears any appearance draft + confirm prompt).
     fn close_overlay_now(&mut self) {
         if self.overlay != Overlay::None {
+            // The New-goal box held keyboard focus in its own scope — hand it back to the
+            // terminal so the shell is typeable again the instant the box closes.
+            let was_goal = self.overlay == Overlay::NewGoal;
             self.overlay = Overlay::None;
             self.prefs_draft = None;
             self.prefs_confirm = false;
@@ -1754,6 +1861,9 @@ impl State {
             self.capturing_binding = None;
             self.capture_conflict = None;
             self.add_project_error.clear();
+            if was_goal {
+                self.refocus_active_pane_scope();
+            }
             self.dirty = true;
         }
     }
@@ -1766,13 +1876,288 @@ impl State {
         self.dirty = true;
     }
 
-    /// Open the "New goal" dialog (command palette → "New goal…"). Refreshes the project list
-    /// first so the picker reflects any just-added projects, and clears any leftover draft images.
+    /// Open the "New goal" box (command palette → "New goal…"). Refreshes the project list
+    /// first so the picker reflects any just-added projects, clears any leftover draft
+    /// images/text, and loads the ↓-history from disk.
     pub fn open_new_goal(&mut self) {
         self.projects = sidebar::list();
         self.goal_draft_images.clear();
+        self.goal_text.clear();
+        self.goal_field = 0;
+        self.goal_menu_open = false;
+        self.goal_menu_sel = 0;
+        self.goal_options_open = false;
+        self.goal_proj_sel = 0;
+        self.goal_model_sel = [0, 0, 1];
+        self.goal_history = load_goal_history();
         self.overlay = Overlay::NewGoal;
+        // Focus the box's OWN key scope (it captures every key and forwards to `goal_key`), so
+        // the box is keyboard-live however it was opened — the terminal FocusScope can't be
+        // grabbed reliably on demand while the overlay covers it.
+        self.goal_focus_seq = self.goal_focus_seq.wrapping_add(1);
         self.dirty = true;
+    }
+
+    /// Hand keyboard focus back to the active pane's terminal `FocusScope` (bumps its
+    /// `refocus_seq`). Called when the New-goal box closes so the shell regains the keyboard.
+    fn refocus_active_pane_scope(&mut self) {
+        let f = self.active_tab().focused;
+        if let Some(p) = self.active_tab_mut().panes.get_mut(f) {
+            p.refocus_seq = p.refocus_seq.wrapping_add(1);
+        }
+    }
+
+    /// New-goal box: set the goal text (the key router's controller-owned mirror). Typing
+    /// pulls focus back to the text field and closes any open option list.
+    pub fn goal_set_text(&mut self, text: String) {
+        // The TextInput is the source of truth for editing; this just mirrors it (for submit +
+        // history). Editing only happens on the text field, so leave field/options state alone.
+        self.goal_text = text;
+        self.dirty = true;
+    }
+
+    /// New-goal box: reveal (or, if already open, hide) the option chips — the Ctrl+O affordance.
+    /// Opening focuses the first chip and shows its dropdown; closing returns to the text field.
+    pub fn goal_toggle_options(&mut self) {
+        if self.goal_options_open {
+            self.goal_collapse();
+        } else {
+            self.goal_options_open = true;
+            self.goal_field = 1;
+            self.goal_menu_toggle(true);
+        }
+        self.dirty = true;
+    }
+
+    /// New-goal box: hide the option chips and return focus to the text field.
+    pub fn goal_collapse(&mut self) {
+        self.goal_options_open = false;
+        self.goal_field = 0;
+        self.goal_menu_open = false;
+        self.dirty = true;
+    }
+
+    /// New-goal box: Tab / Shift+Tab. From the text field it reveals the options (like Ctrl+O);
+    /// with the options open it cycles focus among the chips, each auto-showing its dropdown.
+    pub fn goal_nav(&mut self, delta: i32) {
+        if !self.goal_options_open {
+            self.goal_toggle_options();
+            return;
+        }
+        let count = (GOAL_FIELDS - 1) as i32; // the 4 option chips (fields 1..=4)
+        let cur = self.goal_field.saturating_sub(1) as i32;
+        self.goal_field = (cur + delta).rem_euclid(count) as usize + 1;
+        self.goal_menu_toggle(true); // show the newly-focused chip's dropdown, seed its selection
+        self.dirty = true;
+    }
+
+    /// The option rows for the focused field: goal text → history (title = past goal,
+    /// subtitle = its project name), project → the project list, model tiers → the model
+    /// labels. Empty when there's nothing to offer (no history yet / no projects).
+    pub fn goal_menu_rows(&self) -> Vec<(String, String)> {
+        match self.goal_field {
+            0 => self
+                .goal_history
+                .iter()
+                .map(|h| {
+                    let proj = std::path::Path::new(&h.project)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (h.text.replace('\n', " "), proj)
+                })
+                .collect(),
+            1 => self
+                .projects
+                .iter()
+                .map(|p| (p.name.clone(), p.path.clone()))
+                .collect(),
+            _ => crate::command::GOAL_MODEL_LABELS
+                .iter()
+                .zip(crate::command::GOAL_MODELS.iter())
+                .map(|(label, id)| (label.to_string(), id.to_string()))
+                .collect(),
+        }
+    }
+
+    /// New-goal box: open (↓) / close (Esc) the focused field's option list. Opening seeds the
+    /// selection on the field's current value; a field with no options stays closed.
+    pub fn goal_menu_toggle(&mut self, open: bool) {
+        if !open {
+            self.goal_menu_open = false;
+            self.dirty = true;
+            return;
+        }
+        let len = self.goal_menu_rows().len();
+        if len == 0 {
+            return;
+        }
+        self.goal_menu_sel = match self.goal_field {
+            0 => 0,
+            1 => self.goal_proj_sel.min(len - 1),
+            f => self.goal_model_sel[f - 2].min(len - 1),
+        };
+        self.goal_menu_open = true;
+        self.dirty = true;
+    }
+
+    /// New-goal box: move the open option list's selection by `delta`, clamped. For a chip field
+    /// the new selection is applied LIVE (project / model tier); the history list (text field)
+    /// applies only on pick (Enter).
+    pub fn goal_menu_nav(&mut self, delta: i32) {
+        if !self.goal_menu_open {
+            return;
+        }
+        let len = self.goal_menu_rows().len();
+        if len == 0 {
+            return;
+        }
+        let max = (len - 1) as i32;
+        self.goal_menu_sel = (self.goal_menu_sel as i32 + delta).clamp(0, max) as usize;
+        if self.goal_field != 0 {
+            self.apply_goal_menu_sel();
+        }
+        self.dirty = true;
+    }
+
+    /// Apply the current option-list selection to the focused CHIP field (project / model tier).
+    fn apply_goal_menu_sel(&mut self) {
+        let sel = self.goal_menu_sel;
+        match self.goal_field {
+            1 => self.goal_proj_sel = sel.min(self.projects.len().saturating_sub(1)),
+            f if f >= 2 => {
+                self.goal_model_sel[f - 2] = sel.min(crate::command::GOAL_MODELS.len() - 1)
+            }
+            _ => {}
+        }
+    }
+
+    /// New-goal box: apply the option list's selected row. A chip selection applies and leaves the
+    /// options open (the dropdown stays visible); a history row (text field) fills the goal text,
+    /// re-selects that goal's project, and closes the history list.
+    pub fn goal_menu_pick(&mut self) {
+        if !self.goal_menu_open {
+            return;
+        }
+        let sel = self.goal_menu_sel;
+        if self.goal_field == 0 {
+            if let Some(h) = self.goal_history.get(sel) {
+                self.goal_text = h.text.clone();
+                // Force the picked text into the box's TextInput (it's the source of truth for
+                // typing, so a plain mirror write wouldn't reach it).
+                self.goal_settext_seq = self.goal_settext_seq.wrapping_add(1);
+                if let Some(i) = self.projects.iter().position(|p| p.path == h.project) {
+                    self.goal_proj_sel = i;
+                }
+            }
+            self.goal_menu_open = false;
+        } else {
+            self.apply_goal_menu_sel();
+        }
+        self.dirty = true;
+    }
+
+    /// New-goal box (mouse): focus a field. Clicking the text field (`i == 0`) returns to it;
+    /// clicking a chip reveals the options, focuses it, and shows its dropdown.
+    pub fn goal_field_click(&mut self, i: usize) {
+        if i == 0 {
+            self.goal_field = 0;
+            self.goal_menu_open = false;
+        } else {
+            self.goal_options_open = true;
+            self.goal_field = i.min(GOAL_FIELDS - 1);
+            self.goal_menu_toggle(true);
+        }
+        self.dirty = true;
+    }
+
+    /// New-goal box (mouse): apply option row `i` of the open list.
+    pub fn goal_menu_click(&mut self, i: usize) {
+        if !self.goal_menu_open {
+            return;
+        }
+        self.goal_menu_sel = i;
+        self.goal_menu_pick();
+    }
+
+    /// The four chip labels under the goal box (project + the three model tiers), reflecting
+    /// the current selections.
+    pub fn goal_chip_labels(&self) -> Vec<String> {
+        let proj = self
+            .projects
+            .get(self.goal_proj_sel)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "no projects".to_string());
+        let m = |i: usize| {
+            crate::command::GOAL_MODEL_LABELS
+                .get(i)
+                .copied()
+                .unwrap_or("?")
+                .to_string()
+        };
+        vec![
+            proj,
+            m(self.goal_model_sel[0]),
+            m(self.goal_model_sel[1]),
+            m(self.goal_model_sel[2]),
+        ]
+    }
+
+    /// Submit the New-goal box (Enter / Start): resolve the selected project + models, remember
+    /// the goal in the ↓-history, and hand it to the project's orchestrator via
+    /// [`State::submit_new_goal`] (which closes the overlay). No-op while the option list is
+    /// open, on empty text, or with no projects.
+    pub fn goal_submit(&mut self, mgr: &SessionManager) {
+        let text = self.goal_text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let Some(path) = self.projects.get(self.goal_proj_sel).map(|p| p.path.clone()) else {
+            return;
+        };
+        let m = |i: usize| {
+            *crate::command::GOAL_MODELS
+                .get(i)
+                .unwrap_or(&crate::command::GOAL_MODELS[0])
+        };
+        let (orch, spec, implm) = (
+            m(self.goal_model_sel[0]),
+            m(self.goal_model_sel[1]),
+            m(self.goal_model_sel[2]),
+        );
+        if self.submit_new_goal(mgr, &path, &text, orch, spec, implm) {
+            self.goal_history.retain(|h| h.text != text);
+            self.goal_history.insert(
+                0,
+                GoalHistoryEntry {
+                    text,
+                    project: path,
+                },
+            );
+            self.goal_history.truncate(GOAL_HISTORY_CAP);
+            save_goal_history(&self.goal_history);
+        }
+    }
+
+    /// New-goal box Ctrl+V: an image on the clipboard becomes an attachment; otherwise
+    /// clipboard text is appended to the goal text.
+    pub fn goal_paste_clipboard(&mut self) {
+        if self.goal_paste_image() {
+            return;
+        }
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(text) = cb.get_text() {
+                let t = text.replace('\r', "");
+                if !t.is_empty() {
+                    self.goal_text.push_str(&t);
+                    // Push the updated text into the TextInput (it's the source of truth).
+                    self.goal_settext_seq = self.goal_settext_seq.wrapping_add(1);
+                    self.goal_field = 0;
+                    self.goal_menu_open = false;
+                    self.dirty = true;
+                }
+            }
+        }
     }
 
     /// The active frame palette's 8 swatches (the New Pane dialog's color row). The default
@@ -2410,11 +2795,24 @@ impl State {
             "\n(models — spec: {spec_model}, implementation: {impl_model})"
         ));
 
+        // The pane carries the project's identity (title = project name, frame = project
+        // color) and the current task as its subtitle.
+        let project = self.projects.iter().find(|p| p.path == project_path);
+        let (proj_name, proj_color) = match project {
+            Some(p) => (p.name.clone(), p.color.clone()),
+            None => (String::new(), String::new()),
+        };
+        let subtitle = goal_subtitle(intent);
+
         // Existing orchestrator for this project still live? Queue the goal for it (delivered on
-        // the next tick — its Claude is already up, so the marker gate passes immediately).
+        // the next tick — its Claude is already up, so the marker gate passes immediately) and
+        // refresh its subtitle to the newest task.
         if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
             let alive = self.tabs.iter().flat_map(|t| &t.panes).any(|p| p.uid == uid);
             if alive {
+                if let Some((ti, pi)) = self.find_pane(&uid) {
+                    self.tabs[ti].panes[pi].subtitle = Some(subtitle.clone().into());
+                }
                 self.queue_pending_goal(uid, payload);
                 self.close_overlay();
                 self.dirty = true;
@@ -2464,13 +2862,23 @@ impl State {
         // spec/impl tiers ride in as env so the persona spawns those agents with the chosen
         // models. The goal is NOT set as `startup` (that fires mid-boot, when Claude swallows it);
         // it's queued for marker-gated delivery once the pane's Claude is ready.
+        // `--dangerously-skip-permissions`: the whole goal org runs unattended 24/7 — a
+        // permission prompt would wedge it (and swallow the delivered goal text).
         let command = format!(
-            "claude --append-system-prompt-file {} --model {orch_model}",
+            "claude --dangerously-skip-permissions --append-system-prompt-file {} --model {orch_model}",
             persona.display()
         );
         let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
         env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
         env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
+        // Project identity, so the persona can stamp it onto the spec/impl panes it spawns
+        // (title = project name, frame = project color; see SKILL.md "Pane identity").
+        if !proj_name.is_empty() {
+            env.insert("HP_GOAL_PROJECT_NAME".to_string(), proj_name.clone());
+        }
+        if !proj_color.is_empty() {
+            env.insert("HP_GOAL_PROJECT_COLOR".to_string(), proj_color.clone());
+        }
         // Account rotation: assign this orchestrator the next account (round-robin over the
         // registry) via CLAUDE_CONFIG_DIR, and hand it the full ordered list (HP_GOAL_ACCOUNTS,
         // newline-separated) so the persona can spread + rotate its spec/impl agents across
@@ -2491,13 +2899,23 @@ impl State {
             env.insert("HP_GOAL_ACCOUNTS".to_string(), list);
         }
         let opts = NewPaneOpts {
-            label: Some("goals".to_string()),
+            label: Some(if proj_name.is_empty() {
+                "goals".to_string()
+            } else {
+                proj_name.clone()
+            }),
             cwd: Some(project_path.to_string()),
             command: Some(command),
+            accent: (!proj_color.is_empty()).then(|| parse_hex(&proj_color)),
+            show_frame: (!proj_color.is_empty()).then_some(true),
+            show_dot: (!proj_color.is_empty()).then_some(true),
             env: Some(env),
             ..Default::default()
         };
         if let Some(uid) = self.add_pane_opts(mgr, opts) {
+            if let Some((ti, pi)) = self.find_pane(&uid) {
+                self.tabs[ti].panes[pi].subtitle = Some(subtitle.clone().into());
+            }
             self.goal_orchestrators
                 .insert(project_path.to_string(), uid.clone());
             self.queue_pending_goal(uid, payload);
@@ -3115,6 +3533,7 @@ impl State {
             last_toast: String::new(),
             scrollbar_on: false,
             search_focus_seq: 0,
+            refocus_seq: 0,
             font_px: det.font_px,
             font,
             font_dirty: false,
@@ -3862,6 +4281,7 @@ impl State {
             last_toast: String::new(),
             scrollbar_on: false,
             search_focus_seq: 0,
+            refocus_seq: 0,
             font_px,
             font,
             font_dirty: false,
