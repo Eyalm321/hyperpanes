@@ -22,13 +22,12 @@ pass() { echo "ok:   $*"; }
 # --- 2 + 3: unit-level regression tests (fast, no GUI, no running app needed) --------------
 (
   cd rs
-  cargo test -p hyperpanes-core \
+  cargo test -p hyperpanes-core -- --exact \
     control::dispatch::tests::new_pane_with_flat_spec_fields_is_400 \
     control::dispatch::tests::new_pane_with_non_object_pane_is_400 \
     control::dispatch::tests::new_pane_with_empty_pane_object_still_spawns_default_shell \
     session::spawn::tests::build_env_omits_control_file_when_empty_string \
-    session::spawn::tests::build_env_omits_control_file_when_none \
-    -- --exact
+    session::spawn::tests::build_env_omits_control_file_when_none
 ) || fail "core regression tests (flat newPane 400 / empty control-file env)"
 pass "flat newPane spec -> 400; empty HYPERPANES_CONTROL_FILE never injected (unit tests)"
 
