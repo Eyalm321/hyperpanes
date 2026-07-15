@@ -240,11 +240,70 @@ pub(crate) mod perf {
     }
 }
 
+/// `--help`/`--version` classification, checked before ANY other mode (crash-report,
+/// session-daemon, single-instance gate, …) so `hyperpanes --help` always prints to stdout
+/// and exits, instead of silently forwarding to a running primary instance or falling through
+/// to the GUI launch path.
+#[derive(Debug, PartialEq, Eq)]
+enum InfoMode {
+    Help,
+    Version,
+}
+
+/// Classifies `argv` as a `--help`/`--version` request, or `None` for anything else (including
+/// a bare GUI launch or a subcommand like `worker`/`pair`). Only looks at `argv[1]` — the first
+/// CLI arg after the program path — so e.g. `hyperpanes -c "echo --help"` isn't misclassified.
+fn cli_info_mode(argv: &[String]) -> Option<InfoMode> {
+    match argv.get(1).map(String::as_str) {
+        Some("--help") | Some("-h") | Some("help") => Some(InfoMode::Help),
+        Some("--version") | Some("-V") => Some(InfoMode::Version),
+        _ => None,
+    }
+}
+
+const USAGE: &str = "\
+hyperpanes — tiled terminal workspace with AI-pane orchestration
+
+USAGE:
+    hyperpanes                    Launch the GUI (resumes the last session, or a workspace
+                                   file / -c command passed on the command line)
+    hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree]
+                       [--retry-window <secs>] [--nack-delay <ms>] -- <cmd> [args...]
+                                   Drain a work queue by running <cmd> per claimed task
+    hyperpanes pair                Print mobile-app pairing URLs + a terminal QR code
+
+FLAGS:
+    --kill-daemon                  Shut down the running session daemon for this install, then exit
+    -h, --help                     Print this help and exit
+    -V, --version                  Print the version and exit
+
+    --session-daemon <salt>        (internal) run the headless session daemon
+    --crash-report <path>          (internal) show the crash-recovery dialog for a log
+";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // t0 for the perf log (#2 startup) — must be the very first thing so every mark is
     // relative to process entry. Inert unless `HYPERPANES_PERFLOG` is set.
     perf::init();
     perf::mark("main: enter");
+
+    // `--help`/`--version`: handled before ANY other mode, including the single-instance gate
+    // (~line 358 pre-fix), which would otherwise silently forward these to a running primary
+    // and exit 0 without printing anything (the original defect).
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        match cli_info_mode(&argv) {
+            Some(InfoMode::Help) => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            Some(InfoMode::Version) => {
+                println!("hyperpanes {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            None => {}
+        }
+    }
 
     // Crash-reporter mode: a fresh process spawned by the panic hook (or by the next launch when a
     // crash went unacknowledged) to show the recovery dialog. Handle it before ANY app init or the
@@ -843,6 +902,53 @@ mod tests {
             "--session-daemon",
             "/data"
         ])));
+    }
+
+    // ---- --help / --version classification ----
+
+    #[test]
+    fn cli_info_mode_detects_help() {
+        for flag in ["--help", "-h", "help"] {
+            assert_eq!(
+                cli_info_mode(&argv(&["hyperpanes", flag])),
+                Some(InfoMode::Help),
+                "flag {flag:?} not classified as Help"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_info_mode_detects_version() {
+        for flag in ["--version", "-V"] {
+            assert_eq!(
+                cli_info_mode(&argv(&["hyperpanes", flag])),
+                Some(InfoMode::Version),
+                "flag {flag:?} not classified as Version"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_info_mode_is_none_for_a_normal_launch() {
+        assert_eq!(cli_info_mode(&argv(&["hyperpanes"])), None);
+        assert_eq!(
+            cli_info_mode(&argv(&["hyperpanes", "-c", "ls", "--cwd", "/tmp"])),
+            None
+        );
+        assert_eq!(
+            cli_info_mode(&argv(&["hyperpanes", "worker", "--queue", "q"])),
+            None
+        );
+        assert_eq!(cli_info_mode(&argv(&["hyperpanes", "pair"])), None);
+        assert_eq!(
+            cli_info_mode(&argv(&["hyperpanes", "--kill-daemon"])),
+            None
+        );
+        // Only argv[1] is checked, not flags/args elsewhere on the line.
+        assert_eq!(
+            cli_info_mode(&argv(&["hyperpanes", "-c", "echo --help"])),
+            None
+        );
     }
 
     // ---- Ctrl+Shift+P → palette, pinned at the ROUTER level (the full text→tok→chord
