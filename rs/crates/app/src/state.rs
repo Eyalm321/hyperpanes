@@ -207,6 +207,68 @@ fn save_goal_history(history: &[GoalHistoryEntry]) {
     }
 }
 
+/// Build the contents of `goals-mcp.json`: registers the hyperpanes MCP server so a spawned
+/// `claude --mcp-config <this file>` sees `mcp__hyperpanes__*` tools. Needed because the goals
+/// system rotates `CLAUDE_CONFIG_DIR` across per-account dirs (see `claude_accounts`) whose
+/// `.claude.json` has no user-scoped MCP registrations — the hyperpanes server only lives in the
+/// default `~/.claude.json`, which `claude` ignores once `CLAUDE_CONFIG_DIR` is set.
+fn goals_mcp_config_json(control_json_path: &str) -> String {
+    serde_json::json!({
+        "mcpServers": {
+            "hyperpanes": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "hyperpanes-mcp"],
+                "env": {
+                    "HYPERPANES_ALLOW_INPUT": "1",
+                    "HYPERPANES_CONTROL_FILE": control_json_path,
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+/// Write `goals-mcp.json` into the state dir, returning its path on success. Best-effort — a
+/// write failure must not block a goal spawn; the caller just omits `--mcp-config`.
+fn write_goals_mcp_config() -> Option<std::path::PathBuf> {
+    let control_path = hyperpanes_core::persistence::paths::control_json();
+    let json = goals_mcp_config_json(&control_path.to_string_lossy());
+    let path = hyperpanes_core::persistence::paths::state_dir().join("goals-mcp.json");
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[goals] failed to create state dir for goals-mcp.json: {e}; spawning without --mcp-config");
+            return None;
+        }
+    }
+    match std::fs::write(&path, json) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            eprintln!("[goals] failed to write goals-mcp.json: {e}; spawning without --mcp-config");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod goals_mcp_config_tests {
+    #[test]
+    fn json_registers_hyperpanes_server_with_control_path() {
+        let control_path = "/tmp/example-state/control.json";
+        let json = super::goals_mcp_config_json(control_path);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("goals-mcp.json contents must parse as JSON");
+        let hyperpanes = &parsed["mcpServers"]["hyperpanes"];
+        assert_eq!(hyperpanes["command"], "npx");
+        assert_eq!(
+            hyperpanes["env"]["HYPERPANES_CONTROL_FILE"],
+            control_path
+        );
+        assert!(json.contains(control_path));
+        assert!(json.contains("hyperpanes"));
+    }
+}
+
 /// The "New pane" dialog's payload — full spawn options for a configured pane. The simple
 /// [`State::add_pane`] / [`State::add_pane_cwd`] paths build a default of this. The native
 /// port of the Electron `addPane({ label, color, showFrame, showDot, command, cwd, shell })`.
@@ -2864,13 +2926,25 @@ impl State {
         // it's queued for marker-gated delivery once the pane's Claude is ready.
         // `--dangerously-skip-permissions`: the whole goal org runs unattended 24/7 — a
         // permission prompt would wedge it (and swallow the delivered goal text).
-        let command = format!(
+        let mut command = format!(
             "claude --dangerously-skip-permissions --append-system-prompt-file {} --model {orch_model}",
             persona.display()
         );
+        // Account rotation hides the user-scoped hyperpanes MCP registration (it only lives in
+        // the default `~/.claude.json`), so hand every spawned claude an explicit config that
+        // re-registers it. Best-effort: a write failure just drops the flag, not the spawn.
+        if let Some(mcp_config_path) = write_goals_mcp_config() {
+            command.push_str(&format!(" --mcp-config {}", mcp_config_path.display()));
+        }
         let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
         env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
         env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
+        env.insert(
+            "HYPERPANES_CONTROL_FILE".to_string(),
+            hyperpanes_core::persistence::paths::control_json()
+                .to_string_lossy()
+                .into_owned(),
+        );
         // Project identity, so the persona can stamp it onto the spec/impl panes it spawns
         // (title = project name, frame = project color; see SKILL.md "Pane identity").
         if !proj_name.is_empty() {

@@ -34,7 +34,9 @@ prompt wedges the pane).
   self-contained instruction derived from the spec (what to build, where, its own "done when").
   Use `dependsOn` to encode the DAG: a task with unfinished deps stays unclaimable until they're
   `done` (the queue enforces this), so you can enqueue the whole graph up front.
-- `spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file <this dir>/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+- `spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file <this dir>/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+  — the `--mcp-config` flag is required (see `SKILL.md` "MCP config on every spawned claude");
+  without it, account rotation hides `mcp__hyperpanes__*` tools from the impl agent.
   (or the bare `hyperpanes worker --queue <q> --count N --worktree -- …`). Impl agents run on
   `$HP_GOAL_IMPL_MODEL` (the tier the user picked in the New-goal dialog; default
   `claude-sonnet-5[1m]`), each in its own git worktree off HEAD.
