@@ -113,6 +113,18 @@ the runner (`spawn_workers` / `hyperpanes worker --queue <g> --count N --worktre
 a `dependsOn` DAG so the queue gates claim order. The queue is durable and self-recovering (see the
 plan doc), so you don't babysit individual tasks — you watch goals and health.
 
+### MCP config on every spawned claude
+
+Every `claude` the goals system spawns — this orchestrator, spec agents, impl agents — must carry
+`--mcp-config <state-dir>/goals-mcp.json` (state dir = `hyperpanes_core::persistence::paths::state_dir()`,
+e.g. `~/.local/state/hyperpanes` on Linux). Account rotation below points `CLAUDE_CONFIG_DIR` at
+per-account dirs whose `.claude.json` has no user-scoped MCP registrations, and `claude` ignores
+the default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without the flag, the pane loses
+every `mcp__hyperpanes__*` tool. The app already appends it on your own spawn; pass it down the
+same way when you spawn a spec agent, and tell the spec agent to do the same in its
+`spawn_workers` command, e.g.:
+`spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file <this dir>/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+
 ## Account rotation (24/7)
 
 Spec and impl agents run `claude` under a rotating account so a weekly/session limit on one account
