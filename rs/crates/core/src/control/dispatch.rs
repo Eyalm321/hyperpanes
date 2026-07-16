@@ -272,12 +272,30 @@ fn exec(
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect::<EnvMap>()
             });
+            // A directly-launched claude pane is resumed by RE-LAUNCHING its original
+            // command with `--resume <id>` appended (see [`resume_command`]) — so the
+            // resumed session keeps every flag it was born with (`--mcp-config`,
+            // `--append-system-prompt-file`, `--dangerously-skip-permissions`, `--model`).
+            // Typing a bare `claude --resume <id>` instead (the shell-pane path below)
+            // would drop all of them: the agent would come back tool-less, prompt-wedged,
+            // and persona-less. When we rebuild the launch we also anchor the pane at the
+            // conversation's own cwd (the marker's) and skip the typed line.
+            let resume_launch = marker
+                .as_ref()
+                .and_then(|m| resume_command(pane.command.as_deref(), &m.session_id));
+            let resume_cwd = marker
+                .as_ref()
+                .and_then(|m| crate::claude_panes::valid_resume_cwd(&m.cwd).then(|| m.cwd.clone()));
             let opts = SpawnOptions {
                 uid: new_uid.clone(),
                 shell: pane.shell.clone(),
                 args: pane.args.clone(),
-                command: pane.command.clone(),
-                cwd: pane.cwd.clone(),
+                command: resume_launch.clone().or_else(|| pane.command.clone()),
+                cwd: if resume_launch.is_some() {
+                    resume_cwd.clone().or_else(|| pane.cwd.clone())
+                } else {
+                    pane.cwd.clone()
+                },
                 env: env_override,
                 cols: None,
                 rows: None,
@@ -289,12 +307,17 @@ fn exec(
             sessions.create(opts).map_err(|e| e.to_string())?;
             model.respawn_pane(&pane_id, &new_uid);
             if let Some(m) = marker {
-                let line = if crate::claude_panes::valid_resume_cwd(&m.cwd) {
-                    format!("cd '{}' && claude --resume {}\r", m.cwd, m.session_id)
-                } else {
-                    format!("claude --resume {}\r", m.session_id)
-                };
-                sessions.write(&new_uid, &line);
+                // Shell-hosted pane (no direct claude command to rebuild): fall back to
+                // typing the resume line into the fresh shell. Direct claude panes already
+                // relaunched with `--resume` baked in, so skip the typed line for them.
+                if resume_launch.is_none() {
+                    let line = if crate::claude_panes::valid_resume_cwd(&m.cwd) {
+                        format!("cd '{}' && claude --resume {}\r", m.cwd, m.session_id)
+                    } else {
+                        format!("claude --resume {}\r", m.session_id)
+                    };
+                    sessions.write(&new_uid, &line);
+                }
                 if let Some(Value::String(p)) = cmd.get("prompt") {
                     crate::resume_queue::enqueue(&m.session_id, p)?;
                 }
@@ -578,6 +601,28 @@ fn window_id_field(cmd: &Value) -> Option<i64> {
     })
 }
 
+/// Rebuild a directly-launched claude command so a resumed pane keeps every flag it
+/// was born with (`--mcp-config`, `--append-system-prompt-file`,
+/// `--dangerously-skip-permissions`, `--model`) by appending `--resume <session_id>` to
+/// its original launch. Returns `None` when `base` doesn't launch claude directly (a
+/// shell-hosted pane — the caller keeps typing a bare `claude --resume` into its shell).
+///
+/// `session_id` is UUID-shaped (it comes from a SessionStart marker, gated on write), so
+/// it needs no shell-quoting here. `respawn_pane` never bakes the resume flag back into
+/// the stored command, so `base` is always the pristine original — but we still guard
+/// against a pre-existing `--resume` to stay idempotent if that ever changes.
+fn resume_command(base: Option<&str>, session_id: &str) -> Option<String> {
+    let base = base?.trim();
+    // Only rewrite a direct claude invocation; never append flags to a plain shell.
+    let launches_claude = base
+        .split_whitespace()
+        .any(|tok| tok == "claude" || tok.rsplit('/').next() == Some("claude"));
+    if !launches_claude || base.contains("--resume ") {
+        return launches_claude.then(|| base.to_string());
+    }
+    Some(format!("{base} --resume {session_id}"))
+}
+
 fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -791,5 +836,40 @@ mod tests {
             command_scope_error(None, &json!({ "type": "closePane", "paneId": "ghost" }), &m),
             None
         );
+    }
+
+    #[test]
+    fn resume_command_appends_flags_to_direct_claude() {
+        let base = "claude --dangerously-skip-permissions                     --append-system-prompt-file /x/SPEC.md --model m --mcp-config /x/mcp.json";
+        let got = resume_command(Some(base), "abc-123").unwrap();
+        // Every original flag survives, and the resume id is appended.
+        assert!(got.starts_with(base));
+        assert!(got.ends_with(" --resume abc-123"));
+        assert!(got.contains("--mcp-config /x/mcp.json"));
+        assert!(got.contains("--append-system-prompt-file /x/SPEC.md"));
+        assert!(got.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn resume_command_handles_absolute_claude_path() {
+        let got = resume_command(Some("/usr/bin/claude --model m"), "id9").unwrap();
+        assert_eq!(got, "/usr/bin/claude --model m --resume id9");
+    }
+
+    #[test]
+    fn resume_command_skips_non_claude_and_empty() {
+        // Shell-hosted pane → None (caller keeps the typed-`claude --resume` path).
+        assert_eq!(resume_command(Some("bash -l"), "id"), None);
+        assert_eq!(resume_command(Some("  "), "id"), None);
+        assert_eq!(resume_command(None, "id"), None);
+        // A word merely containing "claude" must not trip the direct-launch check.
+        assert_eq!(resume_command(Some("echo declaude"), "id"), None);
+    }
+
+    #[test]
+    fn resume_command_is_idempotent_when_already_resuming() {
+        let base = "claude --model m --resume old-id";
+        // Never double-append; return the command unchanged.
+        assert_eq!(resume_command(Some(base), "new-id").unwrap(), base);
     }
 }
