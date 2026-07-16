@@ -2939,6 +2939,17 @@ impl State {
         let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
         env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
         env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
+        // The orchestrator is handed the persona *content* via `--append-system-prompt-file`,
+        // not its path — so it cannot resolve `<persona dir>/SPEC.md` / `IMPL.md` when it spawns
+        // spec/impl agents, and those agents silently lose their persona. Hand it the on-disk dir
+        // (all three personas ship together, see build.rs) so the SKILL/SPEC spawn commands can
+        // pass `$HP_GOAL_PERSONA_DIR/{SPEC,IMPL}.md`.
+        if let Some(persona_dir) = persona.parent() {
+            env.insert(
+                "HP_GOAL_PERSONA_DIR".to_string(),
+                persona_dir.to_string_lossy().into_owned(),
+            );
+        }
         env.insert(
             "HYPERPANES_CONTROL_FILE".to_string(),
             hyperpanes_core::persistence::paths::control_json()
