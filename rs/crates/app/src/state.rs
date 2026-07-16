@@ -3090,7 +3090,13 @@ impl State {
         // the default `~/.claude.json`), so hand every spawned claude an explicit config that
         // re-registers it. Best-effort: a write failure just drops the flag, not the spawn.
         if let Some(mcp_config_path) = write_goals_mcp_config() {
-            command.push_str(&format!(" --mcp-config {}", mcp_config_path.display()));
+            // `--strict-mcp-config`: load ONLY the hyperpanes server from our config, never merge
+            // whatever `.mcp.json` / user-scoped servers the goal's project cwd happens to carry.
+            // Keeps the goal agent's tool pool small and deterministic (just `mcp__hyperpanes__*`).
+            command.push_str(&format!(
+                " --mcp-config {} --strict-mcp-config",
+                mcp_config_path.display()
+            ));
         }
         // The user's statusLine lives only in the default `~/.claude/settings.json`; account
         // rotation points CLAUDE_CONFIG_DIR at per-account dirs that don't carry it, so agents
@@ -3127,6 +3133,16 @@ impl State {
                 .to_string_lossy()
                 .into_owned(),
         );
+        // Force eager MCP-tool registration. Claude Code >= 2.1.x defaults to "tool-search" mode
+        // (`ENABLE_TOOL_SEARCH` unset ⇒ mode "tst"), under which EVERY MCP tool is deferred and
+        // only callable after a `ToolSearch` round-trip. In an unattended goal pane that deferral
+        // is fatal: the `mcp__hyperpanes__*` tools show up but never surface (ToolSearch returns
+        // nothing / can even orphan a `tool_search_tool_result` and 400-brick the session). Pin
+        // the mode to "standard" so the pane's Claude — and every spec/impl agent it spawns, which
+        // inherit this env — registers the hyperpanes tools up front and can call them directly.
+        // (The user's own sessions dodge this because their launcher already sets it; unattended
+        // spawns get the CLI default, so we set it explicitly here.)
+        env.insert("ENABLE_TOOL_SEARCH".to_string(), "false".to_string());
         // Project identity, so the persona can stamp it onto the spec/impl panes it spawns
         // (title = project name, frame = project color; see SKILL.md "Pane identity").
         if !proj_name.is_empty() {
