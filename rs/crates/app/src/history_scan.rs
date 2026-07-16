@@ -66,7 +66,10 @@ fn spawn_scanner() -> Scanner {
                 let res = match job {
                     Job::Sessions(root) => {
                         let cache = caches.entry(root.clone()).or_default();
-                        let sessions = cache.scan_project(Path::new(&root));
+                        // Union every account's transcript store: a session run under a
+                        // rotated/non-default CLAUDE_CONFIG_DIR lives in that account's
+                        // projects/, not ~/.claude (multi-account resume/history).
+                        let sessions = cache.scan_project_all(Path::new(&root));
                         ScanResult::Sessions(root, sessions)
                     }
                     Job::Worktrees(repo) => {

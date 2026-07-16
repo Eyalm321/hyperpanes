@@ -138,6 +138,32 @@ pub fn claude_projects_root() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude").join("projects"))
 }
 
+/// Every `projects/` transcript store to search, across all Claude accounts. `claude` writes
+/// transcripts under `$CLAUDE_CONFIG_DIR/projects`, so a session run under a rotated/non-default
+/// account (the goals system rotates them; a user may export `CLAUDE_CONFIG_DIR` too) lives in
+/// that account's store, NOT `~/.claude/projects`. Union of: `$CLAUDE_CONFIG_DIR` (if set), every
+/// registered account ([`crate::claude_accounts::config_dirs`]), and the default `~/.claude` —
+/// deduped, order-preserved (default first). Empty only when no home dir is known.
+pub fn claude_projects_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let push = |dir: PathBuf, roots: &mut Vec<PathBuf>| {
+        let p = dir.join("projects");
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    };
+    if let Some(root) = claude_projects_root() {
+        roots.push(root); // ~/.claude/projects first (the primary account)
+    }
+    for dir in crate::claude_accounts::config_dirs() {
+        push(dir, &mut roots);
+    }
+    if let Some(cfg) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|c| !c.is_empty()) {
+        push(PathBuf::from(cfg), &mut roots);
+    }
+    roots
+}
+
 /// The sessions for `project_root`, resolved against the real `~/.claude/projects`. A missing
 /// home dir or missing encoded directory yields an empty list. Newest-first.
 pub fn sessions_for_project(project_root: &Path) -> Vec<ClaudeSession> {
@@ -397,6 +423,25 @@ impl SessionCache {
             return Vec::new();
         };
         self.scan_dir(&root.join(encode_project_dir(project_root)))
+    }
+
+    /// Scan `project_root`'s sessions across EVERY account's transcript store
+    /// ([`claude_projects_roots`]), merged newest-first. A session run under a rotated or
+    /// non-default `CLAUDE_CONFIG_DIR` lives in that account's `projects/`, not `~/.claude`,
+    /// so the resume/history browser must union them. Session ids are unique across accounts,
+    /// so the merge needs no dedup. One cache backs all dirs (files keyed by full path), so
+    /// each account's unchanged transcripts stay warm across scans.
+    pub fn scan_project_all(&mut self, project_root: &Path) -> Vec<ClaudeSession> {
+        let encoded = encode_project_dir(project_root);
+        let mut out: Vec<ClaudeSession> = Vec::new();
+        let mut parsed = 0usize;
+        for root in claude_projects_roots() {
+            out.extend(self.scan_dir(&root.join(&encoded)));
+            parsed += self.last_scan_parsed;
+        }
+        self.last_scan_parsed = parsed;
+        sort_newest_first(&mut out);
+        out
     }
 
     /// List `session_dir`, re-parsing only new/changed transcripts (by mtime+size) and

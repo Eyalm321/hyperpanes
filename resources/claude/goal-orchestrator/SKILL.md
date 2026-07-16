@@ -133,6 +133,23 @@ same way when you spawn a spec agent, and tell the spec agent to do the same in 
 `spawn_workers` command, e.g.:
 `spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
 
+### If the `mcp__hyperpanes__*` tools won't load — drop to the Control API, don't reverse-engineer
+
+Some harnesses load tools on demand and **cannot surface MCP tool schemas** even when the server
+is registered and running — so `mcp__hyperpanes__open_pane` etc. are never callable, no matter how
+you search for them. **Do not** waste turns probing the tool list, guessing a `select:`/loader
+syntax, or reverse-engineering the wire protocol. The control API is a plain loopback HTTP server
+and every MCP tool maps **1:1** to an endpoint. When the MCP tools aren't callable, invoke the
+`use-hyperpanes` skill and drop straight to its **Control-API tier**:
+
+1. Read `<state-dir>/control.json` (e.g. `~/.local/state/hyperpanes/control.json`) for `{port, token}`.
+2. `curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:<port>/health` to confirm it's live.
+3. Drive it with `Authorization: Bearer <token>` — `POST /command` with `{"type":"newPane"|"setMeta"|"promptPane"|...}` for pane ops, `GET /panes/:id/output`, `GET /panes/:id/messages`, the `/queues/*` endpoints for the work queue. Full endpoint + payload mapping: the `use-hyperpanes` skill's `API.md`.
+
+This recovers the entire read/drive/orchestrate surface via `Bash` alone. Prefer it the moment the
+MCP tools don't answer — a wrapper you can shell beats a tool you can't load. Pass this same
+fallback down to spec agents (their harness has the same blind spot).
+
 ### Statusline on every spawned claude
 
 `$HP_GOAL_SETTINGS` (in your env when the user has a `statusLine` configured) points at a

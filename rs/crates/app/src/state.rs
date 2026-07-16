@@ -2109,11 +2109,15 @@ impl State {
         self.dirty = true;
     }
 
-    /// New-goal box: hide the option chips and return focus to the text field.
+    /// New-goal box: hide the option chips and return focus to the text field. Bumps the focus
+    /// tick so the `gi` TextInput regains the keyboard — without it, collapsing back from a chip
+    /// (e.g. Enter to confirm a model tier) leaves the text field visually active but unfocused,
+    /// so typing is dropped.
     pub fn goal_collapse(&mut self) {
         self.goal_options_open = false;
         self.goal_field = 0;
         self.goal_menu_open = false;
+        self.goal_focus_seq = self.goal_focus_seq.wrapping_add(1);
         self.dirty = true;
     }
 
@@ -4402,21 +4406,45 @@ impl State {
             .and_then(|m| m.get(hyperpanes_core::claude_panes::META_CWD_KEY))
             .filter(|c| hyperpanes_core::claude_panes::valid_resume_cwd(c))
             .cloned();
+        // The account (CLAUDE_CONFIG_DIR) the conversation was saved under. `claude` stores
+        // transcripts in `$CLAUDE_CONFIG_DIR/projects`, so resume must re-set it or claude
+        // looks in `~/.claude` and finds nothing (multi-account). Empty/absent ⇒ the default
+        // account — leave the env alone.
+        let resume_config_dir = (!reattach)
+            .then(|| spec.meta.as_ref())
+            .flatten()
+            .and_then(|m| m.get(hyperpanes_core::claude_panes::META_CONFIG_DIR_KEY))
+            .filter(|d| hyperpanes_core::claude_panes::valid_config_dir(d))
+            .cloned();
         let mut spawn_command = spec.command.clone();
         let mut spawn_args = spec.args.clone();
         let mut spawn_cwd = spec.cwd.clone();
+        let mut spawn_env: Option<hyperpanes_core::session::spawn::EnvMap> = None;
         let mut startup = None;
         if let Some(id) = &resume_id {
+            // `CLAUDE_CONFIG_DIR='<dir>' ` prefix for typed resume lines (the shell-pane path);
+            // empty when there's no recorded account (the default).
+            let cfg_prefix = resume_config_dir
+                .as_deref()
+                .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
+                .unwrap_or_default();
             let head = spawn_command.as_deref().unwrap_or("").split_whitespace().next().unwrap_or("");
             let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
             if spawn_command.is_none() {
                 startup = Some(match &resume_cwd {
-                    Some(cwd) => format!("cd '{cwd}' && claude --resume {id}\r"),
-                    None => format!("claude --resume {id}\r"),
+                    Some(cwd) => format!("cd '{cwd}' && {cfg_prefix}claude --resume {id}\r"),
+                    None => format!("{cfg_prefix}claude --resume {id}\r"),
                 });
             } else if head == "claude" || head == "claude.exe" {
                 if resume_cwd.is_some() {
                     spawn_cwd = resume_cwd.clone();
+                }
+                // Direct claude relaunch keeps its born-with flags; the account rides the spawn
+                // env rather than the command line so the resumed process reads the right store.
+                if let Some(dir) = &resume_config_dir {
+                    spawn_env
+                        .get_or_insert_with(Default::default)
+                        .insert("CLAUDE_CONFIG_DIR".to_string(), dir.clone());
                 }
                 match &mut spawn_args {
                     // Direct-argv spawn: extend the argv.
@@ -4454,6 +4482,7 @@ impl State {
                     shell: shell.clone(),
                     command: spawn_command,
                     args: spawn_args,
+                    env: spawn_env,
                     integration,
                     ..Default::default()
                 },

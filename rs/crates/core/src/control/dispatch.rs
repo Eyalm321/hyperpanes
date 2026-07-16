@@ -267,11 +267,40 @@ fn exec(
             // `openPane`). The account-rotation path uses this to respawn a pane under a
             // different `CLAUDE_CONFIG_DIR` when its Claude account hits a limit, while
             // `resume:true` keeps the conversation (transcripts are on a shared store).
-            let env_override = cmd.get("env").and_then(Value::as_object).map(|o| {
+            let mut env_override = cmd.get("env").and_then(Value::as_object).map(|o| {
                 o.iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect::<EnvMap>()
             });
+            // Restore the account (CLAUDE_CONFIG_DIR) the conversation was saved under, so
+            // `claude --resume` finds it in the right per-account transcript store. An explicit
+            // `env` override wins (the account-rotation path deliberately moves the pane to a
+            // DIFFERENT account with the same shared-store transcript), so only fill it in when
+            // the caller didn't set it and the marker recorded a valid dir.
+            let resume_config_dir = marker
+                .as_ref()
+                .filter(|_| resume)
+                .map(|m| m.config_dir.as_str())
+                .filter(|d| crate::claude_panes::valid_config_dir(d));
+            if let Some(dir) = resume_config_dir {
+                let already_set = env_override
+                    .as_ref()
+                    .is_some_and(|e| e.contains_key("CLAUDE_CONFIG_DIR"));
+                if !already_set {
+                    env_override
+                        .get_or_insert_with(EnvMap::default)
+                        .insert("CLAUDE_CONFIG_DIR".to_string(), dir.to_string());
+                }
+            }
+            // The account the effective env resolved to (explicit `env` override wins over the
+            // marker's) — captured before `env_override` moves into `SpawnOptions`, for the
+            // typed shell-pane resume line below. Empty ⇒ the default account.
+            let resume_cfg_prefix = env_override
+                .as_ref()
+                .and_then(|e| e.get("CLAUDE_CONFIG_DIR"))
+                .filter(|d| crate::claude_panes::valid_config_dir(d))
+                .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
+                .unwrap_or_default();
             // A directly-launched claude pane is resumed by RE-LAUNCHING its original
             // command with `--resume <id>` appended (see [`resume_command`]) — so the
             // resumed session keeps every flag it was born with (`--mcp-config`,
@@ -311,10 +340,16 @@ fn exec(
                 // typing the resume line into the fresh shell. Direct claude panes already
                 // relaunched with `--resume` baked in, so skip the typed line for them.
                 if resume_launch.is_none() {
+                    // Prefix the resolved account so the typed resume runs against the right
+                    // per-account transcript store (captured above, pre-move). Empty ⇒ default.
+                    let prefix = &resume_cfg_prefix;
                     let line = if crate::claude_panes::valid_resume_cwd(&m.cwd) {
-                        format!("cd '{}' && claude --resume {}\r", m.cwd, m.session_id)
+                        format!(
+                            "cd '{}' && {prefix}claude --resume {}\r",
+                            m.cwd, m.session_id
+                        )
                     } else {
-                        format!("claude --resume {}\r", m.session_id)
+                        format!("{prefix}claude --resume {}\r", m.session_id)
                     };
                     sessions.write(&new_uid, &line);
                 }
