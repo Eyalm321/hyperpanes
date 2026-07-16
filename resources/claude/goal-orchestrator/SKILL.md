@@ -131,7 +131,17 @@ the default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without the fla
 every `mcp__hyperpanes__*` tool. The app already appends it on your own spawn; pass it down the
 same way when you spawn a spec agent, and tell the spec agent to do the same in its
 `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+`spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+
+### Statusline on every spawned claude
+
+`$HP_GOAL_SETTINGS` (in your env when the user has a `statusLine` configured) points at a
+`goals-settings.json` carrying that statusline. Same rotation blind-spot as MCP: the per-account
+`CLAUDE_CONFIG_DIR` has no `statusLine`, so without this every agent shows Claude's built-in
+default instead of the user's. Pass `${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS}` on every
+claude you spawn (the `:+` expands to nothing when it's unset, so it's safe to always include), and
+have the spec agent add it to its `spawn_workers` command too. The app already appends `--settings`
+on your own spawn.
 
 ## Account rotation (24/7)
 

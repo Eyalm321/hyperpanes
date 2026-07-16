@@ -290,6 +290,42 @@ fn write_goals_mcp_config() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Build the contents of `goals-settings.json`: a minimal Claude settings blob carrying just
+/// the user's `statusLine`. Spawned agents rotate `CLAUDE_CONFIG_DIR` across per-account dirs
+/// whose `settings.json` has no `statusLine` (it lives only in the default `~/.claude`), so
+/// without this they show Claude's built-in default statusline instead of the user's.
+fn goals_settings_json(status_line: &serde_json::Value) -> String {
+    serde_json::json!({ "statusLine": status_line }).to_string()
+}
+
+/// Write `goals-settings.json` for a spawned `claude --settings <this file>`, mirroring the
+/// user's `statusLine` from `~/.claude/settings.json` (the config a manual, no-`CLAUDE_CONFIG_DIR`
+/// launch reads). Returns `None` — and the caller omits `--settings` — when there's no
+/// statusLine to carry or the copy fails; a settings hiccup must never block a goal spawn.
+fn write_goals_settings_config() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let src = std::path::Path::new(&home)
+        .join(".claude")
+        .join("settings.json");
+    let parsed: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(src).ok()?).ok()?;
+    let status_line = parsed.get("statusLine").filter(|v| !v.is_null())?;
+    let json = goals_settings_json(status_line);
+    let path = hyperpanes_core::persistence::paths::state_dir().join("goals-settings.json");
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[goals] failed to create state dir for goals-settings.json: {e}; spawning without --settings");
+            return None;
+        }
+    }
+    match std::fs::write(&path, json) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            eprintln!("[goals] failed to write goals-settings.json: {e}; spawning without --settings");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod goals_mcp_config_tests {
     #[test]
@@ -306,6 +342,19 @@ mod goals_mcp_config_tests {
         );
         assert!(json.contains(control_path));
         assert!(json.contains("hyperpanes"));
+    }
+
+    #[test]
+    fn settings_json_wraps_status_line_only() {
+        let status_line = serde_json::json!({
+            "type": "command",
+            "command": "~/.claude/statusline-tee.sh",
+        });
+        let json = super::goals_settings_json(&status_line);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Only statusLine is carried — no behavior keys (model/effort/outputStyle) leak in.
+        assert_eq!(parsed.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["statusLine"]);
+        assert_eq!(parsed["statusLine"], status_line);
     }
 }
 
@@ -3007,6 +3056,15 @@ impl State {
         if let Some(mcp_config_path) = write_goals_mcp_config() {
             command.push_str(&format!(" --mcp-config {}", mcp_config_path.display()));
         }
+        // The user's statusLine lives only in the default `~/.claude/settings.json`; account
+        // rotation points CLAUDE_CONFIG_DIR at per-account dirs that don't carry it, so agents
+        // fall back to Claude's built-in statusline. Inject it via `--settings` (same
+        // rotation-blindness fix as `--mcp-config`) and hand the path down as HP_GOAL_SETTINGS so
+        // the persona's spec/impl spawns inherit it too. Best-effort: no statusLine ⇒ no flag.
+        let goals_settings = write_goals_settings_config();
+        if let Some(ref settings_path) = goals_settings {
+            command.push_str(&format!(" --settings {}", settings_path.display()));
+        }
         let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
         env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
         env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
@@ -3019,6 +3077,12 @@ impl State {
             env.insert(
                 "HP_GOAL_PERSONA_DIR".to_string(),
                 persona_dir.to_string_lossy().into_owned(),
+            );
+        }
+        if let Some(ref settings_path) = goals_settings {
+            env.insert(
+                "HP_GOAL_SETTINGS".to_string(),
+                settings_path.to_string_lossy().into_owned(),
             );
         }
         env.insert(
