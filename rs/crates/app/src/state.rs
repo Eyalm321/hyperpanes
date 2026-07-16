@@ -3154,6 +3154,19 @@ impl State {
                 .join("\n");
             env.insert("HP_GOAL_ACCOUNTS".to_string(), list);
         }
+        // Env-inheritance backstop. A control-spawned pane gets the APP process env + its explicit
+        // spawn env, NOT the parent pane's PTY env (see `session::spawn::build_env`) — so these
+        // vars reach a spec agent / worker-runner pane only if the LLM threads them through EVERY
+        // spawn. Miss one and `--append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md` expands to
+        // `/IMPL.md` and the worker dies instantly. Mirror the STABLE, non-goal-specific vars into
+        // the app's own env so `fresh_env()` hands them to every pane unconditionally. The
+        // goal/project-specific vars (models, project name/color, the rotated CLAUDE_CONFIG_DIR)
+        // deliberately stay per-spawn — they must not leak process-wide across concurrent projects.
+        for key in ["HP_GOAL_PERSONA_DIR", "HP_GOAL_SETTINGS", "HP_GOAL_ACCOUNTS"] {
+            if let Some(val) = env.get(key) {
+                std::env::set_var(key, val);
+            }
+        }
         let opts = NewPaneOpts {
             label: Some(if proj_name.is_empty() {
                 "goals".to_string()

@@ -560,8 +560,36 @@ impl Worktree {
         let branch = format!("worker/{safe}/{id8}");
         let path =
             std::env::temp_dir().join(format!("hp-wt-{safe}-{id8}-{}", std::process::id()));
+        // The branch name is deterministic (per task id), so a stale `worker/<q>/<id8>` left by a
+        // prior run makes `git worktree add -b` fail. Prune dead worktree admin entries first, then
+        // decide by whether the stale branch carries uncollected commits: if it's an ancestor of
+        // HEAD (nothing beyond the base) reset it with `-B`; if it's AHEAD of HEAD (uncollected
+        // impl work per the commit-first protocol, or checked out in a live worktree) refuse and
+        // surface it rather than clobber committed work.
+        let _ = Command::new("git").args(["worktree", "prune"]).output();
+        let branch_exists = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{branch}"))
+            .output()
+            .is_ok_and(|o| o.status.success());
+        let add_flag = if branch_exists {
+            let safe_to_reset = Command::new("git")
+                .args(["merge-base", "--is-ancestor", &branch, "HEAD"])
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !safe_to_reset {
+                return Err(format!(
+                    "git worktree add: branch {branch} already exists with commits not in HEAD \
+                     (uncollected work from a prior run?) — collect or delete it before retrying"
+                )
+                .into());
+            }
+            "-B" // stale but empty relative to HEAD → safe to re-point onto HEAD
+        } else {
+            "-b"
+        };
         let out = Command::new("git")
-            .args(["worktree", "add", "-b", &branch])
+            .args(["worktree", "add", add_flag, &branch])
             .arg(&path)
             .arg("HEAD")
             .output()
