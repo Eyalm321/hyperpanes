@@ -17,7 +17,8 @@ name: verify
 # workspaces. Tests live in two of them — `rs` (lean headless core, crates/core) and
 # `rs/crates/terminal-widget`. The heavy GUI/GPU crate `rs/crates/app` is its own
 # workspace, normally built at tag time (release-rust.yml); it is build-verified here
-# only when a PR actually touches it (label `area:app`) or inside the merge queue.
+# whenever a PR touches any Rust crate (the `changes` path filter), carries `area:app`,
+# or runs inside the merge queue.
 # There is no TypeScript/Node check to gate: bench/ is a plain Node benchmark harness
 # whose only scripts launch the app to measure it (no lint/typecheck/build/test script).
 
@@ -105,13 +106,33 @@ jobs:
       - name: Clippy (deny warnings)
         run: cd ${{ matrix.ws }} && cargo clippy --all-targets -- -D warnings
 
-  # The GUI/GPU crate (rs/crates/app) is tag-time-only by default. Build-verify it for PRs
-  # that touch it (label `area:app`) and always inside the merge queue, so we never
-  # auto-merge code that fails to compile on the GUI path. (--locked: all three workspaces
-  # ship a committed Cargo.lock, so a dep can't silently float in.)
+  # Did this PR touch any Rust crate? The GUI crate (rs/crates/app) depends on core +
+  # terminal-widget by path, so a change to ANY of them (or a lockfile) can break the GUI
+  # build — build-gui gates on this so app-crate changes are actually build-verified, not
+  # silently skipped (the old label-only trigger meant plain `--merge` PRs never built the GUI).
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'rs/crates/**'
+              - 'rs/Cargo.lock'
+
+  # The GUI/GPU crate (rs/crates/app) is tag-time-only by default. Build-verify it whenever a
+  # PR touches any Rust crate (see `changes`), carries the `area:app` label, or runs inside the
+  # merge queue — so we never auto-merge code that fails to compile on the GUI path. (--locked:
+  # all three workspaces ship a committed Cargo.lock, so a dep can't silently float in.)
   build-gui:
     name: build-gui
-    if: contains(github.event.pull_request.labels.*.name, 'area:app') || github.event_name == 'merge_group'
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || contains(github.event.pull_request.labels.*.name, 'area:app') || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -138,15 +159,17 @@ jobs:
   # Umbrella gate: the ONLY required status check (context name `verify`). It aggregates
   # the matrix legs so the ruleset never has to enumerate per-OS / per-workspace contexts.
   verify:
-    needs: [test, lint, build-gui]
+    needs: [changes, test, lint, build-gui]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Gate on upstream job results
         run: |
-          echo "test=${{ needs.test.result }} lint=${{ needs.lint.result }} build-gui=${{ needs.build-gui.result }}"
-          # build-gui is intentionally skipped on PRs that don't touch the GUI crate; treat
-          # skipped as pass, but fail on any failure/cancellation.
+          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }} lint=${{ needs.lint.result }} build-gui=${{ needs.build-gui.result }}"
+          # build-gui is intentionally skipped on PRs that don't touch any Rust crate; treat
+          # skipped as pass, but fail on any failure/cancellation. `changes` must succeed —
+          # if the path filter breaks, build-gui skips and we must NOT silently pass the GUI gate.
+          [[ "${{ needs.changes.result }}" == "success" ]] || { echo "::error::changes gate failed"; exit 1; }
           [[ "${{ needs.test.result }}" == "success" ]] || { echo "::error::test gate failed"; exit 1; }
           [[ "${{ needs.lint.result }}" == "success" ]] || { echo "::error::lint gate failed"; exit 1; }
           [[ "${{ needs.build-gui.result }}" =~ ^(success|skipped)$ ]] || { echo "::error::build-gui gate failed"; exit 1; }
