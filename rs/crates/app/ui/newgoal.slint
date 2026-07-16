@@ -199,6 +199,37 @@ export component NewGoalDialog inherits Rectangle {
                 }
             }
 
+            // ---- target project (ALWAYS visible; flat) — the org this goal is handed to.
+            //      Hidden behind Ctrl+O the project was invisible, so a goal could silently land
+            //      on the wrong orchestrator. Click to reveal + focus the project picker.
+            if root.chips.length > 0 && root.chips[0] != "" && !root.options-open : Rectangle {
+                height: 20px;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    spacing: 5px;
+                    Text {
+                        text: "→";
+                        color: Theme.faint;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.chips[0];
+                        color: Theme.subtext;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "· ⌃O to change";
+                        color: Theme.faint;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+                TouchArea { clicked => { gi.focus(); root.field-click(1); } }
+            }
+
             // ---- attached images (flat) ----
             if root.goal-images.length > 0 : VerticalLayout {
                 spacing: 4px;

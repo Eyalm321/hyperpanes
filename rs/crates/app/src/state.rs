@@ -236,6 +236,20 @@ fn goal_subtitle(intent: &str) -> String {
     }
 }
 
+/// Index into `projects` of the project containing `cwd` — the project whose non-empty root is
+/// `cwd` itself or a `<root>/…` prefix of it, longest (most specific) winning when roots nest.
+/// `None` when `cwd` sits outside every project. Pure so the New-goal default is unit-testable.
+fn goal_project_for_cwd(projects: &[sidebar::Project], cwd: &str) -> Option<usize> {
+    projects
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            !p.path.is_empty() && (cwd == p.path || cwd.starts_with(&format!("{}/", p.path)))
+        })
+        .max_by_key(|(_, p)| p.path.len())
+        .map(|(i, _)| i)
+}
+
 /// Persist the goal history (best-effort — a write failure only loses recall convenience).
 fn save_goal_history(history: &[GoalHistoryEntry]) {
     if let Ok(json) = serde_json::to_string_pretty(history) {
@@ -2059,6 +2073,20 @@ impl State {
     /// Open the "New goal" box (command palette → "New goal…"). Refreshes the project list
     /// first so the picker reflects any just-added projects, clears any leftover draft
     /// images/text, and loads the ↓-history from disk.
+    /// The index into `self.projects` for the FOCUSED pane's project — the project whose root is
+    /// the longest path prefix of the focused pane's live cwd. `0` (recency-top) when the focused
+    /// pane has no cwd yet or sits outside every remembered project. Used to seed the New-goal
+    /// box so a goal defaults to the project the user is actually in, not whatever's most-recent.
+    fn default_goal_project_sel(&self) -> usize {
+        let cwd = self
+            .active_tab()
+            .panes
+            .get(self.active_tab().focused)
+            .and_then(|p| p.cwd.as_deref());
+        cwd.and_then(|c| goal_project_for_cwd(&self.projects, c))
+            .unwrap_or(0)
+    }
+
     pub fn open_new_goal(&mut self) {
         self.projects = sidebar::list();
         self.goal_draft_images.clear();
@@ -2067,7 +2095,11 @@ impl State {
         self.goal_menu_open = false;
         self.goal_menu_sel = 0;
         self.goal_options_open = false;
-        self.goal_proj_sel = 0;
+        // Default the target project to the one the FOCUSED pane sits in — what the user is
+        // looking at — not the recency-top project (index 0). Otherwise a goal typed while a
+        // DIFFERENT project's orchestrator is the most-recently-touched silently routes to that
+        // project's org: the "sent the prompt to the wrong orchestrator" bug. Falls back to 0.
+        self.goal_proj_sel = self.default_goal_project_sel();
         self.goal_model_sel = load_goal_model_defaults();
         self.goal_history = load_goal_history();
         self.overlay = Overlay::NewGoal;
@@ -4654,6 +4686,47 @@ pub(crate) fn local_secs_since_midnight() -> u64 {
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn secs_from_hms(h: u64, m: u64, s: u64) -> u64 {
     h * 3600 + m * 60 + s
+}
+
+#[cfg(test)]
+mod goal_project_tests {
+    use super::*;
+
+    fn proj(path: &str) -> Project {
+        Project {
+            id: path.to_string(),
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            color: String::new(),
+            last_opened_at: None,
+        }
+    }
+
+    #[test]
+    fn cwd_maps_to_its_project_not_the_recency_top() {
+        // Recency-top is index 0 (`working`); the focused pane sits in `target` → pick `target`,
+        // NOT 0. This is the wrong-orchestrator fix: the default must follow the pane, not order.
+        let projects = [proj("/home/me/working"), proj("/home/me/target")];
+        assert_eq!(goal_project_for_cwd(&projects, "/home/me/target"), Some(1));
+        // A worktree/subdir cwd still resolves to the project root.
+        assert_eq!(
+            goal_project_for_cwd(&projects, "/home/me/target/.worktrees/x"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn longest_prefix_wins_and_outsiders_are_none() {
+        // Nested roots: the most specific project wins.
+        let projects = [proj("/home/me/repo"), proj("/home/me/repo/sub")];
+        assert_eq!(
+            goal_project_for_cwd(&projects, "/home/me/repo/sub/deep"),
+            Some(1)
+        );
+        // A cwd outside every project (and a bare-prefix false match) → None (caller falls to 0).
+        assert_eq!(goal_project_for_cwd(&projects, "/home/me/other"), None);
+        assert_eq!(goal_project_for_cwd(&projects, "/home/me/repo-x"), None);
+    }
 }
 
 #[cfg(test)]
