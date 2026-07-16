@@ -175,6 +175,46 @@ fn goal_history_path() -> std::path::PathBuf {
     hyperpanes_core::persistence::paths::data_dir().join("goal_history.json")
 }
 
+/// Where the New-goal dialog's last-used model tiers persist — sibling of
+/// `goal_history.json`. Remembering the picks means re-opening the box doesn't reset the
+/// orchestrator/spec/impl tiers to the built-in defaults every time.
+fn goal_defaults_path() -> std::path::PathBuf {
+    hyperpanes_core::persistence::paths::data_dir().join("goal_defaults.json")
+}
+
+/// Built-in model tiers when nothing is remembered yet: orchestrator/spec = opus (idx 0),
+/// implementation = sonnet (idx 1). Keep in sync with [`State::open_new_goal`].
+const GOAL_MODEL_SEL_DEFAULT: [usize; 3] = [0, 0, 1];
+
+/// Clamp each remembered tier index into [`crate::command::GOAL_MODELS`] so a stale file
+/// (e.g. written before the model list shrank) can never point past the end.
+fn clamp_goal_model_sel(sel: [usize; 3]) -> [usize; 3] {
+    let max = crate::command::GOAL_MODELS.len() - 1;
+    [sel[0].min(max), sel[1].min(max), sel[2].min(max)]
+}
+
+/// Load the remembered [orchestrator, spec, impl] model-tier indices for the New-goal box
+/// (missing/corrupt file → built-in defaults).
+fn load_goal_model_defaults() -> [usize; 3] {
+    std::fs::read_to_string(goal_defaults_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<[usize; 3]>(&s).ok())
+        .map(clamp_goal_model_sel)
+        .unwrap_or(GOAL_MODEL_SEL_DEFAULT)
+}
+
+/// Persist the New-goal box's model tiers (best-effort — a write failure only loses the
+/// remembered defaults, never load-bearing).
+fn save_goal_model_defaults(sel: &[usize; 3]) {
+    if let Ok(json) = serde_json::to_string(sel) {
+        let path = goal_defaults_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
 /// Load the persisted goal history (missing/corrupt file → empty; history is a convenience,
 /// never load-bearing).
 fn load_goal_history() -> Vec<GoalHistoryEntry> {
@@ -266,6 +306,35 @@ mod goals_mcp_config_tests {
         );
         assert!(json.contains(control_path));
         assert!(json.contains("hyperpanes"));
+    }
+}
+
+#[cfg(test)]
+mod goal_defaults_tests {
+    use super::{clamp_goal_model_sel, GOAL_MODEL_SEL_DEFAULT};
+
+    #[test]
+    fn valid_indices_pass_through() {
+        // A saved selection within range survives a round-trip unchanged.
+        assert_eq!(clamp_goal_model_sel([2, 0, 1]), [2, 0, 1]);
+        assert_eq!(clamp_goal_model_sel(GOAL_MODEL_SEL_DEFAULT), GOAL_MODEL_SEL_DEFAULT);
+    }
+
+    #[test]
+    fn stale_out_of_range_indices_are_clamped() {
+        // A file written when GOAL_MODELS was longer must not point past the end.
+        let max = crate::command::GOAL_MODELS.len() - 1;
+        assert_eq!(clamp_goal_model_sel([99, 0, 42]), [max, 0, max]);
+    }
+
+    #[test]
+    fn serde_roundtrip_matches_saved_shape() {
+        // save_goal_model_defaults writes a bare 3-element array; load parses the same.
+        let sel = [1usize, 2, 3];
+        let json = serde_json::to_string(&sel).unwrap();
+        assert_eq!(json, "[1,2,3]");
+        let back: [usize; 3] = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sel);
     }
 }
 
@@ -827,7 +896,7 @@ impl State {
             goal_menu_open: false,
             goal_menu_sel: 0,
             goal_proj_sel: 0,
-            goal_model_sel: [0, 0, 1],
+            goal_model_sel: GOAL_MODEL_SEL_DEFAULT,
             goal_history: Vec::new(),
             goal_focus_seq: 0,
             goal_settext_seq: 0,
@@ -1950,7 +2019,7 @@ impl State {
         self.goal_menu_sel = 0;
         self.goal_options_open = false;
         self.goal_proj_sel = 0;
-        self.goal_model_sel = [0, 0, 1];
+        self.goal_model_sel = load_goal_model_defaults();
         self.goal_history = load_goal_history();
         self.overlay = Overlay::NewGoal;
         // Focus the box's OWN key scope (it captures every key and forwards to `goal_key`), so
@@ -2188,6 +2257,8 @@ impl State {
             m(self.goal_model_sel[2]),
         );
         if self.submit_new_goal(mgr, &path, &text, orch, spec, implm) {
+            // Remember the chosen tiers so the next New-goal box opens pre-filled.
+            save_goal_model_defaults(&self.goal_model_sel);
             self.goal_history.retain(|h| h.text != text);
             self.goal_history.insert(
                 0,
