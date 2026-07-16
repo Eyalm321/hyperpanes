@@ -45,8 +45,11 @@ For each goal you're given (free text):
    that must exist, or a rubric to judge). If acceptance is unclear, infer the tightest reasonable
    check and state it; don't block.
 2. **Spawn a spec agent** — one dedicated pane per goal (`open_pane`, NOT a subagent), in the
-   project cwd, running `claude --dangerously-skip-permissions` with the spec-agent persona (this
-   skill's `SPEC.md`) via `--append-system-prompt-file`. Model:
+   project cwd, running `claude --dangerously-skip-permissions` with the spec-agent persona via
+   `--append-system-prompt-file $HP_GOAL_PERSONA_DIR/SPEC.md` (the app hands you
+   `HP_GOAL_PERSONA_DIR` in your env — the on-disk dir that holds `SKILL.md`, `SPEC.md`,
+   `IMPL.md`; pass it down to every spec agent so its `spawn_workers` can point impl agents at
+   `$HP_GOAL_PERSONA_DIR/IMPL.md`). Model:
    use **`$HP_GOAL_SPEC_MODEL`** if it's set in your env (the user picked it in the New-goal
    dialog); otherwise `claude-opus-4-8[1m]` for a hard/large goal, `claude-fable-5[1m]` for a
    lighter one. Pass the impl-agent model down to the spec agent too (env `HP_GOAL_IMPL_MODEL`, or
@@ -113,6 +116,11 @@ the runner (`spawn_workers` / `hyperpanes worker --queue <g> --count N --worktre
 a `dependsOn` DAG so the queue gates claim order. The queue is durable and self-recovering (see the
 plan doc), so you don't babysit individual tasks — you watch goals and health.
 
+**Impl-agent pane budget:** fan-out is soft-capped at **16 worker panes** — the spec agent sets
+`count <= 16` and the queue multiplexes any overflow (competing-consumers), so more subtasks than 16
+drain through the 16 panes rather than opening more. It's persona-enforced (see `SPEC.md` section 2),
+not a code limit; hold the line so concurrent goals don't explode the pane count.
+
 ### MCP config on every spawned claude
 
 Every `claude` the goals system spawns — this orchestrator, spec agents, impl agents — must carry
@@ -123,7 +131,7 @@ the default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without the fla
 every `mcp__hyperpanes__*` tool. The app already appends it on your own spawn; pass it down the
 same way when you spawn a spec agent, and tell the spec agent to do the same in its
 `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file <this dir>/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+`spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
 
 ## Account rotation (24/7)
 
