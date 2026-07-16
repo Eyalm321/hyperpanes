@@ -283,9 +283,9 @@ fn exec(
             let resume_launch = marker
                 .as_ref()
                 .and_then(|m| resume_command(pane.command.as_deref(), &m.session_id));
-            let resume_cwd = marker.as_ref().and_then(|m| {
-                crate::claude_panes::valid_resume_cwd(&m.cwd).then(|| m.cwd.clone())
-            });
+            let resume_cwd = marker
+                .as_ref()
+                .and_then(|m| crate::claude_panes::valid_resume_cwd(&m.cwd).then(|| m.cwd.clone()));
             let opts = SpawnOptions {
                 uid: new_uid.clone(),
                 shell: pane.shell.clone(),
