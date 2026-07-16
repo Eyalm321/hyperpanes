@@ -284,6 +284,15 @@ impl App {
                         meta.insert(claude_panes::META_CWD_KEY.to_string(), s.cwd.clone());
                         p.cwd = Some(s.cwd);
                     }
+                    // The account (CLAUDE_CONFIG_DIR) the conversation was saved under —
+                    // restore re-sets it so `claude --resume` finds the right transcript
+                    // store. Absent/invalid ⇒ the default account, so record nothing.
+                    if claude_panes::valid_config_dir(&s.config_dir) {
+                        meta.insert(
+                            claude_panes::META_CONFIG_DIR_KEY.to_string(),
+                            s.config_dir,
+                        );
+                    }
                 }
             }
         }

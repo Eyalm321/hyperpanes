@@ -36,6 +36,13 @@ pub const META_KEY: &str = "claude.session";
 /// re-attach) — so the hook-reported cwd is authoritative and restore must `cd` first.
 pub const META_CWD_KEY: &str = "claude.cwd";
 
+/// Pane-meta key for the conversation's `CLAUDE_CONFIG_DIR` (the account it was saved
+/// under). `claude` stores transcripts in `$CLAUDE_CONFIG_DIR/projects`, so a relaunch must
+/// set the SAME dir for `claude --resume <id>` to find the session — without it, a pane that
+/// ran under a rotated/non-default account resumes against `~/.claude` and finds nothing.
+/// Empty/absent ⇒ the default account (`~/.claude`), so restore sets nothing.
+pub const META_CONFIG_DIR_KEY: &str = "claude.config_dir";
+
 /// Is `cwd` safe to interpolate into a single-quoted `cd '<cwd>'`? Absolute, no control
 /// characters, and no single quotes (rather than escaping, refuse — real project paths
 /// never contain them, and refusing keeps the injection reasoning trivial).
@@ -44,6 +51,14 @@ pub fn valid_resume_cwd(cwd: &str) -> bool {
         && cwd.len() < 1024
         && !cwd.contains('\'')
         && !cwd.chars().any(|c| c.is_control())
+}
+
+/// Is `dir` safe to interpolate into a single-quoted `CLAUDE_CONFIG_DIR='<dir>'` prefix (or
+/// pass as a spawn env value)? Same gate as [`valid_resume_cwd`] — absolute, bounded, no
+/// single quotes, no control chars — since a marker is external, best-effort state that
+/// lands on a command line. A non-empty but invalid dir is treated as "no config dir".
+pub fn valid_config_dir(dir: &str) -> bool {
+    valid_resume_cwd(dir)
 }
 
 /// One pane's live Claude conversation, as reported by the session hook.
@@ -56,6 +71,12 @@ pub struct PaneClaudeSession {
     /// own cwd snapshot is what restore actually uses).
     #[serde(default)]
     pub cwd: String,
+    /// The `CLAUDE_CONFIG_DIR` this conversation was saved under (empty ⇒ the default
+    /// `~/.claude` account). Restore must re-set it so `claude --resume` finds the session
+    /// in the right per-account transcript store. Older markers without the field parse
+    /// with an empty string (the default account), preserving pre-multi-account behaviour.
+    #[serde(default)]
+    pub config_dir: String,
 }
 
 /// The marker file for one pane id.
@@ -109,14 +130,25 @@ mod tests {
     #[test]
     fn parses_marker_json_shape() {
         let parsed: PaneClaudeSession = serde_json::from_str(
-            r#"{ "sessionId": "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a", "cwd": "/w" }"#,
+            r#"{ "sessionId": "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a", "cwd": "/w", "configDir": "/home/me/.claude-alt" }"#,
         )
         .unwrap();
         assert_eq!(parsed.session_id, "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a");
         assert_eq!(parsed.cwd, "/w");
-        // cwd is optional — an older/minimal hook payload still parses.
+        assert_eq!(parsed.config_dir, "/home/me/.claude-alt");
+        // cwd + configDir are optional — an older/minimal hook payload (pre-multi-account)
+        // still parses, defaulting to the default account.
         let bare: PaneClaudeSession =
             serde_json::from_str(r#"{ "sessionId": "deadbeef" }"#).unwrap();
         assert_eq!(bare.cwd, "");
+        assert_eq!(bare.config_dir, "");
+    }
+
+    #[test]
+    fn config_dir_gate() {
+        assert!(valid_config_dir("/home/me/.claude-alt"));
+        assert!(!valid_config_dir("")); // empty = no config dir, not "valid"
+        assert!(!valid_config_dir("relative/.claude"));
+        assert!(!valid_config_dir("/has'quote"));
     }
 }
