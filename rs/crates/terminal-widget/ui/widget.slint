@@ -13,6 +13,7 @@ export struct KeyMsg {
     control: bool,
     alt: bool,
     shift: bool,
+    meta: bool,
 }
 
 // A highlight rectangle in the pane's logical-px space (selection / search overlays). The
@@ -519,6 +520,7 @@ export component TerminalPane inherits Rectangle {
                 control: e.modifiers.control,
                 alt: e.modifiers.alt,
                 shift: e.modifiers.shift,
+                meta: e.modifiers.meta,
             });
             accept
         }

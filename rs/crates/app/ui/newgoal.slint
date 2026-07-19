@@ -136,17 +136,33 @@ export component NewGoalDialog inherits Rectangle {
                                 wrap: word-wrap;
                                 edited => { root.text-changed(self.text); }
                                 key-pressed(e) => {
-                                // Forward nav / options / submit / dismiss + Ctrl+O / Ctrl+V. NOT
-                                // Left/Right (native cursor) nor Ctrl+A/C/X (native text ops).
+                                // Forward nav / options / submit / dismiss + Cmd+H (history) +
+                                // Ctrl+O / Ctrl+V. NOT Left/Right (native cursor) nor Ctrl+A/C/X
+                                // (native text ops).
                                 if (e.text == Key.Tab || e.text == Key.Escape || e.text == Key.Return
-                                    || e.text == Key.UpArrow || e.text == Key.DownArrow
                                     || (e.modifiers.control && (e.text == "o" || e.text == "v"
-                                        || e.text == "\u{0f}" || e.text == "\u{16}"))) {
+                                        || e.text == "\u{0f}" || e.text == "\u{16}"))
+                                    || (e.modifiers.meta && (e.text == "h" || e.text == "H"))) {
                                     root.key({
                                         text: e.text,
                                         control: e.modifiers.control,
                                         alt: e.modifiers.alt,
                                         shift: e.modifiers.shift,
+                                        meta: e.modifiers.meta,
+                                    });
+                                    return accept;
+                                }
+                                // Up/Down only drive an already-open list (or chip nav); on the
+                                // bare text field with the list closed, let the TextInput move the
+                                // caret between wrapped lines as normal.
+                                if ((e.text == Key.UpArrow || e.text == Key.DownArrow)
+                                    && (root.field != 0 || root.menu-open)) {
+                                    root.key({
+                                        text: e.text,
+                                        control: e.modifiers.control,
+                                        alt: e.modifiers.alt,
+                                        shift: e.modifiers.shift,
+                                        meta: e.modifiers.meta,
                                     });
                                     return accept;
                                 }
@@ -158,6 +174,7 @@ export component NewGoalDialog inherits Rectangle {
                                         control: e.modifiers.control,
                                         alt: e.modifiers.alt,
                                         shift: e.modifiers.shift,
+                                        meta: e.modifiers.meta,
                                     });
                                     return accept;
                                 }

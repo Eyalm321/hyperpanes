@@ -766,15 +766,17 @@ pub(crate) fn palette_key(query: &str, msg: &KeyMsg) -> Option<Command> {
 }
 
 /// Translate a FORWARDED key event from the New-goal box into a command. The goal field is a
-/// real Slint `TextInput` that owns text editing (typing, Left/Right/Home/End cursor motion,
-/// Backspace) natively; it forwards ONLY the navigation/options/submit/dismiss keys here.
+/// real Slint `TextInput` that owns text editing (typing, Left/Right/Up/Down/Home/End cursor
+/// motion, Backspace) natively; it forwards ONLY the navigation/options/submit/dismiss keys here.
 /// `field` is the focused field (0 = text, 1..=4 = chips), `menu_open` whether the focused
 /// field's option list is showing.
 ///
 /// Layout: Ctrl+O reveals/hides the option chips; Tab / Shift+Tab cycle chip focus (each chip
-/// auto-shows its dropdown); ↓/↑ move the open list (chips apply live); Enter picks a history
-/// row, else submits; Esc collapses the options/list, then closes the box; Ctrl+V pastes an
-/// image attachment (or text). Left/Right never reach here — the TextInput moves its cursor.
+/// auto-shows its dropdown); Cmd+H opens the goal-history list (or cycles it forward if already
+/// open); ↓/↑ move an already-open list (chips apply live) but never open one themselves; Enter
+/// picks a history row, else submits; Esc collapses the options/list, then closes the box; Ctrl+V
+/// pastes an image attachment (or text). Left/Right/Up/Down on the bare text field never reach
+/// here — the TextInput moves its cursor with them.
 pub(crate) fn goal_key(field: usize, menu_open: bool, msg: &KeyMsg) -> Option<Command> {
     // Ctrl+O toggles the option chips (Slint may deliver the letter or the control char).
     if msg.control && !msg.alt && (msg.text == "o" || msg.text == "O" || msg.text == "\u{0f}") {
@@ -783,6 +785,14 @@ pub(crate) fn goal_key(field: usize, menu_open: bool, msg: &KeyMsg) -> Option<Co
     // Ctrl+V pastes: an image on the clipboard becomes an attachment, otherwise text.
     if msg.control && !msg.alt && (msg.text == "v" || msg.text == "V" || msg.text == "\u{16}") {
         return Some(Command::GoalPasteClipboard);
+    }
+    // Cmd+H opens the goal-history list, or cycles it forward if already open.
+    if msg.meta && !msg.control && !msg.alt && (msg.text == "h" || msg.text == "H") {
+        return Some(if menu_open {
+            Command::GoalMenuNav(1)
+        } else {
+            Command::GoalMenu(true)
+        });
     }
     if is_key(&msg.text, Key::Escape) {
         return Some(if menu_open || field != 0 {
@@ -805,11 +815,15 @@ pub(crate) fn goal_key(field: usize, menu_open: bool, msg: &KeyMsg) -> Option<Co
         }
     }
     if is_key(&msg.text, Key::DownArrow) {
-        return Some(if menu_open {
-            Command::GoalMenuNav(1)
+        // A closed list on the bare text field (field == 0) is native caret movement — the
+        // TextInput shouldn't forward it here at all, but guard anyway for a stray event.
+        return if menu_open {
+            Some(Command::GoalMenuNav(1))
+        } else if field != 0 {
+            Some(Command::GoalMenu(true))
         } else {
-            Command::GoalMenu(true)
-        });
+            None
+        };
     }
     if is_key(&msg.text, Key::UpArrow) {
         return menu_open.then_some(Command::GoalMenuNav(-1));
@@ -838,6 +852,17 @@ mod tests {
             control: ctrl,
             alt,
             shift,
+            meta: false,
+        }
+    }
+
+    fn msg_meta(text: &str) -> KeyMsg {
+        KeyMsg {
+            text: text.into(),
+            control: false,
+            alt: false,
+            shift: false,
+            meta: true,
         }
     }
 
@@ -1105,9 +1130,12 @@ mod tests {
             goal_key(0, false, &msg("v", true, false, false)),
             Some(Command::GoalPasteClipboard)
         ));
-        // ↓ opens the focused field's list, then navigates it; ↑ only navigates an open list.
+        // ↓ on the bare text field with the list closed is native caret movement — goal_key
+        // never opens the list itself (that's Cmd+H now); on a chip it still opens that chip's
+        // list, and an already-open list navigates either way. ↑ only navigates an open list.
+        assert!(goal_key(0, false, &msg(down.as_str(), false, false, false)).is_none());
         assert!(matches!(
-            goal_key(0, false, &msg(down.as_str(), false, false, false)),
+            goal_key(2, false, &msg(down.as_str(), false, false, false)),
             Some(Command::GoalMenu(true))
         ));
         assert!(matches!(
@@ -1119,6 +1147,17 @@ mod tests {
             Some(Command::GoalMenuNav(-1))
         ));
         assert!(goal_key(0, false, &msg(up.as_str(), false, false, false)).is_none());
+        // Cmd+H opens the goal-history list, or cycles it forward if already open.
+        assert!(matches!(
+            goal_key(0, false, &msg_meta("h")),
+            Some(Command::GoalMenu(true))
+        ));
+        assert!(matches!(
+            goal_key(0, true, &msg_meta("h")),
+            Some(Command::GoalMenuNav(1))
+        ));
+        // Plain "h" without the meta modifier is ordinary typing — the TextInput's job.
+        assert!(goal_key(0, false, &msg("h", false, false, false)).is_none());
         // Enter picks a HISTORY row (text field + list open); submits everywhere else.
         assert!(matches!(
             goal_key(0, true, &msg(enter.as_str(), false, false, false)),
