@@ -52,6 +52,10 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/health", get(health))
         .route("/state", get(state))
         .route("/tokens", post(tokens))
+        .route(
+            "/devices",
+            get(devices_list).post(devices_mint).delete(devices_revoke),
+        )
         .route("/command", post(command))
         .route("/projects", get(projects_list).post(projects_add))
         .route(
@@ -257,6 +261,155 @@ async fn tokens(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Byt
         port: port_field,
         events,
     })
+}
+
+// ---- /devices (paired mobile clients: persisted, revocable, full-authority) ----------------
+//
+// A device token is unscoped (a phone is a full remote head, and a scope is a whitelist of
+// TODAY's panes — it would go blind the moment a new pane opens), persisted to
+// `device-tokens.json` so pairing survives a host restart, and individually revocable by label.
+// `hyperpanes pair` POSTs here so the MASTER token never leaves the machine; `devices`/`revoke`
+// list and drop. All three are MASTER-only — a scoped agent token must not mint device creds.
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceMintOut {
+    ok: bool,
+    label: String,
+    token: String,
+    expires_at: Option<i64>,
+    port: Option<u16>,
+    events: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceListItem {
+    label: String,
+    expires_at: Option<i64>,
+}
+
+/// Rewrite `device-tokens.json` from the live store (best-effort — the in-memory table is
+/// authoritative for this process; the file only has to be right for the next start). Kept beside
+/// the active `control.json` so tests/embeds with a custom control file stay self-consistent.
+fn persist_devices(shared: &Arc<Shared>) {
+    let records: Vec<_> = shared
+        .tokens
+        .lock()
+        .unwrap()
+        .list_devices()
+        .into_iter()
+        .map(
+            |(token, label, expires_at)| crate::persistence::device_tokens::DeviceRecord {
+                label,
+                token,
+                expires_at,
+            },
+        )
+        .collect();
+    let path = shared.control_file.with_file_name("device-tokens.json");
+    if let Err(e) = crate::persistence::device_tokens::save_to(&path, &records) {
+        eprintln!("[control] persist device-tokens.json failed: {e}");
+    }
+}
+
+/// POST /devices — mint a device token. Body: `{ label?, ttlMs? }` (label defaults to `device`,
+/// ttl omitted = never expires). Returns the token + reachable port/events for the QR.
+async fn devices_mint(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if info.scope.is_some() {
+        return jstatus(403, json!({ "error": "master token required" }));
+    }
+    let parsed: Option<Value> = serde_json::from_slice(&body).ok();
+    let label = parsed
+        .as_ref()
+        .and_then(|b| b.get("label"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("device")
+        .to_string();
+    let ttl = parsed
+        .as_ref()
+        .and_then(|b| b.get("ttlMs"))
+        .and_then(Value::as_i64)
+        .filter(|&t| t > 0);
+    let (token, expires_at) =
+        shared
+            .tokens
+            .lock()
+            .unwrap()
+            .mint_device(label.clone(), ttl, now_ms());
+    persist_devices(&shared);
+    let port = shared.port();
+    let (port_field, events) = if port != 0 {
+        (
+            Some(port),
+            Value::String(events_url(&shared.advertised_host(), port, &token)),
+        )
+    } else {
+        (None, Value::Null)
+    };
+    ok_json(DeviceMintOut {
+        ok: true,
+        label,
+        token,
+        expires_at,
+        port: port_field,
+        events,
+    })
+}
+
+/// GET /devices — list paired devices (label + expiry only; tokens are never echoed back).
+async fn devices_list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if info.scope.is_some() {
+        return jstatus(403, json!({ "error": "master token required" }));
+    }
+    let mut items: Vec<DeviceListItem> = shared
+        .tokens
+        .lock()
+        .unwrap()
+        .list_devices()
+        .into_iter()
+        .map(|(_token, label, expires_at)| DeviceListItem { label, expires_at })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    ok_json(json!({ "ok": true, "devices": items }))
+}
+
+/// DELETE /devices?label=<label> — revoke every device carrying `label` (a query param so labels
+/// may hold spaces or slashes). `revoked` = how many were dropped.
+async fn devices_revoke(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if info.scope.is_some() {
+        return jstatus(403, json!({ "error": "master token required" }));
+    }
+    let Some(label) = q.get("label").filter(|l| !l.is_empty()) else {
+        return jstatus(400, json!({ "error": "missing label" }));
+    };
+    let removed = shared.tokens.lock().unwrap().revoke_device(label);
+    if removed > 0 {
+        persist_devices(&shared);
+    }
+    ok_json(json!({ "ok": true, "revoked": removed }))
 }
 
 // ---- /panes/{id}/output -------------------------------------------------------------------
@@ -1600,6 +1753,107 @@ mod golden {
             .unwrap();
         assert_eq!(r.status().as_u16(), 403);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn devices_mint_list_revoke_full_authority_and_master_only() {
+        let s = boot(true).await;
+
+        // Master mints a device token; it comes back and carries full (unscoped) authority.
+        let mint: Value = client()
+            .post(format!("{}/devices", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .json(&json!({ "label": "iphone" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(mint["ok"], json!(true));
+        assert_eq!(mint["label"], json!("iphone"));
+        let device = mint["token"].as_str().unwrap().to_string();
+
+        // The device token authenticates like the master (e.g. reads /state).
+        let r = client()
+            .get(format!("{}/state", s.base))
+            .header("authorization", format!("Bearer {device}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+
+        // GET /devices lists it by label and NEVER echoes the token back.
+        let list: Value = client()
+            .get(format!("{}/devices", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(list["devices"][0]["label"], json!("iphone"));
+        assert!(list["devices"][0].get("token").is_none());
+
+        // A scoped token can neither mint nor list device credentials.
+        let scoped = client()
+            .post(format!("{}/tokens", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .json(&json!({ "scope": { "tabIds": ["t1"] } }))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for method in ["post", "get"] {
+            let req = if method == "post" {
+                client().post(format!("{}/devices", s.base))
+            } else {
+                client().get(format!("{}/devices", s.base))
+            };
+            let r = req
+                .header("authorization", format!("Bearer {scoped}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 403);
+        }
+
+        // Revoke by label drops it; the device token is then rejected, and the list is empty.
+        let revoked: Value = client()
+            .delete(format!("{}/devices?label=iphone", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(revoked["revoked"], json!(1));
+        let r = client()
+            .get(format!("{}/state", s.base))
+            .header("authorization", format!("Bearer {device}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 401);
+        let list: Value = client()
+            .get(format!("{}/devices", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(list["devices"].as_array().unwrap().len(), 0);
+
+        let _ = std::fs::remove_file(s.shared.control_file.with_file_name("device-tokens.json"));
     }
 
     #[tokio::test]

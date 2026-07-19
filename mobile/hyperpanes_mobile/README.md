@@ -17,8 +17,14 @@ Architecture, protocol, and host-side requirements: `docs/mobile-client-plan.md`
    ```
 
    Prefer the Tailscale IP — WireGuard-encrypted, no open LAN ports.
-2. Run `hyperpanes pair` → prints `hp://…` URLs + a QR code.
+2. Run `hyperpanes pair` → mints a **per-device token** (the master token never leaves the
+   host) and prints `hp://…` URLs + a QR code. Name the device / set an expiry with
+   `hyperpanes pair --device "my-iphone" --ttl 30d` (TTL omitted = never expires).
 3. In the app: **Scan pairing QR** (or enter host:port + token manually).
+
+Each device is paired individually and revocably: `hyperpanes devices` lists the paired
+clients by label, and `hyperpanes revoke "my-iphone"` drops one without disturbing the others.
+Device tokens are persisted (`device-tokens.json`), so a phone stays paired across host restarts.
 
 ## Develop
 
