@@ -416,6 +416,15 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
         .lock()
         .unwrap()
         .set_master(master_token(&shared));
+    // Reload persisted device tokens (paired phones) so pairing survives a restart, just like the
+    // master token does for remote binds. Kept beside the active control.json (custom in tests).
+    {
+        let path = shared.control_file.with_file_name("device-tokens.json");
+        let mut tokens = shared.tokens.lock().unwrap();
+        for rec in crate::persistence::device_tokens::load_from(&path) {
+            tokens.add_device(rec.token, rec.label, rec.expires_at);
+        }
+    }
     write_discovery(&shared)?;
 
     let app = routes::router(Arc::clone(&shared));

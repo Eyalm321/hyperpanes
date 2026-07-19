@@ -17,7 +17,7 @@ API** (`rs/crates/core/src/control/`):
 | Scrollback / attach snapshot | `GET /panes/{id}/output` (raw ANSI replay + byte `cursor`) |
 | Typing / prompting / key chords | `POST /panes/{id}/input` (`data`+`submit`, `keys`) |
 | Pane management | `POST /command` (`newPane`, `closePane`, `restartPane`, `renamePane`, `recolorPane`, `setLayout`, `focusPane`) |
-| Auth | bearer token (master or scoped via `POST /tokens`) |
+| Auth | bearer token — a per-device token minted by `hyperpanes pair` via `POST /devices` (master + scoped tokens also exist) |
 
 So the client is architecturally identical to the MCP server — but with a terminal
 *emulator on the device*: we stream **raw pty bytes** and emulate/render locally
@@ -54,11 +54,22 @@ Host change H3 adds it (additive; legacy clients ignore unknown fields).
   + a scannable terminal QR code.
 
 ### Security model
-Token-bearer auth (existing), transport security by **network layer**: the recommended
+Token-bearer auth, transport security by **network layer**: the recommended
 deployment is Tailscale (WireGuard-encrypted, no open LAN ports). Binding `0.0.0.0` on
 untrusted LANs is possible but the pair output warns about it. `allowInput` stays a
 separate host-side switch. TLS termination is a non-goal for v1 (tailscale serve can
 provide HTTPS if wanted).
+
+**Per-device tokens.** `hyperpanes pair` does not hand the phone the master token — it POSTs
+`/devices` (master-only) to mint a distinct, labelled, full-authority (unscoped) token and
+embeds *that* in the QR, so the master credential never leaves the host. A scope is a whitelist
+of the panes that exist *now*, so it can't serve a full remote head that must reach panes opened
+later — hence device tokens are unscoped, but individually revocable (`hyperpanes revoke
+<label>`) and optionally TTL'd (`pair --ttl 30d`). They persist to `device-tokens.json` (`0600`,
+beside `control.json`) and reload on start, so pairing survives a restart — the same guarantee
+the master token gets from its `control-token` file on remote binds. `POST/GET/DELETE /devices`
+are all master-only, so a sandboxed agent's scoped token can never mint or enumerate device
+credentials.
 
 ## 3. Mobile app (Flutter, `mobile/hyperpanes_mobile/`)
 

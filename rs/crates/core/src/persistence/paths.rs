@@ -149,6 +149,13 @@ pub fn control_settings_json() -> PathBuf {
     config_dir().join("control-settings.json")
 }
 
+/// Persisted paired-device tokens (mobile clients). Lives beside `control.json` in the state
+/// dir — the running server reads it on start and `hyperpanes pair`/`devices`/`revoke` drive it
+/// through the control API, so the two always agree.
+pub fn device_tokens_json() -> PathBuf {
+    state_dir().join("device-tokens.json")
+}
+
 /// The last saved session (restored on launch). Session state → [`state_dir`].
 pub fn last_workspace_json() -> PathBuf {
     state_dir().join("last-workspace.json")

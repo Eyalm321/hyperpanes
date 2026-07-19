@@ -1,6 +1,7 @@
 //! `hyperpanes pair` — print pairing info for the mobile app (docs/mobile-client-plan.md).
 //!
-//! Reads the running app's `control.json` discovery file (port + master token), figures
+//! Reads the running app's `control.json` (port + master token), mints a per-device token off it
+//! via the control API so the master never leaves the machine, figures
 //! out which addresses a phone could reach (the configured `bindAddress`, else the
 //! machine's default-route + Tailscale IPs via the connected-UDP-socket trick — no
 //! packets are sent), and prints `hp://<host>:<port>/?token=<token>` pairing URLs plus a
@@ -19,7 +20,84 @@ pub fn wants_pair(argv: &[String]) -> bool {
     argv.get(1).map(|a| a == "pair").unwrap_or(false)
 }
 
-pub fn run() -> std::io::Result<()> {
+/// Parsed `pair` flags: which device label to stamp, and an optional TTL after which the token
+/// self-revokes.
+struct PairOpts {
+    label: String,
+    ttl_ms: Option<i64>,
+}
+
+impl PairOpts {
+    /// `hyperpanes pair [--device <label>] [--ttl <30d|12h|90m|<ms>>]`. Label defaults to the
+    /// machine hostname; TTL omitted = never expires (the master-token guarantee).
+    fn parse(argv: &[String]) -> Result<Self, String> {
+        let mut label: Option<String> = None;
+        let mut ttl_ms: Option<i64> = None;
+        let mut it = argv.iter().skip(2); // argv[0]=exe, argv[1]="pair"
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "--device" | "--label" => {
+                    label = Some(it.next().ok_or("--device needs a value")?.clone());
+                }
+                "--ttl" => {
+                    let spec = it.next().ok_or("--ttl needs a value")?;
+                    ttl_ms = Some(crate::control_cli::parse_ttl_ms(spec)?);
+                }
+                other => return Err(format!("unknown flag '{other}'")),
+            }
+        }
+        let label = label
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(crate::control_cli::default_device_label);
+        Ok(Self { label, ttl_ms })
+    }
+}
+
+/// Mint a per-device token by POSTing to the running server's `/devices` (master-authenticated),
+/// so the master token itself never travels to the phone. Returns the new device token.
+fn mint_device(
+    port: u16,
+    bind_address: Option<&str>,
+    master: &str,
+    opts: &PairOpts,
+) -> Result<String, String> {
+    let base = crate::control_cli::base_url(port, bind_address);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut body = serde_json::json!({ "label": opts.label });
+    if let Some(ttl) = opts.ttl_ms {
+        body["ttlMs"] = serde_json::json!(ttl);
+    }
+    let resp = client
+        .post(format!("{base}/devices"))
+        .bearer_auth(master)
+        .json(&body)
+        .send()
+        .map_err(|e| format!("POST {base}/devices: {e}"))?;
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let msg = resp.text().unwrap_or_default();
+        return Err(format!("server returned {code}: {msg}"));
+    }
+    let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    v.get("token")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "response missing token".to_string())
+}
+
+pub fn run(argv: &[String]) -> std::io::Result<()> {
+    let opts = match PairOpts::parse(argv) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("hyperpanes pair: {e}");
+            eprintln!("usage: hyperpanes pair [--device <label>] [--ttl <30d|12h|90m|<ms>>]");
+            std::process::exit(2);
+        }
+    };
     // Panes inherit HYPERPANES_CONTROL_FILE set-but-EMPTY from the app; treat empty as
     // unset or `pair` run inside a pane resolves a blank path instead of the state dir.
     let control_file = std::env::var_os("HYPERPANES_CONTROL_FILE")
@@ -54,9 +132,24 @@ pub fn run() -> std::io::Result<()> {
         println!("⚠ allowInput is off — the mobile app will be read-only (no typing/keys).\n");
     }
 
+    // Mint a per-device token via the control API so the MASTER token never leaves this machine.
+    // The phone carries only this named, revocable credential (`hyperpanes devices` / `revoke`).
+    let device_token = match mint_device(port, settings.bind_address.as_deref(), &token, &opts) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("failed to mint device token: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "paired device \"{}\"{}\n",
+        opts.label,
+        opts.ttl_ms.map(|_| " (expiring)").unwrap_or("")
+    );
+
     let urls: Vec<String> = hosts
         .iter()
-        .map(|h| pairing_url(h, port, &token))
+        .map(|h| pairing_url(h, port, &device_token))
         .collect();
     for u in &urls {
         println!("  {u}");

@@ -3,5 +3,6 @@
 //! (`%APPDATA%\<productName>`), or the MCP can't find `control.json` and last-session
 //! restore breaks. See the core handoff.
 pub mod control_settings;
+pub mod device_tokens;
 pub mod paths;
 pub mod projects;

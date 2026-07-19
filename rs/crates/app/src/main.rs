@@ -23,12 +23,15 @@ mod ai;
 mod app;
 mod command;
 mod contextmenu;
+mod control_cli;
 mod control_host;
 mod crash;
+mod devices;
 mod drag;
 mod glow;
 mod history_scan;
 mod keybindings;
+mod pair;
 mod palette;
 mod paneview;
 mod prefs;
@@ -38,7 +41,6 @@ mod tetris;
 mod theme;
 mod update;
 mod window;
-mod pair;
 mod worker;
 
 use std::sync::Arc;
@@ -270,7 +272,10 @@ USAGE:
     hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree]
                        [--retry-window <secs>] [--nack-delay <ms>] -- <cmd> [args...]
                                    Drain a work queue by running <cmd> per claimed task
-    hyperpanes pair                Print mobile-app pairing URLs + a terminal QR code
+    hyperpanes pair [--device <label>] [--ttl <30d|12h|90m|<ms>>]
+                                   Mint a per-device token and print pairing URLs + a QR code
+    hyperpanes devices             List paired mobile devices
+    hyperpanes revoke <label>      Revoke a paired device by label
 
 FLAGS:
     --kill-daemon                  Shut down the running session daemon for this install, then exit
@@ -389,10 +394,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return worker::run(&argv0);
     }
 
-    // `pair` mode: print mobile-app pairing URLs + a terminal QR from control.json, then
+    // `pair` mode: mint a per-device token, print mobile-app pairing URLs + a terminal QR, then
     // return without launching a GUI (docs/mobile-client-plan.md).
     if pair::wants_pair(&argv0) {
-        return pair::run().map_err(Into::into);
+        return pair::run(&argv0).map_err(Into::into);
+    }
+
+    // `devices` / `revoke <label>`: list or drop paired mobile clients via the control API.
+    if devices::wants_devices(&argv0) {
+        return devices::run_list().map_err(Into::into);
+    }
+    if devices::wants_revoke(&argv0) {
+        return devices::run_revoke(&argv0).map_err(Into::into);
     }
 
     // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.
