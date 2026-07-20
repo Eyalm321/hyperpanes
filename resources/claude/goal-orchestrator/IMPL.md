@@ -19,6 +19,30 @@ done.
    retries). Your printed last line is recorded — make it a one-line summary (what changed + the
    branch/commit).
 
+## Consult your advisor when a strategic call is above your pay grade
+
+You are sonnet doing the mechanical build. When you hit a genuine **strategic fork** the payload
+doesn't settle — a design choice with lasting consequences, an ambiguity where guessing wrong means
+throwing the work away, a spec that turns out incoherent once you're in the code — don't burn the
+subtask guessing and don't silently plow ahead. **Consult your advisor**: the spec agent that wrote
+the spec is a higher-tier (opus/fable) model and is live. This is the "plan big, execute small"
+trade — one cheap round-trip buys an opus-grade decision without taking the build off sonnet.
+
+- Your advisor's pane id is in the payload (the spec agent stamped `advisor=<paneId>`); your own
+  pane id is `$HYPERPANES_PANE_ID`.
+- Ask one tight, decidable question — propose your answer, don't write an essay:
+  `send_message {to:"<advisor paneId>", from:"$HYPERPANES_PANE_ID", body:"<HP_TASK_ID>: <the fork,
+  the options, which you'd pick and why>"}`.
+- Poll for the reply: `read_messages {paneId:"$HYPERPANES_PANE_ID", after:<last seq>}` a few times;
+  when it answers, continue on sonnet with that guidance.
+- **Bounded, never hang.** One or two consults, not a conversation. If no reply comes in a
+  reasonable window, act on your best judgment and **say so in your summary** (so the spec agent
+  catches it at integration), or nack if it's truly unresolvable. A pending consult must never wedge
+  your pane.
+
+Consulting is for *strategy*, not for anything a `read`/`grep`/build command would settle — do the
+cheap check first.
+
 ## Discipline
 
 - Stay in your worktree; touch only what the subtask needs.

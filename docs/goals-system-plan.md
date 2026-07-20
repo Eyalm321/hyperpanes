@@ -157,6 +157,24 @@ All fns exist in `work.rs`; nothing calls them.
 
 ---
 
+## Patterns adopted from Claude (advisor + plan-big/execute-small)
+
+Reviewed against Anthropic's [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool)
+and the [plan-big/execute-small cookbook](https://github.com/anthropics/claude-cookbooks/blob/main/managed_agents/CMA_plan_big_execute_small.ipynb).
+The org already **is** the coordinator pattern (fable/opus plans, sonnet executes, context isolated
+per worktree pane, distilled reports up) — on durability (SQLite queue, daemon resume, account
+rotation) we're ahead of both. Imported the rest as persona edits (`SKILL/SPEC/IMPL.md`):
+
+| Import | Source | Change |
+|---|---|---|
+| **Advisor consult** | advisor tool | Static tiers → mid-task escalation. An impl agent (sonnet) that hits a strategic fork consults its **live spec agent** (opus/fable) over the existing message bus (`send_message`/`read_messages`) and continues on sonnet — opus-grade decisions at sonnet rates, instead of guessing or a full nack→re-spec round-trip. Spec agent stamps `advisor=<paneId>` on every payload; the same channel runs spec→orchestrator. |
+| **Don't decompose when it doesn't pay** | cookbook #9 | Spec agent implements a small/atomic goal inline (or 1 subtask) rather than always fanning out — our worktree+`claude`-boot floor is far higher than a web-fetch worker. |
+| **Right-size briefs** | cookbook #7 (delegation floor cost) | Batch trivia into one subtask; don't dedicate a worktree agent to a two-line edit. |
+| **Verify the premise, not just the artifact** | cookbook #8 | Spec agent sanity-checks its own decomposition (missing subtasks? premise true?) before fan-out — acceptance only audits what got built. |
+| **Synchronization barrier** | cookbook #4 | Spec agent waits for the whole wave (`working` → done/failed) before verifying/reporting `done`. |
+
+---
+
 ## Build order
 
 1. **Queue plumbing (B)** — `work_db()` path, disk-backed `Shared::default`, boot recovery, reaper
