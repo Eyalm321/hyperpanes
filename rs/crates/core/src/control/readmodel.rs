@@ -184,6 +184,26 @@ impl ReadModel {
         })
     }
 
+    /// Canonicalize a caller-supplied pane id, tolerating the two id spellings that coexist in
+    /// the wild: app-created panes are `pane-<uuid>`, control-created ones are a bare `<uuid>`.
+    /// An agent that was handed one form and reconstructs the other (goals-system spec agents do
+    /// exactly this) would otherwise get `404 no such pane` on every message it sends or reads.
+    /// Also accepts a session uid, which is what a pane's own tooling sometimes has to hand.
+    /// Returns the id as the read-model knows it, or `None` when nothing matches.
+    pub fn resolve_pane_id(&self, id: &str) -> Option<String> {
+        if self.pane_loc.contains_key(id) {
+            return Some(id.to_string());
+        }
+        let alias = match id.strip_prefix("pane-") {
+            Some(bare) => bare.to_string(),
+            None => format!("pane-{id}"),
+        };
+        if self.pane_loc.contains_key(&alias) {
+            return Some(alias);
+        }
+        self.uid_to_pane(id)
+    }
+
     pub fn tab_window(&self, tab_id: &str) -> Option<i64> {
         self.tab_to_window.get(tab_id).copied()
     }
@@ -695,6 +715,22 @@ mod tests {
         assert_eq!(out.windows[0].window_id, 1);
         assert_eq!(out.windows[0].tabs[0].panes.len(), 1);
         assert_eq!(out.windows[0].tabs[0].panes[0].id, "p2");
+    }
+
+    #[test]
+    fn resolve_pane_id_accepts_both_spellings_and_the_session_uid() {
+        let mut m = seeded();
+        m.insert_pane(1, pane("pane-abc", "u-abc"));
+        m.insert_pane(1, pane("bare", "u-bare"));
+        // Exact match wins.
+        assert_eq!(m.resolve_pane_id("pane-abc").as_deref(), Some("pane-abc"));
+        assert_eq!(m.resolve_pane_id("bare").as_deref(), Some("bare"));
+        // Alias in both directions: add the prefix / strip it.
+        assert_eq!(m.resolve_pane_id("abc").as_deref(), Some("pane-abc"));
+        assert_eq!(m.resolve_pane_id("pane-bare").as_deref(), Some("bare"));
+        // A session uid resolves to its pane.
+        assert_eq!(m.resolve_pane_id("u-abc").as_deref(), Some("pane-abc"));
+        assert_eq!(m.resolve_pane_id("ghost"), None);
     }
 
     #[test]

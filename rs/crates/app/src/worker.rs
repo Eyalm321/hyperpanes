@@ -3,7 +3,8 @@
 //! Usage:
 //! ```text
 //! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree] \
-//!   [--retry-window <secs>] [--nack-delay <ms>] -- <cmd> [args...]
+//!   [--retry-window <secs>] [--nack-delay <ms>] \
+//!   [--stream] [--log-dir <dir>] [--linger <secs>] -- <cmd> [args...]
 //! ```
 //!
 //! Discovers the running app's control API from `control.json` (or `HYPERPANES_CONTROL_FILE`),
@@ -16,7 +17,17 @@
 //! task in a throwaway git worktree that auto-removes (#14); `--retry-window <secs>` keeps
 //! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
 //! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
-//! long task isn't reclaimed mid-flight (#12). The child reads its task from the environment, so
+//! long task isn't reclaimed mid-flight (#12).
+//!
+//! Visibility flags (a headless `claude -p` child prints nothing until it exits, and the pane
+//! auto-closes the moment the queue drains, so a run could finish leaving no trace):
+//! `--stream` renders the child's Claude `--output-format stream-json` events as readable
+//! progress lines (non-JSON output passes through); `--log-dir <dir>` tees every child's raw
+//! output to `<dir>/<queue>-<taskId>.log`, which outlives the pane; `--linger <secs>` holds the
+//! process open after the drain so the pane stays readable. All three default off = the original
+//! inherit-stdio, exit-on-drain behaviour.
+//!
+//! The child reads its task from the environment, so
 //! shell expansion like `$HP_TASK_PAYLOAD` needs an explicit inner shell:
 //! `-- sh -c 'claude -p "$HP_TASK_PAYLOAD"'`.
 
@@ -43,6 +54,15 @@ pub struct WorkerArgs {
     pub nack_delay_ms: Option<i64>,
     /// Run each task in a throwaway git worktree, auto-removed on exit (#14).
     pub worktree: bool,
+    /// Render the child's Claude `--output-format stream-json` lines as readable progress
+    /// instead of raw JSON, so a worker pane shows what the agent is doing while it runs.
+    pub stream: bool,
+    /// Tee every child's raw output to `<dir>/<queue>-<taskId>.log`, so the transcript survives
+    /// the pane closing when the queue drains. `None` = no logs (frozen behaviour).
+    pub log_dir: Option<PathBuf>,
+    /// Stay alive this many seconds after the queue drains, so the pane (which auto-closes when
+    /// this process exits) stays readable. 0 = exit immediately, as before.
+    pub linger_secs: u64,
     /// Everything after `--`: program + args, executed directly (no shell).
     pub child: Vec<String>,
 }
@@ -93,6 +113,9 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut count_arg: Option<String> = None;
     let mut retry_window_arg: Option<String> = None;
     let mut nack_delay_arg: Option<String> = None;
+    let mut linger_arg: Option<String> = None;
+    let mut log_dir: Option<PathBuf> = None;
+    let mut stream = false;
     let mut worktree = false;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
@@ -112,8 +135,11 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                 i += 2;
             }
             "--retry-window" => {
-                retry_window_arg =
-                    Some(argv.get(i + 1).ok_or("--retry-window needs a value")?.clone());
+                retry_window_arg = Some(
+                    argv.get(i + 1)
+                        .ok_or("--retry-window needs a value")?
+                        .clone(),
+                );
                 i += 2;
             }
             "--nack-delay" => {
@@ -123,6 +149,20 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
             "--worktree" => {
                 worktree = true;
                 i += 1;
+            }
+            "--stream" => {
+                stream = true;
+                i += 1;
+            }
+            "--log-dir" => {
+                log_dir = Some(PathBuf::from(
+                    argv.get(i + 1).ok_or("--log-dir needs a value")?,
+                ));
+                i += 2;
+            }
+            "--linger" => {
+                linger_arg = Some(argv.get(i + 1).ok_or("--linger needs a value")?.clone());
+                i += 2;
             }
             "--" => {
                 child = argv[i + 1..].to_vec();
@@ -139,6 +179,10 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                     retry_window_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--nack-delay=") {
                     nack_delay_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--log-dir=") {
+                    log_dir = Some(PathBuf::from(v));
+                } else if let Some(v) = other.strip_prefix("--linger=") {
+                    linger_arg = Some(v.to_string());
                 } else {
                     return Err(format!("unexpected argument: {other}"));
                 }
@@ -176,6 +220,12 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         ),
         None => None,
     };
+    let linger_secs = match linger_arg {
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("--linger must be a non-negative integer (secs), got '{s}'"))?,
+        None => 0,
+    };
     Ok(WorkerArgs {
         queue,
         worker,
@@ -183,6 +233,9 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         retry_window_secs,
         nack_delay_ms,
         worktree,
+        stream,
+        log_dir,
+        linger_secs,
         child,
     })
 }
@@ -232,6 +285,19 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
     let worktree = args.worktree;
+    // Output policy shared by every worker thread: render Claude's stream-json readably and/or
+    // tee raw child output to a per-task log that outlives the pane.
+    let out = Arc::new(ChildOutput {
+        stream: args.stream,
+        log_dir: args.log_dir.clone(),
+    });
+    if let Some(dir) = &out.log_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("worker: cannot create --log-dir {}: {e}", dir.display());
+        } else {
+            eprintln!("worker: per-task logs in {}", dir.display());
+        }
+    }
 
     // One worker drains in this thread; `--count N` spawns N competing workers (#11), each
     // with its own id, and the process exits once they have all seen the queue empty.
@@ -246,11 +312,13 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
             retry_window,
             nack_delay,
             worktree,
+            &out,
         )?;
         eprintln!(
             "[{}] queue drained — {done} task(s) acked, exiting",
             args.worker
         );
+        linger(args.linger_secs);
         return Ok(());
     }
 
@@ -266,9 +334,19 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         let queue = args.queue.clone();
         let child = args.child.clone();
         let worker = format!("{}-{i}", args.worker);
+        let out = Arc::clone(&out);
         handles.push(std::thread::spawn(move || {
             match drain(
-                &client, &base, &token, &queue, &worker, &child, retry_window, nack_delay, worktree,
+                &client,
+                &base,
+                &token,
+                &queue,
+                &worker,
+                &child,
+                retry_window,
+                nack_delay,
+                worktree,
+                &out,
             ) {
                 Ok(n) => {
                     eprintln!("[{worker}] drained {n} task(s)");
@@ -283,7 +361,18 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     }
     let total: u64 = handles.into_iter().filter_map(|h| h.join().ok()).sum();
     eprintln!("all {} workers exited — {total} task(s) total", args.count);
+    linger(args.linger_secs);
     Ok(())
+}
+
+/// Hold the process (and therefore its pane, which auto-closes on exit) open after the drain, so
+/// the run stays readable. No-op at 0.
+fn linger(secs: u64) {
+    if secs == 0 {
+        return;
+    }
+    eprintln!("worker: holding this pane open for {secs}s (--linger)");
+    std::thread::sleep(Duration::from_secs(secs));
 }
 
 /// One worker's claim → run → ack/nack loop. Returns the number of tasks acked; stops when a
@@ -299,6 +388,7 @@ fn drain(
     retry_window: Duration,
     nack_delay_ms: Option<i64>,
     worktree: bool,
+    out: &ChildOutput,
 ) -> Result<u64, Box<dyn Error>> {
     eprintln!("[{worker}] online — draining '{queue}'");
     let mut done: u64 = 0;
@@ -344,7 +434,7 @@ fn drain(
             None
         };
         let cwd = wt.as_ref().map(|w| w.path.as_path());
-        let outcome = run_child(child, &task, queue, client, base, token, cwd);
+        let outcome = run_child(child, &task, queue, client, base, token, cwd, worker, out);
         if let Some(w) = &wt {
             w.remove();
         }
@@ -400,8 +490,30 @@ fn claim_one(
     Ok(out.tasks.into_iter().next())
 }
 
+/// How a child's output reaches the operator. Default (`stream: false`, `log_dir: None`) inherits
+/// the worker's stdio — byte-for-byte the original behaviour. Either option switches to piped
+/// stdio so the runner can render and/or persist what the child says.
+#[derive(Debug, Default)]
+pub struct ChildOutput {
+    pub stream: bool,
+    pub log_dir: Option<PathBuf>,
+}
+
+impl ChildOutput {
+    fn piped(&self) -> bool {
+        self.stream || self.log_dir.is_some()
+    }
+    /// Where this task's raw transcript is kept (so it outlives the pane).
+    fn log_path(&self, queue: &str, task_id: &str) -> Option<PathBuf> {
+        self.log_dir
+            .as_ref()
+            .map(|d| d.join(format!("{queue}-{}.log", short(task_id))))
+    }
+}
+
 /// Run the child command with the task in its environment, while a background heartbeat renews
 /// the lease (#12) so a long-running task is not reclaimed mid-flight. Returns Ok(true) on exit 0.
+#[allow(clippy::too_many_arguments)]
 fn run_child(
     child: &[String],
     task: &Task,
@@ -410,6 +522,8 @@ fn run_child(
     base: &str,
     token: &str,
     cwd: Option<&Path>,
+    worker: &str,
+    out: &ChildOutput,
 ) -> Result<bool, Box<dyn Error>> {
     // Heartbeat: while the child runs, `extend` the lease at ~half the remaining lease interval.
     let stop = Arc::new(AtomicBool::new(false));
@@ -443,16 +557,176 @@ fn run_child(
     if let Some(dir) = cwd {
         cmd.current_dir(dir).env("HP_WORKTREE", dir);
     }
-    let result = cmd
-        .status()
-        .map_err(|e| format!("failed to spawn '{}': {e}", child[0]));
+    let result = if out.piped() {
+        run_child_piped(cmd, task, queue, worker, out)
+    } else {
+        cmd.status()
+            .map(|s| s.success())
+            .map_err(|e| format!("failed to spawn '{}': {e}", child[0]))
+    };
 
     // Stop the heartbeat before ack/nack so we never extend a finished task.
     stop.store(true, Ordering::Relaxed);
     if let Some(h) = heartbeat {
         let _ = h.join();
     }
-    Ok(result?.success())
+    Ok(result?)
+}
+
+/// Piped variant of the child run: stdout+stderr are captured line-by-line so each line can be
+/// (a) appended raw to this task's log — the transcript that survives the pane closing — and
+/// (b) rendered into the pane. With `--stream`, Claude `--output-format stream-json` lines become
+/// readable progress; anything else passes through unchanged, so a plain shell task still looks
+/// the same. Every line is prefixed with the worker + task so `--count N` interleaving is legible.
+fn run_child_piped(
+    mut cmd: Command,
+    task: &Task,
+    queue: &str,
+    worker: &str,
+    out: &ChildOutput,
+) -> Result<bool, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    let log = out.log_path(queue, &task.id).and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+            .map_err(|e| eprintln!("[{worker}] cannot open log {}: {e}", p.display()))
+            .ok()
+            .map(|f| (p, Arc::new(std::sync::Mutex::new(f))))
+    });
+    if let Some((p, _)) = &log {
+        eprintln!("[{worker}] log: {}", p.display());
+    }
+
+    let mut c = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn child: {e}"))?;
+
+    let tag = format!("[{worker}/{}]", short(&task.id));
+    let stream = out.stream;
+    let mut pumps = Vec::new();
+    for (reader, is_stderr) in [
+        (
+            c.stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            false,
+        ),
+        (
+            c.stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            true,
+        ),
+    ] {
+        let Some(reader) = reader else { continue };
+        let tag = tag.clone();
+        let log = log.as_ref().map(|(_, f)| Arc::clone(f));
+        pumps.push(std::thread::spawn(move || {
+            for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                if let Some((_, f)) = log.as_ref().map(|f| ((), f)) {
+                    if let Ok(mut f) = f.lock() {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
+                // stderr is already human text; only stdout carries the JSON stream.
+                match if stream && !is_stderr {
+                    render_stream_line(&line)
+                } else {
+                    Some(line)
+                } {
+                    Some(text) if !text.is_empty() => eprintln!("{tag} {text}"),
+                    _ => {}
+                }
+            }
+        }));
+    }
+    let status = c.wait().map_err(|e| format!("child wait failed: {e}"))?;
+    for p in pumps {
+        let _ = p.join();
+    }
+    Ok(status.success())
+}
+
+/// Render one line of Claude's `--output-format stream-json` into a short human line, or `None`
+/// to drop it. A line that isn't such an event (plain program output) is returned unchanged, so
+/// this is safe to run over any child's stdout.
+fn render_stream_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return Some(line.to_string());
+    }
+    let v: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Some(line.to_string()),
+    };
+    match v.get("type").and_then(serde_json::Value::as_str) {
+        Some("system") => {
+            let model = v.get("model").and_then(serde_json::Value::as_str)?;
+            Some(format!("▶ started ({model})"))
+        }
+        Some("assistant") => {
+            let content = v.get("message")?.get("content")?.as_array()?;
+            let mut parts: Vec<String> = Vec::new();
+            for block in content {
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("text") => {
+                        let t = block.get("text").and_then(serde_json::Value::as_str)?;
+                        let t = t.trim();
+                        if !t.is_empty() {
+                            parts.push(one_line(t, 300));
+                        }
+                    }
+                    Some("tool_use") => {
+                        let name = block
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool");
+                        parts.push(format!("⚙ {name}"));
+                    }
+                    _ => {}
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" "))
+            }
+        }
+        Some("result") => {
+            let ok = v
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .map(|e| !e)
+                .unwrap_or(true);
+            let text = v
+                .get("result")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            Some(format!(
+                "{} {}",
+                if ok { "✓ done:" } else { "✗ failed:" },
+                one_line(text, 300)
+            ))
+        }
+        // user turns are tool results — noise in a progress view.
+        _ => None,
+    }
+}
+
+/// Collapse whitespace and clip to `max` chars, so one rendered event stays one readable line.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let clipped: String = flat.chars().take(max).collect();
+    format!("{clipped}…")
 }
 
 /// Sleep up to `ms`, waking early and returning `true` if `stop` gets set; `false` on timeout.
@@ -558,8 +832,7 @@ impl Worktree {
         let id8 = &task_id[..8.min(task_id.len())];
         let safe = queue.replace(['/', ' '], "-");
         let branch = format!("worker/{safe}/{id8}");
-        let path =
-            std::env::temp_dir().join(format!("hp-wt-{safe}-{id8}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("hp-wt-{safe}-{id8}-{}", std::process::id()));
         // The branch name is deterministic (per task id), so a stale `worker/<q>/<id8>` left by a
         // prior run makes `git worktree add -b` fail. Prune dead worktree admin entries first, then
         // decide by whether the stale branch carries uncollected commits: if it's an ancestor of
@@ -642,15 +915,33 @@ mod tests {
 
     #[test]
     fn detects_worker_mode() {
-        assert!(wants_worker(&argv(&["hyperpanes", "worker", "--queue", "q"])));
+        assert!(wants_worker(&argv(&[
+            "hyperpanes",
+            "worker",
+            "--queue",
+            "q"
+        ])));
         assert!(!wants_worker(&argv(&["hyperpanes"])));
-        assert!(!wants_worker(&argv(&["hyperpanes", "--session-daemon", "x"])));
+        assert!(!wants_worker(&argv(&[
+            "hyperpanes",
+            "--session-daemon",
+            "x"
+        ])));
     }
 
     #[test]
     fn parses_queue_worker_and_child() {
         let a = parse_args(&argv(&[
-            "hp", "worker", "--queue", "hp-issues", "--worker", "w1", "--", "claude", "-p", "hi",
+            "hp",
+            "worker",
+            "--queue",
+            "hp-issues",
+            "--worker",
+            "w1",
+            "--",
+            "claude",
+            "-p",
+            "hi",
         ]))
         .unwrap();
         assert_eq!(a.queue, "hp-issues");
@@ -699,9 +990,16 @@ mod tests {
             4
         );
         assert_eq!(
-            parse_args(&argv(&["hp", "worker", "--queue=q", "--count=2", "--", "true"]))
-                .unwrap()
-                .count,
+            parse_args(&argv(&[
+                "hp",
+                "worker",
+                "--queue=q",
+                "--count=2",
+                "--",
+                "true"
+            ]))
+            .unwrap()
+            .count,
             2
         );
         assert!(parse_args(&argv(&[
@@ -737,17 +1035,123 @@ mod tests {
         assert_eq!(d.nack_delay_ms, None);
 
         assert!(parse_args(&argv(&[
-            "hp", "worker", "--queue", "q", "--retry-window", "x", "--", "true"
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--retry-window",
+            "x",
+            "--",
+            "true"
         ]))
         .is_err());
     }
 
     #[test]
+    fn parses_visibility_flags_with_frozen_defaults() {
+        let a = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--stream",
+            "--log-dir",
+            "/tmp/hp-logs",
+            "--linger",
+            "30",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert!(a.stream);
+        assert_eq!(a.log_dir.as_deref(), Some(Path::new("/tmp/hp-logs")));
+        assert_eq!(a.linger_secs, 30);
+
+        let eq = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue=q",
+            "--log-dir=/tmp/l",
+            "--linger=5",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(eq.log_dir.as_deref(), Some(Path::new("/tmp/l")));
+        assert_eq!(eq.linger_secs, 5);
+
+        // Defaults keep the original inherit-stdio, exit-on-drain behaviour.
+        let d = parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).unwrap();
+        assert!(!d.stream);
+        assert_eq!(d.log_dir, None);
+        assert_eq!(d.linger_secs, 0);
+        assert!(!ChildOutput::default().piped());
+        assert!(parse_args(&argv(&[
+            "hp", "worker", "--queue", "q", "--linger", "x", "--", "true"
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn renders_claude_stream_json_events_and_passes_other_output_through() {
+        // Plain program output is untouched — a non-claude task still reads normally.
+        assert_eq!(
+            render_stream_line("cargo test: 12 passed").as_deref(),
+            Some("cargo test: 12 passed")
+        );
+        // Malformed JSON is output, not an error.
+        assert_eq!(
+            render_stream_line("{not json").as_deref(),
+            Some("{not json")
+        );
+        // Assistant text + tool calls collapse to one progress line.
+        let a = render_stream_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixing the\n  installer"},{"type":"tool_use","name":"Edit"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(a, "Fixing the installer ⚙ Edit");
+        // Tool results (user turns) are dropped as noise.
+        assert_eq!(
+            render_stream_line(r#"{"type":"user","message":{"content":[]}}"#),
+            None
+        );
+        // The final result line reports success/failure.
+        let ok = render_stream_line(r#"{"type":"result","is_error":false,"result":"branch x"}"#)
+            .unwrap();
+        assert_eq!(ok, "✓ done: branch x");
+        let bad = render_stream_line(r#"{"type":"result","is_error":true,"result":"build broke"}"#)
+            .unwrap();
+        assert_eq!(bad, "✗ failed: build broke");
+    }
+
+    #[test]
+    fn per_task_log_path_is_queue_and_task_scoped() {
+        let out = ChildOutput {
+            stream: false,
+            log_dir: Some(PathBuf::from("/tmp/logs")),
+        };
+        assert!(out.piped());
+        assert_eq!(
+            out.log_path("g7", "0123456789abcdef"),
+            Some(PathBuf::from("/tmp/logs/g7-01234567.log"))
+        );
+        assert_eq!(ChildOutput::default().log_path("g7", "abc"), None);
+    }
+
+    #[test]
     fn parses_worktree_flag() {
         assert!(
-            parse_args(&argv(&["hp", "worker", "--queue", "q", "--worktree", "--", "true"]))
-                .unwrap()
-                .worktree
+            parse_args(&argv(&[
+                "hp",
+                "worker",
+                "--queue",
+                "q",
+                "--worktree",
+                "--",
+                "true"
+            ]))
+            .unwrap()
+            .worktree
         );
         assert!(
             !parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"]))

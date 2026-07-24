@@ -175,6 +175,19 @@ rotation) we're ahead of both. Imported the rest as persona edits (`SKILL/SPEC/I
 
 ---
 
+## Live-org fixes (2026-07-24)
+
+Two failures found driving a real org (canora-sync, goals `gp6`/`gp7`) — both in the plumbing
+around the org, not the org itself:
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| Reports reach the orchestrator's inbox but it never acts on them | The bus is **pull-only**: `POST /panes/:id/messages` stores + pings WS clients, nothing writes to the pane. An interactive `claude` orchestrator blocks on stdin the moment its turn ends, so mail sat unread (88 messages deep) until a human typed. | `control/nudge.rs` + `arm_inbox_nudge` in `routes.rs`: when mail lands for an opted-in pane (`meta.role` in `goals-orch`/`spec`, or `hp.nudge=on`), wait for the pane to leave `Busy`, then type ONE coalesced, rate-limited (`60s`) line naming the read cursor. `HYPERPANES_MSG_NUDGE=0` disables. |
+| Replies to a spec agent 404 (`no such pane`) | **Two pane-id spellings**: app-created panes are `pane-<uuid>`, control-created ones bare `<uuid>`. An agent handed one and reconstructing the other addressed a queue nobody reads. | `ReadModel::resolve_pane_id` canonicalizes either spelling (and a session uid); `find_pane_scoped` returns the canonical id, so post and read land on the same inbox. |
+| Impl-agent work is invisible: no chat, and the pane is gone afterwards | `spawn_workers` put **N agents in one pane**; `claude -p` prints nothing until it exits; the runner exits on drain and the pane auto-closes with its scrollback. | `hyperpanes worker` gains `--stream` (render Claude `stream-json` events as progress), `--log-dir` (per-task raw transcript that outlives the pane) and `--linger`; `spawn_workers` defaults to `layout:"pane-per-worker"` (one pane per agent) and exposes `stream`/`logDir`/`lingerSecs`. Personas pass `--output-format stream-json --verbose`. |
+
+---
+
 ## Build order
 
 1. **Queue plumbing (B)** — `work_db()` path, disk-backed `Shared::default`, boot recovery, reaper

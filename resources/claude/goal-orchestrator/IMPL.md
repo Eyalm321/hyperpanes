@@ -14,7 +14,10 @@ done.
    Fix until it passes.
 3. **Commit** your work on your worktree's branch with a clear message. Leave the branch for the
    spec agent to integrate — do not push, do not merge to main.
-4. **Exit 0 on success**, non-zero on genuine failure. The runner acks on 0 (subtask `done`, which
+4. **Narrate as you go.** Your pane renders your turn live (the runner is started with `--stream`
+   against `--output-format stream-json`), so a short line before each phase — what you're about
+   to do and why — is what the human sees. Silence for ten minutes reads as a wedged pane.
+5. **Exit 0 on success**, non-zero on genuine failure. The runner acks on 0 (subtask `done`, which
    unblocks any dependents) and nacks on non-zero (requeue with backoff, or dead-letter after
    retries). Your printed last line is recorded — make it a one-line summary (what changed + the
    branch/commit).
@@ -29,7 +32,8 @@ the spec is a higher-tier (opus/fable) model and is live. This is the "plan big,
 trade — one cheap round-trip buys an opus-grade decision without taking the build off sonnet.
 
 - Your advisor's pane id is in the payload (the spec agent stamped `advisor=<paneId>`); your own
-  pane id is `$HYPERPANES_PANE_ID`.
+  pane id is `$HYPERPANES_PANE_ID`. Pass both **verbatim** — don't add or strip a `pane-` prefix
+  (the API tolerates either spelling now, but only the exact id is guaranteed to be your queue).
 - Ask one tight, decidable question — propose your answer, don't write an essay:
   `send_message {to:"<advisor paneId>", from:"$HYPERPANES_PANE_ID", body:"<HP_TASK_ID>: <the fork,
   the options, which you'd pick and why>"}`.
