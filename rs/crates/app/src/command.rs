@@ -18,7 +18,7 @@ use crate::theme;
 /// options. ORDER MUST MATCH [`GOAL_MODEL_LABELS`]. Defaults per tier: orchestrator/spec =
 /// index 0 (opus), implementation = 1 (sonnet).
 pub const GOAL_MODELS: [&str; 4] = [
-    "claude-opus-4-8[1m]",
+    "claude-opus-5[1m]",
     "claude-sonnet-5[1m]",
     "claude-fable-5[1m]",
     "claude-haiku-4-5",
