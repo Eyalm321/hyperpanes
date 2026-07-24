@@ -25,6 +25,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::control::events::{ControlEvent, EventHub};
 use crate::control::inbox::MessageInbox;
 use crate::control::lock::PaneLocks;
+use crate::control::nudge::NudgeLedger;
 use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
 use crate::control::routes;
 use crate::control::supervisor::{Decision, Supervisor};
@@ -52,6 +53,9 @@ pub struct Shared {
     pub model: Mutex<ReadModel>,
     pub tokens: Mutex<TokenStore>,
     pub inbox: Mutex<MessageInbox>,
+    /// Inbox-nudge bookkeeping (`control::nudge`): which agent panes have unread mail and when
+    /// they were last woken. The inbox itself stays pull-only; this is the opt-in wake-up.
+    pub nudges: Mutex<NudgeLedger>,
     pub locks: Mutex<PaneLocks>,
     /// Durable, claimable work queue backing the `/queues` + `/tasks` routes
     /// (worker-pool phase-2). `rusqlite::Connection` is `Send` but not `Sync`, so —
@@ -108,6 +112,7 @@ impl Shared {
             model: Mutex::new(ReadModel::new()),
             tokens: Mutex::new(TokenStore::new()),
             inbox: Mutex::new(MessageInbox::new()),
+            nudges: Mutex::new(NudgeLedger::new()),
             locks: Mutex::new(PaneLocks::new()),
             work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
             events: EventHub::new(),

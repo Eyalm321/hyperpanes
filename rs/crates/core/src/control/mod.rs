@@ -4,6 +4,7 @@
 pub mod inbox;
 pub mod input;
 pub mod lock;
+pub mod nudge;
 pub mod output;
 pub mod scope;
 pub mod work;

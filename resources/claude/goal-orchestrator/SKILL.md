@@ -65,7 +65,12 @@ For each goal you're given (free text):
    Your own pane already carries this identity (the app set it); keep the scheme for everything
    you spawn so a glance at the workspace reads project → task.
 3. **Ingest reports.** Read spec-agent messages (`read_messages` on your pane; spec agents
-   `send_to_parent`). A report is one of: `progress` (incl. `spec:`/`respec:`), `blocked <reason>`,
+   `send_to_parent`). The bus is pull-only, so the app helps: when mail lands for your pane while
+   you're idle it types a one-line `[hyperpanes] inbox: N new message(s) … read_messages {paneId,
+   after:<seq>}` nudge into you. **Treat that line as a work order** — read from the given cursor
+   and act before anything else. It is coalesced (one line per burst) and rate-limited, so still
+   poll `read_messages` yourself on every loop pass; never assume the nudge is your only signal.
+   A report is one of: `progress` (incl. `spec:`/`respec:`), `blocked <reason>`,
    `needs-decision <q>`, `done <evidence>`, `failed <reason>`. Act:
    - `progress` — update ledger, continue.
    - `needs-decision` — answer from the goal intent if you can; otherwise surface to the human
@@ -130,7 +135,9 @@ plan doc), so you don't babysit individual tasks — you watch goals and health.
 
 **Impl-agent pane budget:** fan-out is soft-capped at **16 worker panes** — the spec agent sets
 `count <= 16` and the queue multiplexes any overflow (competing-consumers), so more subtasks than 16
-drain through the 16 panes rather than opening more. It's persona-enforced (see `SPEC.md` section 2),
+drain through the 16 panes rather than opening more. `spawn_workers` now gives each worker its own
+pane (`layout:"pane-per-worker"`, the default), so `count` IS the pane count — one readable agent
+per pane instead of N interleaved into one. It's persona-enforced (see `SPEC.md` section 2),
 not a code limit; hold the line so concurrent goals don't explode the pane count.
 
 ### MCP config on every spawned claude
@@ -143,7 +150,7 @@ the default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without the fla
 every `mcp__hyperpanes__*` tool. The app already appends it on your own spawn; pass it down the
 same way when you spawn a spec agent, and tell the spec agent to do the same in its
 `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+`spawn_workers {queue, count:N, isolation:"worktree", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
 
 ### If the `mcp__hyperpanes__*` tools won't load — drop to the Control API, don't reverse-engineer
 

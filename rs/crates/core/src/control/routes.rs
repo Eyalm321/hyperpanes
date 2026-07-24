@@ -33,11 +33,12 @@ use crate::ansi_strip::strip_ansi;
 use crate::control::dispatch;
 use crate::control::events::ControlEvent;
 use crate::control::input::{keys_to_bytes, submit_newlines, KeysResult, SUBMIT_DELAY_MS};
+use crate::control::nudge;
 use crate::control::output::{
     detect_awaiting_input, next_poll_delay, slice_since, wait_decision, WaitVerdict,
     DEFAULT_SETTLE_MS, DEFAULT_WAIT_TIMEOUT_MS,
 };
-use crate::control::readmodel::PaneStatus;
+use crate::control::readmodel::{Activity, PaneStatus};
 use crate::control::scope::{check_mintable, coerce_scope, pane_in_scope, queue_in_scope, Scope};
 use crate::control::server::{events_url, notify_state, now_ms, Shared};
 use crate::control::tokens::TokenInfo;
@@ -122,9 +123,12 @@ fn authorize(shared: &Arc<Shared>, headers: &HeaderMap) -> Result<TokenInfo, Res
         .ok_or_else(|| jstatus(401, json!({ "error": "unauthorized" })))
 }
 
-/// A resolved, in-scope pane: its session uid. 404 (no such pane) / 403 (out of scope).
+/// A resolved, in-scope pane: its session uid plus the canonical pane id (the caller may have
+/// addressed it by an alias — see `ReadModel::resolve_pane_id`). 404 (no such pane) / 403 (out
+/// of scope).
 struct FoundPane {
     uid: String,
+    pane_id: String,
 }
 
 // pre-existing; deferred per repo lint policy (test.yml)
@@ -135,7 +139,16 @@ fn find_pane_scoped(
     pane_id: &str,
 ) -> Result<FoundPane, Response> {
     let m = shared.model.lock().unwrap();
-    match m.coords_of(pane_id) {
+    let canonical = match m.resolve_pane_id(pane_id) {
+        None => {
+            return Err(jstatus(
+                404,
+                json!({ "error": "no such pane", "paneId": pane_id }),
+            ))
+        }
+        Some(c) => c,
+    };
+    match m.coords_of(&canonical) {
         None => Err(jstatus(
             404,
             json!({ "error": "no such pane", "paneId": pane_id }),
@@ -148,10 +161,13 @@ fn find_pane_scoped(
                 ));
             }
             let uid = m
-                .pane(pane_id)
+                .pane(&canonical)
                 .map(|p| p.session_uid.clone())
                 .unwrap_or_default();
-            Ok(FoundPane { uid })
+            Ok(FoundPane {
+                uid,
+                pane_id: canonical,
+            })
         }
     }
 }
@@ -780,9 +796,12 @@ async fn messages_get(
         Ok(i) => i,
         Err(e) => return e,
     };
-    if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
-        return e;
-    }
+    // Canonical id: an inbox is keyed by the read-model's pane id, so an alias-addressed read
+    // (`pane-<uuid>` vs bare `<uuid>`) must land on the same queue the writer posted to.
+    let id = match find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        Ok(f) => f.pane_id,
+        Err(e) => return e,
+    };
     let after = non_neg_num(q.get("after"))
         .filter(|&a| a > 0)
         .map(|a| a as u64)
@@ -807,9 +826,12 @@ async fn messages_post(
         Ok(i) => i,
         Err(e) => return e,
     };
-    if let Err(e) = find_pane_scoped(&shared, info.scope.as_ref(), &id) {
-        return e;
-    }
+    // Canonical id: the inbox is keyed by the read-model's pane id, so an alias-addressed post
+    // (`pane-<uuid>` vs bare `<uuid>`) lands on the queue the target actually reads.
+    let id = match find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        Ok(f) => f.pane_id,
+        Err(e) => return e,
+    };
     let b: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let from = b
         .get("from")
@@ -825,6 +847,9 @@ async fn messages_post(
         .lock()
         .unwrap()
         .post(&id, &from, &msg_body, now_ms());
+    // Wake an opted-in agent pane (goals org): the durable read stays the source of truth, but a
+    // TUI agent parked at its prompt would never perform that read on its own.
+    arm_inbox_nudge(&shared, &id, msg.seq);
     // Nudge live, in-scope clients (the durable read remains the source of truth).
     let coords = shared.model.lock().unwrap().coords_of(&id);
     shared.events.broadcast_for_pane(
@@ -837,6 +862,75 @@ async fn messages_post(
         },
     );
     jstatus(200, json!({ "ok": true, "seq": msg.seq }))
+}
+
+/// Whether inbox nudges are enabled at all — `HYPERPANES_MSG_NUDGE=0` (or `false`/`off`) in the
+/// app's environment turns the whole mechanism off, leaving the bus pull-only as before.
+fn nudges_enabled() -> bool {
+    !matches!(
+        std::env::var("HYPERPANES_MSG_NUDGE").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    )
+}
+
+/// Arm (and, if needed, spawn) the waiter that types a one-line "you have mail" into `pane_id`
+/// once it goes quiet. See `control::nudge` for the policy: role opt-in, coalescing,
+/// never-mid-turn, rate limit.
+fn arm_inbox_nudge(shared: &Arc<Shared>, pane_id: &str, seq: u64) {
+    if !nudges_enabled() {
+        return;
+    }
+    let (wants, uid, status) = {
+        let m = shared.model.lock().unwrap();
+        match m.pane(pane_id) {
+            None => return,
+            Some(p) => (
+                nudge::wants_nudge(p.meta.as_ref()),
+                p.session_uid.clone(),
+                p.status,
+            ),
+        }
+    };
+    if !wants || status == PaneStatus::Exited {
+        return;
+    }
+    if !shared.nudges.lock().unwrap().arm(pane_id, seq, now_ms()) {
+        return; // a waiter is already in flight for this pane; it will pick the batch up
+    }
+    let shared = Arc::clone(shared);
+    let pane_id = pane_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(nudge::SETTLE_MS)).await;
+        loop {
+            // Busy = mid-turn (a running command, or output within the idle threshold): typing
+            // now would land in a live prompt, so wait for the pane to come to rest.
+            let busy = {
+                let m = shared.model.lock().unwrap();
+                match m.pane(&pane_id) {
+                    None => return, // pane closed while we waited
+                    Some(p) => shared.compute_activity(p) == Activity::Busy,
+                }
+            };
+            let step = shared.nudges.lock().unwrap().poll(&pane_id, busy, now_ms());
+            match step {
+                nudge::Step::Stop => return,
+                nudge::Step::Wait => {
+                    tokio::time::sleep(Duration::from_millis(nudge::POLL_MS)).await;
+                }
+                nudge::Step::Send(text) => {
+                    // Same cadence the goal/resume delivery uses: text, gap, CR, insurance CR —
+                    // a bracketed-paste TUI reads text+CR in one read as a paste otherwise.
+                    let sessions = Arc::clone(&shared.sessions);
+                    sessions.write(&uid, &text);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    sessions.write(&uid, "\r");
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    sessions.write(&uid, "\r");
+                    return;
+                }
+            }
+        }
+    });
 }
 
 // ---- /panes/{id}/lock ---------------------------------------------------------------------
@@ -2049,6 +2143,53 @@ mod golden {
         assert_eq!(m["from"], serde_json::json!("mgr"));
         assert_eq!(m["body"], serde_json::json!("go"));
         assert!(m["ts"].is_number());
+    }
+
+    /// The two pane-id spellings in the wild (`pane-<uuid>` from the app, bare `<uuid>` from the
+    /// control API) must address the SAME inbox: an agent handed one form and reconstructing the
+    /// other used to get `404 no such pane`, silently breaking the reply direction of the bus.
+    #[tokio::test]
+    async fn messages_are_addressable_by_either_pane_id_spelling() {
+        let s = boot(true).await;
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("pane-abc", "u1"));
+        // Post to the bare-uuid alias…
+        let post = client()
+            .post(format!("{}/panes/abc/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(r#"{"from":"impl","body":"done"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(post.status().as_u16(), 200);
+        // …and read it back under the canonical id.
+        let get: serde_json::Value = client()
+            .get(format!("{}/panes/pane-abc/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(get["paneId"], serde_json::json!("pane-abc"));
+        assert_eq!(get["messages"][0]["body"], serde_json::json!("done"));
+        // The reverse spelling reads the same queue and reports the canonical id.
+        let alias: serde_json::Value = client()
+            .get(format!("{}/panes/abc/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(alias["paneId"], serde_json::json!("pane-abc"));
+        assert_eq!(alias["messages"][0]["body"], serde_json::json!("done"));
     }
 
     #[tokio::test]

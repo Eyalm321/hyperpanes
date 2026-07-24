@@ -53,8 +53,15 @@ prompt wedges the pane).
   the advisor:** include `advisor=<your $HYPERPANES_PANE_ID>` in every payload so an impl agent that
   hits a strategic fork can consult you mid-build instead of guessing or bouncing the whole subtask
   (see IMPL.md "Consult your advisor").
-- `spawn_workers {queue, count:N, isolation:"worktree", command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
-  — the `--mcp-config` flag is required (see `SKILL.md` "MCP config on every spawned claude");
+- `spawn_workers {queue, count:N, isolation:"worktree", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+  — **keep the visibility trio**: `stream:true` + `--output-format stream-json --verbose` makes the
+  impl agent's turn readable in its pane (a bare `claude -p` prints nothing until it exits, so the
+  pane looks dead for the whole build), and `lingerSecs` holds the pane open after the queue drains
+  (the pane auto-closes when the runner exits, taking the scrollback with it). Add
+  `logDir:"<state-dir>/worker-logs"` when you want the raw transcript to outlive the pane.
+  `spawn_workers` gives each worker **its own pane** by default (`layout:"pane-per-worker"`), so
+  `count:N` = N readable panes; `layout:"single-pane"` multiplexes them into one if you'd rather.
+  The `--mcp-config` flag is required (see `SKILL.md` "MCP config on every spawned claude");
   without it, account rotation hides `mcp__hyperpanes__*` tools from the impl agent.
   `${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS}` likewise carries the user's statusline
   (see `SKILL.md` "Statusline on every spawned claude") — harmless when the var is unset.
@@ -80,7 +87,9 @@ prompt wedges the pane).
 ## 3. Integrate & verify
 
 - **Be the impl agents' advisor while the wave runs.** You're the higher-tier model that wrote the
-  spec, so you're on call: watch your inbox (`read_messages {paneId:<your $HYPERPANES_PANE_ID>}`)
+  spec, so you're on call. The app types a one-line `[hyperpanes] inbox: N new message(s)…` nudge
+  into your pane when mail lands while you're idle — when you see it, read and answer immediately.
+  Don't rely on it alone: also watch your inbox (`read_messages {paneId:<your $HYPERPANES_PANE_ID>}`)
   for `<taskId>:` consults and answer fast (`send_message {to:<the `from` pane id on the message>,
   from:"$HYPERPANES_PANE_ID", body:<crisp decision>}`). A 20-second answer here saves a thrown-away
   subtask and a whole re-spec round-trip — this is the point of pairing your intelligence with their
