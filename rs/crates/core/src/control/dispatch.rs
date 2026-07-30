@@ -306,7 +306,10 @@ fn exec(
                 .pane(&pane_id)
                 .cloned()
                 .ok_or_else(|| format!("no such pane: {pane_id}"))?;
-            let action = cmd.get("action").and_then(Value::as_str).unwrap_or("inspect");
+            let action = cmd
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("inspect");
             match action {
                 "inspect" => Ok((Some(recover_inspect(sessions, &pane)?), false)),
                 "repair" => Ok((Some(recover_repair(sessions, &pane, cmd)?), false)),
@@ -501,7 +504,9 @@ fn resolve_recover_target(pane: &PaneInfo, cmd: &Value) -> Result<RecoverTarget,
         let hit = claude_recovery::resolve_session_candidates(Path::new(&cwd))
             .into_iter()
             .find(|c| c.session_id == explicit)
-            .ok_or_else(|| format!("no transcript found for sessionId {explicit} under cwd {cwd}"))?;
+            .ok_or_else(|| {
+                format!("no transcript found for sessionId {explicit} under cwd {cwd}")
+            })?;
         return Ok(RecoverTarget {
             session_id: hit.session_id,
             path: hit.path,
@@ -518,7 +523,9 @@ fn resolve_recover_target(pane: &PaneInfo, cmd: &Value) -> Result<RecoverTarget,
                 .ok_or_else(|| "no default ~/.claude/projects store found".to_string())?,
         };
         let path = projects_root
-            .join(crate::claude_history::encode_project_dir(Path::new(&marker.cwd)))
+            .join(crate::claude_history::encode_project_dir(Path::new(
+                &marker.cwd,
+            )))
             .join(format!("{}.jsonl", marker.session_id));
         return Ok(RecoverTarget {
             session_id: marker.session_id,
@@ -548,10 +555,15 @@ fn resolve_recover_target(pane: &PaneInfo, cmd: &Value) -> Result<RecoverTarget,
 /// masking a real, unrelated problem. A healthy/already-repaired transcript is a no-op
 /// (`dropped: []`, no backup written); repairing one is byte-preserving except for the
 /// dropped lines, and always backed up first.
-fn recover_repair(sessions: &SessionManager, pane: &PaneInfo, cmd: &Value) -> Result<Value, String> {
+fn recover_repair(
+    sessions: &SessionManager,
+    pane: &PaneInfo,
+    cmd: &Value,
+) -> Result<Value, String> {
     let force = matches!(cmd.get("force"), Some(Value::Bool(true)));
     let tail = pane_tail(sessions, &pane.session_uid);
-    let class = claude_recovery::detect_api_error(&tail).map(|s| claude_recovery::classify_error(&s));
+    let class =
+        claude_recovery::detect_api_error(&tail).map(|s| claude_recovery::classify_error(&s));
     if !force && class != Some(ErrorClass::Poisoned) {
         return Err(format!(
             "refusing to repair: class is {} (not poisoned) — pass force:true to override",
@@ -606,9 +618,12 @@ fn recover_resume(
 ) -> Result<(), String> {
     let force = matches!(cmd.get("force"), Some(Value::Bool(true)));
     let tail = pane_tail(sessions, &pane.session_uid);
-    let class = claude_recovery::detect_api_error(&tail).map(|s| claude_recovery::classify_error(&s));
+    let class =
+        claude_recovery::detect_api_error(&tail).map(|s| claude_recovery::classify_error(&s));
     if !force && class == Some(ErrorClass::Unknown) {
-        return Err("refusing to resume: class is unknown — pass force:true to override".to_string());
+        return Err(
+            "refusing to resume: class is unknown — pass force:true to override".to_string(),
+        );
     }
 
     let target = resolve_recover_target(pane, cmd)?;

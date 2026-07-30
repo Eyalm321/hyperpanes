@@ -264,7 +264,12 @@ impl Shared {
     /// threshold"; a never-output pane reads `busy` (the renderer's `markActivity` only fires on
     /// output).
     pub fn compute_activity(&self, pane: &PaneInfo) -> Activity {
-        activity_for(&self.sessions, self.idle_threshold_ms, &pane.session_uid, pane.status)
+        activity_for(
+            &self.sessions,
+            self.idle_threshold_ms,
+            &pane.session_uid,
+            pane.status,
+        )
     }
 }
 
@@ -490,7 +495,12 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
         let mut seen = std::collections::HashSet::new();
         for pr in &panes {
             seen.insert(pr.pane_id.clone());
-            let act = activity_for(&shared.sessions, shared.idle_threshold_ms, &pr.session_uid, pr.status);
+            let act = activity_for(
+                &shared.sessions,
+                shared.idle_threshold_ms,
+                &pr.session_uid,
+                pr.status,
+            );
             let prev = last.get(&pr.pane_id).copied();
             if prev != Some(act) {
                 // Only emit on a flip of an already-tracked pane while someone is streaming.
