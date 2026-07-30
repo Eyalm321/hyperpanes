@@ -292,7 +292,6 @@ fn exec(
                 model,
                 sessions,
                 control_file,
-                &pane_id,
                 &pane,
                 &target,
                 cmd.get("env"),
@@ -636,7 +635,6 @@ fn recover_resume(
         model,
         sessions,
         control_file,
-        &pane.id,
         pane,
         &resume_target,
         cmd.get("env"),
@@ -664,7 +662,7 @@ impl ResumeTarget {
     }
 }
 
-/// Kill `pane_id`'s current session and respawn it resuming `target`'s conversation — the
+/// Kill `pane`'s current session and respawn it resuming `target`'s conversation — the
 /// mechanics shared by `restartPane { resume: true }` (marker-sourced target) and
 /// `recoverPane { action: "resume" }` (marker-or-scan-fallback target), factored out so
 /// there's exactly one place that knows how to rebuild a resumed launch.
@@ -672,7 +670,6 @@ fn respawn_resuming(
     model: &mut ReadModel,
     sessions: &SessionManager,
     control_file: Option<&str>,
-    pane_id: &str,
     pane: &PaneInfo,
     target: &ResumeTarget,
     env_field: Option<&Value>,
@@ -680,6 +677,7 @@ fn respawn_resuming(
 ) -> Result<(), String> {
     let old_uid = pane.session_uid.clone();
     let new_uid = new_id();
+    let pane_id = pane.id.as_str();
 
     // Optional `env` override, layered over the base spawn env (same shape as `openPane`).
     // The account-rotation path uses this to respawn a pane under a different
@@ -1247,5 +1245,123 @@ mod tests {
         let base = "claude --model m --resume old-id";
         // Never double-append; return the command unchanged.
         assert_eq!(resume_command(Some(base), "new-id").unwrap(), base);
+    }
+
+    // ---- recoverPane ----
+
+    #[tokio::test]
+    async fn recover_pane_inspect_reports_null_api_error_when_tail_is_healthy() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let open = json!({ "type": "newPane", "windowId": 1, "pane": { "command": "echo hi" } });
+        let pane_id = handle_command(&mut m, &s, None, None, &open).body["result"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let inspect = json!({ "type": "recoverPane", "paneId": pane_id, "action": "inspect" });
+        let r = handle_command(&mut m, &s, None, None, &inspect);
+        assert_eq!(r.status, 200, "{:?}", r.body);
+        assert_eq!(r.body["result"]["apiError"], Value::Null);
+        assert_eq!(r.body["result"]["class"], Value::Null);
+        assert!(r.body["result"]["activity"].is_string());
+        assert!(r.body["result"]["session"].is_object());
+    }
+
+    #[tokio::test]
+    async fn recover_pane_resume_refuses_unknown_class_without_force() {
+        let mut m = model_one_window();
+        let s = sessions();
+        // Classifies as Unknown per the classification table (a 418 matches no known
+        // transient/account-limit/poisoned pattern).
+        let open = json!({
+            "type": "newPane",
+            "windowId": 1,
+            "pane": { "command": "printf 'API Error: 418 I am a teapot\\r\\n'; exec cat" }
+        });
+        let pane_id = handle_command(&mut m, &s, None, None, &open).body["result"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let resume = json!({ "type": "recoverPane", "paneId": pane_id, "action": "resume" });
+        let r = handle_command(&mut m, &s, None, None, &resume);
+        assert_eq!(r.status, 500);
+        assert!(
+            r.body["error"].as_str().unwrap().contains("unknown"),
+            "{:?}",
+            r.body
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_pane_repair_drops_the_orphaned_fixture_line_and_is_idempotent() {
+        let tmp = std::env::temp_dir().join(format!("hp-recover-test-{}", uuid::Uuid::new_v4()));
+        let project_cwd = tmp.join("proj");
+        let config_dir = tmp.join("config");
+        std::fs::create_dir_all(&project_cwd).unwrap();
+
+        let mut m = model_one_window();
+        let s = sessions();
+        let open = json!({
+            "type": "newPane",
+            "windowId": 1,
+            "pane": { "command": "cat", "cwd": project_cwd.to_str().unwrap() },
+        });
+        let pane_id = handle_command(&mut m, &s, None, None, &open).body["result"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A test-controlled config_dir/projects store (never the real ~/.claude), seeded
+        // from the committed poisoned-transcript fixture under its own session id, wired to
+        // the pane via a marker — mirrors what `read_pane_session` would find for a live
+        // `SessionStart` marker, without touching the real account store.
+        const FIXTURE: &str = include_str!("../../tests/fixtures/g2-poisoned-transcript.jsonl");
+        const SESSION_ID: &str = "02e639b0-4575-4538-8c30-19a1d94520d9";
+        let encoded = crate::claude_history::encode_project_dir(&project_cwd);
+        let store_dir = config_dir.join("projects").join(&encoded);
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let transcript_path = store_dir.join(format!("{SESSION_ID}.jsonl"));
+        std::fs::write(&transcript_path, FIXTURE).unwrap();
+
+        let marker_dir = crate::persistence::paths::claude_sessions_dir();
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        let marker_path = marker_dir.join(format!("{pane_id}.json"));
+        std::fs::write(
+            &marker_path,
+            json!({
+                "sessionId": SESSION_ID,
+                "cwd": project_cwd.to_str().unwrap(),
+                "configDir": config_dir.to_str().unwrap(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // force:true — the pane's own tail is healthy (a bare `cat`), so this exercises
+        // resolution + repair directly rather than the classify gate (covered by the
+        // classification_table test above and, end-to-end, by scripts/g3-recovery-demo.sh).
+        let repair =
+            json!({ "type": "recoverPane", "paneId": pane_id, "action": "repair", "force": true });
+        let r = handle_command(&mut m, &s, None, None, &repair);
+        assert_eq!(r.status, 200, "{:?}", r.body);
+        assert_eq!(r.body["result"]["dropped"], json!([9]));
+        assert_eq!(r.body["result"]["sessionId"], json!(SESSION_ID));
+        let backup = r.body["result"]["backup"].as_str().unwrap().to_string();
+        assert!(
+            Path::new(&backup).exists(),
+            "backup file must exist: {backup}"
+        );
+
+        // Idempotent: repairing the now-healthy transcript a second time is a no-op —
+        // nothing dropped, no new backup written.
+        let r2 = handle_command(&mut m, &s, None, None, &repair);
+        assert_eq!(r2.body["result"]["dropped"], json!([]));
+        assert_eq!(r2.body["result"]["backup"], Value::Null);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_file(&marker_path);
     }
 }
