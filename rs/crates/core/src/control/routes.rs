@@ -1495,6 +1495,7 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
             control_file.as_deref(),
             info.scope.as_ref(),
             &cmd,
+            &shared.speech,
         )
     };
     // Phase-5: keep supervisor policies in lockstep with pane meta (setMeta flips
