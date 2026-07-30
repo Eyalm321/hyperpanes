@@ -21,22 +21,39 @@ daemon never collide there — correct for argv hand-off, blind to file ownershi
 
 ## The guard (`core/src/control/discovery_guard.rs`)
 
-Before `run_server` claims the file it reads it and checks the recorded pid:
+Before `run_server` claims the file it reads it and checks the recorded pid. The file
+is refused ONLY when that pid is alive, is not ours, and **verifiably looks like a
+hyperpanes process** (comm/argv0 on Linux, `ps` comm elsewhere on unix, image path on
+Windows — matching `hyperpanes` or the `headless` bin). Everything else claims
+cleanly; the guard **fails open**, because a wrongly-refused legitimate launch would
+be a worse wedge than the clobber it prevents:
 
-- **pid alive and not ours → refuse startup**, before binding anything, with a message
-  naming the live owner (pid / port / version), the isolation recipe, and the pid-reuse
-  escape hatch. The headless daemon exits 1 with it; the GUI host's detached server
-  task also logs it to stderr.
-- **pid dead, file missing/corrupt, or pid is ours** (in-process `ControlHost`
-  restart) **→ claim cleanly.** Crash recovery needs no manual cleanup.
+- **live foreign hyperpanes pid → refuse startup**, before binding anything, with a
+  message naming the live owner (pid / port / version), the copy-pasteable isolation
+  env line, and the pid-reuse escape hatch. The refusal is retried for ~5s first, so
+  an owner that is mid-exit (restart overlap) is claimed instead of refused. The
+  headless daemon exits 1 with the message; the GUI host's detached server task also
+  logs it to stderr.
+- **pid dead (zombies count as dead), file missing/corrupt, or pid is ours**
+  (in-process `ControlHost` restart) **→ claim cleanly.** Crash recovery needs no
+  manual cleanup.
+- **pid alive but some unrelated program (recycled pid), or identity unreadable →
+  claim.** A reused pid can never brick startup forever.
 - `remove_discovery` is owner-checked the same way: an instance only deletes a file
   recording its own pid, so a refused instance quitting cannot delete the live owner's
   file either.
 
-Liveness probe: `/proc/<pid>` on Linux, `OpenProcess` on Windows, `kill -0` on other
-unix. Known limit: two instances starting simultaneously against a not-yet-written
-file both pass (last write wins) — the incident class is a dev build joining a
-long-lived live instance, where the file always exists first.
+`restartApp` (both scopes) is safe twice over: same-flavor restarts are serialized by
+the `single_instance` flock (released only when the old process dies) plus the
+relauncher's 2s sleep (`app::service_restart_request`), and the guard's retry window
+covers any residual overlap. Exactly two code paths ever write discovery — the GUI's
+`ControlHost` and the core headless `app::run` (`grep -rn "server::run_server"
+rs/crates`); the session daemon (`--session-daemon`) and `hyperpanes worker` are
+clients only, so no legitimate pair of processes can deadlock on the guard.
+
+Known limit: two instances starting simultaneously against a not-yet-written file
+both pass (last write wins) — the incident class is a dev build joining a long-lived
+live instance, where the file always exists first.
 
 ## Running an isolated dev instance (the supported way)
 

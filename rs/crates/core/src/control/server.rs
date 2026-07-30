@@ -407,7 +407,7 @@ pub fn remove_discovery(shared: &Arc<Shared>) {
 pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
     // A control file owned by a live, different-pid instance is not ours to claim — fail
     // loudly before binding anything (see control::discovery_guard).
-    crate::control::discovery_guard::ensure_claimable(&shared.control_file, shared.pid)?;
+    crate::control::discovery_guard::ensure_claimable(&shared.control_file, shared.pid).await?;
     let (addr, req_port) = shared.bind_config();
     let listener = match tokio::net::TcpListener::bind((addr.as_str(), req_port)).await {
         Ok(l) => l,
