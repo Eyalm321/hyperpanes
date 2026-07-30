@@ -48,5 +48,8 @@ XDG_STATE_HOME=$d HYPERPANES_CONTROL_FILE=$d/control.json \
 
 Both variables matter: `XDG_STATE_HOME` isolates the rest of the state dir, and
 `HYPERPANES_CONTROL_FILE` must be set explicitly because the inherited value would
-otherwise win (that precedence is the whole failure mode). An unisolated dev launch
+otherwise win (that precedence is the whole failure mode). Optionally add
+`XDG_CONFIG_HOME=$d` too: `control-settings.json` lives in the config dir, so a dev
+instance otherwise inherits the live bind address — harmless (the live port is taken
+and it falls back to loopback), just noisy. An unisolated dev launch
 now fails fast with the refusal message instead of hijacking the live control plane.
