@@ -126,8 +126,29 @@ else
     exit 1
 fi
 
+# ---- resume environment ---------------------------------------------------------------------
+# The transcript's surviving tool-search records reference tools that must exist in the resumed
+# request or the API 400s with "Tool reference ... not found in available tools":
+#   - mcp__tokensave__tokensave_context (loaded by the record-16 tool_search result)
+#   - five mcp__hyperpanes__* tools (loaded via ToolSearch in record 20)
+# So the resume needs: tool search ENABLED (ENABLE_TOOL_SEARCH=true), plus the tokensave and
+# hyperpanes MCP servers connected. `tokensave serve` refuses to start outside a registered
+# project, so it is pinned to the project the incident session actually ran in.
+TOKENSAVE_PROJECT="${HP_DEMO_TOKENSAVE_PROJECT:-$HOME/dev/hyperpanes}"
+DEMO_MCP="$TMP/demo-mcp.json"
+jq -n --arg tsproj "$TOKENSAVE_PROJECT" '{mcpServers: {
+    tokensave: {type: "stdio", command: (env.HOME + "/.local/bin/tokensave"), args: ["serve", "-p", $tsproj], env: {}},
+    hyperpanes: {type: "stdio", command: "npx", args: ["-y", "hyperpanes-mcp"], env: {HYPERPANES_ALLOW_INPUT: "1"}}
+}}' >"$DEMO_MCP"
+
+resume_claude() {
+    env CLAUDE_CONFIG_DIR="$ACCOUNT_DIR" ENABLE_TOOL_SEARCH=true \
+        claude --resume "$SID" --mcp-config "$DEMO_MCP" \
+        -p "reply with exactly OK" --model claude-haiku-4-5-20251001 </dev/null 2>&1
+}
+
 echo "== step 2: prove the poison is live =="
-STEP2_OUT="$(cd "$PROJ" && env CLAUDE_CONFIG_DIR="$ACCOUNT_DIR" claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
+STEP2_OUT="$(cd "$PROJ" && resume_claude)"
 STEP2_STATUS=$?
 printf '%s\n' "$STEP2_OUT" >"$TMP/err.txt"
 if [ $STEP2_STATUS -ne 0 ] && printf '%s' "$STEP2_OUT" | grep -q "API Error" && printf '%s' "$STEP2_OUT" | grep -q "tool_use_id"; then
@@ -237,7 +258,7 @@ else
 fi
 
 echo "== step 6: re-run the resume — must now succeed =="
-STEP6_OUT="$(cd "$PROJ" && env CLAUDE_CONFIG_DIR="$ACCOUNT_DIR" claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
+STEP6_OUT="$(cd "$PROJ" && resume_claude)"
 STEP6_STATUS=$?
 if [ $STEP6_STATUS -eq 0 ] && printf '%s' "$STEP6_OUT" | grep -q "OK"; then
     ok "step 6: claude --resume succeeded and replied OK — the repaired session is usable"
