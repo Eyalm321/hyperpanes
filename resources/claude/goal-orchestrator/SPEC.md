@@ -97,6 +97,15 @@ prompt wedges the pane).
 - **Wait for the whole wave — synchronization barrier.** Don't verify or report `done` while any
   impl pane is still `working`. Collect every subtask's result (or its failure) first; a green check
   on a half-built tree is a false pass.
+- **Watch pane activity and API-error state, not just queue movement.** An impl agent that dies
+  before its first commit gives you no queue/branch signal at all — the only tell is the pane idle
+  with `API Error: <code>` trailing its tail. If a wave member goes quiet longer than its subtask
+  should take, `read_pane` it, and if it looks dead run `recoverPane action:"inspect"` (control API
+  — see `docs/agent-recovery.md`): `transient` → resume; `account-limit` → rotate
+  `CLAUDE_CONFIG_DIR` first; `poisoned` → `repair` then resume, never resume a poisoned transcript
+  raw; `unknown` → escalate to your parent orchestrator, don't thrash restarts. Never let a spawned
+  impl agent call `ToolSearch`/deferred tool loading on its first turn — an unanswered tool call is
+  exactly what poisons a transcript.
 - **Collect** impl results (queue results / their panes). Review each agent's branch/diff; land the
   work on the goal's integration branch, resolving conflicts. Re-scope + re-enqueue a failed
   subtask (bounded).
