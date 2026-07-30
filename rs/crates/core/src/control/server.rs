@@ -264,17 +264,27 @@ impl Shared {
     /// threshold"; a never-output pane reads `busy` (the renderer's `markActivity` only fires on
     /// output).
     pub fn compute_activity(&self, pane: &PaneInfo) -> Activity {
-        self.activity_for(&pane.session_uid, pane.status)
+        activity_for(&self.sessions, self.idle_threshold_ms, &pane.session_uid, pane.status)
     }
+}
 
-    fn activity_for(&self, uid: &str, status: PaneStatus) -> Activity {
+/// Free-function core of [`Shared::compute_activity`], factored out so `dispatch::recoverPane`
+/// (which has a `&SessionManager` but no `Shared`) reads liveness through the exact same
+/// source of truth as `/state`'s `activity` field, rather than a second, driftable copy.
+pub(crate) fn activity_for(
+    sessions: &SessionManager,
+    idle_threshold_ms: i64,
+    uid: &str,
+    status: PaneStatus,
+) -> Activity {
+    {
         if status == PaneStatus::Exited {
             return Activity::Exited;
         }
         // Phase 4: prefer the precise, marker-derived state. The gate is `marker_seen` —
         // until a pane has EVER emitted a prompt marker, the legacy silence heuristic owns
         // its activity, so an un-instrumented pane is byte-for-byte unchanged.
-        if let Some(l) = self.sessions.liveness(uid) {
+        if let Some(l) = sessions.liveness(uid) {
             if l.marker_seen {
                 // A command known to be running stays Busy THROUGH output silence — the
                 // whole fix. A returned prompt is a positive AwaitingInput edge.
@@ -290,8 +300,8 @@ impl Shared {
             }
         }
         // Fallback: the legacy 10s output-silence heuristic (labeled, unchanged).
-        match self.sessions.last_output_at(uid) {
-            Some(t) if now_ms() - (t as i64) >= self.idle_threshold_ms => Activity::Idle,
+        match sessions.last_output_at(uid) {
+            Some(t) if now_ms() - (t as i64) >= idle_threshold_ms => Activity::Idle,
             _ => Activity::Busy,
         }
     }
@@ -480,7 +490,7 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
         let mut seen = std::collections::HashSet::new();
         for pr in &panes {
             seen.insert(pr.pane_id.clone());
-            let act = shared.activity_for(&pr.session_uid, pr.status);
+            let act = activity_for(&shared.sessions, shared.idle_threshold_ms, &pr.session_uid, pr.status);
             let prev = last.get(&pr.pane_id).copied();
             if prev != Some(act) {
                 // Only emit on a flip of an already-tracked pane while someone is streaming.
@@ -799,7 +809,7 @@ fn emit_marker_liveness(shared: &Arc<Shared>, uid: &str) {
             .unwrap_or(PaneStatus::Running);
         (pid, coords, status)
     };
-    let act = shared.activity_for(uid, status);
+    let act = activity_for(&shared.sessions, shared.idle_threshold_ms, uid, status);
     // Health signal for the supervisor: a prompt-ready / agent-done edge means the worker
     // is healthy, so reset its backoff budget (no-op if the pane isn't supervised).
     if matches!(act, Activity::AwaitingInput) {
