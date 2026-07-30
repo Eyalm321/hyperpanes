@@ -82,7 +82,18 @@ if [ -f "$LIVE_CONTROL_JSON" ]; then
 fi
 
 ENCODED_PROJ="$(encode "$PROJ")"
-DEFAULT_STORE_DIR="$HOME/.claude/projects/$ENCODED_PROJ"
+# The account the poisoned session lives under. It must be an account whose MCP tool set
+# matches what the fixture conversation actually loaded (tokensave/serena/headroom/hyperpanes)
+# — the g2 incident session ran under the goals-rotation account `.claude-sunsations`, and a
+# resume in a store without those servers fails with a NEW 400 ("Tool reference ... not found
+# in available tools") even after the poison is excised. The headless server's markerless scan
+# finds this store via claude_accounts discovery (a `.claude*` home dir with .credentials.json).
+ACCOUNT_DIR="${HP_DEMO_CLAUDE_CONFIG_DIR:-$HOME/.claude-sunsations}"
+if [ ! -d "$ACCOUNT_DIR" ]; then
+    echo "FAIL: account dir $ACCOUNT_DIR does not exist (set HP_DEMO_CLAUDE_CONFIG_DIR)"
+    exit 1
+fi
+DEFAULT_STORE_DIR="$ACCOUNT_DIR/projects/$ENCODED_PROJ"
 DEST="$DEFAULT_STORE_DIR/$SID.jsonl"
 
 HEADLESS_PID=""
@@ -100,7 +111,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== step 1: install the poisoned session into the default ~/.claude store =="
+echo "== step 1: install the poisoned session into the account transcript store =="
 mkdir -p "$DEFAULT_STORE_DIR"
 FIXTURE_SID="$(grep -o '"sessionId":"[^"]*"' "$FIXTURE" | head -1 | sed -E 's/.*:"([^"]*)"/\1/')"
 if [ -z "$FIXTURE_SID" ]; then
@@ -116,7 +127,7 @@ else
 fi
 
 echo "== step 2: prove the poison is live =="
-STEP2_OUT="$(cd "$PROJ" && env -u CLAUDE_CONFIG_DIR claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
+STEP2_OUT="$(cd "$PROJ" && env CLAUDE_CONFIG_DIR="$ACCOUNT_DIR" claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
 STEP2_STATUS=$?
 printf '%s\n' "$STEP2_OUT" >"$TMP/err.txt"
 if [ $STEP2_STATUS -ne 0 ] && printf '%s' "$STEP2_OUT" | grep -q "API Error" && printf '%s' "$STEP2_OUT" | grep -q "tool_use_id"; then
@@ -204,10 +215,14 @@ if [ "$CLASS" = "poisoned" ]; then
 else
     fail "step 4: expected class=poisoned, got: $INSPECT_RESP"
 fi
-if [ -n "$CANDIDATE_HIT" ] && [ "$CANDIDATE_HIT" != "null" ] && { [ "$CANDIDATE_CONFIG_DIR" = "null" ] || [ -z "$CANDIDATE_CONFIG_DIR" ]; }; then
-    ok "step 4: scan candidates include $SID with configDir null (markerless resolution proved)"
+# The session was installed under an ACCOUNT store (not ~/.claude), so the candidate must
+# carry a non-null configDir — that account linkage is what lets resume run under the right
+# CLAUDE_CONFIG_DIR. (~/.claude-sunsations/projects symlinks to the shared store, so the
+# reported dir may be either account name; both resolve to the store the file lives in.)
+if [ -n "$CANDIDATE_HIT" ] && [ "$CANDIDATE_HIT" != "null" ] && [ "$CANDIDATE_CONFIG_DIR" != "null" ] && [ -n "$CANDIDATE_CONFIG_DIR" ]; then
+    ok "step 4: scan candidates include $SID with configDir=$CANDIDATE_CONFIG_DIR (markerless, account-carrying resolution proved)"
 else
-    fail "step 4: expected a markerless scan candidate for $SID with configDir null, got: $INSPECT_RESP"
+    fail "step 4: expected a markerless scan candidate for $SID with a non-null configDir, got: $INSPECT_RESP"
 fi
 
 echo "== step 5: repair the poisoned transcript =="
@@ -222,7 +237,7 @@ else
 fi
 
 echo "== step 6: re-run the resume — must now succeed =="
-STEP6_OUT="$(cd "$PROJ" && env -u CLAUDE_CONFIG_DIR claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
+STEP6_OUT="$(cd "$PROJ" && env CLAUDE_CONFIG_DIR="$ACCOUNT_DIR" claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
 STEP6_STATUS=$?
 if [ $STEP6_STATUS -eq 0 ] && printf '%s' "$STEP6_OUT" | grep -q "OK"; then
     ok "step 6: claude --resume succeeded and replied OK — the repaired session is usable"
