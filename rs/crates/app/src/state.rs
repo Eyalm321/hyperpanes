@@ -527,6 +527,9 @@ pub struct PaneState {
     /// Whether the pane's ambient-AI summary line is muted (the pane menu's "Mute AI Summary"
     /// toggle; mirrors the renderer's `ui.aiMuted` set). New panes default unmuted.
     pub ai_muted: bool,
+    /// Per-pane "talk": speak NEW Claude assistant replies aloud via local TTS (the pane menu's
+    /// "Talk" toggle). New panes default off; mirrors the control read-model's `PaneInfo::talk`.
+    pub talk: bool,
     /// Ambient-AI subtitle + typewriter reveal state (the local projection of this pane's
     /// `meta['ai.subtitle']`; produced by the `core::ai` engine when enabled).
     pub ai: AiLine,
@@ -1287,6 +1290,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            talk: false,
             ai: AiLine::default(),
             last_toast: String::new(),
             scrollbar_on: false,
@@ -1500,6 +1504,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            talk: false,
             ai: AiLine::default(),
             last_toast: String::new(),
             scrollbar_on: false,
@@ -3447,6 +3452,14 @@ impl State {
         }
     }
 
+    /// Toggle whether pane `idx`'s "talk" (speak new Claude assistant replies aloud) is on.
+    pub fn toggle_talk(&mut self, idx: usize) {
+        if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            p.talk = !p.talk;
+            self.dirty = true;
+        }
+    }
+
     /// Maximize/restore (zoom-in-tab) pane `idx`. Focuses it first, then toggles its zoom.
     pub fn zoom_pane(&mut self, idx: usize) {
         let t = self.active_tab_mut();
@@ -3814,6 +3827,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            talk: false,
             ai: AiLine::default(),
             last_toast: String::new(),
             scrollbar_on: false,
@@ -4587,6 +4601,7 @@ impl State {
             glow,
             shell_title: String::new(),
             ai_muted: false,
+            talk: spec.talk.unwrap_or(false),
             ai: AiLine::default(),
             last_toast: String::new(),
             scrollbar_on: false,

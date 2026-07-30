@@ -727,6 +727,15 @@ impl App {
                     win.closing.set(true);
                 }
             }
+            Effect::SpeechStopNow => {
+                self.control.speech_stop_all();
+            }
+            Effect::SpeechToggleMuted => {
+                self.control.speech_toggle_muted();
+            }
+            Effect::SpeechToggleFocusedOnly => {
+                self.control.speech_toggle_focused_only();
+            }
         }
     }
 
