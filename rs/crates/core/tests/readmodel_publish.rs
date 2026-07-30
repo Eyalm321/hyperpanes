@@ -238,3 +238,49 @@ fn close_of_an_adopted_pane_stays_closed_through_the_republish() {
     assert!(m.uid_to_pane("u-w").is_none());
     assert!(m.pane("u-gui").is_some());
 }
+
+/// The orchestrator's live-repro shape (probe-1): a pane inserted, OBSERVED present, must
+/// then survive every LATER sync tick until the GUI adopts it — the victim window is "insert
+/// until adoption", not just the tick concurrent with the insert. The carry-over predicate
+/// (Running ∧ uid ∉ last_published) holds across arbitrarily many pre-adoption republishes,
+/// and adoption then ends the carry-over without duplication.
+#[test]
+fn observed_pane_survives_every_republish_until_adopted() {
+    let (mut m, last_published) = published_model();
+
+    assert!(m.insert_pane(1, pane("ctl-slow", "u-slow")));
+    // Observed present (the orchestrator's successful first read).
+    assert!(m.pane("ctl-slow").is_some());
+
+    // Three sync ticks pass in which the GUI has still not adopted it (burst adoption lag):
+    // each republishes a tree without the pane, with last_published still GUI-only.
+    for tick in 0..3 {
+        m.publish_replace(
+            &[1],
+            vec![gui_window(vec![pane("u-gui", "u-gui")])],
+            &last_published,
+        );
+        assert!(
+            m.pane("ctl-slow").is_some(),
+            "pane erased by later republish (tick {tick}) before GUI adoption"
+        );
+    }
+
+    // Adoption tick: the GUI now hosts it; carried state converges, no duplicate.
+    let last2: HashSet<String> = ["u-gui".to_string(), "u-slow".to_string()].into();
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![
+            pane("u-gui", "u-gui"),
+            pane("ctl-slow", "u-slow"),
+        ])],
+        &last2,
+    );
+    assert_eq!(
+        m.panes()
+            .iter()
+            .filter(|p| p.session_uid == "u-slow")
+            .count(),
+        1
+    );
+}
