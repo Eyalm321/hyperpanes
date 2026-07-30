@@ -185,6 +185,11 @@ pub fn ai_settings_json() -> PathBuf {
     config_dir().join("ai-settings.json")
 }
 
+/// Per-pane "talk" (local TTS) settings. User setting → [`config_dir`].
+pub fn speech_json() -> PathBuf {
+    config_dir().join("speech.json")
+}
+
 /// Ambient-AI per-pane memory. Durable user data → [`data_dir`].
 pub fn ai_memory_json() -> PathBuf {
     data_dir().join("ai-memory.json")
