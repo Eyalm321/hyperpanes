@@ -4,7 +4,8 @@
 //! (busy/idle/exited) computed centrally from `session_manager` `last_output_at` at the
 //! `idleAlertSeconds` threshold. Serializes the EXACT `/state` JSON (PaneState:
 //! id/sessionUid/label/color/command?/args?/cwd?/shell?/subtitle?/status/exitCode?/activity/meta?,
-//! optionals OMITTED when unset). Scope-filtered per request.
+//! optionals OMITTED when unset). Scope-filtered per request. `talk` (per-pane "talk", additive)
+//! follows the same omit-when-unset convention: present only when `true`.
 //!
 //! In Electron the tree is published by renderers; in this single process it is mutated
 //! DIRECTLY by `control::dispatch` (newPane/closePane/…), which is what collapses `/command`
