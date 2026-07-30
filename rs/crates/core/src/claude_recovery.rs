@@ -43,11 +43,17 @@ pub struct ApiErrorSighting {
 pub fn detect_api_error(tail: &str) -> Option<ApiErrorSighting> {
     let line = tail.lines().rev().find(|l| l.contains("API Error"))?;
 
-    let after = line.split_once("API Error").map(|(_, rest)| rest).unwrap_or("");
+    let after = line
+        .split_once("API Error")
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
     let after = after.strip_prefix(':').unwrap_or(after).trim_start();
 
     let digit_len = after.chars().take_while(|c| c.is_ascii_digit()).count();
-    let next_is_boundary = after[digit_len..].chars().next().is_none_or(char::is_whitespace);
+    let next_is_boundary = after[digit_len..]
+        .chars()
+        .next()
+        .is_none_or(char::is_whitespace);
     let (code, detail) = if digit_len > 0 && next_is_boundary {
         let code = after[..digit_len].parse::<u16>().ok();
         (code, after[digit_len..].trim_start().to_string())
@@ -112,8 +118,8 @@ pub fn classify_error(sighting: &ApiErrorSighting) -> ErrorClass {
         return ErrorClass::AccountLimit;
     }
 
-    let is_4xx_ish =
-        code.is_some_and(|c| (400..500).contains(&c)) || detail_lc.contains("invalid_request_error");
+    let is_4xx_ish = code.is_some_and(|c| (400..500).contains(&c))
+        || detail_lc.contains("invalid_request_error");
     if is_4xx_ish && looks_structurally_poisoned(&sighting.detail, &detail_lc) {
         return ErrorClass::Poisoned;
     }
@@ -245,7 +251,8 @@ fn record_is_healthy(v: &serde_json::Value, producer_ids: &HashSet<String>) -> b
             }
             Some("tool_result") | Some("tool_search_tool_result") => {
                 if let Some(tool_use_id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
-                    if !producer_ids.contains(tool_use_id) && !local_producers.contains(tool_use_id) {
+                    if !producer_ids.contains(tool_use_id) && !local_producers.contains(tool_use_id)
+                    {
                         return false;
                     }
                 }
@@ -324,7 +331,10 @@ pub fn resolve_session_candidates(project_root: &Path) -> Vec<SessionCandidate> 
 /// test seam). Searches `store.projects_root.join(encode_project_dir(project_root))`
 /// in each store, merges, and sorts newest-first (ties broken by `session_id`
 /// descending so ordering is deterministic even with equal/missing mtimes).
-pub fn resolve_session_candidates_in(stores: &[SessionStore], project_root: &Path) -> Vec<SessionCandidate> {
+pub fn resolve_session_candidates_in(
+    stores: &[SessionStore],
+    project_root: &Path,
+) -> Vec<SessionCandidate> {
     let encoded = crate::claude_history::encode_project_dir(project_root);
     let mut out = Vec::new();
 
@@ -335,10 +345,14 @@ pub fn resolve_session_candidates_in(stores: &[SessionStore], project_root: &Pat
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jsonl")) {
+            if !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"))
+            {
                 continue;
             }
-            let Some(session_id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+            let Some(session_id) = path.file_stem().map(|s| s.to_string_lossy().into_owned())
+            else {
                 continue;
             };
             let modified_at = entry
@@ -356,7 +370,11 @@ pub fn resolve_session_candidates_in(stores: &[SessionStore], project_root: &Pat
         }
     }
 
-    out.sort_by(|a, b| b.modified_at.cmp(&a.modified_at).then_with(|| b.session_id.cmp(&a.session_id)));
+    out.sort_by(|a, b| {
+        b.modified_at
+            .cmp(&a.modified_at)
+            .then_with(|| b.session_id.cmp(&a.session_id))
+    });
     out
 }
 
@@ -394,7 +412,8 @@ mod tests {
             ("API Error: 500 internal server error", 500),
         ];
         for (line, expected_code) in cases {
-            let sighting = detect_api_error(line).unwrap_or_else(|| panic!("should detect: {line}"));
+            let sighting =
+                detect_api_error(line).unwrap_or_else(|| panic!("should detect: {line}"));
             assert_eq!(sighting.code, Some(expected_code), "line: {line}");
         }
     }
@@ -505,7 +524,10 @@ mod tests {
             .filter(|(i, _)| *i != 9)
             .map(|(_, (line, term))| format!("{line}{term}"))
             .collect();
-        assert_eq!(result.repaired, expected, "kept lines must be byte-identical to source");
+        assert_eq!(
+            result.repaired, expected,
+            "kept lines must be byte-identical to source"
+        );
     }
 
     #[test]
@@ -543,7 +565,8 @@ mod tests {
     // ---- 4) resolve_session_candidates_in ----
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hp-claude-recovery-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("hp-claude-recovery-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -552,8 +575,10 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, "{\"type\":\"summary\",\"summary\":\"x\"}\n").unwrap();
         let f = std::fs::File::options().write(true).open(&path).unwrap();
-        f.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(offset_secs))
-            .unwrap();
+        f.set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(offset_secs),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -590,13 +615,19 @@ mod tests {
         assert_eq!(candidates.len(), 3);
 
         let ids: Vec<&str> = candidates.iter().map(|c| c.session_id.as_str()).collect();
-        assert_eq!(ids, vec!["newest", "middle", "oldest"], "newest-first across stores");
+        assert_eq!(
+            ids,
+            vec!["newest", "middle", "oldest"],
+            "newest-first across stores"
+        );
 
-        let by_id: std::collections::HashMap<&str, &SessionCandidate> =
-            candidates.iter().map(|c| (c.session_id.as_str(), c)).collect();
+        let by_id: std::collections::HashMap<&str, &SessionCandidate> = candidates
+            .iter()
+            .map(|c| (c.session_id.as_str(), c))
+            .collect();
         assert_eq!(by_id["newest"].config_dir, None);
         assert_eq!(by_id["oldest"].config_dir, None);
-        assert_eq!(by_id["middle"].config_dir, Some(alt_config_dir));
+        assert_eq!(by_id["middle"].config_dir, Some(alt_config_dir.clone()));
 
         let _ = std::fs::remove_dir_all(&default_root);
         let _ = std::fs::remove_dir_all(&alt_root);
@@ -607,7 +638,10 @@ mod tests {
     fn missing_store_dir_yields_no_candidates() {
         let stores = vec![SessionStore {
             config_dir: None,
-            projects_root: std::env::temp_dir().join(format!("hp-claude-recovery-missing-{}", uuid::Uuid::new_v4())),
+            projects_root: std::env::temp_dir().join(format!(
+                "hp-claude-recovery-missing-{}",
+                uuid::Uuid::new_v4()
+            )),
         }];
         assert!(resolve_session_candidates_in(&stores, Path::new("/nowhere")).is_empty());
     }
