@@ -124,6 +124,12 @@ pub fn handle_command(
             None => DispatchResult::err(400, "setSpeechFocusedOnly needs a boolean focusedOnly"),
         };
     }
+    // One-shot global stop: kill the in-flight utterance and drop the backlog, leaving
+    // the persisted mute/focused settings untouched (mute is the sticky variant).
+    if ty == "stopSpeech" {
+        speech.stop_all();
+        return DispatchResult::ok(None, false);
+    }
 
     // Resolve a target window: explicit windowId (number or numeric string), else the pane's window.
     let window_id = window_id_field(cmd).or_else(|| {
@@ -961,6 +967,20 @@ mod tests {
         let r = handle_command(&mut m, &s, None, None, &cmd, &svc);
         assert_eq!(r.status, 200);
         assert!(!svc.status().muted);
+    }
+
+    #[test]
+    fn stop_speech_is_global_and_leaves_mute_untouched() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let svc = speech();
+        svc.set_muted(true);
+        // Global like setSpeechMuted: no paneId/windowId, must not 400.
+        let cmd = json!({ "type": "stopSpeech" });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &svc);
+        assert_eq!(r.status, 200);
+        // A one-shot stop is not a mode switch — mute stays as it was.
+        assert!(svc.status().muted);
     }
 
     #[test]

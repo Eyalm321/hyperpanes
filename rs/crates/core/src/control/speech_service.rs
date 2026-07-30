@@ -72,6 +72,20 @@ impl SpeechService {
         }
     }
 
+    /// Kill any in-flight utterance and discard the queued backlog, without changing the
+    /// persisted mute setting — a one-shot "shut up now" rather than a mode switch. A
+    /// never-spawned engine has nothing to stop, so this is a no-op then.
+    pub fn stop_all(&self) {
+        if let Some(handle) = self
+            .engine
+            .lock()
+            .expect("speech engine lock poisoned")
+            .as_ref()
+        {
+            handle.stop_all();
+        }
+    }
+
     pub fn set_focused_only(&self, focused_only: bool) {
         let settings = {
             let mut s = self.settings.lock().expect("speech settings lock poisoned");
