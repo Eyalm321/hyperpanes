@@ -124,6 +124,17 @@ On every loop iteration, inspect your live spec-agent/impl panes and judge liven
   surface to the human. Count strikes per pane; don't restart-loop.
 - **Crashed pane (`exited` unexpectedly):** the work queue's reaper already requeues its in-flight
   tasks; re-spawn the spec agent (`resume:true`) if the goal is still active.
+- **Blind spot: watch activity and API-error state, not only queue/branch movement.** A
+  spec/impl agent that dies before its first enqueue or commit gives you **no** queue or branch
+  signal, ever — the only death signal is the pane going idle with `API Error: <code>` as the
+  last line in its tail. On any agent pane idle suspiciously long, `read_pane` its tail, and if it
+  looks dead run `recoverPane action:"inspect"` (control API — see `docs/agent-recovery.md`) and
+  apply its `class`: `transient` → resume; `account-limit` → rotate `CLAUDE_CONFIG_DIR` first;
+  `poisoned` → `repair` then resume, **never** `restart_pane resume:true` a poisoned transcript
+  raw; `unknown` → escalate to the human, don't thrash restarts.
+- **Never call `ToolSearch`/deferred tool loading from a spawned agent's first turn.** This is
+  exactly how a transcript gets poisoned in the first place (an unanswered tool call wedges the
+  pane forever) — say so in every spec/impl persona you hand out.
 
 ## Fan-out & the work queue
 
