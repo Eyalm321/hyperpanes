@@ -217,6 +217,7 @@ impl ControlHost {
             // `/health` report it accurately instead of a stale hardcoded string.
             env!("CARGO_PKG_VERSION"),
             self.control_file.clone(),
+            paths::speech_json(),
         );
         // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.
         shared.set_runtime(self.runtime.clone());
@@ -363,7 +364,8 @@ impl ControlHost {
             for t in st.tabs.iter_mut() {
                 for p in t.panes.iter_mut() {
                     if p.talk && shown.insert(p.uid.clone()) {
-                        p.pane.set_toast("Talk needs the control server (Preferences)");
+                        p.pane
+                            .set_toast("Talk needs the control server (Preferences)");
                     }
                 }
             }
@@ -434,7 +436,11 @@ impl ControlHost {
             t.panes.get(t.focused).map(|p| p.uid.clone())
         });
         let focused_pane_id = focused_uid.map(|uid| self.pane_id_for_uid(&uid).unwrap_or(uid));
-        shared.model.lock().unwrap().set_focused_pane(focused_pane_id);
+        shared
+            .model
+            .lock()
+            .unwrap()
+            .set_focused_pane(focused_pane_id);
     }
 
     /// Read every pane the read-model currently holds (keyed by session uid), each GUI window's
