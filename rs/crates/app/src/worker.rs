@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! ```text
-//! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree [--base <committish>]] \
+//! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>] \
 //!   [--retry-window <secs>] [--nack-delay <ms>] \
 //!   [--stream] [--log-dir <dir>] [--linger <secs>] -- <cmd> [args...]
 //! ```
@@ -15,8 +15,10 @@
 //!
 //! Flags: `--count N` runs N competing workers in this process (#11); `--worktree` runs each
 //! task in a throwaway git worktree that auto-removes (#14), forked from `--base <committish>`
-//! (any branch, tag, or sha); without `--base` it falls back to the runner cwd's HEAD — whatever
-//! a shared checkout happens to have checked out, so prefer an explicit base; `--retry-window <secs>` keeps
+//! (any branch, tag, or sha) — `--base` is REQUIRED with `--worktree`: the old implicit fork
+//! point was the runner cwd's HEAD, i.e. whatever a shared checkout happened to have checked
+//! out, and `--base HEAD` stays expressible for anyone who really means that;
+//! `--retry-window <secs>` keeps
 //! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
 //! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
 //! long task isn't reclaimed mid-flight (#12).
@@ -56,9 +58,10 @@ pub struct WorkerArgs {
     pub nack_delay_ms: Option<i64>,
     /// Run each task in a throwaway git worktree, auto-removed on exit (#14).
     pub worktree: bool,
-    /// Fork point for `--worktree` task worktrees: any committish (branch, tag, sha). `None`
-    /// falls back to the runner cwd's HEAD — whatever a shared checkout happens to have checked
-    /// out, which is the footgun `--base` exists to avoid.
+    /// Fork point for `--worktree` task worktrees: any committish (branch, tag, sha). Required
+    /// with `--worktree` (parse rejects the combination without it): the old implicit fallback —
+    /// the runner cwd's HEAD, whatever a shared checkout happened to have checked out — is the
+    /// footgun `--base` exists to remove. `None` only when `--worktree` is off.
     pub base: Option<String>,
     /// Render the child's Claude `--output-format stream-json` lines as readable progress
     /// instead of raw JSON, so a worker pane shows what the agent is doing while it runs.
@@ -204,6 +207,15 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         }
     }
     let queue = queue.ok_or("missing --queue <name>")?;
+    if worktree && base.is_none() {
+        return Err(
+            "--worktree now requires --base <committish>: the fork point for task worktrees must \
+             be explicit, not whatever the shared checkout's HEAD happens to be. Use `--base main` \
+             for independent work, or `--base <your-integration-branch>` for a dependent wave \
+             (`--base HEAD` keeps the old behaviour if you really mean it)."
+                .to_string(),
+        );
+    }
     if child.is_empty() {
         return Err("missing child command after `--`".to_string());
     }
@@ -299,8 +311,9 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
     let worktree = args.worktree;
-    // Fork point for per-task worktrees. No `--base` = the runner cwd's HEAD (legacy); resolve
-    // it up front so a typo'd committish fails loudly here, before any task is claimed.
+    // Fork point for per-task worktrees — parse guarantees `--base` whenever `--worktree` is on
+    // (the "HEAD" fallback only feeds the non-worktree path, where it is never used). Resolve it
+    // up front so a typo'd committish fails loudly here, before any task is claimed.
     let fork_base = args.base.clone().unwrap_or_else(|| "HEAD".to_string());
     if worktree {
         validate_base(&fork_base)?;
@@ -1218,6 +1231,8 @@ mod tests {
                 "--queue",
                 "q",
                 "--worktree",
+                "--base",
+                "main",
                 "--",
                 "true"
             ]))
@@ -1229,6 +1244,28 @@ mod tests {
                 .unwrap()
                 .worktree
         );
+    }
+
+    #[test]
+    fn worktree_without_base_is_refused_with_teaching_error() {
+        let err = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--worktree",
+            "--",
+            "true",
+        ]))
+        .unwrap_err();
+        // The refusal must teach the fix: name the flag, state the new requirement, and show
+        // both real forms — independent work off main and a dependent wave off its integration
+        // branch.
+        assert!(err.contains("--worktree now requires --base"), "{err}");
+        assert!(err.contains("--base main"), "{err}");
+        assert!(err.contains("--base <your-integration-branch>"), "{err}");
+        // Without --worktree, --base stays optional.
+        assert!(parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).is_ok());
     }
 
     #[test]
