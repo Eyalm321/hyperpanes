@@ -571,16 +571,11 @@ impl ControlHost {
     fn publish(&self, shared: &Arc<Shared>, windows: &[Rc<Window>]) -> bool {
         let pane_ids = self.pane_ids.borrow();
         let ctl = self.ctl.borrow();
-        let mut model = shared.model.lock().unwrap();
-
-        // Drop every window we previously published, then rebuild from GUI state.
-        for wid in self.prev_windows.borrow_mut().drain(..) {
-            model.drop_window(wid);
-        }
 
         let mut new_windows = Vec::new();
         let mut new_prev = HashMap::new();
         let mut new_active = HashMap::new();
+        let mut tree = Vec::new();
         for w in windows {
             let wid = w.id as i64;
             new_windows.push(wid);
@@ -628,13 +623,21 @@ impl ControlHost {
                     panes,
                 });
             }
-            model.add_window(WindowInfo {
+            tree.push(WindowInfo {
                 window_id: wid,
                 active_tab_id,
                 tabs,
             });
         }
-        drop(model);
+
+        // The uids the LAST publish put in the model = the panes the GUI actually hosts.
+        let last_published: HashSet<String> = self.prev.borrow().keys().cloned().collect();
+        let drop_windows: Vec<i64> = self.prev_windows.borrow_mut().drain(..).collect();
+        shared
+            .model
+            .lock()
+            .unwrap()
+            .publish_replace(&drop_windows, tree, &last_published);
 
         // Did the structure (which panes exist, or which tab is active) change since last publish?
         let structural = {

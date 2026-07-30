@@ -13,7 +13,7 @@
 //! shell, status, exitCode, activity, meta) — we serialize ordered structs directly, never a
 //! key-sorted `serde_json::Value`, so the bytes match the TS source.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -147,6 +147,25 @@ impl ReadModel {
             self.reindex();
         }
         removed
+    }
+
+    /// The GUI host's per-tick republish: drop `drop_windows` (every window the previous
+    /// publish created), then append `windows` (the freshly rebuilt GUI tree).
+    /// `last_published` is the set of session uids the caller's PREVIOUS publish put in the
+    /// model — i.e. the panes the GUI actually hosts.
+    pub fn publish_replace(
+        &mut self,
+        drop_windows: &[i64],
+        windows: Vec<WindowInfo>,
+        last_published: &HashSet<String>,
+    ) {
+        let _ = last_published;
+        for wid in drop_windows {
+            self.drop_window(*wid);
+        }
+        for w in windows {
+            self.add_window(w);
+        }
     }
 
     /// Rebuild the reverse indexes from the tree. Runs only on structure change.
