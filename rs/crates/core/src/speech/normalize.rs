@@ -17,7 +17,7 @@ pub fn normalize_for_speech(input: &str) -> String {
     let without_fences = strip_code_fences(input);
     let lines: Vec<String> = without_fences
         .lines()
-        .map(|line| convert_table_row_or_pass(&strip_atx_header(line)))
+        .map(|line| convert_table_row_or_pass(&strip_list_marker(&strip_atx_header(line))))
         .collect();
     let joined = lines.join("\n");
     let joined = strip_markdown_links(&joined);
@@ -33,17 +33,43 @@ pub fn normalize_for_speech(input: &str) -> String {
     truncate_at_sentence(&collapsed, MAX_LEN)
 }
 
-/// Drop ``` fence delimiter lines, keeping the code content itself (it still reads
-/// as plain text, which is the best a speech backend can do with it).
+/// Replace each fenced code block (``` ... ```) with the phrase "code block omitted." —
+/// hearing raw code read character-by-character is noise, not information; the listener
+/// can look at the pane for the code itself.
 fn strip_code_fences(input: &str) -> String {
     let mut out_lines = Vec::new();
+    let mut in_fence = false;
     for line in input.lines() {
         if line.trim_start().starts_with("```") {
+            if !in_fence {
+                out_lines.push("code block omitted.");
+            }
+            in_fence = !in_fence;
             continue;
         }
-        out_lines.push(line);
+        if !in_fence {
+            out_lines.push(line);
+        }
     }
     out_lines.join("\n")
+}
+
+/// Strip a leading list marker (`- `, `* `, `+ `, or `1. `-style) from one line,
+/// keeping the item text.
+fn strip_list_marker(line: &str) -> String {
+    let trimmed = line.trim_start();
+    for m in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(m) {
+            return rest.to_string();
+        }
+    }
+    let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        if let Some(rest) = trimmed[digits..].strip_prefix(". ") {
+            return rest.to_string();
+        }
+    }
+    line.to_string()
 }
 
 /// Strip a leading ATX header marker (`#` through `######` followed by a space) from
@@ -206,9 +232,20 @@ mod tests {
     }
 
     #[test]
-    fn strips_code_fence_delimiters() {
+    fn replaces_fenced_code_blocks_with_a_phrase() {
         let input = "Before\n```rust\nlet x = 1;\n```\nAfter";
-        assert_eq!(normalize_for_speech(input), "Before let x = 1; After");
+        assert_eq!(
+            normalize_for_speech(input),
+            "Before code block omitted. After"
+        );
+    }
+
+    #[test]
+    fn strips_list_markers_keeping_item_text() {
+        assert_eq!(
+            normalize_for_speech("- one\n* two\n+ three\n2. four"),
+            "one two three four"
+        );
     }
 
     #[test]
