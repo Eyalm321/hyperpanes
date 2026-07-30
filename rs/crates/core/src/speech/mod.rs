@@ -46,7 +46,10 @@ mod tests {
     use super::*;
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("hp-speech-settings-{}-{tag}.json", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "hp-speech-settings-{}-{tag}.json",
+            std::process::id()
+        ))
     }
 
     #[test]

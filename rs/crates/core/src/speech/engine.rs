@@ -187,7 +187,11 @@ impl SpeechHandle {
     /// queued (not-yet-spoken) utterance if the queue is already at capacity.
     pub fn enqueue(&self, utterance: Utterance) {
         {
-            let mut q = self.shared.queue.lock().expect("speech queue lock poisoned");
+            let mut q = self
+                .shared
+                .queue
+                .lock()
+                .expect("speech queue lock poisoned");
             push_bounded(&mut q, QUEUE_CAP, utterance);
         }
         let _ = self.wake_tx.send(());
@@ -364,7 +368,11 @@ mod tests {
 
     /// A shell script that exclusive-appends `START $1` then, after `sleep_secs`,
     /// `END $1` to `log` — used to observe serialization/interleaving from outside.
-    fn make_echo_script(dir: &std::path::Path, log: &std::path::Path, sleep_secs: f64) -> std::path::PathBuf {
+    fn make_echo_script(
+        dir: &std::path::Path,
+        log: &std::path::Path,
+        sleep_secs: f64,
+    ) -> std::path::PathBuf {
         let script = dir.join("speak.sh");
         let contents = format!(
             "#!/bin/sh\necho \"START $1\" >> {log:?}\nsleep {sleep_secs}\necho \"END $1\" >> {log:?}\n"
@@ -468,7 +476,11 @@ mod tests {
 
         let contents = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 12, "expected 6 START/END pairs, got: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            12,
+            "expected 6 START/END pairs, got: {lines:?}"
+        );
 
         for pair in lines.chunks(2) {
             let [start, end] = pair else {
@@ -527,12 +539,22 @@ mod tests {
         let started = Instant::now();
         handle.stop_all();
         let elapsed = started.elapsed();
-        assert!(elapsed < Duration::from_secs(3), "stop_all took {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stop_all took {elapsed:?}"
+        );
 
         thread::sleep(Duration::from_millis(300));
         let contents = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(contents.contains("START first"));
-        assert!(!contents.contains("END"), "killed process must never log END: {contents:?}");
-        assert_eq!(handle.status().queue_len, 0, "queued utterances must be discarded");
+        assert!(
+            !contents.contains("END"),
+            "killed process must never log END: {contents:?}"
+        );
+        assert_eq!(
+            handle.status().queue_len,
+            0,
+            "queued utterances must be discarded"
+        );
     }
 }

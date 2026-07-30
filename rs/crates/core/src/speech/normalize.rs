@@ -51,7 +51,7 @@ fn strip_code_fences(input: &str) -> String {
 fn strip_atx_header(line: &str) -> String {
     let trimmed = line.trim_start();
     let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-    if hashes >= 1 && hashes <= 6 {
+    if (1..=6).contains(&hashes) {
         let rest = &trimmed[hashes..];
         return rest.strip_prefix(' ').unwrap_or(rest).to_string();
     }
@@ -61,7 +61,9 @@ fn strip_atx_header(line: &str) -> String {
 fn is_table_separator_row(trimmed: &str) -> bool {
     !trimmed.is_empty()
         && trimmed.contains('-')
-        && trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+        && trimmed
+            .chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
 }
 
 /// If `line` looks like a `|`-delimited table row, flatten it to `", "`-joined cells
@@ -155,9 +157,7 @@ fn truncate_at_sentence(input: &str, max: usize) -> String {
         return input.to_string();
     }
     let truncated: String = input.chars().take(max).collect();
-    let cut = truncated
-        .rfind(|c: char| matches!(c, '.' | '!' | '?'))
-        .map(|idx| idx + 1);
+    let cut = truncated.rfind(['.', '!', '?']).map(|idx| idx + 1);
     let base = match cut {
         Some(idx) => &truncated[..idx],
         None => truncated.as_str(),
