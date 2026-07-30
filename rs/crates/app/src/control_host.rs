@@ -34,7 +34,7 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
-use hyperpanes_core::control::readmodel::{PaneInfo, PaneStatus, TabInfo, WindowInfo};
+use hyperpanes_core::control::readmodel::{PaneInfo, PaneStatus, ReadModel, TabInfo, WindowInfo};
 use hyperpanes_core::control::server::{self, notify_state, Shared};
 use hyperpanes_core::persistence::{control_settings, paths};
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
@@ -102,7 +102,16 @@ pub struct ControlHost {
     prev_active: RefCell<HashMap<i64, Option<String>>>,
     /// The window ids present in the read-model (so a rebuild can drop them all first).
     prev_windows: RefCell<Vec<i64>>,
+    /// Self-heal debounce: control-spawned uid → when it was first seen alive-but-untracked
+    /// (live in the session manager, missing from BOTH the read-model and the GUI). Healed
+    /// only after [`HEAL_DEBOUNCE`] so a transient mid-flight state (e.g. daemon re-attach
+    /// during startup) is never misread as a lost pane.
+    heal_pending: RefCell<HashMap<String, std::time::Instant>>,
 }
+
+/// How long a live control-spawned session must stay untracked before the self-heal
+/// re-inserts its pane into the read-model.
+const HEAL_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl ControlHost {
     /// Build the host from persisted `control-settings.json` (+ env overrides) and start the
@@ -133,6 +142,7 @@ impl ControlHost {
             prev: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
             prev_windows: RefCell::new(Vec::new()),
+            heal_pending: RefCell::new(HashMap::new()),
         };
         if host.enabled.get() {
             host.start(mgr);
@@ -266,6 +276,7 @@ impl ControlHost {
         self.prev.borrow_mut().clear();
         self.prev_active.borrow_mut().clear();
         self.prev_windows.borrow_mut().clear();
+        self.heal_pending.borrow_mut().clear();
     }
 
     /// Toggle the server on/off live, persisting the setting.
@@ -335,16 +346,31 @@ impl ControlHost {
             None => return,
         };
 
-        // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
-        let (cur, cur_active, focus_uid) = self.snapshot_model(&shared, windows);
+        // ONE model lock across snapshot → reconcile → republish. `/command` dispatch holds
+        // this lock for its whole execution (routes.rs), so a mutation lands either before
+        // the snapshot (reconciled this tick) or after the republish (seen next tick) —
+        // never in between, where the wholesale rebuild would destroy it (the g4 pane-vanish
+        // race). Lock order model→sessions matches dispatch, so the mgr calls inside
+        // reconcile can't deadlock.
+        let (reconciled, republished) = {
+            let mut model = shared.model.lock().unwrap();
 
-        // 2. Reconcile the model→GUI deltas (what the control plane changed) on the UI thread.
-        let reconciled = self.reconcile(windows, mgr, &cur, &cur_active, &focus_uid);
+            // 0. Self-heal: re-insert any live control-spawned session that lost its pane.
+            let healed = self.heal_lost_panes(&mut model, windows, mgr);
 
-        // 3. Republish the (now-updated) live GUI tree into the read-model.
-        let republished = self.publish(&shared, windows);
+            // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
+            let (cur, cur_active, focus_uid) = self.snapshot_model(&model, windows);
+
+            // 2. Reconcile the model→GUI deltas (what the control plane changed) on the UI thread.
+            let reconciled = self.reconcile(windows, mgr, &cur, &cur_active, &focus_uid);
+
+            // 3. Republish the (now-updated) live GUI tree into the read-model.
+            let republished = self.publish(&mut model, windows);
+            (reconciled || healed, republished)
+        };
 
         // 4. Nudge WS clients if the published structure changed (GUI- or control-driven).
+        //    (After the guard drops — notify serializes `/state` under the same lock.)
         if reconciled || republished {
             notify_state(&shared);
         }
@@ -360,20 +386,85 @@ impl ControlHost {
         }
     }
 
+    /// Self-heal (recovery, independent of the publish-race fix): a control-spawned pane whose
+    /// SESSION is alive but which is missing from BOTH the read-model and the GUI is invisible
+    /// to every documented mechanism (`list_panes` / `read_pane` / `restart_pane` all 404) even
+    /// though its process is working. Whatever dropped it, re-insert a pane for it into the
+    /// model under its persisted pane-id; the normal adopt path re-hosts it in the GUI on the
+    /// next reconcile. Keyed on the uid→pane-id alias map (control-minted id ≠ uid), so
+    /// GUI-native panes — including the closed-tab undo buffer and parked reminder panes,
+    /// whose sessions stay alive on purpose — are never resurrected. Debounced by
+    /// [`HEAL_DEBOUNCE`] so a transient mid-flight state (e.g. daemon re-attach at startup)
+    /// is never misread as a lost pane. The original label/spec/meta died with the model
+    /// entry, so the restored pane carries `label:"recovered"` + `meta.hp.recovered:"1"`.
+    fn heal_lost_panes(
+        &self,
+        model: &mut ReadModel,
+        windows: &[Rc<Window>],
+        mgr: &Arc<SessionManager>,
+    ) -> bool {
+        let gui = gui_uids_with_parked(windows);
+        let lost = {
+            let ids = self.pane_ids.borrow();
+            lost_control_panes(&ids, model, &gui, &|uid| mgr.has(uid))
+        };
+        let mut pending = self.heal_pending.borrow_mut();
+        // Anything no longer lost (adopted, exited, healed) leaves the debounce map.
+        pending.retain(|uid, _| lost.iter().any(|(u, _)| u == uid));
+        let mut healed = false;
+        for (uid, pane_id) in lost {
+            let since = *pending
+                .entry(uid.clone())
+                .or_insert_with(std::time::Instant::now);
+            if since.elapsed() < HEAL_DEBOUNCE {
+                continue;
+            }
+            pending.remove(&uid);
+            let Some(wid) = model.first_window_id() else {
+                continue;
+            };
+            let mut meta = BTreeMap::new();
+            meta.insert("hp.recovered".to_string(), "1".to_string());
+            let inserted = model.insert_pane(
+                wid,
+                PaneInfo {
+                    id: pane_id.clone(),
+                    session_uid: uid.clone(),
+                    label: "recovered".to_string(),
+                    subtitle: None,
+                    color: "#888888".to_string(),
+                    command: None,
+                    args: None,
+                    cwd: None,
+                    shell: None,
+                    status: PaneStatus::Running,
+                    exit_code: None,
+                    meta: Some(meta),
+                },
+            );
+            if inserted {
+                eprintln!(
+                    "[hyperpanes] self-heal: restored control pane {pane_id} (session {uid}) to the read-model"
+                );
+                healed = true;
+            }
+        }
+        healed
+    }
+
     /// Read every pane the read-model currently holds (keyed by session uid), each GUI window's
     /// active tab id, and a representative session uid living in each window's active tab. The
     /// representative uid lets the focus reconcile resolve the focused tab by a pane that's
     /// actually in it (stable across GUI tab reorder/close) rather than parsing the positional id.
     fn snapshot_model(
         &self,
-        shared: &Arc<Shared>,
+        model: &ReadModel,
         windows: &[Rc<Window>],
     ) -> (
         HashMap<String, ModelPane>,
         HashMap<i64, Option<String>>,
         HashMap<i64, Option<String>>,
     ) {
-        let model = shared.model.lock().unwrap();
         let mut cur = HashMap::new();
         for pr in model.panes() {
             if let Some(p) = model.pane(&pr.pane_id) {
@@ -425,6 +516,18 @@ impl ControlHost {
         let mut ctl = self.ctl.borrow_mut();
         let state_uids = gui_uids(windows);
         let mut structural = false;
+        let ids_before = self.pane_ids.borrow().len();
+        // Record every control-minted pane-id alias the model knows, not just the panes this
+        // host has adopted: the persisted uid→pane-id map is what the self-heal keys on, so a
+        // pane must stay re-identifiable even if it is lost before adoption.
+        {
+            let mut ids = self.pane_ids.borrow_mut();
+            for (uid, c) in cur {
+                if c.pane_id != *uid && !ids.contains_key(uid) {
+                    ids.insert(uid.clone(), c.pane_id.clone());
+                }
+            }
+        }
         // Model tab id → the GUI tab a control-spawned tab was materialized into THIS tick, so the
         // 2nd…nth pane of an `attach as:tab` group joins the same new tab instead of each making one.
         let mut created_tabs: HashMap<String, (i64, usize)> = HashMap::new();
@@ -516,7 +619,6 @@ impl ControlHost {
         // Prune side-store entries for panes that no longer exist in the GUI.
         let live = gui_uids(windows);
         ctl.retain(|uid, _| live.contains(uid));
-        let ids_before = self.pane_ids.borrow().len();
         // The pane-id aliases also honor DAEMON liveness: right after a GUI relaunch this
         // pass can run before the surviving sessions are re-adopted (zero GUI panes), and
         // a GUI-presence-only prune would wipe the just-reloaded persisted map — orphaning
@@ -568,7 +670,7 @@ impl ControlHost {
     /// Wholesale-rebuild the read-model from the live GUI tree, re-stamping the control-owned
     /// fields, and refresh the baselines for the next reconcile. Returns whether the published
     /// structure (pane set or active tabs) changed versus the previous publish.
-    fn publish(&self, shared: &Arc<Shared>, windows: &[Rc<Window>]) -> bool {
+    fn publish(&self, model: &mut ReadModel, windows: &[Rc<Window>]) -> bool {
         let pane_ids = self.pane_ids.borrow();
         let ctl = self.ctl.borrow();
 
@@ -633,11 +735,12 @@ impl ControlHost {
         // The uids the LAST publish put in the model = the panes the GUI actually hosts.
         let last_published: HashSet<String> = self.prev.borrow().keys().cloned().collect();
         let drop_windows: Vec<i64> = self.prev_windows.borrow_mut().drain(..).collect();
-        shared
-            .model
-            .lock()
-            .unwrap()
-            .publish_replace(&drop_windows, tree, &last_published);
+        let carried = model.publish_replace(&drop_windows, tree, &last_published);
+        for id in &carried {
+            eprintln!(
+                "[hyperpanes] control pane {id} carried over the GUI republish (not yet adopted)"
+            );
+        }
 
         // Did the structure (which panes exist, or which tab is active) change since last publish?
         let structural = {
@@ -791,6 +894,47 @@ fn gui_uid_for_pane_id(
     None
 }
 
+/// The control-spawned panes that are LOST: session alive, but neither the read-model nor the
+/// GUI (including its kept-alive off-layout buffers) knows the uid. GUI-native panes are
+/// excluded structurally — their alias entry is `uid == pane_id`. Pure, so it is unit-testable
+/// without a Slint window. Returns `(uid, pane_id)` pairs.
+fn lost_control_panes(
+    pane_ids: &HashMap<String, String>,
+    model: &ReadModel,
+    gui_uids: &HashSet<String>,
+    alive: &dyn Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    pane_ids
+        .iter()
+        .filter(|(uid, pane_id)| {
+            uid != pane_id
+                && !gui_uids.contains(*uid)
+                && model.uid_to_pane(uid).is_none()
+                && model.coords_of(pane_id).is_none()
+                && alive(uid)
+        })
+        .map(|(u, p)| (u.clone(), p.clone()))
+        .collect()
+}
+
+/// [`gui_uids`] plus the sessions the GUI keeps alive OFF-layout on purpose: the closed-tab
+/// undo buffer and parked reminder panes. The self-heal must not resurrect either.
+fn gui_uids_with_parked(windows: &[Rc<Window>]) -> HashSet<String> {
+    let mut set = gui_uids(windows);
+    for w in windows {
+        let st = w.state.borrow();
+        for t in &st.closed_tabs {
+            for p in &t.panes {
+                set.insert(p.uid.clone());
+            }
+        }
+        for r in &st.reminders {
+            set.insert(r.pane.uid.clone());
+        }
+    }
+    set
+}
+
 /// Every session uid the GUI currently hosts across all windows + tabs.
 fn gui_uids(windows: &[Rc<Window>]) -> HashSet<String> {
     let mut set = HashSet::new();
@@ -847,4 +991,81 @@ fn env_truthy(name: &str) -> bool {
         std::env::var(name).ok().as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane(id: &str, uid: &str) -> PaneInfo {
+        PaneInfo {
+            id: id.to_string(),
+            session_uid: uid.to_string(),
+            label: "shell".to_string(),
+            subtitle: None,
+            color: "#888888".to_string(),
+            command: None,
+            args: None,
+            cwd: None,
+            shell: None,
+            status: PaneStatus::Running,
+            exit_code: None,
+            meta: None,
+        }
+    }
+
+    fn model_with(panes: Vec<PaneInfo>) -> ReadModel {
+        let mut m = ReadModel::new();
+        m.add_window(WindowInfo {
+            window_id: 1,
+            active_tab_id: Some("1:0".to_string()),
+            tabs: vec![TabInfo {
+                id: "1:0".to_string(),
+                title: "Tab 1".to_string(),
+                layout: "auto".to_string(),
+                panes,
+            }],
+        });
+        m
+    }
+
+    #[test]
+    fn lost_control_pane_is_detected() {
+        let mut ids = HashMap::new();
+        ids.insert("u1".to_string(), "ctl-1".to_string());
+        let model = model_with(vec![]);
+        let gui = HashSet::new();
+        let lost = lost_control_panes(&ids, &model, &gui, &|_| true);
+        assert_eq!(lost, vec![("u1".to_string(), "ctl-1".to_string())]);
+    }
+
+    #[test]
+    fn gui_native_alias_and_tracked_or_dead_panes_are_not_lost() {
+        let mut ids = HashMap::new();
+        // GUI-native pane (uid == pane id): structurally excluded — never healed, so the
+        // closed-tab undo buffer / parked reminders can keep sessions alive off-layout.
+        ids.insert("u-gui".to_string(), "u-gui".to_string());
+        // Still present in the read-model → not lost.
+        ids.insert("u-in-model".to_string(), "ctl-m".to_string());
+        // Hosted by the GUI (mid-adoption) → not lost.
+        ids.insert("u-in-gui".to_string(), "ctl-g".to_string());
+        // Session dead → nothing to restore.
+        ids.insert("u-dead".to_string(), "ctl-d".to_string());
+        let model = model_with(vec![pane("ctl-m", "u-in-model")]);
+        let mut gui = HashSet::new();
+        gui.insert("u-in-gui".to_string());
+        let lost = lost_control_panes(&ids, &model, &gui, &|uid| uid != "u-dead");
+        assert!(lost.is_empty(), "unexpected heal targets: {lost:?}");
+    }
+
+    #[test]
+    fn pane_id_already_in_model_is_not_healed_twice() {
+        let mut ids = HashMap::new();
+        ids.insert("u-new".to_string(), "ctl-1".to_string());
+        // A restartPane swapped the session uid but kept the stable pane id: the pane EXISTS
+        // under a different uid — healing would duplicate it.
+        let model = model_with(vec![pane("ctl-1", "u-old")]);
+        let lost = lost_control_panes(&ids, &model, &HashSet::new(), &|_| true);
+        assert!(lost.is_empty(), "unexpected heal targets: {lost:?}");
+    }
 }

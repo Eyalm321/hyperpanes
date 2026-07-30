@@ -44,7 +44,11 @@ fn gui_window(panes: Vec<PaneInfo>) -> WindowInfo {
 /// A model as it stands right after a publish: window 1 hosting the GUI pane `u-gui`.
 fn published_model() -> (ReadModel, HashSet<String>) {
     let mut m = ReadModel::new();
-    m.publish_replace(&[], vec![gui_window(vec![pane("u-gui", "u-gui")])], &HashSet::new());
+    m.publish_replace(
+        &[],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &HashSet::new(),
+    );
     let last_published: HashSet<String> = ["u-gui".to_string()].into();
     (m, last_published)
 }
@@ -64,13 +68,20 @@ fn pane_inserted_between_snapshot_and_publish_survives_the_republish() {
     assert!(m.insert_pane(1, worker));
 
     // The host's republish, rebuilt from a GUI snapshot that predates the insert.
-    m.publish_replace(&[1], vec![gui_window(vec![pane("u-gui", "u-gui")])], &last_published);
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &last_published,
+    );
 
     let p = m
         .pane("ctl-worker")
         .expect("control pane inserted during the publish cycle must survive the republish");
     assert_eq!(p.session_uid, "u-worker");
-    assert_eq!(p.meta.as_ref().and_then(|m| m.get("role")).unwrap(), "worker");
+    assert_eq!(
+        p.meta.as_ref().and_then(|m| m.get("role")).unwrap(),
+        "worker"
+    );
     // Re-homed somewhere addressable (window 1 still exists → stays in window 1).
     assert_eq!(m.coords_of("ctl-worker").unwrap().window_id, 1);
     // The GUI pane published normally is untouched.
@@ -86,16 +97,25 @@ fn gui_closed_pane_is_not_resurrected() {
     let mut m = ReadModel::new();
     m.publish_replace(
         &[],
-        vec![gui_window(vec![pane("u-gui", "u-gui"), pane("u-closed", "u-closed")])],
+        vec![gui_window(vec![
+            pane("u-gui", "u-gui"),
+            pane("u-closed", "u-closed"),
+        ])],
         &HashSet::new(),
     );
-    let last_published: HashSet<String> =
-        ["u-gui".to_string(), "u-closed".to_string()].into();
+    let last_published: HashSet<String> = ["u-gui".to_string(), "u-closed".to_string()].into();
 
     // GUI closed `u-closed`; the republished tree no longer contains it.
-    m.publish_replace(&[1], vec![gui_window(vec![pane("u-gui", "u-gui")])], &last_published);
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &last_published,
+    );
 
-    assert!(m.pane("u-closed").is_none(), "GUI-closed pane must not be resurrected");
+    assert!(
+        m.pane("u-closed").is_none(),
+        "GUI-closed pane must not be resurrected"
+    );
     assert!(m.pane("u-gui").is_some());
 }
 
@@ -117,17 +137,27 @@ fn carryover_rehomes_into_active_tab_and_never_duplicates() {
     ));
 
     // Republish: the GUI tree has neither `ctl-tab` nor the pane → re-homed to "1:0".
-    m.publish_replace(&[1], vec![gui_window(vec![pane("u-gui", "u-gui")])], &last_published);
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &last_published,
+    );
     assert_eq!(m.coords_of("ctl-a").expect("carried over").tab_id, "1:0");
 
     // Next cycle the GUI HAS adopted it (it appears in the tree under its own id): no dupe.
     let last2: HashSet<String> = ["u-gui".to_string(), "u-a".to_string()].into();
     m.publish_replace(
         &[1],
-        vec![gui_window(vec![pane("u-gui", "u-gui"), pane("ctl-a", "u-a")])],
+        vec![gui_window(vec![
+            pane("u-gui", "u-gui"),
+            pane("ctl-a", "u-a"),
+        ])],
         &last2,
     );
-    assert_eq!(m.panes().iter().filter(|p| p.session_uid == "u-a").count(), 1);
+    assert_eq!(
+        m.panes().iter().filter(|p| p.session_uid == "u-a").count(),
+        1
+    );
     assert_eq!(m.coords_of("ctl-a").unwrap().tab_id, "1:0");
 }
 
@@ -140,6 +170,10 @@ fn exited_pane_is_not_carried_over() {
     dead.exit_code = Some(1);
     assert!(m.insert_pane(1, dead));
 
-    m.publish_replace(&[1], vec![gui_window(vec![pane("u-gui", "u-gui")])], &last_published);
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &last_published,
+    );
     assert!(m.pane("ctl-dead").is_none());
 }
