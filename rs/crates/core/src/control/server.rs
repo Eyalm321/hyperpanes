@@ -28,6 +28,7 @@ use crate::control::lock::PaneLocks;
 use crate::control::nudge::NudgeLedger;
 use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
 use crate::control::routes;
+use crate::control::speech_service::SpeechService;
 use crate::control::supervisor::{Decision, Supervisor};
 use crate::control::tokens::{random_token, TokenStore};
 use crate::control::work::WorkQueue;
@@ -97,16 +98,23 @@ pub struct Shared {
     /// thread-local — the GUI host sets this so a `notify_state` from the UI thread can never
     /// panic if the runtime guard is ever absent. Unset ⇒ fall back to the ambient `tokio::spawn`.
     runtime: OnceLock<Handle>,
+    /// Per-pane "talk" (local TTS): persisted settings + lazily-spawned engine + transcript
+    /// tails. Default-off; costs nothing until a pane's talk is switched on.
+    pub speech: SpeechService,
 }
 
 impl Shared {
     /// Build the shared state. `allow_input` mirrors control-settings; `control_file` is both the
     /// path written on start and the `HYPERPANES_CONTROL_FILE` injected into spawned panes.
+    /// `speech_settings_path` is `speech.json`'s path — a real embedder passes
+    /// [`paths::speech_json`](crate::persistence::paths::speech_json); tests pass a scratch
+    /// path so `cargo test` never touches the developer's real settings file.
     pub fn new(
         sessions: Arc<SessionManager>,
         allow_input: bool,
         version: impl Into<String>,
         control_file: PathBuf,
+        speech_settings_path: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Shared {
             model: Mutex::new(ReadModel::new()),
@@ -129,6 +137,7 @@ impl Shared {
             restart_app: AtomicU8::new(0),
             bind: Mutex::new(("127.0.0.1".to_string(), 0)),
             runtime: OnceLock::new(),
+            speech: SpeechService::new(speech_settings_path),
         })
     }
 
@@ -831,11 +840,13 @@ pub fn serve_for_test(
 ) -> io::Result<(Arc<Shared>, u16)> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
     let sessions = Arc::new(SessionManager::new(tx));
+    let speech_settings_path = control_file.with_file_name("speech.json");
     let shared = Shared::new(
         sessions,
         allow_input,
         env!("CARGO_PKG_VERSION"),
         control_file,
+        speech_settings_path,
     );
     shared
         .tokens
@@ -886,6 +897,7 @@ mod tests {
             true,
             "0.0.0-test",
             std::env::temp_dir().join("control-test.json"),
+            std::env::temp_dir().join("control-test-speech.json"),
         );
         let pane = PaneInfo {
             id: "p1".into(),
@@ -900,6 +912,7 @@ mod tests {
             status: PaneStatus::Running,
             exit_code: None,
             meta: None,
+            talk: false,
         };
         shared.model.lock().unwrap().add_window(WindowInfo {
             window_id: 1,
@@ -939,9 +952,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hp-token-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let control = dir.join("control.json");
+        let speech_settings = dir.join("speech.json");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
         let sessions = Arc::new(SessionManager::new(tx));
-        let shared = Shared::new(sessions, false, "0.0.0", control);
+        let shared = Shared::new(sessions, false, "0.0.0", control, speech_settings);
 
         // Loopback default: fresh token every start (frozen legacy behaviour).
         let a = master_token(&shared);

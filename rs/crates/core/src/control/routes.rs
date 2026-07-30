@@ -1732,7 +1732,14 @@ mod golden {
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let sessions = Arc::new(SessionManager::new(tx));
         let control_file = std::env::temp_dir().join("hp-golden-control.json");
-        let shared = Shared::new(sessions, allow_input, "0.1.8", control_file);
+        let speech_settings = std::env::temp_dir().join("hp-golden-speech.json");
+        let shared = Shared::new(
+            sessions,
+            allow_input,
+            "0.1.8",
+            control_file,
+            speech_settings,
+        );
         shared.model.lock().unwrap().add_window(WindowInfo {
             window_id: 1,
             active_tab_id: Some("t1".into()),
@@ -1773,6 +1780,7 @@ mod golden {
             status: PaneStatus::Running,
             exit_code: None,
             meta: None,
+            talk: false,
         }
     }
 

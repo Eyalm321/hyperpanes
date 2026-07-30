@@ -87,6 +87,9 @@ pub struct PaneInfo {
     pub status: PaneStatus,
     pub exit_code: Option<i32>,
     pub meta: Option<BTreeMap<String, String>>,
+    /// Per-pane "talk": speak new Claude assistant replies aloud via local TTS.
+    /// Default-off; omitted from `/state` when `false` (see [`PaneOut::talk`]).
+    pub talk: bool,
 }
 
 /// One tab (group): a layout + its panes.
@@ -123,6 +126,9 @@ pub struct ReadModel {
     uid_to_pane: HashMap<String, String>,
     pane_loc: HashMap<String, (i64, String)>, // paneId → (windowId, tabId)
     tab_to_window: HashMap<String, i64>,
+    /// The pane the GUI currently has focused (`None` = unknown — no GUI publisher
+    /// wired up yet). Consulted by the speech service's `focusedOnly` filter.
+    focused_pane: Option<String>,
 }
 
 impl ReadModel {
@@ -372,6 +378,45 @@ impl ReadModel {
         }
     }
 
+    /// Enable/disable per-pane "talk". Returns false if the pane is unknown.
+    pub fn set_talk(&mut self, pane_id: &str, enabled: bool) -> bool {
+        match self.pane_mut(pane_id) {
+            Some(p) => {
+                p.talk = enabled;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `(pane id, label)` for every pane currently talking — the speech service's
+    /// only read-model dependency, so its background loop can scan for talkers
+    /// without knowing the windows/tabs tree shape.
+    pub fn talking_panes(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for w in &self.windows {
+            for t in &w.tabs {
+                for p in &t.panes {
+                    if p.talk {
+                        out.push((p.id.clone(), p.label.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Record which pane the GUI currently has focused (`None` = unknown). Wired up
+    /// by a GUI publisher later; the speech service's `focusedOnly` filter consults
+    /// [`Self::focused_pane`] in the meantime.
+    pub fn set_focused_pane(&mut self, pane_id: Option<String>) {
+        self.focused_pane = pane_id;
+    }
+
+    pub fn focused_pane(&self) -> Option<&str> {
+        self.focused_pane.as_deref()
+    }
+
     /// Merge a metadata patch (string → set, null → delete) and return the TRUE merged meta
     /// (mirrors the synchronous `setMeta` echo, agent-orchestration #7). `None` ⇒ no such pane.
     pub fn set_meta(
@@ -583,6 +628,13 @@ pub struct PaneOut {
     pub cols: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
+    /// Per-pane "talk" — additive, omitted when off so the legacy shape is untouched.
+    #[serde(skip_serializing_if = "is_false")]
+    pub talk: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn pane_out(p: &PaneInfo, activity: Activity, dims: Option<(u16, u16)>) -> PaneOut {
@@ -604,6 +656,7 @@ fn pane_out(p: &PaneInfo, activity: Activity, dims: Option<(u16, u16)>) -> PaneO
         meta: p.meta.clone(),
         cols: dims.map(|(c, _)| c),
         rows: dims.map(|(_, r)| r),
+        talk: p.talk,
     }
 }
 
@@ -626,6 +679,7 @@ mod tests {
             status: PaneStatus::Running,
             exit_code: None,
             meta: None,
+            talk: false,
         }
     }
 
@@ -787,5 +841,58 @@ mod tests {
         assert_eq!(coords.window_id, 1);
         assert_eq!(m.pane("p1").unwrap().status, PaneStatus::Exited);
         assert_eq!(m.pane("p1").unwrap().exit_code, Some(3));
+    }
+
+    #[test]
+    fn talk_omitted_when_false_present_when_true() {
+        let mut m = seeded();
+        let out = m.state_for_scope(None, &busy);
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(!s.contains("talk"), "talk must be omitted when false: {s}");
+
+        assert!(m.set_talk("p1", true));
+        let out = m.state_for_scope(None, &busy);
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["windows"][0]["tabs"][0]["panes"][0]["talk"], json!(true));
+
+        assert!(m.set_talk("p1", false));
+        assert!(!m.set_talk("ghost", true));
+    }
+
+    #[test]
+    fn talking_panes_lists_only_enabled_panes() {
+        let mut m = seeded();
+        m.insert_pane(1, pane("p2", "u2"));
+        assert!(m.talking_panes().is_empty());
+        m.set_talk("p1", true);
+        assert_eq!(
+            m.talking_panes(),
+            vec![("p1".to_string(), "shell".to_string())]
+        );
+        m.set_talk("p2", true);
+        let mut got = m.talking_panes();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("p1".to_string(), "shell".to_string()),
+                ("p2".to_string(), "shell".to_string())
+            ]
+        );
+        m.set_talk("p1", false);
+        assert_eq!(
+            m.talking_panes(),
+            vec![("p2".to_string(), "shell".to_string())]
+        );
+    }
+
+    #[test]
+    fn focused_pane_tracks_last_set_value() {
+        let mut m = seeded();
+        assert_eq!(m.focused_pane(), None);
+        m.set_focused_pane(Some("p1".to_string()));
+        assert_eq!(m.focused_pane(), Some("p1"));
+        m.set_focused_pane(None);
+        assert_eq!(m.focused_pane(), None);
     }
 }

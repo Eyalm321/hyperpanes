@@ -543,6 +543,7 @@ fn spawn_pane(
         status: PaneStatus::Running,
         exit_code: None,
         meta: meta.filter(|m| !m.is_empty()),
+        talk: false,
     })
 }
 
