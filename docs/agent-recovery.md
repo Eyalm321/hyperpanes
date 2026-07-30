@@ -10,7 +10,13 @@ recovering from both, implemented in `rs/crates/core/src/claude_recovery.rs`
 (`detect_api_error`, `classify_api_error`, `resolve_session_candidates`,
 `repair_transcript`) and exposed as the control command `recoverPane`.
 
-## Why detection is exit-based and conservative
+## Why detection is output-based and conservative
+
+The app's phase-5 supervisor (`control::supervisor`) is **exit-based**, and these deaths
+never exit: the Claude process survives its API error and sits at the idle REPL prompt
+forever, so exit supervision can't fire and no app-side auto-repair is wired this pass —
+recovery is deliberately orchestrator-driven via `recoverPane`. If you came here assuming
+the app notices these deaths on its own: it does not, by design; the watchdog does.
 
 There is no structured signal for "this agent died mid-turn." The `SessionStart` hook that
 stamps a pane's live-session marker only fires on a *new* session start — if the process
@@ -153,8 +159,26 @@ just re-hits the same limit); for `transient`, resume under the same account.
 `resources/claude/goal-orchestrator/SKILL.md` and `SPEC.md` both carry a watchdog addition
 built on this contract: watch pane **activity and API-error state**, not only queue/branch
 movement — an agent that dies before its first enqueue or commit is invisible to queue and
-branch signals alike, and the tail's `API Error:` line is the only tell. On a pane idle
-longer than its work should take, run `recoverPane action:"inspect"` and apply the class
-policy above. Both personas also warn every spawned agent off calling `ToolSearch`/deferred
-tool loading — a first-turn `ToolSearch` call is exactly the kind of unanswered tool call
-that produces the poisoned-transcript pattern this document describes.
+branch signals alike, and the tail's `API Error:` line is the only tell. Both personas also
+warn every spawned agent off calling `ToolSearch`/deferred tool loading — a first-turn
+`ToolSearch` call is exactly the kind of unanswered tool call that produces the
+poisoned-transcript pattern this document describes.
+
+Two field-tested refinements (both from the incident that motivated this doc):
+
+- **Idleness alone is not a wedge.** A spec agent that finished its turn and is waiting on
+  its own fan-out is healthy and reads as idle — the first orchestrator watchdog pass
+  false-positived on exactly this. An `API Error:` line in the tail fires immediately; bare
+  idleness only counts as death when **no task is claimed across the goal's queues AND no
+  worker process is alive** for it. A live child shell or a spinner in the tail means
+  *working*, not wedged.
+- **A vanished pane id is not a wedged agent.** A worker pane can drop out of the read
+  model while its process and its `--log-dir` log stay healthy (observed live; tracked
+  separately as its own goal). When a pane id stops resolving, fall back to the queue's
+  task states and the worker log before declaring the agent dead — `recoverPane` on an
+  unresolvable pane id errors, it does not classify.
+
+Endpoint recipes go stale and a stale recipe wedges an agent as effectively as an API
+error (this goal's briefing shipped one). The authoritative control-API surface is
+`rs/crates/core/src/control/routes.rs` — check it there rather than trusting a persona's
+inlined `curl` line.

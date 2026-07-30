@@ -103,7 +103,12 @@ prompt wedges the pane).
   should take, `read_pane` it, and if it looks dead run `recoverPane action:"inspect"` (control API
   — see `docs/agent-recovery.md`): `transient` → resume; `account-limit` → rotate
   `CLAUDE_CONFIG_DIR` first; `poisoned` → `repair` then resume, never resume a poisoned transcript
-  raw; `unknown` → escalate to your parent orchestrator, don't thrash restarts. Never let a spawned
+  raw; `unknown` → escalate to your parent orchestrator, don't thrash restarts. Idleness alone is
+  NOT a wedge (an agent waiting on its own fan-out reads idle): `API Error:` in the tail fires
+  immediately; bare idleness only counts when no task is claimed on the goal's queues AND no worker
+  process is alive. A pane id that stops resolving while its process + `--log-dir` log stay healthy
+  is a read-model dropout, not a death — fall back to queue state and the worker log. For endpoint
+  shapes trust `rs/crates/core/src/control/routes.rs`, not inlined recipes. Never let a spawned
   impl agent call `ToolSearch`/deferred tool loading on its first turn — an unanswered tool call is
   exactly what poisons a transcript.
 - **Collect** impl results (queue results / their panes). Review each agent's branch/diff; land the

@@ -131,7 +131,14 @@ On every loop iteration, inspect your live spec-agent/impl panes and judge liven
   looks dead run `recoverPane action:"inspect"` (control API — see `docs/agent-recovery.md`) and
   apply its `class`: `transient` → resume; `account-limit` → rotate `CLAUDE_CONFIG_DIR` first;
   `poisoned` → `repair` then resume, **never** `restart_pane resume:true` a poisoned transcript
-  raw; `unknown` → escalate to the human, don't thrash restarts.
+  raw; `unknown` → escalate to the human, don't thrash restarts. Idleness ALONE is not a wedge —
+  a spec agent waiting on its own fan-out is healthy and reads idle (a real watchdog false-positive):
+  `API Error:` in the tail fires immediately, but bare idleness only counts when NO task is claimed
+  across the goal's queues AND no worker process is alive; a live child shell/spinner = working.
+  If a pane id stops resolving while its process and `--log-dir` log stay healthy (known read-model
+  bug), fall back to queue state + the worker log — don't misread a vanished pane as a wedged agent.
+  Endpoint recipes staled in a briefing wedge agents too: the authoritative control-API surface is
+  `rs/crates/core/src/control/routes.rs`, not any inlined `curl` line.
 - **Never call `ToolSearch`/deferred tool loading from a spawned agent's first turn.** This is
   exactly how a transcript gets poisoned in the first place (an unanswered tool call wedges the
   pane forever) — say so in every spec/impl persona you hand out.
