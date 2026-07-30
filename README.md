@@ -67,6 +67,11 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
 - **Idle glow for AI panes** — when an agent CLI (claude, aider, codex, gemini, …) goes quiet at its
   prompt, its frame glows so you notice it's waiting for you — in one of five styles (**firefly,
   pulse, blink, fluorescent, solid**). Tunable threshold; off‑window panes glow even when focused.
+- **Talk — spoken replies** — toggle **Talk** on a pane (right‑click → *Talk (speak replies)*) and it
+  reads each NEW Claude reply aloud via local TTS (spd‑say / espeak‑ng / macOS `say`, or a custom
+  command). Replies are normalized (no markdown noise, code blocks skipped), all panes share one
+  serialized speech queue with pane‑label prefixes, and the palette has global **Stop / Mute /
+  Only Focused Pane**. Off by default; persisted per pane. See `docs/talk-feature.md`.
 
 ### Layouts
 - **Automatic** layout plus five presets: **Single, Columns, Rows, Grid, Main + Stack**.
@@ -325,7 +330,7 @@ means Ctrl on Windows/Linux and Cmd on macOS.
   Close Others / Close to the Right / Reopen / Layout.
 - **Pane header** — drag to move the pane to another tab or out to a new window; the dot is the color
   picker. Right‑click for: New Pane / Rename / Change Color / Maximize / Fullscreen / Search /
-  Restart / Copy / Paste / Select All / Clear / Move to New Tab / Move to Tab / Close.
+  Restart / Talk (speak replies) / Copy / Paste / Select All / Clear / Move to New Tab / Move to Tab / Close.
 - **Terminal body** — select to copy, right‑click to paste, `Ctrl`+wheel to zoom, click a path to
   open it.
 
