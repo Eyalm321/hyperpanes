@@ -177,3 +177,64 @@ fn exited_pane_is_not_carried_over() {
     );
     assert!(m.pane("ctl-dead").is_none());
 }
+
+/// The MIRROR direction of the race: a `closePane` must stay closed through the republish.
+/// A control pane created and then CLOSED within the same publish cycle (both landing after
+/// the host's snapshot) is gone from the model at republish time — the carry-over must not
+/// use stale knowledge to resurrect it as a zombie "running" pane a watchdog would wait on
+/// forever. (Carry-over reads the model as it stands, so an insert+close pair leaves
+/// nothing to carry.)
+#[test]
+fn pane_inserted_then_closed_within_the_same_gap_stays_closed() {
+    let (mut m, last_published) = published_model();
+
+    // dispatch newPane …
+    assert!(m.insert_pane(1, pane("ctl-flash", "u-flash")));
+    // … and dispatch closePane, both before the next republish. remove_pane is exactly what
+    // dispatch's closePane runs (the PTY kill happens beside it).
+    assert_eq!(m.remove_pane("ctl-flash").as_deref(), Some("u-flash"));
+
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &last_published,
+    );
+    assert!(
+        m.pane("ctl-flash").is_none(),
+        "closed pane must not be resurrected by the republish carry-over"
+    );
+}
+
+/// A `closePane` of an already-adopted pane also stays closed: the pane leaves the model
+/// (dispatch) and the GUI (reconcile's close branch, same lock), so the republished tree no
+/// longer contains it and `last_published` no longer protects it. On main the equivalent
+/// interleaving re-added the pane from the STALE GUI tree — a zombie the single-lock sync
+/// makes unrepresentable: this test pins the model-level contract for the tree the host
+/// actually publishes after reconciling the close.
+#[test]
+fn close_of_an_adopted_pane_stays_closed_through_the_republish() {
+    // Model as published while the GUI hosted both panes.
+    let mut m = ReadModel::new();
+    m.publish_replace(
+        &[],
+        vec![gui_window(vec![
+            pane("u-gui", "u-gui"),
+            pane("ctl-w", "u-w"),
+        ])],
+        &HashSet::new(),
+    );
+    let last_published: HashSet<String> = ["u-gui".to_string(), "u-w".to_string()].into();
+
+    // dispatch closePane removes it from the model; under the sync lock the reconcile then
+    // drops it from the GUI, so the tree the host publishes this tick no longer has it.
+    assert_eq!(m.remove_pane("ctl-w").as_deref(), Some("u-w"));
+    m.publish_replace(
+        &[1],
+        vec![gui_window(vec![pane("u-gui", "u-gui")])],
+        &last_published,
+    );
+
+    assert!(m.pane("ctl-w").is_none());
+    assert!(m.uid_to_pane("u-w").is_none());
+    assert!(m.pane("u-gui").is_some());
+}

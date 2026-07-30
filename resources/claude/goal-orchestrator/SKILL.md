@@ -124,6 +124,16 @@ On every loop iteration, inspect your live spec-agent/impl panes and judge liven
   surface to the human. Count strikes per pane; don't restart-loop.
 - **Crashed pane (`exited` unexpectedly):** the work queue's reaper already requeues its in-flight
   tasks; re-spawn the spec agent (`resume:true`) if the goal is still active.
+- **Pane id stops resolving ≠ agent died.** A pane can be absent from the read model while its
+  process is alive and working (historically: a publish race destroyed just-created worker panes;
+  fixed, plus a self-heal that restores such panes with `meta.hp.recovered:"1"` within seconds).
+  Before concluding an agent is gone, fall back to the queue state (`list_tasks` — is its task
+  still leased/progressing?) and its `--log-dir` transcript; re-check `list_panes` after a few
+  seconds in case the self-heal restored it. Endpoints live in
+  `rs/crates/core/src/control/routes.rs` — treat that file as authoritative, not any doc. (The
+  regression test for the race is `rs/crates/core/tests/readmodel_publish.rs`; its red run is
+  against a behavior-preserving extraction commit, not literal main — the buggy composite was only
+  reachable through the GUI.)
 
 ## Fan-out & the work queue
 
