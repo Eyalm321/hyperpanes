@@ -571,35 +571,44 @@ fn recover_repair(
     }
 
     let target = resolve_recover_target(pane, cmd)?;
-    let content = std::fs::read_to_string(&target.path)
-        .map_err(|e| format!("reading transcript {}: {e}", target.path.display()))?;
+    let (dropped, backup) = apply_repair_to_disk(&target.path)?;
+
+    Ok(json!({
+        "sessionId": target.session_id,
+        "path": target.path.display().to_string(),
+        "dropped": dropped,
+        "backup": backup,
+    }))
+}
+
+/// Repair the transcript at `path` in place: read it, run
+/// [`claude_recovery::repair_poisoned_transcript`], and — only when it actually dropped
+/// something — back up the original to `<path>.bak-<epoch-ms>` before overwriting `path`
+/// with the repaired content. An already-healthy transcript is untouched (empty
+/// `dropped`, no backup file). Factored out of [`recover_repair`] so this disk-mutation
+/// contract (byte-preserving repair, timestamped backup, idempotency) is testable against
+/// a plain temp file, independent of [`resolve_recover_target`]'s session resolution
+/// (which, in production, reads real per-account transcript stores).
+fn apply_repair_to_disk(path: &Path) -> Result<(Vec<usize>, Option<String>), String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading transcript {}: {e}", path.display()))?;
     let result = claude_recovery::repair_poisoned_transcript(&content);
 
     if result.dropped_lines.is_empty() {
-        return Ok(json!({
-            "sessionId": target.session_id,
-            "path": target.path.display().to_string(),
-            "dropped": [],
-            "backup": null,
-        }));
+        return Ok((Vec::new(), None));
     }
 
     let epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let backup_path = format!("{}.bak-{epoch_ms}", target.path.display());
-    std::fs::copy(&target.path, &backup_path)
-        .map_err(|e| format!("backing up {} to {backup_path}: {e}", target.path.display()))?;
-    std::fs::write(&target.path, &result.repaired)
-        .map_err(|e| format!("writing repaired transcript {}: {e}", target.path.display()))?;
+    let backup_path = format!("{}.bak-{epoch_ms}", path.display());
+    std::fs::copy(path, &backup_path)
+        .map_err(|e| format!("backing up {} to {backup_path}: {e}", path.display()))?;
+    std::fs::write(path, &result.repaired)
+        .map_err(|e| format!("writing repaired transcript {}: {e}", path.display()))?;
 
-    Ok(json!({
-        "sessionId": target.session_id,
-        "path": target.path.display().to_string(),
-        "dropped": result.dropped_lines,
-        "backup": backup_path,
-    }))
+    Ok((result.dropped_lines, Some(backup_path)))
 }
 
 /// `action: "resume"` — resolves the target the same way `repair` does, refuses an
@@ -1295,73 +1304,42 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn recover_pane_repair_drops_the_orphaned_fixture_line_and_is_idempotent() {
-        let tmp = std::env::temp_dir().join(format!("hp-recover-test-{}", uuid::Uuid::new_v4()));
-        let project_cwd = tmp.join("proj");
-        let config_dir = tmp.join("config");
-        std::fs::create_dir_all(&project_cwd).unwrap();
-
-        let mut m = model_one_window();
-        let s = sessions();
-        let open = json!({
-            "type": "newPane",
-            "windowId": 1,
-            "pane": { "command": "cat", "cwd": project_cwd.to_str().unwrap() },
-        });
-        let pane_id = handle_command(&mut m, &s, None, None, &open).body["result"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        // A test-controlled config_dir/projects store (never the real ~/.claude), seeded
-        // from the committed poisoned-transcript fixture under its own session id, wired to
-        // the pane via a marker — mirrors what `read_pane_session` would find for a live
-        // `SessionStart` marker, without touching the real account store.
+    // `recover_repair`'s own session resolution (marker file / same-cwd scan) reads real,
+    // user-global directories (`~/.claude/projects`, per-account config dirs, the pane
+    // marker dir) that other concurrent processes on this machine also touch — exercising
+    // that live in a unit test is exactly the flakiness/pollution risk
+    // `scripts/g3-recovery-demo.sh` is designed to absorb instead (it owns its own isolated
+    // headless instance + a namespaced temp project). So this test drives the disk-mutation
+    // half directly through `apply_repair_to_disk`, on a plain temp file dispatch doesn't
+    // otherwise share with anything: byte-exact drop of line 9, a real backup file, and a
+    // no-op idempotent second pass.
+    #[test]
+    fn apply_repair_to_disk_drops_the_orphaned_fixture_line_and_is_idempotent() {
         const FIXTURE: &str = include_str!("../../tests/fixtures/g2-poisoned-transcript.jsonl");
-        const SESSION_ID: &str = "02e639b0-4575-4538-8c30-19a1d94520d9";
-        let encoded = crate::claude_history::encode_project_dir(&project_cwd);
-        let store_dir = config_dir.join("projects").join(&encoded);
-        std::fs::create_dir_all(&store_dir).unwrap();
-        let transcript_path = store_dir.join(format!("{SESSION_ID}.jsonl"));
+        let tmp = std::env::temp_dir().join(format!("hp-recover-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let transcript_path = tmp.join("session.jsonl");
         std::fs::write(&transcript_path, FIXTURE).unwrap();
 
-        let marker_dir = crate::persistence::paths::claude_sessions_dir();
-        std::fs::create_dir_all(&marker_dir).unwrap();
-        let marker_path = marker_dir.join(format!("{pane_id}.json"));
-        std::fs::write(
-            &marker_path,
-            json!({
-                "sessionId": SESSION_ID,
-                "cwd": project_cwd.to_str().unwrap(),
-                "configDir": config_dir.to_str().unwrap(),
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        // force:true — the pane's own tail is healthy (a bare `cat`), so this exercises
-        // resolution + repair directly rather than the classify gate (covered by the
-        // classification_table test above and, end-to-end, by scripts/g3-recovery-demo.sh).
-        let repair =
-            json!({ "type": "recoverPane", "paneId": pane_id, "action": "repair", "force": true });
-        let r = handle_command(&mut m, &s, None, None, &repair);
-        assert_eq!(r.status, 200, "{:?}", r.body);
-        assert_eq!(r.body["result"]["dropped"], json!([9]));
-        assert_eq!(r.body["result"]["sessionId"], json!(SESSION_ID));
-        let backup = r.body["result"]["backup"].as_str().unwrap().to_string();
+        let (dropped, backup) = apply_repair_to_disk(&transcript_path).unwrap();
+        assert_eq!(dropped, vec![9]);
+        let backup = backup.expect("a dropped-line repair must write a backup");
         assert!(
             Path::new(&backup).exists(),
             "backup file must exist: {backup}"
         );
+        assert_eq!(
+            std::fs::read_to_string(&backup).unwrap(),
+            FIXTURE,
+            "backup must be the untouched original"
+        );
 
         // Idempotent: repairing the now-healthy transcript a second time is a no-op —
         // nothing dropped, no new backup written.
-        let r2 = handle_command(&mut m, &s, None, None, &repair);
-        assert_eq!(r2.body["result"]["dropped"], json!([]));
-        assert_eq!(r2.body["result"]["backup"], Value::Null);
+        let (dropped2, backup2) = apply_repair_to_disk(&transcript_path).unwrap();
+        assert!(dropped2.is_empty());
+        assert!(backup2.is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
-        let _ = std::fs::remove_file(&marker_path);
     }
 }
