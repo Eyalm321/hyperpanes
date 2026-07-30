@@ -83,11 +83,16 @@ prompt wedges the pane).
     `project: $HP_GOAL_PROJECT_NAME` and `subtitle:"<goal id>: <one-liner>"` to `spawn_workers`
     (the app resolves the default cwd + frame color from the project registry; explicit `cwd`/
     `color` still win if you pass them) — `rename_pane` is no longer needed for worker identity,
-    so a glance at the workspace reads project → task.
+    so a glance at the workspace reads project → task. `spawn_workers` also stamps every worker
+    pane with default org meta (role="worker", task="queue:<q>", `parent` = your pane), so an impl
+    agent's `send_to_parent` reaches you out of the box — no manual `set_meta` step; a caller
+    `meta` key always wins over the defaults.
   - **Account rotation:** if `HP_GOAL_ACCOUNTS` is set (newline-separated `CLAUDE_CONFIG_DIR`s
     the orchestrator passed down), split it on newlines and pass the array as `accounts` to
     `spawn_workers` — it round-robins one `CLAUDE_CONFIG_DIR` per worker pane (pane *i* gets
     `accounts[i % len]`, overriding `env.CLAUDE_CONFIG_DIR`) so impl agents spread across accounts.
+    Rotation needs one pane per worker: `accounts` with `layout:"single-pane"` and count > 1 fails
+    loudly (one process env cannot rotate per-worker).
     Transcripts are shared, so `--resume` still works if one is later restarted under another
     account.
 
