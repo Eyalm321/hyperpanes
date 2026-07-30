@@ -37,6 +37,7 @@ fn kitchen_sink() -> WorkspaceFile {
             ("role".to_string(), "worker".to_string()),
         ])),
         uid: Some("pane-3".into()),
+        talk: Some(true),
     };
     let group = GroupSpec {
         title: Some("build".into()),

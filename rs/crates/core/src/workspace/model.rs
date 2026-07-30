@@ -50,6 +50,10 @@ pub struct PaneSpec {
     /// re-attach target). New here (no TS sibling), so it trails the ported fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
+    /// Per-pane "talk" (speak new Claude assistant replies aloud via local TTS), recorded only
+    /// when on (a plain pane omits it). New here (no TS sibling), so it trails the ported fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub talk: Option<bool>,
 }
 
 /// One tab (group): a layout plus its panes and per-slot split state.

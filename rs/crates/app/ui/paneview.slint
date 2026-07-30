@@ -64,6 +64,17 @@ component IconX inherits Path {
     commands: "M 5 5 L 11 11 M 11 5 L 5 11";
 }
 
+// A speaker glyph (cone + two sound-wave arcs), for the pane header's "talk" indicator.
+// Stroked geometry (fill: transparent), not a font glyph — matches the sidebar's Bell/Search
+// glyphs, which take the same font-independence approach.
+component IconSpeaker inherits Path {
+    in property <color> ink;
+    width: 12px; height: 12px;
+    viewbox-width: 16; viewbox-height: 16;
+    stroke: ink; stroke-width: 1.4px; fill: transparent;
+    commands: "M 2 6 L 2 10 L 5 10 L 9 13.5 L 9 2.5 L 5 6 Z M 11.5 5.5 A 4.2 4.2 0 0 1 11.5 10.5 M 13.3 3.7 A 6.7 6.7 0 0 1 13.3 12.3";
+}
+
 // A pane-header button (`.hp-pane-btn`). kind: 0 zoom · 1 fullscreen · 2 close.
 component PaneBtn inherits Rectangle {
     in property <int> kind;
@@ -363,6 +374,14 @@ export component PaneView inherits Rectangle {
                                 border-radius: 4px;
                                 background: pane.accent;
                                 visible: pane.show-dot;
+                            }
+                        }
+                        // "talk" indicator: a small speaker glyph, shown only while this
+                        // pane's talk is on (the pane menu's "Talk (speak replies)" toggle).
+                        if pane.talk : VerticalLayout {
+                            alignment: center;
+                            IconSpeaker {
+                                ink: pane.focused ? Theme.accent : Theme.subtext;
                             }
                         }
                         // ---- editable label + secondary line (subtitle / shell title) ----
