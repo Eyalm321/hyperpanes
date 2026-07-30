@@ -97,7 +97,8 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn pid_alive(pid: u32) -> bool {
     match std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
+        .arg("-0")
+        .arg(pid.to_string())
         .output()
     {
         Ok(out) => {
@@ -200,14 +201,23 @@ mod tests {
         assert!(msg.contains("pid 1"), "names the live pid: {msg}");
         assert!(msg.contains("port 41419"), "names the live port: {msg}");
         assert!(msg.contains("version 0.0.27"), "names the version: {msg}");
-        assert!(msg.contains(&path.display().to_string()), "names the file: {msg}");
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "names the file: {msg}"
+        );
         // …and the exact isolation recipe + the precedence rule it exists for.
-        assert!(msg.contains("XDG_STATE_HOME=<dir>"), "names XDG_STATE_HOME: {msg}");
+        assert!(
+            msg.contains("XDG_STATE_HOME=<dir>"),
+            "names XDG_STATE_HOME: {msg}"
+        );
         assert!(
             msg.contains("HYPERPANES_CONTROL_FILE=<dir>/control.json"),
             "names HYPERPANES_CONTROL_FILE: {msg}"
         );
-        assert!(msg.contains("app.rs:44-46"), "cites the precedence site: {msg}");
+        assert!(
+            msg.contains("app.rs:44-46"),
+            "cites the precedence site: {msg}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -228,11 +238,16 @@ mod tests {
         let dir = scratch("server-refuse");
         let path = write_control(&dir, LIVE_FOREIGN_PID);
         let before = std::fs::read_to_string(&path).unwrap();
-        let res = tokio::time::timeout(Duration::from_secs(5), run_server(test_shared(path.clone())))
-            .await
-            .expect("run_server must fail fast, not serve");
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_server(test_shared(path.clone())),
+        )
+        .await
+        .expect("run_server must fail fast, not serve");
         let err = res.expect_err("must refuse to claim a live instance's file");
-        assert!(err.to_string().contains("refusing to overwrite control file"));
+        assert!(err
+            .to_string()
+            .contains("refusing to overwrite control file"));
         // The live owner's file is byte-for-byte untouched.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
@@ -273,7 +288,10 @@ mod tests {
         let server = tokio::spawn(run_server(test_shared(isolated.clone())));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while recorded_pid(&isolated) != Some(std::process::id()) {
-            assert!(std::time::Instant::now() < deadline, "isolated file never claimed");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "isolated file never claimed"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         server.abort();
