@@ -269,7 +269,7 @@ hyperpanes — tiled terminal workspace with AI-pane orchestration
 USAGE:
     hyperpanes                    Launch the GUI (resumes the last session, or a workspace
                                    file / -c command passed on the command line)
-    hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree]
+    hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>]
                        [--retry-window <secs>] [--nack-delay <ms>] -- <cmd> [args...]
                                    Drain a work queue by running <cmd> per claimed task
     hyperpanes pair [--device <label>] [--ttl <30d|12h|90m|<ms>>]

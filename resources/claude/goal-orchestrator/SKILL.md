@@ -129,8 +129,10 @@ On every loop iteration, inspect your live spec-agent/impl panes and judge liven
 
 Spec agents do the fan-out, but you own the queue namespace: one queue per goal (e.g. `g1`), so a
 goal's subtasks are isolated and you can `list_tasks`/`purge_queue` per goal. Impl agents drain via
-the runner (`spawn_workers` / `hyperpanes worker --queue <g> --count N --worktree`); subtasks carry
-a `dependsOn` DAG so the queue gates claim order. The queue is durable and self-recovering (see the
+the runner (`spawn_workers` with `base:"<committish>"` / `hyperpanes worker --queue <g> --count N
+--worktree --base <committish>`); subtasks carry
+a `dependsOn` DAG so the queue gates claim order. The worktree fork point is always explicit —
+`--worktree` refuses to run without `--base` (see `docs/worker-worktree-base.md`). The queue is durable and self-recovering (see the
 plan doc), so you don't babysit individual tasks — you watch goals and health.
 
 **Impl-agent pane budget:** fan-out is soft-capped at **16 worker panes** — the spec agent sets
@@ -150,7 +152,7 @@ the default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without the fla
 every `mcp__hyperpanes__*` tool. The app already appends it on your own spawn; pass it down the
 same way when you spawn a spec agent, and tell the spec agent to do the same in its
 `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
 
 ### If the `mcp__hyperpanes__*` tools won't load — drop to the Control API, don't reverse-engineer
 

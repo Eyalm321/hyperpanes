@@ -53,7 +53,7 @@ prompt wedges the pane).
   the advisor:** include `advisor=<your $HYPERPANES_PANE_ID>` in every payload so an impl agent that
   hits a strategic fork can consult you mid-build instead of guessing or bouncing the whole subtask
   (see IMPL.md "Consult your advisor").
-- `spawn_workers {queue, count:N, isolation:"worktree", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+- `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
   — **keep the visibility trio**: `stream:true` + `--output-format stream-json --verbose` makes the
   impl agent's turn readable in its pane (a bare `claude -p` prints nothing until it exits, so the
   pane looks dead for the whole build), and `lingerSecs` holds the pane open after the queue drains
@@ -65,9 +65,13 @@ prompt wedges the pane).
   without it, account rotation hides `mcp__hyperpanes__*` tools from the impl agent.
   `${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS}` likewise carries the user's statusline
   (see `SKILL.md` "Statusline on every spawned claude") — harmless when the var is unset.
-  (or the bare `hyperpanes worker --queue <q> --count N --worktree -- …`). Impl agents run on
+  (or the bare `hyperpanes worker --queue <q> --count N --worktree --base <committish> -- …`).
+  Impl agents run on
   `$HP_GOAL_IMPL_MODEL` (the tier the user picked in the New-goal dialog; default
-  `claude-sonnet-5[1m]`), each in its own git worktree off HEAD.
+  `claude-sonnet-5[1m]`), each in its own git worktree forked from the `base` you pass — always
+  explicit, never the shared checkout's HEAD (`--worktree` refuses to run without `--base`):
+  `main` for a first wave, the goal's integration branch for a dependent wave (resolved per task
+  claim, so a branch that advances mid-run is picked up). See `docs/worker-worktree-base.md`.
   - **Pane budget — cap 16, multiplex overflow.** Never run more than **16** impl-agent worker
     panes at once: set `count = min(<# ready subtasks>, 16)`. If the goal has more subtasks than
     16, do **not** raise `count` — the queue's competing-consumers model multiplexes for you: the
