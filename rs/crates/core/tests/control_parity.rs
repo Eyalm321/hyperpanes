@@ -76,6 +76,7 @@ fn boot() -> u16 {
                 status: PaneStatus::Running,
                 exit_code: None,
                 meta: None,
+                talk: false,
             }],
         }],
     });
@@ -99,9 +100,17 @@ fn state_is_byte_exact_over_a_real_socket() {
     let port = boot();
     let (status, body) = request(port, "GET", "/state", Some(TOKEN), None);
     assert_eq!(status, 200);
-    assert_eq!(
-        body,
-        r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#3b82f6","status":"running","activity":"busy"}]}]}]}"##
+    // `windows` is byte-exact (the frozen legacy shape); the additive `speech` field's
+    // `backend` is environment-dependent (whatever TTS the test machine has on PATH, if
+    // any) — this crate has no JSON parser available (public-API + std only), so the
+    // known-exact prefix/suffix around that one variable value are checked directly.
+    let prefix = r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#3b82f6","status":"running","activity":"busy"}]}]}],"speech":{"muted":false,"focusedOnly":false,"backend":""##;
+    let suffix = r#"","speakingPane":null}}"#;
+    assert!(body.starts_with(prefix), "unexpected body: {body}");
+    assert!(body.ends_with(suffix), "unexpected body: {body}");
+    assert!(
+        body.len() > prefix.len() + suffix.len(),
+        "expected a non-empty backend name: {body}"
     );
 }
 
