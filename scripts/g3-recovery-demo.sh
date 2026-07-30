@@ -64,6 +64,23 @@ XDG_CONFIG_HOME="$TMP/xconfig"
 mkdir -p "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
 CONTROL_JSON="$XDG_STATE_HOME/hyperpanes/control.json"
 
+# ---- production-state guard (hard requirement, see docs/agent-recovery.md) ----------------
+# The headless boot MUST be pointed away from the live org's control file EXPLICITLY:
+# HYPERPANES_CONTROL_FILE takes precedence over the XDG-derived path (app.rs:44-46), and this
+# very script inherited it pointing at production three times before this guard existed. A test
+# that CAN reach production state eventually WILL.
+LIVE_CONTROL_JSON="$HOME/.local/state/hyperpanes/control.json"
+if [ "$CONTROL_JSON" = "$LIVE_CONTROL_JSON" ]; then
+    echo "FAIL: refusing to run — isolated control path equals the live control file ($LIVE_CONTROL_JSON)"
+    exit 1
+fi
+# Snapshot the live control file (if present) so the end of the run can PROVE it was untouched.
+LIVE_SNAPSHOT=""
+if [ -f "$LIVE_CONTROL_JSON" ]; then
+    LIVE_SNAPSHOT="$TMP/live-control-before.json"
+    cp "$LIVE_CONTROL_JSON" "$LIVE_SNAPSHOT"
+fi
+
 ENCODED_PROJ="$(encode "$PROJ")"
 DEFAULT_STORE_DIR="$HOME/.claude/projects/$ENCODED_PROJ"
 DEST="$DEFAULT_STORE_DIR/$SID.jsonl"
@@ -99,7 +116,7 @@ else
 fi
 
 echo "== step 2: prove the poison is live =="
-STEP2_OUT="$(cd "$PROJ" && claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
+STEP2_OUT="$(cd "$PROJ" && env -u CLAUDE_CONFIG_DIR claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
 STEP2_STATUS=$?
 printf '%s\n' "$STEP2_OUT" >"$TMP/err.txt"
 if [ $STEP2_STATUS -ne 0 ] && printf '%s' "$STEP2_OUT" | grep -q "API Error" && printf '%s' "$STEP2_OUT" | grep -q "tool_use_id"; then
@@ -112,14 +129,20 @@ else
 fi
 
 echo "== step 3: boot an isolated headless hyperpanes-core instance =="
+# Build outside /tmp: worktrees live on a tmpfs here, and a fresh target/ inside one costs RAM.
+CARGO_TARGET_DIR="${HP_DEMO_TARGET_DIR:-$HOME/.cache/hyperpanes-g3-demo-target}"
+export CARGO_TARGET_DIR
 (cd "$CORE_DIR" && cargo build -p hyperpanes-core --bin headless) >"$TMP/build.log" 2>&1
 if [ $? -ne 0 ]; then
     fail "step 3: cargo build failed — see $TMP/build.log"
     cat "$TMP/build.log"
     exit 1
 fi
-HEADLESS_BIN="$CORE_DIR/target/debug/headless"
+HEADLESS_BIN="$CARGO_TARGET_DIR/debug/headless"
+# HYPERPANES_CONTROL_FILE must be overridden HERE: it wins over XDG_STATE_HOME (app.rs:44-46)
+# and the surrounding environment carries it pointing at the live org's control file.
 XDG_STATE_HOME="$XDG_STATE_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
+    HYPERPANES_CONTROL_FILE="$CONTROL_JSON" \
     HYPERPANES_ALLOW_INPUT=1 "$HEADLESS_BIN" >"$TMP/headless.log" 2>&1 &
 HEADLESS_PID=$!
 
@@ -157,8 +180,8 @@ if [ -z "$WINDOW_ID" ] || [ "$WINDOW_ID" = "null" ]; then
     exit 1
 fi
 
-NEWPANE_BODY="$(jq -n --arg cwd "$PROJ" --arg errfile "$TMP/err.txt" --argjson windowId "$WINDOW_ID" \
-    '{type: "newPane", windowId: $windowId, pane: {command: ("cat '" + $errfile + "'; exec sh"), cwd: $cwd}}')"
+NEWPANE_BODY="$(jq -n --arg cwd "$PROJ" --arg cmd "cat $TMP/err.txt; exec sh" --argjson windowId "$WINDOW_ID" \
+    '{type: "newPane", windowId: $windowId, pane: {command: $cmd, cwd: $cwd}}')"
 NEWPANE_RESP="$(api -X POST "$BASE/command" -d "$NEWPANE_BODY")"
 PANE_ID="$(printf '%s' "$NEWPANE_RESP" | jq -r '.result // empty')"
 if [ -z "$PANE_ID" ]; then
@@ -199,7 +222,7 @@ else
 fi
 
 echo "== step 6: re-run the resume — must now succeed =="
-STEP6_OUT="$(cd "$PROJ" && claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
+STEP6_OUT="$(cd "$PROJ" && env -u CLAUDE_CONFIG_DIR claude --resume "$SID" -p "reply with exactly OK" --model claude-haiku-4-5-20251001 2>&1)"
 STEP6_STATUS=$?
 if [ $STEP6_STATUS -eq 0 ] && printf '%s' "$STEP6_OUT" | grep -q "OK"; then
     ok "step 6: claude --resume succeeded and replied OK — the repaired session is usable"
@@ -219,6 +242,18 @@ echo "== cleanup =="
 CLOSE_BODY="$(jq -n --arg paneId "$PANE_ID" '{type: "closePane", paneId: $paneId}')"
 api -X POST "$BASE/command" -d "$CLOSE_BODY" >/dev/null 2>&1
 ok "cleanup: closed demo pane, isolated instance + temp dirs removed on exit"
+
+echo "== step 7: prove the live control plane was untouched =="
+if [ -n "$LIVE_SNAPSHOT" ]; then
+    if cmp -s "$LIVE_SNAPSHOT" "$LIVE_CONTROL_JSON"; then
+        ok "step 7: live $LIVE_CONTROL_JSON is byte-identical to its pre-run snapshot"
+    else
+        fail "step 7: live control.json CHANGED during the run — this demo hijacked the org's control plane"
+        diff "$LIVE_SNAPSHOT" "$LIVE_CONTROL_JSON" || true
+    fi
+else
+    ok "step 7: no live control.json existed before the run (nothing to protect)"
+fi
 
 echo
 echo "==================== SUMMARY ===================="

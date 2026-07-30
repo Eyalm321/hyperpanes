@@ -182,3 +182,20 @@ Endpoint recipes go stale and a stale recipe wedges an agent as effectively as a
 error (this goal's briefing shipped one). The authoritative control-API surface is
 `rs/crates/core/src/control/routes.rs` — check it there rather than trusting a persona's
 inlined `curl` line.
+
+## Named failure mode: control-plane hijack by a dev/test instance
+
+`app.rs:44-46`: `HYPERPANES_CONTROL_FILE` takes **precedence** over the XDG-derived
+control-file path. Every agent pane inherits that variable pointing at the LIVE
+`~/.local/state/hyperpanes/control.json` — so a dev build booted from a pane with only
+`XDG_STATE_HOME` overridden still writes its port+token over the live file, silently
+repointing every agent (and the orchestrator's MCP bridge) at a dead instance. This
+happened three times in one session while building this very feature. Two rules follow:
+
+- Any dev/test boot of a hyperpanes binary must override `HYPERPANES_CONTROL_FILE`
+  **on the command line itself** (not in prose, not via XDG alone) and assert afterwards
+  that the live control.json is byte-identical to a pre-run snapshot —
+  `scripts/g3-recovery-demo.sh` is the reference implementation.
+- A watchdog seeing sudden `unauthorized` or `"no such pane"` for panes that were just
+  alive must **re-read control.json** before concluding anything died: the symptoms of a
+  hijacked control file lie about their cause.
