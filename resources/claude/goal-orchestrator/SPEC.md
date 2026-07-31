@@ -53,7 +53,12 @@ prompt wedges the pane).
   the advisor:** include `advisor=<your $HYPERPANES_PANE_ID>` in every payload so an impl agent that
   hits a strategic fork can consult you mid-build instead of guessing or bouncing the whole subtask
   (see IMPL.md "Consult your advisor").
-- `spawn_workers {queue, count:N, isolation:"worktree", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+- `spawn_workers {queue, count:N, isolation:"worktree", stream:true, lingerSecs:120,
+  project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
+  split on newlines>, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config
+  <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
+  --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings
+  $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
   — **keep the visibility trio**: `stream:true` + `--output-format stream-json --verbose` makes the
   impl agent's turn readable in its pane (a bare `claude -p` prints nothing until it exits, so the
   pane looks dead for the whole build), and `lingerSecs` holds the pane open after the queue drains
@@ -75,14 +80,21 @@ prompt wedges the pane).
     finishes first, never a 17th pane). This is a soft budget you enforce yourself — keep the
     workspace legible and the machine within a sane pane count.
   - **Pane identity:** worker panes wear the project's colors too — pass
-    `color: $HP_GOAL_PROJECT_COLOR` and `cwd: <project path>` to `spawn_workers`, then
-    `rename_pane {paneId, label: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>"}` on the
-    returned pane id, so a glance at the workspace reads project → task.
+    `project: $HP_GOAL_PROJECT_NAME` and `subtitle:"<goal id>: <one-liner>"` to `spawn_workers`
+    (the app resolves the default cwd + frame color from the project registry; explicit `cwd`/
+    `color` still win if you pass them) — `rename_pane` is no longer needed for worker identity,
+    so a glance at the workspace reads project → task. `spawn_workers` also stamps every worker
+    pane with default org meta (role="worker", task="queue:<q>", `parent` = your pane), so an impl
+    agent's `send_to_parent` reaches you out of the box — no manual `set_meta` step; a caller
+    `meta` key always wins over the defaults.
   - **Account rotation:** if `HP_GOAL_ACCOUNTS` is set (newline-separated `CLAUDE_CONFIG_DIR`s
-    the orchestrator passed down), set each impl agent's `CLAUDE_CONFIG_DIR` to a different dir
-    from the list (round-robin) — e.g. prefix the command `CLAUDE_CONFIG_DIR=<dir> claude …` or
-    set it in the worker env — so impl agents spread across accounts. Transcripts are shared, so
-    `--resume` still works if one is later restarted under another account.
+    the orchestrator passed down), split it on newlines and pass the array as `accounts` to
+    `spawn_workers` — it round-robins one `CLAUDE_CONFIG_DIR` per worker pane (pane *i* gets
+    `accounts[i % len]`, overriding `env.CLAUDE_CONFIG_DIR`) so impl agents spread across accounts.
+    Rotation needs one pane per worker: `accounts` with `layout:"single-pane"` and count > 1 fails
+    loudly (one process env cannot rotate per-worker).
+    Transcripts are shared, so `--resume` still works if one is later restarted under another
+    account.
 
 ## 3. Integrate & verify
 

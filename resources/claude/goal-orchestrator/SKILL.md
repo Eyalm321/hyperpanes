@@ -188,18 +188,21 @@ doesn't stall the project. The app hands you the account list; you distribute + 
   or unset ⇒ single-account, skip all of this). Your own pane already runs on the first of them
   (the app set your `CLAUDE_CONFIG_DIR`). Transcripts are on a shared store, so `--resume` works
   across accounts.
-- **Spread on spawn:** when you spawn a spec agent, and when the spec agent fans out impl agents,
-  set each pane's `CLAUDE_CONFIG_DIR` to the next dir in `HP_GOAL_ACCOUNTS` (round-robin) — pass it
-  in the `open_pane`/`spawn_workers` env, or `CLAUDE_CONFIG_DIR=<dir> claude …` in the command.
-  Different agents on different accounts = more headroom before any one limit bites.
+- **Spread on spawn:** when you spawn a spec agent, set its `CLAUDE_CONFIG_DIR` to the next dir in
+  `HP_GOAL_ACCOUNTS` (round-robin) — `open_pane` has no dedicated accounts param, so pass it in the
+  pane env or `CLAUDE_CONFIG_DIR=<dir> claude …` in the command. When the spec agent fans out impl
+  agents via `spawn_workers`, it instead splits `HP_GOAL_ACCOUNTS` on newlines and passes the array
+  as `accounts` — `spawn_workers` round-robins one `CLAUDE_CONFIG_DIR` per worker pane itself
+  (pane *i* gets `accounts[i % len]`). Different agents on different accounts = more headroom
+  before any one limit bites.
 - **Rotate on exhaustion:** when you see a pane hit the rate/weekly-limit message (`read_pane`),
   mark that dir exhausted in your ledger and `restart_pane` it with `resume:true` and
   `env:{ "CLAUDE_CONFIG_DIR": "<next non-exhausted dir>" }` — the shared transcript store lets the
   conversation continue under the new account. If **all** dirs are exhausted, pause spawning and
   surface it — there's no budget breaker, so exhaustion is the only hard stop besides human cancel.
 
-Pass `HP_GOAL_ACCOUNTS` down to each spec agent (env or prompt) so it can rotate its own impl
-agents the same way.
+Pass `HP_GOAL_ACCOUNTS` down to each spec agent (env or prompt) so it can pass it as `accounts` to
+its own `spawn_workers` calls.
 
 ## Loop discipline
 
