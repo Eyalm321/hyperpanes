@@ -58,6 +58,7 @@ pub async fn run(version: &str) -> io::Result<()> {
         allow_input,
         version,
         control_file.clone(),
+        paths::speech_json(),
     );
     // Remote-access bind (mobile client): honor bindAddress/port from control-settings.json.
     if settings.bind_address.is_some() || settings.port.is_some() {
@@ -130,6 +131,11 @@ pub async fn run(version: &str) -> io::Result<()> {
     // ticker sweeps expired work-queue leases alongside it.
     tokio::spawn(server::run_activity_ticker(Arc::clone(&shared)));
     tokio::spawn(server::run_reaper_ticker(Arc::clone(&shared)));
+    // Per-pane "talk": default-off background loop that tails talking panes' Claude
+    // transcripts and speaks new assistant replies via local TTS.
+    tokio::spawn(crate::control::speech_service::run_ticker(Arc::clone(
+        &shared,
+    )));
 
     // Serve the loopback control API. (The headless daemon always serves — that is its purpose;
     // the enabled/allowInput toggles still gate input and are reflected in /health.)
@@ -248,6 +254,7 @@ fn spawn_seed_pane(
         status: PaneStatus::Running,
         exit_code: None,
         meta: ps.meta.clone().filter(|m| !m.is_empty()),
+        talk: false,
     }
 }
 

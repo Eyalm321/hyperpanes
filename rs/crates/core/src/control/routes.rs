@@ -38,7 +38,7 @@ use crate::control::output::{
     detect_awaiting_input, next_poll_delay, slice_since, wait_decision, WaitVerdict,
     DEFAULT_SETTLE_MS, DEFAULT_WAIT_TIMEOUT_MS,
 };
-use crate::control::readmodel::{Activity, PaneStatus};
+use crate::control::readmodel::{Activity, PaneStatus, WindowOut};
 use crate::control::scope::{check_mintable, coerce_scope, pane_in_scope, queue_in_scope, Scope};
 use crate::control::server::{events_url, notify_state, now_ms, Shared};
 use crate::control::tokens::TokenInfo;
@@ -196,17 +196,44 @@ async fn health(State(shared): State<Arc<Shared>>) -> Response {
 
 // ---- /state -------------------------------------------------------------------------------
 
+/// `/state`'s top-level, additive `speech` field: the per-pane "talk" engine's status,
+/// reported even before the engine has been lazily spawned.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpeechOut {
+    muted: bool,
+    focused_only: bool,
+    backend: String,
+    speaking_pane: Option<String>,
+}
+
+#[derive(Serialize)]
+struct StateWithSpeechOut {
+    windows: Vec<WindowOut>,
+    speech: SpeechOut,
+}
+
 async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
     let info = match authorize(&shared, &headers) {
         Ok(i) => i,
         Err(e) => return e,
     };
-    let m = shared.model.lock().unwrap();
-    let out =
+    let out = {
+        let m = shared.model.lock().unwrap();
         m.state_for_scope_with_dims(info.scope.as_ref(), &|p| shared.compute_activity(p), &|p| {
             shared.sessions.dims(&p.session_uid)
-        });
-    ok_json(out)
+        })
+    };
+    let status = shared.speech.status();
+    ok_json(StateWithSpeechOut {
+        windows: out.windows,
+        speech: SpeechOut {
+            muted: status.muted,
+            focused_only: status.focused_only,
+            backend: status.backend,
+            speaking_pane: status.speaking_pane,
+        },
+    })
 }
 
 // ---- /tokens ------------------------------------------------------------------------------
@@ -1495,6 +1522,7 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
             control_file.as_deref(),
             info.scope.as_ref(),
             &cmd,
+            &shared.speech,
         )
     };
     // Phase-5: keep supervisor policies in lockstep with pane meta (setMeta flips
@@ -1732,7 +1760,14 @@ mod golden {
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let sessions = Arc::new(SessionManager::new(tx));
         let control_file = std::env::temp_dir().join("hp-golden-control.json");
-        let shared = Shared::new(sessions, allow_input, "0.1.8", control_file);
+        let speech_settings = std::env::temp_dir().join("hp-golden-speech.json");
+        let shared = Shared::new(
+            sessions,
+            allow_input,
+            "0.1.8",
+            control_file,
+            speech_settings,
+        );
         shared.model.lock().unwrap().add_window(WindowInfo {
             window_id: 1,
             active_tab_id: Some("t1".into()),
@@ -1773,6 +1808,7 @@ mod golden {
             status: PaneStatus::Running,
             exit_code: None,
             meta: None,
+            talk: false,
         }
     }
 
@@ -1992,10 +2028,18 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(r.status().as_u16(), 200);
+        let body: Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+        // `windows` stays byte-exact (the frozen legacy shape); `speech` is additive — its
+        // `backend` is environment-dependent (whatever TTS the test machine has on PATH),
+        // so only its shape is asserted, not the exact backend name.
         assert_eq!(
-            r.text().await.unwrap(),
-            r#"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[]}]}]}"#
+            body["windows"],
+            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[]}]}])
         );
+        assert_eq!(body["speech"]["muted"], json!(false));
+        assert_eq!(body["speech"]["focusedOnly"], json!(false));
+        assert!(body["speech"]["backend"].is_string());
+        assert_eq!(body["speech"]["speakingPane"], Value::Null);
     }
 
     #[tokio::test]

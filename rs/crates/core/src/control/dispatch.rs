@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use crate::claude_recovery::{self, ErrorClass};
 use crate::control::readmodel::{PaneInfo, PaneStatus, ReadModel, TabInfo};
 use crate::control::scope::{pane_in_scope, tab_in_scope, window_in_scope, Scope};
+use crate::control::speech_service::SpeechService;
 use crate::session::spawn::EnvMap;
 use crate::session_manager::{SessionManager, SpawnOptions};
 
@@ -75,13 +76,15 @@ impl DispatchResult {
 
 /// Execute a `/command`, mirroring the TS `/command` handler + `applyControlCommand`.
 /// `control_file` is the discovery path injected into spawned panes' env (suppressed by
-/// `build_env` when a scoped token rides in the spec's env).
+/// `build_env` when a scoped token rides in the spec's env). `speech` is the shared
+/// per-pane "talk" service (settings + engine) for the `setSpeech*` commands below.
 pub fn handle_command(
     model: &mut ReadModel,
     sessions: &SessionManager,
     control_file: Option<&str>,
     scope: Option<&Scope>,
     cmd: &Value,
+    speech: &SpeechService,
 ) -> DispatchResult {
     let ty = match cmd.get("type").and_then(Value::as_str) {
         Some(t) => t,
@@ -107,6 +110,34 @@ pub fn handle_command(
             Ok(()) => DispatchResult::ok(None, false),
             Err(e) => DispatchResult::err(400, &e),
         };
+    }
+
+    // `setSpeechMuted`/`setSpeechFocusedOnly` are global speech-engine settings, not
+    // targeted at a pane/window — handle them before window resolution, same as
+    // `queuePrompt` above.
+    if ty == "setSpeechMuted" {
+        return match cmd.get("muted").and_then(Value::as_bool) {
+            Some(muted) => {
+                speech.set_muted(muted);
+                DispatchResult::ok(None, false)
+            }
+            None => DispatchResult::err(400, "setSpeechMuted needs a boolean muted"),
+        };
+    }
+    if ty == "setSpeechFocusedOnly" {
+        return match cmd.get("focusedOnly").and_then(Value::as_bool) {
+            Some(focused_only) => {
+                speech.set_focused_only(focused_only);
+                DispatchResult::ok(None, false)
+            }
+            None => DispatchResult::err(400, "setSpeechFocusedOnly needs a boolean focusedOnly"),
+        };
+    }
+    // One-shot global stop: kill the in-flight utterance and drop the backlog, leaving
+    // the persisted mute/focused settings untouched (mute is the sticky variant).
+    if ty == "stopSpeech" {
+        speech.stop_all();
+        return DispatchResult::ok(None, false);
     }
 
     // Resolve a target window: explicit windowId (number or numeric string), else the pane's window.
@@ -385,6 +416,17 @@ fn exec(
                 Some(text) => Ok((Some(Value::String(text)), false)),
                 None => Err("screen unavailable".to_string()),
             }
+        }
+        "setTalk" => {
+            let pane_id = str_field(cmd, "paneId")?;
+            let enabled = cmd
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("missing boolean field: enabled")?;
+            if !model.set_talk(&pane_id, enabled) {
+                return Err(format!("no such pane: {pane_id}"));
+            }
+            Ok((None, false))
         }
         other => Err(format!("unknown command type: {other}")),
     }
@@ -891,6 +933,7 @@ fn spawn_pane(
         status: PaneStatus::Running,
         exit_code: None,
         meta: meta.filter(|m| !m.is_empty()),
+        talk: false,
     })
 }
 
@@ -1036,13 +1079,24 @@ mod tests {
         SessionManager::new(tx)
     }
 
+    /// A fresh `SpeechService` backed by a scratch settings path unique to the calling
+    /// test, so `cargo test` never touches (or races on) the developer's real speech.json.
+    fn speech() -> SpeechService {
+        let path = std::env::temp_dir().join(format!(
+            "hp-dispatch-speech-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        SpeechService::new(path)
+    }
+
     // newPane needs a tokio runtime (SessionManager::create spawns a driver task).
     #[tokio::test]
     async fn new_pane_spawns_inserts_and_returns_the_pane_id() {
         let mut m = model_one_window();
         let s = sessions();
         let cmd = json!({ "type": "newPane", "windowId": 1, "pane": { "label": "w", "command": "echo hi" } });
-        let r = handle_command(&mut m, &s, Some("C:/control.json"), None, &cmd);
+        let r = handle_command(&mut m, &s, Some("C:/control.json"), None, &cmd, &speech());
         assert_eq!(r.status, 200);
         assert!(r.notify_state);
         let id = r.body["result"].as_str().unwrap().to_string();
@@ -1057,7 +1111,7 @@ mod tests {
         // Spawn spec fields at the top level instead of nested under "pane" — a common
         // hand-authored mistake that must be rejected, not silently spawn a default shell.
         let cmd = json!({ "type": "newPane", "windowId": 1, "command": "claude" });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(r.status, 400);
         assert!(r.body["error"].as_str().unwrap().contains("pane"));
         assert!(m.panes().is_empty());
@@ -1068,7 +1122,7 @@ mod tests {
         let mut m = model_one_window();
         let s = sessions();
         let cmd = json!({ "type": "newPane", "windowId": 1, "pane": "claude" });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(r.status, 400);
         assert!(r.body["error"].as_str().unwrap().contains("pane"));
         assert!(m.panes().is_empty());
@@ -1079,7 +1133,7 @@ mod tests {
         let mut m = model_one_window();
         let s = sessions();
         let cmd = json!({ "type": "newPane", "windowId": 1, "pane": {} });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(r.status, 200);
         let id = r.body["result"].as_str().unwrap().to_string();
         assert!(m.pane(&id).is_some());
@@ -1090,7 +1144,7 @@ mod tests {
         let mut m = model_one_window();
         let s = sessions();
         let cmd = json!({ "type": "newPane", "windowId": 1 });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(r.status, 200);
         let id = r.body["result"].as_str().unwrap().to_string();
         assert!(m.pane(&id).is_some());
@@ -1102,19 +1156,19 @@ mod tests {
         let s = sessions();
         // Spawn a pane to target.
         let open = json!({ "type": "newPane", "windowId": 1, "pane": {} });
-        let id = handle_command(&mut m, &s, None, None, &open).body["result"]
+        let id = handle_command(&mut m, &s, None, None, &open, &speech()).body["result"]
             .as_str()
             .unwrap()
             .to_string();
         let cmd =
             json!({ "type": "setMeta", "paneId": id, "meta": { "role": "worker", "task": "x" } });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(r.status, 200);
         assert_eq!(r.body["result"]["role"], json!("worker"));
         assert_eq!(r.body["result"]["task"], json!("x"));
         // Delete a key — echoed merged drops it.
         let del = json!({ "type": "setMeta", "paneId": id, "meta": { "task": null } });
-        let r2 = handle_command(&mut m, &s, None, None, &del);
+        let r2 = handle_command(&mut m, &s, None, None, &del, &speech());
         assert!(r2.body["result"].get("task").is_none());
         assert_eq!(r2.body["result"]["role"], json!("worker"));
     }
@@ -1128,7 +1182,7 @@ mod tests {
         // because resolution fails first, this never writes to the registry.
         let bogus = format!("no-such-project-{}", uuid::Uuid::new_v4());
         let cmd = json!({ "type": "newPane", "windowId": 1, "pane": { "project": bogus } });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(r.status, 500);
         assert_eq!(r.body["error"], json!(format!("unknown project: {bogus}")));
         assert!(!r.projects_dirty);
@@ -1149,7 +1203,7 @@ mod tests {
     fn missing_type_is_400() {
         let mut m = model_one_window();
         let s = sessions();
-        let r = handle_command(&mut m, &s, None, None, &json!({ "paneId": "p" }));
+        let r = handle_command(&mut m, &s, None, None, &json!({ "paneId": "p" }), &speech());
         assert_eq!(r.status, 400);
         assert_eq!(r.body["error"], json!("expected { type: string, … }"));
     }
@@ -1164,6 +1218,7 @@ mod tests {
             None,
             None,
             &json!({ "type": "setLayout", "layout": "grid" }),
+            &speech(),
         );
         assert_eq!(r.status, 400);
         assert_eq!(r.body["error"], json!("command needs a paneId or windowId"));
@@ -1176,7 +1231,7 @@ mod tests {
         let mut m = model_one_window();
         let s = sessions();
         let cmd = json!({ "type": "newPane", "windowId": "1", "pane": {} });
-        let r = handle_command(&mut m, &s, None, None, &cmd);
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
         assert_eq!(
             r.status, 200,
             "string windowId should resolve, got {:?}",
@@ -1194,9 +1249,123 @@ mod tests {
             ..Default::default()
         };
         let cmd = json!({ "type": "newPane", "windowId": 1, "pane": {} });
-        let r = handle_command(&mut m, &s, None, Some(&scope), &cmd);
+        let r = handle_command(&mut m, &s, None, Some(&scope), &cmd, &speech());
         assert_eq!(r.status, 403);
         assert_eq!(r.body["error"], json!("windowId 1 is out of scope"));
+    }
+
+    #[tokio::test]
+    async fn set_talk_enables_and_disables_a_pane() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let open = json!({ "type": "newPane", "windowId": 1, "pane": {} });
+        let id = handle_command(&mut m, &s, None, None, &open, &speech()).body["result"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!m.pane(&id).unwrap().talk);
+
+        let on = json!({ "type": "setTalk", "paneId": id, "enabled": true });
+        let r = handle_command(&mut m, &s, None, None, &on, &speech());
+        assert_eq!(r.status, 200);
+        assert!(m.pane(&id).unwrap().talk);
+
+        let off = json!({ "type": "setTalk", "paneId": id, "enabled": false });
+        let r = handle_command(&mut m, &s, None, None, &off, &speech());
+        assert_eq!(r.status, 200);
+        assert!(!m.pane(&id).unwrap().talk);
+    }
+
+    #[test]
+    fn set_talk_unknown_pane_is_500() {
+        let mut m = model_one_window();
+        let s = sessions();
+        // An explicit windowId gets past the generic "needs a paneId or windowId" gate
+        // (which can't resolve "ghost" to a window on its own) so this actually exercises
+        // setTalk's own "no such pane" check inside `exec`.
+        let cmd = json!({ "type": "setTalk", "windowId": 1, "paneId": "ghost", "enabled": true });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        assert_eq!(r.status, 500);
+        assert_eq!(r.body["error"], json!("no such pane: ghost"));
+    }
+
+    #[test]
+    fn set_talk_missing_enabled_is_500() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "setTalk", "windowId": 1, "paneId": "p" });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        assert_eq!(r.status, 500);
+        assert_eq!(r.body["error"], json!("missing boolean field: enabled"));
+    }
+
+    #[test]
+    fn set_speech_muted_toggles_the_service_and_is_global_not_pane_scoped() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let svc = speech();
+        // No paneId/windowId on this command at all — it must not hit the "needs a
+        // paneId or windowId" 400 that every pane/window command does.
+        let cmd = json!({ "type": "setSpeechMuted", "muted": true });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &svc);
+        assert_eq!(r.status, 200);
+        assert!(svc.status().muted);
+
+        let cmd = json!({ "type": "setSpeechMuted", "muted": false });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &svc);
+        assert_eq!(r.status, 200);
+        assert!(!svc.status().muted);
+    }
+
+    #[test]
+    fn stop_speech_is_global_and_leaves_mute_untouched() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let svc = speech();
+        svc.set_muted(true);
+        // Global like setSpeechMuted: no paneId/windowId, must not 400.
+        let cmd = json!({ "type": "stopSpeech" });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &svc);
+        assert_eq!(r.status, 200);
+        // A one-shot stop is not a mode switch — mute stays as it was.
+        assert!(svc.status().muted);
+    }
+
+    #[test]
+    fn set_speech_muted_needs_a_boolean() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "setSpeechMuted" });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        assert_eq!(r.status, 400);
+        assert_eq!(
+            r.body["error"],
+            json!("setSpeechMuted needs a boolean muted")
+        );
+    }
+
+    #[test]
+    fn set_speech_focused_only_toggles_the_service() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let svc = speech();
+        let cmd = json!({ "type": "setSpeechFocusedOnly", "focusedOnly": true });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &svc);
+        assert_eq!(r.status, 200);
+        assert!(svc.status().focused_only);
+    }
+
+    #[test]
+    fn set_speech_focused_only_needs_a_boolean() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "setSpeechFocusedOnly" });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        assert_eq!(r.status, 400);
+        assert_eq!(
+            r.body["error"],
+            json!("setSpeechFocusedOnly needs a boolean focusedOnly")
+        );
     }
 
     #[test]

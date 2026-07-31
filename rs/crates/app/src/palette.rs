@@ -159,6 +159,26 @@ pub fn build(state: &State) -> Vec<Entry> {
         ));
     }
 
+    // ---- speech (per-pane "talk" — routed to the ControlHost's SpeechService) ----
+    cmds.push(Entry::new(
+        "Speech: Stop Now",
+        "Kill any in-flight/queued speech immediately",
+        "talk tts audio silence shut up",
+        Command::SpeechStopNow,
+    ));
+    cmds.push(Entry::new(
+        "Speech: Toggle Mute",
+        "Mute/unmute all per-pane talk",
+        "talk tts audio silence",
+        Command::SpeechToggleMuted,
+    ));
+    cmds.push(Entry::new(
+        "Speech: Only Focused Pane",
+        "Toggle speaking only the focused pane's replies",
+        "talk tts audio focus",
+        Command::SpeechToggleFocusedOnly,
+    ));
+
     // ---- preferences + sidebar ----
     cmds.push(Entry::new(
         "Preferences…",

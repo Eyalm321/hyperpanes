@@ -269,6 +269,8 @@ fn pane_item(
         ai_subtitle,
         // The cached shell-type badge (computed once at pane creation; "" → not shown).
         shell_type: ps.shell_label.as_str().into(),
+        // Speaker glyph in the header, shown only while this pane's "talk" is on.
+        talk: ps.talk,
         show_frame: ps.frame_on(show_frame),
         show_dot: ps.dot_on(show_dot),
         editing,

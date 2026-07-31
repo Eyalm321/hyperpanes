@@ -64,6 +64,7 @@ struct PaneSnap {
     label: String,
     color: String,
     subtitle: Option<String>,
+    talk: bool,
 }
 
 /// Hosts the embedded control server beside the GUI. UI-thread-owned (all interior mutability
@@ -102,6 +103,10 @@ pub struct ControlHost {
     prev_active: RefCell<HashMap<i64, Option<String>>>,
     /// The window ids present in the read-model (so a rebuild can drop them all first).
     prev_windows: RefCell<Vec<i64>>,
+    /// Session uids already shown the "talk needs the control server" toast while the server
+    /// is stopped, so it fires once per pane (not every sync tick) — cleared once the server
+    /// starts, so a later stop→talk-on cycle notices again.
+    talk_notice_shown: RefCell<HashSet<String>>,
 }
 
 impl ControlHost {
@@ -133,6 +138,7 @@ impl ControlHost {
             prev: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
             prev_windows: RefCell::new(Vec::new()),
+            talk_notice_shown: RefCell::new(HashSet::new()),
         };
         if host.enabled.get() {
             host.start(mgr);
@@ -211,6 +217,7 @@ impl ControlHost {
             // `/health` report it accurately instead of a stale hardcoded string.
             env!("CARGO_PKG_VERSION"),
             self.control_file.clone(),
+            paths::speech_json(),
         );
         // Bind the server's own background spawns (the `notify_state` coalescer) to this runtime.
         shared.set_runtime(self.runtime.clone());
@@ -314,6 +321,57 @@ impl ControlHost {
         (self.enabled.get(), self.allow_input.get(), port)
     }
 
+    // ---- speech (SpeechService, owned by the running `Shared`) ----
+
+    /// Kill any in-flight/queued speech immediately. No-op (returns `false`) when the control
+    /// server isn't running — the `SpeechService` lives on `Shared`.
+    pub fn speech_stop_all(&self) -> bool {
+        match self.shared.borrow().as_ref() {
+            Some(s) => {
+                s.speech.stop_all();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Flip the global speech mute flag, returning the new value. `None` when the control
+    /// server isn't running.
+    pub fn speech_toggle_muted(&self) -> Option<bool> {
+        let shared = self.shared.borrow();
+        let s = shared.as_ref()?;
+        let on = !s.speech.status().muted;
+        s.speech.set_muted(on);
+        Some(on)
+    }
+
+    /// Flip "only speak the focused pane", returning the new value. `None` when the control
+    /// server isn't running.
+    pub fn speech_toggle_focused_only(&self) -> Option<bool> {
+        let shared = self.shared.borrow();
+        let s = shared.as_ref()?;
+        let on = !s.speech.status().focused_only;
+        s.speech.set_focused_only(on);
+        Some(on)
+    }
+
+    /// Toast every pane with `talk` on that hasn't been notified yet that speech needs the
+    /// control server running (it hosts the `SpeechService`). No-op once already shown per pane.
+    fn notice_talk_needs_backend(&self, windows: &[Rc<Window>]) {
+        let mut shown = self.talk_notice_shown.borrow_mut();
+        for w in windows {
+            let mut st = w.state.borrow_mut();
+            for t in st.tabs.iter_mut() {
+                for p in t.panes.iter_mut() {
+                    if p.talk && shown.insert(p.uid.clone()) {
+                        p.pane
+                            .set_toast("Talk needs the control server (Preferences)");
+                    }
+                }
+            }
+        }
+    }
+
     // ---- live event tee ----
 
     /// Forward one session event to the running server (model cwd/exit + `/events` WS frames).
@@ -332,8 +390,17 @@ impl ControlHost {
     pub fn sync(&self, windows: &[Rc<Window>], mgr: &Arc<SessionManager>) {
         let shared = match self.shared.borrow().as_ref() {
             Some(s) => Arc::clone(s),
-            None => return,
+            None => {
+                // The server isn't running, so nothing polls `talk` — a pane the user just
+                // switched on would otherwise silently never speak. One-shot, non-blocking
+                // toast per pane (see `talk_notice_shown`).
+                self.notice_talk_needs_backend(windows);
+                return;
+            }
         };
+        // The server IS running: clear the notice baseline so a later stop→talk-on cycle
+        // notices again.
+        self.talk_notice_shown.borrow_mut().clear();
 
         // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
         let (cur, cur_active, focus_uid) = self.snapshot_model(&shared, windows);
@@ -358,6 +425,22 @@ impl ControlHost {
                 w.state.borrow_mut().refresh_projects();
             }
         }
+
+        // 6. Publish the focused pane for the speech service's `focusedOnly` filter. The app
+        //    has no per-window OS-focus tracking yet, so this attributes focus to the primary
+        //    window's active tab (correct for the common single-window case; multi-window just
+        //    doesn't disambiguate which OS window is frontmost).
+        let focused_uid = windows.first().and_then(|w| {
+            let st = w.state.borrow();
+            let t = st.active_tab();
+            t.panes.get(t.focused).map(|p| p.uid.clone())
+        });
+        let focused_pane_id = focused_uid.map(|uid| self.pane_id_for_uid(&uid).unwrap_or(uid));
+        shared
+            .model
+            .lock()
+            .unwrap()
+            .set_focused_pane(focused_pane_id);
     }
 
     /// Read every pane the read-model currently holds (keyed by session uid), each GUI window's
@@ -386,6 +469,7 @@ impl ControlHost {
                         label: p.label.clone(),
                         color: p.color.clone(),
                         subtitle: p.subtitle.clone(),
+                        talk: p.talk,
                         command: p.command.clone(),
                         args: p.args.clone(),
                         shell: p.shell.clone(),
@@ -472,8 +556,12 @@ impl ControlHost {
                 }
                 structural = true;
             } else if let Some(p) = prev.get(uid) {
-                // Present on both sides: apply a control rename / recolor / subtitle change.
-                if c.label != p.label || c.color != p.color || c.subtitle != p.subtitle {
+                // Present on both sides: apply a control rename / recolor / subtitle / talk change.
+                if c.label != p.label
+                    || c.color != p.color
+                    || c.subtitle != p.subtitle
+                    || c.talk != p.talk
+                {
                     apply_pane_chrome(windows, uid, c);
                 }
             }
@@ -597,6 +685,7 @@ impl ControlHost {
                     let label = p.title.to_string();
                     let color = color_hex(p.accent);
                     let subtitle = p.subtitle.as_ref().map(|s| s.to_string());
+                    let talk = p.talk;
                     let c = ctl.get(&uid).cloned().unwrap_or_default();
                     new_prev.insert(
                         uid.clone(),
@@ -604,6 +693,7 @@ impl ControlHost {
                             label: label.clone(),
                             color: color.clone(),
                             subtitle: subtitle.clone(),
+                            talk,
                         },
                     );
                     panes.push(PaneInfo {
@@ -612,6 +702,7 @@ impl ControlHost {
                         label,
                         subtitle,
                         color,
+                        talk,
                         command: c.command,
                         args: c.args,
                         cwd: p.cwd.clone(),
@@ -761,6 +852,7 @@ struct ModelPane {
     label: String,
     color: String,
     subtitle: Option<String>,
+    talk: bool,
     command: Option<String>,
     args: Option<Vec<String>>,
     shell: Option<String>,
@@ -812,6 +904,7 @@ fn apply_pane_chrome(windows: &[Rc<Window>], uid: &str, c: &ModelPane) {
             p.accent = accent;
             p.pinned_accent = Some(accent);
             p.subtitle = c.subtitle.clone().map(Into::into);
+            p.talk = c.talk;
             st.dirty = true;
             return;
         }

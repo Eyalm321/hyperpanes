@@ -111,6 +111,15 @@ pub enum Command {
     SetPaneDot(usize, bool),
     /// Toggle whether pane `0`'s ambient-AI summary line is muted.
     ToggleMuteAi(usize),
+    /// Toggle whether pane `0`'s "talk" (speak new Claude assistant replies aloud) is on.
+    ToggleTalk(usize),
+    // ---- speech (global; routed to the ControlHost's SpeechService) ----
+    /// Kill any in-flight/queued speech immediately (command palette "Speech: Stop Now").
+    SpeechStopNow,
+    /// Toggle the global speech mute flag.
+    SpeechToggleMuted,
+    /// Toggle "only speak the focused pane" (background talkers stay silent while unfocused).
+    SpeechToggleFocusedOnly,
     /// Maximize/restore (zoom-in-tab) pane `0`.
     ZoomPane(usize),
     /// Fullscreen/exit-fullscreen pane `0`.
@@ -266,6 +275,11 @@ pub enum Effect {
         tab: DetachedTab,
         source_alive: bool,
     },
+    /// Speech commands route through the `ControlHost`'s `SpeechService` (owned above `State`),
+    /// so `dispatch` bubbles them up as effects rather than mutating state directly.
+    SpeechStopNow,
+    SpeechToggleMuted,
+    SpeechToggleFocusedOnly,
 }
 
 /// The keyboard layout-cycle order (skips `single`, which the menu still offers).
@@ -365,6 +379,10 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SetPaneFrame(i, on) => state.set_pane_frame(i, on),
         Command::SetPaneDot(i, on) => state.set_pane_dot(i, on),
         Command::ToggleMuteAi(i) => state.toggle_mute_ai(i),
+        Command::ToggleTalk(i) => state.toggle_talk(i),
+        Command::SpeechStopNow => return Effect::SpeechStopNow,
+        Command::SpeechToggleMuted => return Effect::SpeechToggleMuted,
+        Command::SpeechToggleFocusedOnly => return Effect::SpeechToggleFocusedOnly,
         Command::ZoomPane(i) => state.zoom_pane(i),
         Command::FullscreenPane(i) => {
             state.focus_pane(i);

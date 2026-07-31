@@ -14,5 +14,6 @@ pub mod events;
 pub mod readmodel;
 pub mod routes;
 pub mod server;
+pub mod speech_service;
 pub mod supervisor;
 pub mod tokens;
