@@ -12,6 +12,7 @@ pub mod claude_accounts;
 pub mod claude_history;
 pub mod claude_hook;
 pub mod claude_panes;
+pub mod claude_recovery;
 pub mod cli;
 pub mod control;
 pub mod layout;
