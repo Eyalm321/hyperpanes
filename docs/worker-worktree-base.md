@@ -34,6 +34,27 @@ right checkout" was a pure-discipline rule, and it failed exactly as often as an
 - `--base HEAD` remains expressible for anyone who genuinely wants the checkout's current HEAD —
   the defect was implicitness, not HEAD itself.
 
+## Worktree-create failure now nacks the task (no silent isolation fallback)
+
+Same degradation family, second instance: when `git worktree add` failed (stale
+`worker/<queue>/<id8>` branch with uncollected commits, git lock, disk), the runner used to log
+one line and then run the task anyway **in its own cwd** — and ack it on success. The isolation
+`--worktree` asked for silently became no isolation, with an unattended `claude
+--dangerously-skip-permissions` sitting in the shared checkout.
+
+Now:
+
+- The task is **nacked**, with `worktree create failed (base <base>): <git error>` as the
+  queue-visible reason; the child is never spawned. The runner prints the reason plus an explicit
+  `child NOT run — refusing to execute without the requested isolation`, and the error names the
+  branch and path it tried.
+- The nack is the **standard retryable** one — `--nack-delay` backoff applies and the queue's
+  `max_attempts` bounds it — because these failures are usually environmental and recoverable
+  (collect or delete the stale branch and the retry succeeds); a persistent one dead-letters
+  instead of spinning.
+- The runner keeps draining: one task's broken worktree doesn't take the worker down or block the
+  rest of the queue.
+
 ## Migration
 
 - Bare runner invocations: add the flag —
