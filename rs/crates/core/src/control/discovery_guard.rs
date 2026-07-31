@@ -294,7 +294,10 @@ mod tests {
     fn test_shared(control: PathBuf) -> Arc<Shared> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
         let sessions = Arc::new(SessionManager::new(tx));
-        Shared::new(sessions, false, "0.0.0", control)
+        // Speech settings live beside the control file so this scratch instance never
+        // touches the real one (g1/talk added this parameter after g6 was written).
+        let speech = control.with_file_name("speech.json");
+        Shared::new(sessions, false, "0.0.0", control, speech)
     }
 
     /// A live process that LOOKS like hyperpanes: `sleep` behind a symlink named
