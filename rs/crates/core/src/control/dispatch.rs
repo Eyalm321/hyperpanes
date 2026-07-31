@@ -1432,13 +1432,13 @@ mod tests {
         let mut m = model_one_window();
         let s = sessions();
         let open = json!({ "type": "newPane", "windowId": 1, "pane": { "command": "echo hi" } });
-        let pane_id = handle_command(&mut m, &s, None, None, &open).body["result"]
+        let pane_id = handle_command(&mut m, &s, None, None, &open, &speech()).body["result"]
             .as_str()
             .unwrap()
             .to_string();
 
         let inspect = json!({ "type": "recoverPane", "paneId": pane_id, "action": "inspect" });
-        let r = handle_command(&mut m, &s, None, None, &inspect);
+        let r = handle_command(&mut m, &s, None, None, &inspect, &speech());
         assert_eq!(r.status, 200, "{:?}", r.body);
         assert_eq!(r.body["result"]["apiError"], Value::Null);
         assert_eq!(r.body["result"]["class"], Value::Null);
@@ -1457,14 +1457,14 @@ mod tests {
             "windowId": 1,
             "pane": { "command": "printf 'API Error: 418 I am a teapot\\r\\n'; exec cat" }
         });
-        let pane_id = handle_command(&mut m, &s, None, None, &open).body["result"]
+        let pane_id = handle_command(&mut m, &s, None, None, &open, &speech()).body["result"]
             .as_str()
             .unwrap()
             .to_string();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         let resume = json!({ "type": "recoverPane", "paneId": pane_id, "action": "resume" });
-        let r = handle_command(&mut m, &s, None, None, &resume);
+        let r = handle_command(&mut m, &s, None, None, &resume, &speech());
         assert_eq!(r.status, 500);
         assert!(
             r.body["error"].as_str().unwrap().contains("unknown"),
