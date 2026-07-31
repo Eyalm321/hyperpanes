@@ -458,13 +458,35 @@ fn drain(
         );
 
         // Optional per-task throwaway worktree (#14): create it, run the child there, remove it
-        // after (the commit, if any, stays on its branch).
+        // after (the commit, if any, stays on its branch). If the worktree can't be created,
+        // the task must NOT fall through to the runner's own cwd — that silently strips the
+        // isolation the caller asked for and puts the child in the shared checkout (the
+        // 2026-07-30 incident class). Nack instead: worktree failures are usually environmental
+        // (stale branch, git lock, disk), so the standard retry path applies, bounded by the
+        // queue's max_attempts.
         let wt = if worktree {
             match Worktree::create(queue, &task.id, fork_base) {
                 Ok(w) => Some(w),
                 Err(e) => {
-                    eprintln!("[{worker}] worktree create failed: {e}");
-                    None
+                    let reason = format!("worktree create failed (base {fork_base}): {e}");
+                    eprintln!("[{worker}] !! {reason}");
+                    eprintln!("[{worker}] !! child NOT run — refusing to execute without the requested isolation");
+                    let state = nack(
+                        client,
+                        base,
+                        token,
+                        &task.id,
+                        task.fencing_token,
+                        &reason,
+                        nack_delay_ms,
+                    )?;
+                    eprintln!(
+                        "[{worker}] !! nacked {} (attempt {}/{}) → {state}",
+                        short(&task.id),
+                        task.attempts,
+                        task.max_attempts
+                    );
+                    continue;
                 }
             }
         } else {
@@ -949,7 +971,8 @@ impl Worktree {
             .map_err(|e| format!("git worktree add: {e}"))?;
         if !out.status.success() {
             return Err(format!(
-                "git worktree add failed: {}",
+                "git worktree add failed for {branch} at {}: {}",
+                path.display(),
                 String::from_utf8_lossy(&out.stderr).trim()
             )
             .into());

@@ -34,23 +34,51 @@ right checkout" was a pure-discipline rule, and it failed exactly as often as an
 - `--base HEAD` remains expressible for anyone who genuinely wants the checkout's current HEAD —
   the defect was implicitness, not HEAD itself.
 
+## Worktree-create failure now nacks the task (no silent isolation fallback)
+
+Same degradation family, second instance: when `git worktree add` failed (stale
+`worker/<queue>/<id8>` branch with uncollected commits, git lock, disk), the runner used to log
+one line and then run the task anyway **in its own cwd** — and ack it on success. The isolation
+`--worktree` asked for silently became no isolation, with an unattended `claude
+--dangerously-skip-permissions` sitting in the shared checkout.
+
+Now:
+
+- The task is **nacked**, with `worktree create failed (base <base>): <git error>` as the
+  queue-visible reason; the child is never spawned. The runner prints the reason plus an explicit
+  `child NOT run — refusing to execute without the requested isolation`, and the error names the
+  branch and path it tried.
+- The nack is the **standard retryable** one — `--nack-delay` backoff applies and the queue's
+  `max_attempts` bounds it — because these failures are usually environmental and recoverable
+  (collect or delete the stale branch and the retry succeeds); a persistent one dead-letters
+  instead of spinning.
+- The runner keeps draining: one task's broken worktree doesn't take the worker down or block the
+  rest of the queue.
+
 ## Migration
 
 - Bare runner invocations: add the flag —
   `hyperpanes worker --queue <q> --count N --worktree --base main -- …`.
 - Dependent waves: `--base <goal-integration-branch>` instead of checking that branch out in a
   shared cwd.
-- **Version-skew gap:** a hyperpanes binary with this change plus a published `hyperpanes-mcp`
-  *without* the `base` passthrough (≤ 0.1.12) means `spawn_workers {isolation:"worktree"}` spawns
-  runners that exit immediately with the teaching error — loud, not silent. Until the MCP
-  follow-up below is published, either spawn worker panes running the bare runner command
-  (`open_pane`), or point `HYPERPANES_WORKER_BIN` at a wrapper script that injects `--base`.
+- **Version-skew gap (closes when `g7/mcp-base` merges + publishes):** a hyperpanes binary with
+  this change plus a published `hyperpanes-mcp` *without* the `base` passthrough (≤ 0.1.12) means
+  `spawn_workers {isolation:"worktree"}` spawns runners that exit immediately with the teaching
+  error — loud, not silent. Until the implemented follow-up below lands in a published package,
+  either spawn worker panes running the bare runner command (`open_pane`), or point
+  `HYPERPANES_WORKER_BIN` at a wrapper script that injects `--base`.
 
-## Follow-up: `base` passthrough in hyperpanes-mcp (apply after the pending MCP branches land)
+## Follow-up: `base` passthrough in hyperpanes-mcp — DONE on `g7/mcp-base`, pending merge + publish
 
-`~/dev/hyperpanes-mcp/src/control-tools.ts` currently has unmerged branches rewriting the
-`spawn_workers` block (`g1/talk`, `g2/spawn-workers-passthrough`), so this change is deliberately
-**not** on a branch — apply it against whatever lands, in the `spawn_workers` registration:
+**Do not re-implement this.** Goal g7 completed it on branch `g7/mcp-base` in
+`~/dev/hyperpanes-mcp` (stacked on `g2/spawn-workers-passthrough`): `base` added to the
+`spawn_workers` schema, REQUIRED with `isolation:"worktree"`, guarded in the handler before any
+`newPane` is issued, emitted as `--base` in the runner argv; verified 170 tests green + tsc clean
+in a clean checkout. What remains is merging g2+g7 and publishing the package — the version-skew
+gap above applies only until then.
+
+The spec as originally written is kept below as the historical record of what was asked
+(`g7/mcp-base` is its implementation):
 
 1. Schema, next to `isolation`:
    ```ts
