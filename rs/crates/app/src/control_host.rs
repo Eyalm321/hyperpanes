@@ -1100,6 +1100,7 @@ mod tests {
             session_uid: uid.to_string(),
             label: "shell".to_string(),
             subtitle: None,
+            talk: false,
             color: "#888888".to_string(),
             command: None,
             args: None,
