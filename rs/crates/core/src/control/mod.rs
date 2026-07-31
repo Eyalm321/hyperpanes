@@ -9,6 +9,7 @@ pub mod output;
 pub mod scope;
 pub mod work;
 
+pub mod discovery_guard;
 pub mod dispatch;
 pub mod events;
 pub mod readmodel;

@@ -416,8 +416,12 @@ fn write_discovery(shared: &Arc<Shared>) -> io::Result<()> {
 }
 
 /// Remove the discovery file (best-effort), so a stale `control.json` never points at a dead port.
+/// Owner-checked: only the instance whose pid the file records may delete it — a refused or
+/// hijacked instance stopping must not take the live owner's file down with it.
 pub fn remove_discovery(shared: &Arc<Shared>) {
-    let _ = std::fs::remove_file(&shared.control_file);
+    if crate::control::discovery_guard::recorded_pid(&shared.control_file) == Some(shared.pid) {
+        let _ = std::fs::remove_file(&shared.control_file);
+    }
 }
 
 /// Bind loopback on an ephemeral port, mint the master token, write `control.json`, and serve
@@ -425,6 +429,9 @@ pub fn remove_discovery(shared: &Arc<Shared>) {
 /// SEPARATE task ([`run_activity_ticker`]) the embedder spawns alongside this one, so its
 /// lifetime can be torn down independently (the GUI host aborts it on stop — see `control_host`).
 pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
+    // A control file owned by a live, different-pid instance is not ours to claim — fail
+    // loudly before binding anything (see control::discovery_guard).
+    crate::control::discovery_guard::ensure_claimable(&shared.control_file, shared.pid).await?;
     let (addr, req_port) = shared.bind_config();
     let listener = match tokio::net::TcpListener::bind((addr.as_str(), req_port)).await {
         Ok(l) => l,
