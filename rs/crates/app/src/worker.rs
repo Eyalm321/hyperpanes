@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! ```text
-//! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree] \
+//! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>] \
 //!   [--retry-window <secs>] [--nack-delay <ms>] \
 //!   [--stream] [--log-dir <dir>] [--linger <secs>] -- <cmd> [args...]
 //! ```
@@ -14,7 +14,11 @@
 //! (so a hyperpanes pane running the worker auto-closes on drain).
 //!
 //! Flags: `--count N` runs N competing workers in this process (#11); `--worktree` runs each
-//! task in a throwaway git worktree that auto-removes (#14); `--retry-window <secs>` keeps
+//! task in a throwaway git worktree that auto-removes (#14), forked from `--base <committish>`
+//! (any branch, tag, or sha) — `--base` is REQUIRED with `--worktree`: the old implicit fork
+//! point was the runner cwd's HEAD, i.e. whatever a shared checkout happened to have checked
+//! out, and `--base HEAD` stays expressible for anyone who really means that;
+//! `--retry-window <secs>` keeps
 //! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
 //! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
 //! long task isn't reclaimed mid-flight (#12).
@@ -54,6 +58,11 @@ pub struct WorkerArgs {
     pub nack_delay_ms: Option<i64>,
     /// Run each task in a throwaway git worktree, auto-removed on exit (#14).
     pub worktree: bool,
+    /// Fork point for `--worktree` task worktrees: any committish (branch, tag, sha). Required
+    /// with `--worktree` (parse rejects the combination without it): the old implicit fallback —
+    /// the runner cwd's HEAD, whatever a shared checkout happened to have checked out — is the
+    /// footgun `--base` exists to remove. `None` only when `--worktree` is off.
+    pub base: Option<String>,
     /// Render the child's Claude `--output-format stream-json` lines as readable progress
     /// instead of raw JSON, so a worker pane shows what the agent is doing while it runs.
     pub stream: bool,
@@ -117,6 +126,7 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut log_dir: Option<PathBuf> = None;
     let mut stream = false;
     let mut worktree = false;
+    let mut base: Option<String> = None;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -150,6 +160,10 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                 worktree = true;
                 i += 1;
             }
+            "--base" => {
+                base = Some(argv.get(i + 1).ok_or("--base needs a value")?.clone());
+                i += 2;
+            }
             "--stream" => {
                 stream = true;
                 i += 1;
@@ -179,6 +193,8 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                     retry_window_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--nack-delay=") {
                     nack_delay_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--base=") {
+                    base = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--log-dir=") {
                     log_dir = Some(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--linger=") {
@@ -191,6 +207,15 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         }
     }
     let queue = queue.ok_or("missing --queue <name>")?;
+    if worktree && base.is_none() {
+        return Err(
+            "--worktree now requires --base <committish>: the fork point for task worktrees must \
+             be explicit, not whatever the shared checkout's HEAD happens to be. Use `--base main` \
+             for independent work, or `--base <your-integration-branch>` for a dependent wave \
+             (`--base HEAD` keeps the old behaviour if you really mean it)."
+                .to_string(),
+        );
+    }
     if child.is_empty() {
         return Err("missing child command after `--`".to_string());
     }
@@ -233,6 +258,7 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         retry_window_secs,
         nack_delay_ms,
         worktree,
+        base,
         stream,
         log_dir,
         linger_secs,
@@ -285,6 +311,13 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
     let worktree = args.worktree;
+    // Fork point for per-task worktrees — parse guarantees `--base` whenever `--worktree` is on
+    // (the "HEAD" fallback only feeds the non-worktree path, where it is never used). Resolve it
+    // up front so a typo'd committish fails loudly here, before any task is claimed.
+    let fork_base = args.base.clone().unwrap_or_else(|| "HEAD".to_string());
+    if worktree {
+        validate_base(&fork_base)?;
+    }
     // Output policy shared by every worker thread: render Claude's stream-json readably and/or
     // tee raw child output to a per-task log that outlives the pane.
     let out = Arc::new(ChildOutput {
@@ -312,6 +345,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
             retry_window,
             nack_delay,
             worktree,
+            &fork_base,
             &out,
         )?;
         eprintln!(
@@ -335,6 +369,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         let child = args.child.clone();
         let worker = format!("{}-{i}", args.worker);
         let out = Arc::clone(&out);
+        let fork_base = fork_base.clone();
         handles.push(std::thread::spawn(move || {
             match drain(
                 &client,
@@ -346,6 +381,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
                 retry_window,
                 nack_delay,
                 worktree,
+                &fork_base,
                 &out,
             ) {
                 Ok(n) => {
@@ -388,6 +424,7 @@ fn drain(
     retry_window: Duration,
     nack_delay_ms: Option<i64>,
     worktree: bool,
+    fork_base: &str,
     out: &ChildOutput,
 ) -> Result<u64, Box<dyn Error>> {
     eprintln!("[{worker}] online — draining '{queue}'");
@@ -423,7 +460,7 @@ fn drain(
         // Optional per-task throwaway worktree (#14): create it, run the child there, remove it
         // after (the commit, if any, stays on its branch).
         let wt = if worktree {
-            match Worktree::create(queue, &task.id) {
+            match Worktree::create(queue, &task.id, fork_base) {
                 Ok(w) => Some(w),
                 Err(e) => {
                     eprintln!("[{worker}] worktree create failed: {e}");
@@ -820,15 +857,52 @@ fn extend(
     Ok(())
 }
 
-/// A throwaway git worktree for one task (#14). Created off HEAD on a fresh branch; the working
-/// dir is removed when the task finishes (a commit, if any, stays on the branch). Created from
-/// the worker's cwd, so `--worktree` requires running inside a git repo.
+/// Early, loud check that the `--worktree` fork point resolves to a commit in the runner's cwd,
+/// before any task is claimed. Each task still resolves the ref at claim time (see
+/// `Worktree::create_in`), so a branch that advances mid-run — a dependent wave's integration
+/// branch — is picked up per task.
+fn validate_base(base: &str) -> Result<(), Box<dyn Error>> {
+    let ok = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("{base}^{{commit}}"))
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if ok {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "the worker's cwd".to_string());
+    Err(format!("--base {base}: does not resolve to a commit in {cwd} — pass a branch, tag, or sha that exists there").into())
+}
+
+/// A throwaway git worktree for one task (#14). Created off an explicit base committish on a
+/// fresh branch; the working dir is removed when the task finishes (a commit, if any, stays on
+/// the branch). Created from the worker's cwd, so `--worktree` requires running inside a git
+/// repo.
 struct Worktree {
     path: PathBuf,
+    /// The repo the worktree was created from — `remove()` must run git there, not in whatever
+    /// the process cwd is by then.
+    repo: PathBuf,
 }
 
 impl Worktree {
-    fn create(queue: &str, task_id: &str) -> Result<Self, Box<dyn Error>> {
+    fn create(queue: &str, task_id: &str, base: &str) -> Result<Self, Box<dyn Error>> {
+        let repo =
+            std::env::current_dir().map_err(|e| format!("worktree: cannot resolve cwd: {e}"))?;
+        Self::create_in(&repo, queue, task_id, base)
+    }
+
+    /// Explicit-repo body so tests can prove the fork point without touching the process cwd.
+    /// `base` is resolved by git HERE, at task start — not pinned at runner start — so a ref
+    /// that advances between tasks forks from its current tip.
+    fn create_in(
+        repo: &Path,
+        queue: &str,
+        task_id: &str,
+        base: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let id8 = &task_id[..8.min(task_id.len())];
         let safe = queue.replace(['/', ' '], "-");
         let branch = format!("worker/{safe}/{id8}");
@@ -836,35 +910,41 @@ impl Worktree {
         // The branch name is deterministic (per task id), so a stale `worker/<q>/<id8>` left by a
         // prior run makes `git worktree add -b` fail. Prune dead worktree admin entries first, then
         // decide by whether the stale branch carries uncollected commits: if it's an ancestor of
-        // HEAD (nothing beyond the base) reset it with `-B`; if it's AHEAD of HEAD (uncollected
+        // the base (nothing beyond it) reset it with `-B`; if it's AHEAD of the base (uncollected
         // impl work per the commit-first protocol, or checked out in a live worktree) refuse and
         // surface it rather than clobber committed work.
-        let _ = Command::new("git").args(["worktree", "prune"]).output();
+        let _ = Command::new("git")
+            .current_dir(repo)
+            .args(["worktree", "prune"])
+            .output();
         let branch_exists = Command::new("git")
+            .current_dir(repo)
             .args(["rev-parse", "--verify", "--quiet"])
             .arg(format!("refs/heads/{branch}"))
             .output()
             .is_ok_and(|o| o.status.success());
         let add_flag = if branch_exists {
             let safe_to_reset = Command::new("git")
-                .args(["merge-base", "--is-ancestor", &branch, "HEAD"])
+                .current_dir(repo)
+                .args(["merge-base", "--is-ancestor", &branch, base])
                 .output()
                 .is_ok_and(|o| o.status.success());
             if !safe_to_reset {
                 return Err(format!(
-                    "git worktree add: branch {branch} already exists with commits not in HEAD \
+                    "git worktree add: branch {branch} already exists with commits not in {base} \
                      (uncollected work from a prior run?) — collect or delete it before retrying"
                 )
                 .into());
             }
-            "-B" // stale but empty relative to HEAD → safe to re-point onto HEAD
+            "-B" // stale but empty relative to the base → safe to re-point onto it
         } else {
             "-b"
         };
         let out = Command::new("git")
+            .current_dir(repo)
             .args(["worktree", "add", add_flag, &branch])
             .arg(&path)
-            .arg("HEAD")
+            .arg(base)
             .output()
             .map_err(|e| format!("git worktree add: {e}"))?;
         if !out.status.success() {
@@ -893,12 +973,16 @@ impl Worktree {
                 }
             }
         }
-        eprintln!("  [worktree] {} @ {branch}", path.display());
-        Ok(Self { path })
+        eprintln!("  [worktree] {} @ {branch} (base {base})", path.display());
+        Ok(Self {
+            path,
+            repo: repo.to_path_buf(),
+        })
     }
 
     fn remove(&self) {
         let _ = Command::new("git")
+            .current_dir(&self.repo)
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
             .output();
@@ -1147,6 +1231,8 @@ mod tests {
                 "--queue",
                 "q",
                 "--worktree",
+                "--base",
+                "main",
                 "--",
                 "true"
             ]))
@@ -1158,5 +1244,155 @@ mod tests {
                 .unwrap()
                 .worktree
         );
+    }
+
+    #[test]
+    fn worktree_without_base_is_refused_with_teaching_error() {
+        let err = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--worktree",
+            "--",
+            "true",
+        ]))
+        .unwrap_err();
+        // The refusal must teach the fix: name the flag, state the new requirement, and show
+        // both real forms — independent work off main and a dependent wave off its integration
+        // branch.
+        assert!(err.contains("--worktree now requires --base"), "{err}");
+        assert!(err.contains("--base main"), "{err}");
+        assert!(err.contains("--base <your-integration-branch>"), "{err}");
+        // Without --worktree, --base stays optional.
+        assert!(parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).is_ok());
+    }
+
+    #[test]
+    fn parses_base_flag() {
+        assert_eq!(
+            parse_args(&argv(&[
+                "hp",
+                "worker",
+                "--queue",
+                "q",
+                "--worktree",
+                "--base",
+                "main",
+                "--",
+                "true"
+            ]))
+            .unwrap()
+            .base
+            .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            parse_args(&argv(&[
+                "hp",
+                "worker",
+                "--queue=q",
+                "--worktree",
+                "--base=g5/int",
+                "--",
+                "true"
+            ]))
+            .unwrap()
+            .base
+            .as_deref(),
+            Some("g5/int")
+        );
+        assert_eq!(
+            parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"]))
+                .unwrap()
+                .base,
+            None
+        );
+        assert!(parse_args(&argv(&["hp", "worker", "--queue", "q", "--base"])).is_err());
+    }
+
+    /// Run git in `repo` with host config neutralized (a global `commit.gpgsign` etc. must not
+    /// leak into the scratch repo), panicking on failure so a broken fixture reads as the test's
+    /// own assertion.
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Scratch repo whose HEAD sits on a diverged branch — the shared-checkout hazard the
+    /// `--base` flag exists for. Layout: `main` at commit A; `int` = A + one commit;
+    /// `wrong` = A + one commit, checked out (HEAD).
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let repo = std::env::temp_dir().join(format!("hp-base-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "A"]);
+        git(&repo, &["checkout", "-b", "int"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "B"]);
+        git(&repo, &["checkout", "-b", "wrong", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "C"]);
+        repo
+    }
+
+    #[test]
+    fn worktree_forks_from_explicit_base_not_cwd_head() {
+        let repo = scratch_repo("fork");
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let main = git(&repo, &["rev-parse", "main"]);
+        assert_ne!(
+            head, main,
+            "fixture must diverge or the test proves nothing"
+        );
+
+        // Explicit --base main forks from main even though the checkout's HEAD is elsewhere.
+        let wt = Worktree::create_in(&repo, "q", "aaaa0000", "main").unwrap();
+        assert_eq!(git(&wt.path, &["rev-parse", "HEAD"]), main);
+        wt.remove();
+
+        // A dependent wave forks its integration branch the same way.
+        let int = git(&repo, &["rev-parse", "int"]);
+        let wt = Worktree::create_in(&repo, "q", "bbbb0000", "int").unwrap();
+        assert_eq!(git(&wt.path, &["rev-parse", "HEAD"]), int);
+        wt.remove();
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn stale_task_branch_guard_compares_against_base_not_head() {
+        let repo = scratch_repo("guard");
+
+        // Stale branch AT the base (no uncollected work) → reset with -B and fork the base.
+        git(&repo, &["branch", "worker/q/cccc0000", "main"]);
+        let wt = Worktree::create_in(&repo, "q", "cccc0000", "main").unwrap();
+        assert_eq!(
+            git(&wt.path, &["rev-parse", "HEAD"]),
+            git(&repo, &["rev-parse", "main"])
+        );
+        wt.remove();
+
+        // Stale branch AHEAD of the base (uncollected commits; here it sits on `wrong`) → refuse
+        // even though HEAD == `wrong` would have made the old HEAD-relative check wave it through.
+        git(&repo, &["branch", "worker/q/dddd0000", "wrong"]);
+        let err = match Worktree::create_in(&repo, "q", "dddd0000", "main") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("stale branch ahead of base must be refused"),
+        };
+        assert!(err.contains("already exists"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }
