@@ -14,7 +14,7 @@
 //! shell, status, exitCode, activity, meta) — we serialize ordered structs directly, never a
 //! key-sorted `serde_json::Value`, so the bytes match the TS source.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -154,6 +154,65 @@ impl ReadModel {
             self.reindex();
         }
         removed
+    }
+
+    /// The GUI host's per-tick republish: drop `drop_windows` (every window the previous
+    /// publish created), then append `windows` (the freshly rebuilt GUI tree).
+    /// `last_published` is the set of session uids the caller's PREVIOUS publish put in the
+    /// model — i.e. the panes the GUI actually hosts.
+    ///
+    /// Running panes the GUI has never hosted (uid ∉ `last_published`) are CARRIED OVER
+    /// instead of destroyed: they are control-spawned panes (`/command newPane`) inserted
+    /// after the caller's snapshot, which the GUI will adopt on its next reconcile. Blindly
+    /// rebuilding used to erase them, leaving a live PTY permanently invisible to `/state` /
+    /// `list_panes` (the g4 vanish bug). Panes the GUI DID host and dropped (a GUI close,
+    /// possibly parked in the closed-tab undo buffer with the session alive) are NOT revived.
+    /// Returns the carried-over pane ids (for the caller's log line).
+    pub fn publish_replace(
+        &mut self,
+        drop_windows: &[i64],
+        windows: Vec<WindowInfo>,
+        last_published: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut orphans: Vec<(i64, String, PaneInfo)> = Vec::new();
+        for w in &self.windows {
+            if !drop_windows.contains(&w.window_id) {
+                continue;
+            }
+            for t in &w.tabs {
+                for p in &t.panes {
+                    if p.status == PaneStatus::Running && !last_published.contains(&p.session_uid) {
+                        orphans.push((w.window_id, t.id.clone(), p.clone()));
+                    }
+                }
+            }
+        }
+        for wid in drop_windows {
+            self.drop_window(*wid);
+        }
+        for w in windows {
+            self.add_window(w);
+        }
+        let mut carried = Vec::new();
+        for (wid, tab_id, p) in orphans {
+            // The rebuilt tree may legitimately hold the pane already (adopted this cycle).
+            if self.pane_loc.contains_key(&p.id) || self.uid_to_pane.contains_key(&p.session_uid) {
+                continue;
+            }
+            let id = p.id.clone();
+            // Re-home: the original tab if it survived, else the original window's active
+            // tab, else the first window (its window was closed; keep the live pane
+            // addressable rather than orphaning a running PTY).
+            let placed = self.insert_pane_in_tab(&tab_id, p.clone())
+                || self.insert_pane(wid, p.clone())
+                || self
+                    .first_window_id()
+                    .is_some_and(|w| self.insert_pane(w, p));
+            if placed {
+                carried.push(id);
+            }
+        }
+        carried
     }
 
     /// Rebuild the reverse indexes from the tree. Runs only on structure change.

@@ -135,13 +135,23 @@ On every loop iteration, inspect your live spec-agent/impl panes and judge liven
   a spec agent waiting on its own fan-out is healthy and reads idle (a real watchdog false-positive):
   `API Error:` in the tail fires immediately, but bare idleness only counts when NO task is claimed
   across the goal's queues AND no worker process is alive; a live child shell/spinner = working.
-  If a pane id stops resolving while its process and `--log-dir` log stay healthy (known read-model
-  bug), fall back to queue state + the worker log — don't misread a vanished pane as a wedged agent.
+  If a pane id stops resolving while its process and `--log-dir` log stay healthy (see the next bullet:
+  fixed, with a self-heal), fall back to queue state + the worker log — don't misread a vanished pane as a wedged agent.
   Endpoint recipes staled in a briefing wedge agents too: the authoritative control-API surface is
   `rs/crates/core/src/control/routes.rs`, not any inlined `curl` line.
 - **Never call `ToolSearch`/deferred tool loading from a spawned agent's first turn.** This is
   exactly how a transcript gets poisoned in the first place (an unanswered tool call wedges the
   pane forever) — say so in every spec/impl persona you hand out.
+- **Pane id stops resolving ≠ agent died.** A pane can be absent from the read model while its
+  process is alive and working (historically: a publish race destroyed just-created worker panes;
+  fixed, plus a self-heal that restores such panes with `meta.hp.recovered:"1"` within seconds).
+  Before concluding an agent is gone, fall back to the queue state (`list_tasks` — is its task
+  still leased/progressing?) and its `--log-dir` transcript; re-check `list_panes` after a few
+  seconds in case the self-heal restored it. Endpoints live in
+  `rs/crates/core/src/control/routes.rs` — treat that file as authoritative, not any doc. (The
+  regression test for the race is `rs/crates/core/tests/readmodel_publish.rs`; its red run is
+  against a behavior-preserving extraction commit, not literal main — the buggy composite was only
+  reachable through the GUI.)
 
 ## Fan-out & the work queue
 
