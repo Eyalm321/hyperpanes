@@ -1447,6 +1447,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns `printf …; exec cat` to plant the API-Error tail — POSIX shell only. The
+    // classification it pins is platform-agnostic and covered by classification_table.
+    #[cfg(unix)]
     async fn recover_pane_resume_refuses_unknown_class_without_force() {
         let mut m = model_one_window();
         let s = sessions();

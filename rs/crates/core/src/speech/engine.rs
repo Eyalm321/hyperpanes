@@ -440,7 +440,10 @@ mod tests {
         assert_eq!(status.speaking_pane, None);
     }
 
+    // The harness backend is a `#!/bin/sh` script, so this exercises the engine only
+    // where a POSIX shell exists; the serialization logic it pins is platform-agnostic.
     #[test]
+    #[cfg(unix)]
     fn alternating_start_end_serialized_and_fifo_per_producer() {
         let dir = scratch_dir("alt");
         let log = dir.join("log.txt");
@@ -514,7 +517,10 @@ mod tests {
         }
     }
 
+    // The harness backend is a `#!/bin/sh` script, so this exercises the engine only
+    // where a POSIX shell exists; the serialization logic it pins is platform-agnostic.
     #[test]
+    #[cfg(unix)]
     fn stop_all_kills_in_flight_and_discards_queue() {
         let dir = scratch_dir("stop");
         let log = dir.join("log.txt");

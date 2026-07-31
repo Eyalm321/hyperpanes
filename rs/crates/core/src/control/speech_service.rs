@@ -281,6 +281,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // fake TTS backend is a /bin/sh script
     #[test]
     fn enabled_pane_speaks_new_assistant_text_normalized() {
         let dir = scratch_dir("single");
@@ -332,6 +333,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)] // fake TTS backend is a /bin/sh script
     #[test]
     fn two_talking_panes_get_label_prefixed() {
         let dir = scratch_dir("multi");
