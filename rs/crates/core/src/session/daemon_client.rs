@@ -274,6 +274,22 @@ impl DaemonSessionManager {
                 uid: meta.uid.clone(),
             });
         }
+        // ...then BARRIER on a round-trip before returning. The `Replay` frames those
+        // Attaches earn are applied by the reader thread, so without this `connect` returns
+        // with every mirror still empty and the caller races it. The GUI's restore path is
+        // exactly that caller: it reads `replay(uid)` synchronously to seed each re-attached
+        // pane's grid, so a survivor came back blank — the process was still there, its
+        // scrollback was not.
+        //
+        // A `Ping` works as the barrier because the daemon answers one connection's messages
+        // in order and the reader applies frames in the order it reads them: by the time
+        // `Pong` reaches the reply channel, every preceding `Replay` has already been folded
+        // into its shadow. Cheap (one local round-trip, only when there is something to
+        // seed) and bounded — a timeout just returns, leaving the old racy behaviour rather
+        // than hanging startup.
+        if !metas.is_empty() {
+            let _ = self.request(ClientMsg::Ping, |m| matches!(m, DaemonMsg::Pong));
+        }
     }
 
     // ---- the SessionManager surface (delegated to over the wire) ----
@@ -1184,6 +1200,49 @@ mod tests {
             }),
             "reconnect: replay() should re-seed from the Attach reply, got {:?}",
             mgr2.replay("surv")
+        );
+
+        mgr2.kill("surv");
+    }
+
+    // ...and the seed is there the INSTANT `connect` returns, not eventually. The test above
+    // polls, which is fair for a mirror the event stream also grows — but the GUI does not
+    // poll: `make_pane_from_spec` reads `replay(uid)` once, synchronously, to prime a
+    // re-attached pane's grid. Before the connect barrier that read landed ahead of the
+    // `Replay` frames and every survivor came back showing a bare prompt, its scrollback
+    // gone even though the process had never died.
+    #[test]
+    fn the_replay_seed_is_ready_when_connect_returns() {
+        let socket = temp_socket("seed-sync");
+        let _daemon = spawn_in_process(&socket).expect("daemon binds");
+
+        let (mgr1, mut rx1) = connect_manager(&socket);
+        mgr1.create(SpawnOptions {
+            uid: "surv".into(),
+            shell: Some("/bin/sh".into()),
+            args: Some(vec!["-i".into()]),
+            ..Default::default()
+        })
+        .expect("create");
+        mgr1.write("surv", "echo SEED_SYNC_MARKER\n");
+        assert!(
+            recv_event_until(&mut rx1, Dur::from_secs(10), |e| {
+                matches!(e, SessionEvent::Data { uid, data, .. } if uid == "surv" && data.contains("SEED_SYNC_MARKER"))
+            })
+            .is_some(),
+            "marker should reach the daemon's replay buffer"
+        );
+        drop(mgr1);
+        drop(rx1);
+
+        let (mgr2, _rx2) = connect_manager(&socket);
+        // No `wait_until`: this is the read the GUI actually performs.
+        let seeded = mgr2.replay("surv");
+        assert!(
+            seeded
+                .as_deref()
+                .is_some_and(|r| r.contains("SEED_SYNC_MARKER")),
+            "connect must not return before the Attach replay is folded in, got {seeded:?}"
         );
 
         mgr2.kill("surv");
