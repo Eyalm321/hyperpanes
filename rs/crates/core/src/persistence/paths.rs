@@ -230,9 +230,13 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "tmp".to_string());
-    // Same-directory temp so the rename stays on one volume; pid keeps it unique
-    // across concurrent writers.
-    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    // Same-directory temp so the rename stays on one volume. Unique across concurrent
+    // writers by pid AND by a per-process counter: two THREADS of one process share a
+    // pid, so a pid-only name let one thread's `rename` carry off the other's temp file
+    // and the loser failed with a bewildering ENOENT on a path it had just written.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
     std::fs::write(&tmp, contents)?;
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
