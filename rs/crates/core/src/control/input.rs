@@ -40,6 +40,16 @@ fn named_key(k: &str) -> Option<&'static str> {
         "esc" => "\x1b",
         "tab" => "\t",
         "shift+tab" => "\x1b[Z",
+        // Shift+Enter is "newline, don't submit" — what a TUI binds for a multi-line
+        // prompt, Claude Code among them. No distinct code point exists for it, so
+        // terminals settled on a meta-prefixed CR. Alt+Enter takes the same route.
+        // Must stay byte-identical to the GUI keypress path in
+        // `terminal-widget::keys::encode_key`, or the same gesture means two different
+        // things depending on whether a human or an agent sent it.
+        "shift+enter" => "\x1b\r",
+        "shift+return" => "\x1b\r",
+        "alt+enter" => "\x1b\r",
+        "alt+return" => "\x1b\r",
         "backtab" => "\x1b[Z",
         "up" => "\x1b[A",
         "down" => "\x1b[B",
@@ -167,6 +177,18 @@ mod tests {
         assert_eq!(key_to_bytes("ctrl+c").as_deref(), Some("\x03"));
         assert_eq!(key_to_bytes("ctrl+d").as_deref(), Some("\x04"));
         assert_eq!(key_to_bytes("ctrl+a").as_deref(), Some("\x01"));
+    }
+
+    #[test]
+    #[test]
+    fn shift_and_alt_enter_are_a_meta_prefixed_cr() {
+        // Byte-for-byte what `terminal-widget::keys::encode_key` emits for the same
+        // gesture; an agent's Shift+Enter must land as a newline, not a submit.
+        for k in ["shift+enter", "shift+return", "alt+enter", "alt+return"] {
+            assert_eq!(key_to_bytes(k).as_deref(), Some("\x1b\r"), "{k}");
+        }
+        // ...and a bare Enter still submits.
+        assert_eq!(key_to_bytes("enter").as_deref(), Some("\r"));
     }
 
     #[test]
