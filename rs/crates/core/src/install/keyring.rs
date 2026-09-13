@@ -2,21 +2,29 @@
 //!
 //! [`KeyStore`] is the seam: the host asks for a key by id and gets back a [`SecretKey`]
 //! that zeroes itself on drop, prints nothing under `Debug`, and has no `Display`.
-//! Two stores ship today:
+//! Three stores ship:
 //!
-//! * [`FileKeyStore`] — the OS-keychain **fallback**. The intended home for the key is the
-//!   platform keychain through the `keyring` crate, which cannot be added while the
-//!   registry is unreachable (frozen-file request filed with track H5's report). Until
-//!   then the key is 32 random bytes in an owner-only file under
-//!   `<data_dir>/modules/keys/<key_id>`, created exclusively (`O_EXCL`) so two racing
-//!   processes never clobber each other's key. The Windows path is a plain create;
-//!   track H7 adds the DACLs.
+//! * [`KeyringKeyStore`] — the intended production home. The key lives in the platform
+//!   keychain through the `keyring` crate (the same seam the license token uses), and a
+//!   [`FileKeyStore`] rides along as the fallback for a host with no reachable keychain
+//!   (a headless Linux box with no Secret Service, a locked login keychain) and as the
+//!   migration origin for a key an older, file-only build already wrote. A key found on
+//!   disk is **adopted, never regenerated** — a new key would fail to verify every record
+//!   the old one signed — and its plaintext file is then removed. Wiring this store into
+//!   the production marketplace path is a one-line change to a frozen `mod.rs`, filed for
+//!   the orchestrator; until it lands the app still constructs [`FileKeyStore`] directly.
+//! * [`FileKeyStore`] — the fallback. The key is 32 random bytes in an owner-only file
+//!   under `<data_dir>/modules/keys/<key_id>`, created exclusively (`O_EXCL`) so two
+//!   racing processes never clobber each other's key. On Windows the file is created
+//!   plainly and then locked down with an owner-only DACL.
 //! * [`MemoryKeyStore`] — for tests: keys live in a map and never touch disk.
 //!
 //! Key bytes are never logged, printed, or placed in an error, here or anywhere. The
 //! file store writes the key with plain `std::fs` calls rather than
 //! `paths::write_atomic_private`, whose `tracing::instrument(ret)` would record its
-//! `contents` argument in a debug span.
+//! `contents` argument in a debug span. The keychain path leans on the caller's install
+//! lock, not an atomic create, to settle a first-write race — the same choice the license
+//! store makes; the file fallback keeps its own `O_EXCL` guard.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -268,6 +276,150 @@ impl KeyStore for FileKeyStore {
     }
 }
 
+/// The service name the install-record key is stored under in the platform keychain.
+/// Distinct from the license token's service so the two secrets never collide.
+const KEYRING_SERVICE: &str = "avada-terminal-install-key";
+
+/// A keychain backend was unreachable. Carries a message only — never the key bytes.
+struct VaultError(String);
+
+impl fmt::Display for VaultError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The seam over the OS keychain, mirroring the license store's `TokenVault`.
+///
+/// `Ok(Some)` — the backend holds a key for this id.
+/// `Ok(None)` — the backend is reachable but has no entry yet.
+/// `Err(_)`   — the backend is unavailable (headless Linux with no Secret Service, a
+/// locked keychain, no backend compiled in); the caller falls back to the file store.
+///
+/// There is no `delete`: [`KeyStore`] only ever reads or creates, so the key is
+/// write-once and never revoked through this seam.
+trait KeyVault: Send + Sync {
+    fn get(&self, key_id: &str) -> Result<Option<Vec<u8>>, VaultError>;
+    fn set(&self, key_id: &str, key: &[u8]) -> Result<(), VaultError>;
+}
+
+/// The production keychain backend, over the `keyring` crate's binary-secret API.
+struct KeyringVault;
+
+impl KeyringVault {
+    fn entry(key_id: &str) -> Result<::keyring::Entry, VaultError> {
+        ::keyring::Entry::new(KEYRING_SERVICE, key_id)
+            .map_err(|e| VaultError(format!("keyring entry: {e}")))
+    }
+}
+
+impl KeyVault for KeyringVault {
+    fn get(&self, key_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        match Self::entry(key_id)?.get_secret() {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(::keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(VaultError(format!("keyring get: {e}"))),
+        }
+    }
+
+    fn set(&self, key_id: &str, key: &[u8]) -> Result<(), VaultError> {
+        Self::entry(key_id)?
+            .set_secret(key)
+            .map_err(|e| VaultError(format!("keyring set: {e}")))
+    }
+}
+
+/// The install-record signing key, kept in the platform keychain.
+///
+/// Reads and creates go to the keychain first. A [`FileKeyStore`] rides along for two
+/// jobs: it is the fallback when the keychain is unreachable, and it is the migration
+/// origin — a key an older, file-only build left on disk is adopted verbatim (so every
+/// record it already signed still verifies) and its plaintext file is then removed.
+pub struct KeyringKeyStore {
+    vault: Box<dyn KeyVault>,
+    fallback: FileKeyStore,
+}
+
+impl KeyringKeyStore {
+    /// A store whose keychain fallback (and migration origin) lives in `dir`.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        KeyringKeyStore {
+            vault: Box::new(KeyringVault),
+            fallback: FileKeyStore::new(dir),
+        }
+    }
+
+    /// Same, but over a supplied vault, so a test can drive the keychain-up,
+    /// keychain-down, and migration paths without a real keychain.
+    #[cfg(test)]
+    fn with_vault(dir: impl Into<PathBuf>, vault: Box<dyn KeyVault>) -> Self {
+        KeyringKeyStore {
+            vault,
+            fallback: FileKeyStore::new(dir),
+        }
+    }
+
+    /// A key of exactly [`KEY_LEN`] bytes, or `Corrupt` against a keychain pseudo-path
+    /// that names the entry without leaking the bytes.
+    fn checked(bytes: Vec<u8>, key_id: &str) -> Result<SecretKey, KeyError> {
+        let key = SecretKey::new(bytes);
+        if key.expose().len() == KEY_LEN {
+            Ok(key)
+        } else {
+            Err(KeyError::Corrupt {
+                path: PathBuf::from(format!("keyring://{KEYRING_SERVICE}/{key_id}")),
+            })
+        }
+    }
+}
+
+impl fmt::Debug for KeyringKeyStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never the key bytes; the fallback dir is the only useful, safe detail.
+        write!(f, "KeyringKeyStore(fallback={:?})", self.fallback.dir())
+    }
+}
+
+impl KeyStore for KeyringKeyStore {
+    fn get_or_create(&self, key_id: &str) -> Result<SecretKey, KeyError> {
+        // Validate the id (and get the fallback file path) before touching the keychain.
+        let file_path = self.fallback.path_for(key_id)?;
+
+        match self.vault.get(key_id) {
+            Ok(Some(bytes)) => Self::checked(bytes, key_id),
+            Ok(None) => {
+                // Keychain reachable but empty. Adopt a key an older build left on disk,
+                // or mint a fresh one; either way the keychain becomes the home.
+                if let Some(existing) = FileKeyStore::read(&file_path)? {
+                    if self.vault.set(key_id, existing.expose()).is_ok() {
+                        let _ = std::fs::remove_file(&file_path);
+                        tracing::info!(
+                            "migrated install-record signing key from disk into the OS keychain"
+                        );
+                    }
+                    // Return the on-disk bytes whether or not the keychain write took:
+                    // they are the bytes every existing record was signed under.
+                    return Ok(existing);
+                }
+                let fresh = SecretKey::generate();
+                if self.vault.set(key_id, fresh.expose()).is_ok() {
+                    Ok(fresh)
+                } else {
+                    // Write raced or failed after the read said empty: let the file
+                    // store settle it (its own O_EXCL guard handles the race).
+                    self.fallback.get_or_create(key_id)
+                }
+            }
+            Err(e) => {
+                // Keychain unavailable (headless Linux, locked keychain, no backend).
+                // The message carries no secret; fall back to the owner-only file.
+                tracing::debug!("install-key keychain unavailable ({e}); using file store");
+                self.fallback.get_or_create(key_id)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +514,189 @@ mod tests {
         assert!(!e.to_string().contains(&hex));
         assert!(!format!("{key:?}").contains(&hex));
         assert!(!format!("{store:?}").contains(&hex));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- KeyringKeyStore: a fake keychain drives every branch ----
+
+    use std::sync::Arc;
+
+    /// A stand-in keychain. Cloning shares the same map, so a second store built on the
+    /// same handle models a process restart against a persistent keychain.
+    #[derive(Clone, Default)]
+    struct MemVault(Arc<Mutex<BTreeMap<String, Vec<u8>>>>);
+
+    impl MemVault {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn boxed(&self) -> Box<dyn KeyVault> {
+            Box::new(self.clone())
+        }
+        fn count(&self) -> usize {
+            self.0.lock().unwrap().len()
+        }
+        /// Plant a raw value under `key_id`, e.g. a wrong-length one to model corruption.
+        fn seed(&self, key_id: &str, bytes: Vec<u8>) {
+            self.0.lock().unwrap().insert(key_id.to_string(), bytes);
+        }
+    }
+
+    impl KeyVault for MemVault {
+        fn get(&self, key_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
+            Ok(self.0.lock().unwrap().get(key_id).cloned())
+        }
+        fn set(&self, key_id: &str, key: &[u8]) -> Result<(), VaultError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key_id.to_string(), key.to_vec());
+            Ok(())
+        }
+    }
+
+    /// A keychain that is never reachable — every op errors, as on a headless box.
+    struct UnavailableVault;
+
+    impl KeyVault for UnavailableVault {
+        fn get(&self, _key_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
+            Err(VaultError("no keychain backend".into()))
+        }
+        fn set(&self, _key_id: &str, _key: &[u8]) -> Result<(), VaultError> {
+            Err(VaultError("no keychain backend".into()))
+        }
+    }
+
+    #[test]
+    fn keyring_store_keeps_the_key_off_disk_when_the_keychain_is_up() {
+        let dir = scratch("kr-up");
+        let vault = MemVault::new();
+        let store = KeyringKeyStore::with_vault(&dir, vault.boxed());
+
+        let k1 = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+        let k2 = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+        assert_eq!(k1.expose(), k2.expose(), "key is stable across calls");
+        assert_eq!(k1.expose().len(), KEY_LEN);
+        assert_eq!(vault.count(), 1, "key lives in the keychain");
+        assert!(
+            !dir.join(DEFAULT_KEY_ID).exists(),
+            "keychain-up path never writes the plaintext file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_store_falls_back_to_an_owner_only_file_when_the_keychain_is_down() {
+        let dir = scratch("kr-down");
+        let store = KeyringKeyStore::with_vault(&dir, Box::new(UnavailableVault));
+
+        let k1 = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+        let k2 = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+        assert_eq!(k1.expose(), k2.expose(), "file fallback is stable too");
+        let path = dir.join(DEFAULT_KEY_ID);
+        assert!(
+            path.is_file(),
+            "unreachable keychain writes the file fallback"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "fallback key file is owner-only"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_store_adopts_an_existing_on_disk_key_without_regenerating_it() {
+        let dir = scratch("kr-migrate");
+        // An older, file-only build wrote the key to disk.
+        let original = FileKeyStore::new(&dir)
+            .get_or_create(DEFAULT_KEY_ID)
+            .unwrap();
+        let original_bytes = original.expose().to_vec();
+        assert!(dir.join(DEFAULT_KEY_ID).is_file());
+
+        // A newer build with a reachable (empty) keychain opens the same dir.
+        let vault = MemVault::new();
+        let store = KeyringKeyStore::with_vault(&dir, vault.boxed());
+        let migrated = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+
+        assert_eq!(
+            migrated.expose(),
+            &original_bytes[..],
+            "migration adopts the exact bytes — records signed under it must still verify"
+        );
+        assert_eq!(vault.count(), 1, "key is now in the keychain");
+        assert!(
+            !dir.join(DEFAULT_KEY_ID).exists(),
+            "plaintext file is removed after a successful migration"
+        );
+        // And a later open reads it back from the keychain, unchanged.
+        let again = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+        assert_eq!(again.expose(), &original_bytes[..]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_store_reports_a_corrupt_keychain_value() {
+        let dir = scratch("kr-corrupt");
+        let vault = MemVault::new();
+        vault.seed(DEFAULT_KEY_ID, b"too-short".to_vec());
+        let store = KeyringKeyStore::with_vault(&dir, vault.boxed());
+        assert!(matches!(
+            store.get_or_create(DEFAULT_KEY_ID).unwrap_err(),
+            KeyError::Corrupt { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_store_key_survives_a_restart_against_a_persistent_keychain() {
+        let dir = scratch("kr-restart");
+        let vault = MemVault::new();
+        let first = KeyringKeyStore::with_vault(&dir, vault.boxed());
+        let k1 = first.get_or_create(DEFAULT_KEY_ID).unwrap();
+        drop(first);
+
+        // New store, new process — but the same underlying keychain.
+        let second = KeyringKeyStore::with_vault(&dir, vault.boxed());
+        let k2 = second.get_or_create(DEFAULT_KEY_ID).unwrap();
+        assert_eq!(k1.expose(), k2.expose());
+        assert!(
+            !dir.join(DEFAULT_KEY_ID).exists(),
+            "still no plaintext file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_store_rejects_bad_key_ids_before_touching_the_keychain() {
+        let dir = scratch("kr-badid");
+        let store = KeyringKeyStore::with_vault(&dir, Box::new(UnavailableVault));
+        assert!(matches!(
+            store.get_or_create("../escape").unwrap_err(),
+            KeyError::BadKeyId(_)
+        ));
+        assert!(matches!(
+            store.get_or_create("").unwrap_err(),
+            KeyError::BadKeyId(_)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keyring_store_debug_never_mentions_key_bytes() {
+        let dir = scratch("kr-debug");
+        let vault = MemVault::new();
+        let store = KeyringKeyStore::with_vault(&dir, vault.boxed());
+        let key = store.get_or_create(DEFAULT_KEY_ID).unwrap();
+        let hex: String = key.expose().iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!format!("{store:?}").contains(&hex));
+        assert!(format!("{store:?}").starts_with("KeyringKeyStore(fallback="));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
