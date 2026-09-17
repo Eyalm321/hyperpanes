@@ -6572,7 +6572,19 @@ impl State {
     pub fn copy_pane(&mut self, idx: usize) {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             if p.kind.is_pty() {
-                p.pane.copy_selection();
+                // No selection to copy? Fall back to the link under the cursor.
+                //
+                // Cmd+C in a pane where the running program holds the mouse grab used to be a
+                // dead key in both directions: the chord never reaches the program (the app
+                // claims it), and there is no selection for it to copy either, because a plain
+                // drag went to the program rather than making one. So the gesture was swallowed
+                // and produced nothing at all. When a link is lit under the pointer, that is
+                // unambiguously the text the human is pointing at — copy it.
+                if p.pane.copy_selection().is_none() {
+                    if let Some(target) = p.link.as_ref().map(|l| l.abs_path.clone()) {
+                        p.pane.copy_text(&target);
+                    }
+                }
             } else if let Some((lo, hi)) = crate::viewpane::selected_range(&p.uid) {
                 let text = crate::viewpane::copy_range(&p.uid, lo, hi);
                 if !text.is_empty() {
@@ -6801,10 +6813,10 @@ impl State {
             // Button released → stop edge-autoscroll (the selection itself is kept/copied below).
             p.pane.end_selection_drag();
             if p.pane.selection_is_drag() {
-                // Copy-on-select is a PREF (off by default, like Windows Terminal): when off,
-                // a finished drag only highlights — the clipboard keeps whatever you copied
-                // elsewhere, so "select the target, paste over it" works. Copy via right-click
-                // (modal), Ctrl+Shift+C, or the context menu instead.
+                // Copy-on-select is a PREF, ON by default: a finished drag lands on the
+                // clipboard. Turning it off makes a drag only highlight, so the clipboard keeps
+                // whatever you copied elsewhere and "select the target, paste over it" works;
+                // copy then goes through right-click (modal), the copy chord, or the menu.
                 if copy_on_select {
                     p.pane.copy_selection();
                 }

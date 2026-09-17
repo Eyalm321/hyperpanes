@@ -128,6 +128,9 @@ export struct PaneItem {
     glow: float,
     // clickable-path hover overlay (driven by the controller after hit-testing the grid).
     link-visible: bool,
+    // True when that hovered link was DECLARED by the running program with an OSC 8
+    // escape rather than sniffed out of rendered text — a plain click opens only those.
+    link-declared: bool,
     link-x: length,
     link-y: length,
     link-w: length,

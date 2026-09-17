@@ -49,6 +49,24 @@ const TOAST_MS: u128 = 1600;
 /// the Electron pane allow before a drag begins.
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 
+/// Largest **OSC 52** clipboard store we will honour, in bytes. Anything a human would
+/// plausibly want on the clipboard from a terminal program — a URL, a selection, a hash — fits
+/// in 100 KiB with room to spare; past that it is far likelier to be a runaway program or a
+/// hostile file being `cat`ed than an intent.
+const MAX_OSC52_BYTES: usize = 100 * 1024;
+
+/// Which of the **OSC 52** stores a single feed produced, if any, belongs on the system
+/// clipboard. Split out from [`TerminalPane::honor_clipboard_writes`] so the policy can be
+/// tested without an OS clipboard under it.
+fn osc52_store_to_honor(stores: Vec<String>) -> Option<String> {
+    let text = stores.into_iter().next_back()?;
+    if text.is_empty() || text.len() > MAX_OSC52_BYTES {
+        tracing::debug!("OSC 52 store ignored: {} bytes", text.len());
+        return None;
+    }
+    Some(text)
+}
+
 /// Controller for a single terminal pane: grid model + a pluggable renderer.
 pub struct TerminalPane {
     grid: TermGrid,
@@ -152,6 +170,12 @@ pub struct LinkHit {
     /// works either way — a build log naming a file that failed to generate is exactly when the
     /// path is worth having — but revealing one that isn't there has nothing to show.
     pub exists: bool,
+    /// `true` when the running program *declared* this link with an **OSC 8** escape, rather
+    /// than the terminal sniffing a URL out of rendered text. The distinction is what lets a
+    /// plain click open it even while the program holds the mouse grab: a program that both
+    /// grabs the mouse and marks a cell as a hyperlink has asked for the click to mean
+    /// "follow me", so honouring it is obeying the program, not overriding it.
+    pub is_osc8: bool,
 }
 
 /// The outcome of activating (clicking) a link: a plain click reveals the target (the left file
@@ -273,12 +297,36 @@ impl TerminalPane {
     #[tracing::instrument(level = "debug", ret, skip(self))]
     pub fn feed(&mut self, data: &str) {
         self.grid.feed(data.as_bytes());
+        self.honor_clipboard_writes();
     }
 
     /// Feed raw output bytes (when you have bytes rather than a decoded `String`).
     #[tracing::instrument(level = "debug", ret, skip(self))]
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
         self.grid.feed(bytes);
+        self.honor_clipboard_writes();
+    }
+
+    /// Put any **OSC 52** clipboard store the last feed decoded onto the system clipboard, and
+    /// toast it exactly like an explicit copy. Claude Code's `(c to copy)`, tmux's
+    /// `set-clipboard`, and `vim --clipboard=unnamed` over ssh all arrive here.
+    ///
+    /// Two limits, both deliberate:
+    ///
+    /// * **Last write wins.** A program that emits several stores in one chunk meant the final
+    ///   one; replaying the earlier ones would just flicker the clipboard.
+    /// * **Size cap.** An unbounded store lets a single `cat` of a hostile file push megabytes
+    ///   into the clipboard. Real uses (a URL, a selection, a commit hash) are far below the cap.
+    ///
+    /// The *read* half of OSC 52 stays off — see [`TermGrid::take_clipboard_writes`].
+    #[tracing::instrument(level = "debug", ret, skip(self))]
+    fn honor_clipboard_writes(&mut self) {
+        let Some(text) = osc52_store_to_honor(self.grid.take_clipboard_writes()) else {
+            return;
+        };
+        if self.clipboard.copy(&text) {
+            self.set_toast("Copied to clipboard");
+        }
     }
 
     /// Drain terminal-originated replies (DSR/DA/etc.) that must be written back to the
@@ -1037,6 +1085,60 @@ impl TerminalPane {
         Some((cand, start, end, row, cell_w, cell_h))
     }
 
+    /// Find an **OSC 8 hyperlink** under the (logical-px) point, returning its URI, that row's
+    /// column extent, the row, and the cell metrics.
+    ///
+    /// Unlike [`url_under`](Self::url_under) this reads no rendered text at all — the target
+    /// comes from the escape the program emitted, so it survives a visible label that is
+    /// truncated, renamed, or split across rows.
+    #[tracing::instrument(level = "debug", ret, skip(self))]
+    fn osc8_under(
+        &self,
+        x: f32,
+        y: f32,
+        surf_w: f32,
+        surf_h: f32,
+    ) -> Option<(String, usize, usize, usize, f32, f32)> {
+        let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let col = (x / cell_w) as usize;
+        let row = (y / cell_h) as usize;
+        if col >= cols || row >= rows {
+            return None;
+        }
+        let (uri, start, end) = self.grid.hyperlink_at(col, row)?;
+        Some((uri, start, end, row, cell_w, cell_h))
+    }
+
+    /// Build the [`LinkHit`] for an OSC 8 span. Shared by the hover and the click hit-tests,
+    /// which differ only in what they fall back to.
+    #[tracing::instrument(level = "debug", ret, skip(self))]
+    fn osc8_hit(&self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<LinkHit> {
+        let (uri, start, end, row, cell_w, cell_h) = self.osc8_under(x, y, surf_w, surf_h)?;
+        // Only web links are ours to open. A program is free to point OSC 8 at `file:`,
+        // `mailto:` or anything else, and handing an arbitrary scheme to the OS opener is how
+        // a terminal turns a hostile `cat` into code execution.
+        if !uri.starts_with("http://") && !uri.starts_with("https://") {
+            return None;
+        }
+        Some(LinkHit {
+            x: start as f32 * cell_w,
+            y: (row as f32 + 1.0) * cell_h - 1.0,
+            w: (end - start) as f32 * cell_w,
+            tip: uri.clone(),
+            abs_path: uri,
+            line: None,
+            col: None,
+            is_url: true,
+            is_commit: false,
+            commit_cwd: String::new(),
+            exists: true,
+            is_osc8: true,
+        })
+    }
+
     /// Find a commit hash under the (logical-px) point, returning the full object name git
     /// resolved it to, the candidate's column span, and the cell metrics.
     ///
@@ -1115,6 +1217,10 @@ impl TerminalPane {
     /// both (a URL is path-shaped but never disk-verifies anyway).
     #[tracing::instrument(level = "debug", ret, skip(self))]
     pub fn link_at(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<LinkHit> {
+        // A declared link beats a sniffed one: the program named its own target.
+        if let Some(hit) = self.osc8_hit(x, y, surf_w, surf_h) {
+            return Some(hit);
+        }
         if let Some((cand, start, end, row, cell_w, cell_h)) = self.url_under(x, y, surf_w, surf_h)
         {
             return Some(LinkHit {
@@ -1129,6 +1235,7 @@ impl TerminalPane {
                 is_commit: false,
                 commit_cwd: String::new(),
                 exists: true,
+                is_osc8: false,
             });
         }
         self.path_hit(x, y, surf_w, surf_h, true)
@@ -1141,6 +1248,10 @@ impl TerminalPane {
     /// can copy any path-shaped token while still refusing to reveal one that isn't there.
     #[tracing::instrument(level = "debug", ret, skip(self))]
     pub fn link_target_at(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<LinkHit> {
+        // A declared link beats a sniffed one: the program named its own target.
+        if let Some(hit) = self.osc8_hit(x, y, surf_w, surf_h) {
+            return Some(hit);
+        }
         if let Some((cand, start, end, row, cell_w, cell_h)) = self.url_under(x, y, surf_w, surf_h)
         {
             return Some(LinkHit {
@@ -1155,6 +1266,7 @@ impl TerminalPane {
                 is_commit: false,
                 commit_cwd: String::new(),
                 exists: true,
+                is_osc8: false,
             });
         }
         self.path_hit(x, y, surf_w, surf_h, false)
@@ -1184,6 +1296,7 @@ impl TerminalPane {
             is_commit: true,
             commit_cwd: cwd,
             exists: true,
+            is_osc8: false,
         })
     }
 
@@ -1217,6 +1330,7 @@ impl TerminalPane {
             is_commit: false,
             commit_cwd: String::new(),
             exists: r.exists,
+            is_osc8: false,
         })
     }
 
@@ -3845,6 +3959,118 @@ mod tests {
         assert!(
             p.verified.is_empty(),
             "a cwd change must clear stale resolutions"
+        );
+    }
+
+    /// The reported bug, at the pane's own seam: Claude Code's OAuth screen declares its login
+    /// URL with OSC 8 while holding the mouse grab, and hard-positions each row with an explicit
+    /// cursor move — so there is no soft-wrap for the text-sniffing path to follow and the label
+    /// need not look like a URL at all. The declared layer has to carry it.
+    #[test]
+    fn a_declared_link_hits_even_when_the_label_is_not_a_url() {
+        let mut p = unit_pane(40, 3);
+        p.feed("go \u{1b}]8;;https://a.com/x\u{7}click here\u{1b}]8;;\u{7}");
+        let (w, h) = (40.0, 3.0); // 1px per cell
+
+        let hit = p
+            .link_at(6.5, 0.5, w, h)
+            .expect("a cell inside the declared span must hit");
+        assert!(hit.is_osc8, "the hit must be marked as declared");
+        assert!(hit.is_url);
+        assert_eq!(hit.abs_path, "https://a.com/x");
+        // Underline spans exactly the wrapped cells: "click here" is cols 3..13.
+        assert_eq!((hit.x, hit.w), (3.0, 10.0));
+        // Text outside the span is not the link, and never was URL-shaped.
+        assert!(p.link_at(1.5, 0.5, w, h).is_none());
+        assert!(p.link_at(20.5, 0.5, w, h).is_none());
+    }
+
+    /// A declared link may point somewhere its label does not name. That is the feature (elided
+    /// and relabelled URLs) and also the risk, so the tooltip shows the DECLARED target: what
+    /// opens is what the human was shown, not the prettier text under the cursor.
+    #[test]
+    fn a_relabelled_link_opens_and_advertises_its_declared_target() {
+        let mut p = unit_pane(40, 3);
+        p.feed("\u{1b}]8;;https://real.example/verify?c=9\u{7}https://a.com\u{1b}]8;;\u{7}");
+        let hit = p.link_at(4.5, 0.5, 40.0, 3.0).expect("should hit");
+        assert_eq!(hit.abs_path, "https://real.example/verify?c=9");
+        assert_eq!(
+            hit.tip, "https://real.example/verify?c=9",
+            "the tooltip must name where the click actually goes"
+        );
+    }
+
+    /// Only `http`/`https` are ours to open. A program is free to point OSC 8 at anything, and
+    /// handing an arbitrary scheme to the OS opener is how a terminal turns a hostile `cat` into
+    /// code execution. A refused scheme falls through to the ordinary sniffing path, which finds
+    /// nothing URL-shaped here either.
+    #[test]
+    fn a_declared_link_to_a_non_web_scheme_is_refused() {
+        for uri in [
+            "file:///etc/passwd",
+            "mailto:a@b.c",
+            "javascript:alert(1)",
+            "ssh://box/x",
+        ] {
+            let mut p = unit_pane(40, 3);
+            p.feed(&format!("\u{1b}]8;;{uri}\u{7}open me\u{1b}]8;;\u{7}"));
+            assert!(
+                p.link_at(3.5, 0.5, 40.0, 3.0).is_none(),
+                "{uri} must not become a clickable link"
+            );
+        }
+    }
+
+    /// A declared link is still a link while the running program holds the mouse grab — that is
+    /// precisely the case the plain-click exception in `widget.slint` exists for. The pane's job
+    /// is to hand back `OpenUrl` without demanding a modifier; which gesture reaches it is the
+    /// widget's decision.
+    #[test]
+    fn a_declared_link_survives_the_mouse_grab_and_opens_on_a_plain_click() {
+        let mut p = unit_pane(40, 3);
+        // DECSET 1002+1006: button-event tracking with SGR encoding, exactly Claude Code's grab.
+        p.feed("\u{1b}[?1002h\u{1b}[?1006h\u{1b}]8;;https://a.com/x\u{7}sign in\u{1b}]8;;\u{7}");
+        assert!(p.app_grabs_mouse(), "the program must hold the mouse");
+        match p.activate_link(3.5, 0.5, 40.0, 3.0, false) {
+            Some(LinkAction::OpenUrl(url)) => assert_eq!(url, "https://a.com/x"),
+            other => panic!("a plain click on a declared link should open it, got {other:?}"),
+        }
+    }
+
+    /// OSC 52 policy, without an OS clipboard under it. The rejections are not "be careful with
+    /// user data" hand-waving: anything that writes to a pty can emit OSC 52, so an uncapped
+    /// store lets one `cat` of a hostile file push megabytes onto the clipboard.
+    #[test]
+    fn osc52_honours_the_last_store_within_the_cap() {
+        assert_eq!(osc52_store_to_honor(vec![]), None);
+        assert_eq!(osc52_store_to_honor(vec!["only".into()]).as_deref(), Some("only"));
+        // Last write wins: a program emitting several stores in one chunk meant the final one.
+        assert_eq!(
+            osc52_store_to_honor(vec!["one".into(), "two".into()]).as_deref(),
+            Some("two")
+        );
+        // An empty store is a clear, not a copy; we leave the clipboard alone.
+        assert_eq!(osc52_store_to_honor(vec![String::new()]), None);
+        // Exactly at the cap is fine; one byte over is not.
+        assert!(osc52_store_to_honor(vec!["x".repeat(MAX_OSC52_BYTES)]).is_some());
+        assert_eq!(osc52_store_to_honor(vec!["x".repeat(MAX_OSC52_BYTES + 1)]), None);
+        // A rejected last store does NOT fall back to an earlier one — the program has moved on
+        // from that text, and quietly copying something stale is worse than copying nothing.
+        assert_eq!(
+            osc52_store_to_honor(vec!["fine".into(), "x".repeat(MAX_OSC52_BYTES + 1)]),
+            None
+        );
+    }
+
+    /// End to end through `feed`: a program's own "copy this for me" reaches the pane's policy.
+    /// The clipboard write itself is the OS's and is not asserted here.
+    #[test]
+    fn an_osc52_store_arriving_in_output_reaches_the_clipboard_policy() {
+        let mut p = unit_pane(20, 2);
+        p.feed("\u{1b}]52;c;aGVsbG8=\u{7}"); // base64("hello")
+        assert!(
+            p.grid.take_clipboard_writes().is_empty(),
+            "feed must have drained the store rather than leaving it queued"
         );
     }
 }

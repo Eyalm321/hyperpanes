@@ -490,6 +490,8 @@ fn pane_item(
         focused,
         glow: ps.glow.alpha,
         link_visible: link.is_some(),
+        // An OSC 8 link opens on a PLAIN click even under a mouse grab (see `widget.slint`).
+        link_declared: link.is_some_and(|l| l.is_osc8),
         link_x: link.map(|l| l.x).unwrap_or(0.0),
         link_y: link.map(|l| l.y).unwrap_or(0.0),
         link_w: link.map(|l| l.w).unwrap_or(0.0),

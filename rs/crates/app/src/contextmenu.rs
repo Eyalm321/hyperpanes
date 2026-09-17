@@ -1268,6 +1268,7 @@ mod tests {
             is_commit,
             commit_cwd: "/repo".into(),
             exists: true,
+            is_osc8: false,
         }
     }
 

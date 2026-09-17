@@ -404,7 +404,9 @@ pub fn default_bindings() -> Vec<Binding> {
             "Paste image (Alt+V)",
             Command::PasteImageFocused,
         ),
-        // The explicit copy gesture, now that copy-on-select defaults off. Ctrl+Shift+C
+        // The explicit copy gesture, for when copy-on-select is off or there is no selection
+        // to copy-on-select from (it then falls back to the hovered link — see
+        // `State::copy_pane`). Ctrl+Shift+C
         // everywhere but macOS, where the chord's `ctrl` slot IS Command (see `CTRL_LABEL`) and
         // the platform gesture is a bare Cmd+C. Shifting it there costs nothing: the shell
         // interrupt lives on the *physical* Control key on macOS (`crate::pty_ctrl`), so Cmd+C

@@ -110,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: titles[i].into(),
             accent: accents[i],
             link_visible: false,
+            link_declared: false,
             link_x: 0.0,
             link_y: 0.0,
             link_w: 0.0,

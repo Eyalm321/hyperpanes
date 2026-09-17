@@ -18,7 +18,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{ClipboardType, Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -97,14 +97,28 @@ impl alacritty_terminal::grid::Dimensions for TermSize {
 /// Captures terminal-originated writes (DSR/DA query replies, etc.) so the controller can
 /// forward them back to the session's pty. Without this, conpty's startup `ESC[6n` blocks
 /// the whole shell. Replies are queued and drained by [`TermGrid::take_replies`].
+///
+/// It also captures **OSC 52** clipboard stores, drained by
+/// [`TermGrid::take_clipboard_writes`]. alacritty's `Osc52::OnlyCopy` default (which we keep)
+/// parses the copy half and refuses the *read* half: a program can hand us text for the
+/// clipboard, but can never ask the terminal what is already on it. That asymmetry is
+/// deliberate — clipboard read-back is the half that leaks, and anything writing to a pty
+/// (an `ssh` session on a box you don't control, `cat` on a hostile file) can emit OSC 52.
 struct ProxyListener {
     tx: Sender<Vec<u8>>,
+    clip_tx: Sender<String>,
 }
 impl EventListener for ProxyListener {
     #[tracing::instrument(level = "debug", ret, skip(self))]
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            let _ = self.tx.send(text.into_bytes());
+        match event {
+            Event::PtyWrite(text) => {
+                let _ = self.tx.send(text.into_bytes());
+            }
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                let _ = self.clip_tx.send(text);
+            }
+            _ => {}
         }
     }
 }
@@ -115,6 +129,7 @@ pub struct TermGrid {
     term: Term<ProxyListener>,
     parser: Processor,
     resp_rx: Receiver<Vec<u8>>,
+    clip_rx: Receiver<String>,
     palette: [Rgb; 256],
     size: TermSize,
     /// Lines of history the grid keeps (alacritty's `scrolling_history`), remembered here
@@ -148,11 +163,20 @@ impl TermGrid {
             ..Config::default()
         };
         let (resp_tx, resp_rx) = channel::<Vec<u8>>();
-        let term = Term::new(config, &size, ProxyListener { tx: resp_tx });
+        let (clip_tx, clip_rx) = channel::<String>();
+        let term = Term::new(
+            config,
+            &size,
+            ProxyListener {
+                tx: resp_tx,
+                clip_tx,
+            },
+        );
         TermGrid {
             term,
             parser: Processor::new(),
             resp_rx,
+            clip_rx,
             palette: default_palette(),
             size,
             scrollback,
@@ -219,6 +243,57 @@ impl TermGrid {
             out.extend_from_slice(&chunk);
         }
         out
+    }
+
+    /// Drain any **OSC 52** clipboard stores the parser decoded while processing the last
+    /// [`feed`](Self::feed) — a program asking the terminal to put text on the system
+    /// clipboard. Claude Code's `c to copy` on its login screen is exactly this. The caller
+    /// owns the policy decision of whether to honour them; see [`ProxyListener`] for why only
+    /// the *write* half exists.
+    #[tracing::instrument(level = "debug", ret, skip(self))]
+    pub fn take_clipboard_writes(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(text) = self.clip_rx.try_recv() {
+            out.push(text);
+        }
+        out
+    }
+
+    /// The **OSC 8 hyperlink** covering viewport cell (`col`, `row`), as
+    /// `(uri, start_col, end_col)` where the columns are that row's half-open extent of the
+    /// same link.
+    ///
+    /// This is the *declared* link layer, and it is strictly better than sniffing rendered
+    /// text for a `scheme://` ([`crate::links`]): the program states the target out of band,
+    /// so the URI comes back whole even when the visible text is elided, relabelled, or — as
+    /// on Claude Code's OAuth screen — hard-wrapped across rows with explicit cursor moves
+    /// that leave no `WRAPLINE` flag for `logical_line` to follow.
+    ///
+    /// The extent stops at this row's edges on purpose: a caller wants a rect to underline,
+    /// and a link that continues onto the next row gets its own hit on that row.
+    #[tracing::instrument(level = "debug", ret, skip(self))]
+    pub fn hyperlink_at(&self, col: usize, row: usize) -> Option<(String, usize, usize)> {
+        if row >= self.size.rows || col >= self.size.cols {
+            return None;
+        }
+        let grid = self.term.grid();
+        let line = alacritty_terminal::index::Line(row as i32 - grid.display_offset() as i32);
+        let at = |c: usize| grid[line][alacritty_terminal::index::Column(c)].hyperlink();
+        let here = at(col)?;
+        // Same link means same target AND same id: two adjacent OSC 8 runs may share a uri
+        // while being distinct links, and `id=` is the sequence's own way of saying so.
+        let same = |other: &alacritty_terminal::term::cell::Hyperlink| {
+            other.uri() == here.uri() && other.id() == here.id()
+        };
+        let mut start = col;
+        while start > 0 && at(start - 1).as_ref().is_some_and(same) {
+            start -= 1;
+        }
+        let mut end = col + 1;
+        while end < self.size.cols && at(end).as_ref().is_some_and(same) {
+            end += 1;
+        }
+        Some((here.uri().to_owned(), start, end))
     }
 
     /// Reflow the grid to `cols`×`rows`. Returns `true` if the size actually changed (the
@@ -984,5 +1059,85 @@ mod tests {
         // A CPR reply looks like ESC [ <row> ; <col> R.
         assert_eq!(reply[0], 0x1b);
         assert_eq!(*reply.last().unwrap(), b'R');
+    }
+
+    /// OSC 8 wraps a run of cells in a declared link. The visible label is deliberately not
+    /// URL-shaped: that is the whole point of the declared layer over sniffing rendered text.
+    #[test]
+    fn osc8_marks_exactly_the_cells_it_wraps() {
+        let mut g = TermGrid::new(40, 3);
+        g.feed(b"go \x1b]8;;https://a.com/x\x07click here\x1b]8;;\x07 now");
+
+        // "go " is cols 0..3, "click here" is cols 3..13, " now" follows.
+        let (uri, start, end) = g.hyperlink_at(5, 0).expect("a linked cell must report it");
+        assert_eq!(uri, "https://a.com/x");
+        assert_eq!((start, end), (3, 13));
+        // The same span from either edge of it.
+        assert_eq!(g.hyperlink_at(3, 0).unwrap().1, 3);
+        assert_eq!(g.hyperlink_at(12, 0).unwrap().2, 13);
+
+        // Text either side of the span, and cells off the grid, are not the link.
+        assert_eq!(g.hyperlink_at(1, 0), None);
+        assert_eq!(g.hyperlink_at(14, 0), None);
+        assert_eq!(g.hyperlink_at(0, 9), None);
+        assert_eq!(g.hyperlink_at(99, 0), None);
+    }
+
+    /// Two links can be adjacent AND share a target — a two-column table of the same URL, say.
+    /// Matching on the URI alone would weld them into one span twice as wide as either; the
+    /// hyperlink *id* (auto-assigned per OSC 8 open when the program gives none) keeps them apart.
+    #[test]
+    fn adjacent_links_to_the_same_uri_stay_separate() {
+        let mut g = TermGrid::new(20, 2);
+        g.feed(b"\x1b]8;;https://a.com\x07AA\x1b]8;;\x07\x1b]8;;https://a.com\x07BB\x1b]8;;\x07");
+        assert_eq!(
+            g.hyperlink_at(0, 0),
+            Some(("https://a.com".to_string(), 0, 2))
+        );
+        assert_eq!(
+            g.hyperlink_at(2, 0),
+            Some(("https://a.com".to_string(), 2, 4))
+        );
+    }
+
+    /// A link hard-positioned onto a later row with an explicit cursor move — Claude Code's
+    /// OAuth screen, which leaves no `WRAPLINE` flag for the text-sniffing path to follow.
+    #[test]
+    fn osc8_is_found_on_a_hard_positioned_row() {
+        let mut g = TermGrid::new(40, 5);
+        g.feed(b"\x1b[3;5H\x1b]8;;https://c.ai/auth\x07sign in\x1b]8;;\x07");
+        // Row 2 (0-based), starting at col 4.
+        let (uri, start, end) = g.hyperlink_at(6, 2).expect("row 2 should carry the link");
+        assert_eq!(uri, "https://c.ai/auth");
+        assert_eq!((start, end), (4, 11));
+        assert_eq!(g.hyperlink_at(6, 0), None, "other rows are untouched");
+    }
+
+    #[test]
+    fn osc52_store_is_captured_and_drains_once() {
+        let mut g = TermGrid::new(20, 2);
+        g.feed(b"\x1b]52;c;aGVsbG8=\x07"); // base64("hello")
+        assert_eq!(g.take_clipboard_writes(), vec!["hello".to_string()]);
+        assert!(g.take_clipboard_writes().is_empty(), "a drain empties");
+
+        // Several stores in one chunk all arrive, in order; the policy of which one wins is
+        // the caller's (see `osc52_store_to_honor`).
+        g.feed(b"\x1b]52;c;b25l\x07\x1b]52;c;dHdv\x07");
+        assert_eq!(g.take_clipboard_writes(), vec!["one", "two"]);
+    }
+
+    /// The *read* half of OSC 52 (`?` in place of the payload) is the half that leaks: it would
+    /// let anything writing to the pty — a hostile `cat`, an ssh session on a box you do not
+    /// control — ask the terminal what is already on your clipboard and receive it as input.
+    /// alacritty's `Osc52::OnlyCopy` default refuses it, and we keep that default.
+    #[test]
+    fn osc52_read_back_is_refused() {
+        let mut g = TermGrid::new(20, 2);
+        g.feed(b"\x1b]52;c;?\x07");
+        assert!(g.take_clipboard_writes().is_empty());
+        assert!(
+            g.take_replies().is_empty(),
+            "nothing may be written back to the pty in answer to a clipboard read"
+        );
     }
 }

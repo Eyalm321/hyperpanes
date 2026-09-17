@@ -201,10 +201,15 @@ pub struct Settings {
     /// downloads or installs without consent, and an offline check is silently skipped.
     pub auto_update: bool,
     /// Whether finishing a drag-selection copies it to the clipboard immediately (the PuTTY/
-    /// X11-style behavior). OFF by default, matching Windows Terminal: selecting only
-    /// highlights, so an external copy survives "select the target, paste over it", and the
-    /// body right-click is modal (copy the selection if one exists, else paste). When ON,
-    /// right-click always pastes — the selection was already copied on release.
+    /// X11-style behavior). **ON by default.** Selecting a thing in a terminal is nearly always
+    /// the first half of "and now put it somewhere", and the pane you most want it in — one
+    /// where an agent holds the mouse grab and a plain drag is the program's, not ours — is
+    /// exactly where the explicit copy gesture has the least to grab onto.
+    ///
+    /// The cost is real and is why Windows Terminal defaults the other way: with this on, an
+    /// external copy does *not* survive "select the target, paste over it", because the select
+    /// clobbered it. Turning it off restores that, and makes the body right-click modal (copy
+    /// the selection if one exists, else paste) instead of always pasting.
     pub copy_on_select: bool,
     /// Whether terminals keep running in the background when Avada closes (the
     /// session-daemon quit-vs-keep-alive toggle, M3). **ON by default** — with the
@@ -281,7 +286,7 @@ impl Default for Settings {
             idle_effect: String::from("firefly"),
             idle_alert_seconds: DEFAULT_IDLE_SECONDS,
             auto_update: false,
-            copy_on_select: false,
+            copy_on_select: true,
             keep_alive: true,
             tool_favorites: Vec::new(),
             tool_paths: BTreeMap::new(),
@@ -583,7 +588,7 @@ mod tests {
             idle_effect: "pulse".into(),
             idle_alert_seconds: 120,
             auto_update: true,
-            copy_on_select: true,
+            copy_on_select: false, // non-default (defaults to true)
             keep_alive: false, // non-default (defaults to true)
             // The tool/browser prefs. Every one is off its default so the round-trip
             // test below can't pass by accidentally re-deriving a default value —

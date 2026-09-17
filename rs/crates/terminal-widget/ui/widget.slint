@@ -308,6 +308,10 @@ export component TerminalPane inherits Rectangle {
     // lands on a verified path, sets these to draw a hover underline + tooltip. Defaults are inert
     // so a consumer that ignores the link layer (e.g. an older app shell) is unaffected.
     in property <bool> link-visible: false;
+    // True when the hovered link was DECLARED by the running program with an OSC 8 escape,
+    // rather than sniffed out of rendered text. Only a declared link takes a plain click away
+    // from a mouse-grabbing app — see the `link-gesture` decision in `ta`'s pointer-event.
+    in property <bool> link-declared: false;
     in property <length> link-x;
     in property <length> link-y;
     in property <length> link-w;
@@ -523,9 +527,18 @@ export component TerminalPane inherits Rectangle {
                     // here rather than the copy it means in a plain shell, because opening is the
                     // gesture with nowhere else to go — copy is still reachable through the
                     // Shift escape hatch below, which is what Shift is for.
+                    //
+                    // An OSC 8 link is the exception, and a PLAIN click opens it. The bargain
+                    // exists because a sniffed link is the terminal's guess, and a guess must
+                    // not cost the app a click it was expecting. A declared link is not a guess:
+                    // the program wrapped those exact cells in a hyperlink escape while holding
+                    // the mouse grab, which is it asking for the click to mean "follow me".
+                    // Claude Code's login URL is the case in point — it grabs the mouse, marks
+                    // the URL with OSC 8, and prints "Browser didn't open?" above it.
                     self.link-gesture = root.link-visible
                         && e.button == PointerEventButton.left
-                        && (e.modifiers.control || e.modifiers.meta || root.ctrl-held);
+                        && (root.link-declared
+                            || e.modifiers.control || e.modifiers.meta || root.ctrl-held);
                     if (!self.link-gesture) {
                         root.held-button = e.button == PointerEventButton.left ? 0
                                          : e.button == PointerEventButton.middle ? 1 : 2;
@@ -768,11 +781,12 @@ export component TerminalPane inherits Rectangle {
             Text {
                 // While the app owns the mouse the plain click is not ours to offer, so the
                 // hint has to name the gesture that actually works there.
-                text: root.app-grabs-mouse ? "Ctrl+click to open"
+                text: root.link-declared ? "Click to open"
+                    : root.app-grabs-mouse ? "Ctrl+click to open"
                     : root.ctrl-held ? "Ctrl+click to copy"
                     : "click to open · Ctrl+click to copy";
-                color: (root.app-grabs-mouse || root.ctrl-held) ? #cdd6f4 : #7f849c;
-                font-weight: (root.app-grabs-mouse || root.ctrl-held) ? 700 : 400;
+                color: (root.link-declared || root.app-grabs-mouse || root.ctrl-held) ? #cdd6f4 : #7f849c;
+                font-weight: (root.link-declared || root.app-grabs-mouse || root.ctrl-held) ? 700 : 400;
                 font-size: 10px;
             }
         }
@@ -955,6 +969,7 @@ export struct PaneVisual {
     accent: color,
     // clickable-paths hover overlay state (set by the demo after hit-testing).
     link-visible: bool,
+    link-declared: bool,
     link-x: length,
     link-y: length,
     link-w: length,
@@ -1021,6 +1036,7 @@ export component DemoWindow inherits Window {
             title: pane.title;
             accent: pane.accent;
             link-visible: pane.link-visible;
+            link-declared: pane.link-declared;
             link-x: pane.link-x;
             link-y: pane.link-y;
             link-w: pane.link-w;
