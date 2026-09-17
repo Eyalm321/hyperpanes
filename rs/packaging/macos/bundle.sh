@@ -292,7 +292,19 @@ mkdir -p "$DMG_STAGE"
 ditto "$APP" "$DMG_STAGE/Avada.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 rm -f "$DMG"
-hdiutil create -volname "Avada" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG"
+# The image size is given EXPLICITLY. `hdiutil create -srcfolder` otherwise sizes the
+# volume from the folder's apparent bytes, which is not what lands on it: `ditto` carries
+# the extended attributes across (that is why it is ditto), and those — plus the APFS
+# metadata for a signed bundle's several thousand hashes — do not fit the estimate. It
+# fails as "No space left on device" naming /Volumes/Avada, which is the mounted IMAGE and
+# not the disk, so it reads like the machine is full when it has hundreds of gigabytes
+# free. Payload plus half again, and never less than 128 MiB, so this does not come back
+# the next time the bundle grows.
+DMG_MB=$(du -sm "$DMG_STAGE" | cut -f1)
+DMG_MB=$(( DMG_MB * 3 / 2 + 64 ))
+if [ "$DMG_MB" -lt 128 ]; then DMG_MB=128; fi
+hdiutil create -volname "Avada" -srcfolder "$DMG_STAGE" -ov -format UDZO \
+    -size "${DMG_MB}m" "$DMG"
 codesign --force "${SIGN_TIMESTAMP[@]}" --sign "$SIGN_ID" "$DMG"
 
 # ---------------------------------------------------------------- notarization
