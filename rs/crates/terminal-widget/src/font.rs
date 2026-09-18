@@ -467,7 +467,11 @@ mod tests {
         let (out, w) = embolden_mask(&[0, 255, 0], 3, 1, 0.5);
         assert_eq!(w, 4);
         assert_eq!(out[1], 255);
-        assert!(out[2] > 0 && out[2] < 255, "partial trailing edge, got {}", out[2]);
+        assert!(
+            out[2] > 0 && out[2] < 255,
+            "partial trailing edge, got {}",
+            out[2]
+        );
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
