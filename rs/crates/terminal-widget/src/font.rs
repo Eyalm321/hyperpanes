@@ -202,9 +202,8 @@ impl Font {
                 Angle::ZERO,
             )));
         }
-        if key.bold {
-            render.embolden(self.px * fit * 0.03);
-        }
+        // Bold is deliberately NOT applied here via `render.embolden` — it is smeared onto
+        // the finished coverage mask instead. See `embolden_mask`.
 
         match render.render(&mut scaler, key.gid as GlyphId) {
             Some(img) if img.placement.width > 0 && img.placement.height > 0 => {
@@ -214,6 +213,11 @@ impl Font {
                     Content::Mask => img.data,
                     // Defensive: collapse any color result to luminance-ish coverage.
                     _ => img.data.chunks_exact(4).map(|p| p[3]).collect::<Vec<u8>>(),
+                };
+                let (mask, w) = if key.bold {
+                    embolden_mask(&mask, w, h, bold_smear(self.px * fit))
+                } else {
+                    (mask, w)
                 };
                 CachedGlyph {
                     mask,
@@ -345,6 +349,53 @@ fn compute_fit(data: &[u8], px: f32, cell_h: u32) -> Option<f32> {
     Some(fit)
 }
 
+/// How far, in pixels, synthetic bold smears a glyph to the right. Proportional to the font
+/// size and capped at one pixel so a bold cell can never bleed more than a column into its
+/// neighbour.
+fn bold_smear(px: f32) -> f32 {
+    (px * 0.03).clamp(0.0, 1.0)
+}
+
+/// Synthetic bold: composite a copy of the coverage mask shifted right by `d` pixels over the
+/// original, widening it by one column. Horizontal only, so row height and baselines are
+/// untouched — which matters here because the cell box is fixed.
+///
+/// This replaces `swash`'s outline `Render::embolden`, which offsets contour points along
+/// their normals and silently corrupts some glyphs. On the bundled JetBrains Mono the
+/// emboldened `i` came back *narrower* than the regular one (6px vs 7px at 14px) and peaked
+/// at 135/255 coverage instead of 255, so a bold `i` rendered as a grey smudge inside an
+/// otherwise bright-white word — "ma_i_n". Every other letter measured survived, which is
+/// exactly why only `i` looked wrong.
+///
+/// Compositing on the raster cannot do that: `over` is monotone, so an emboldened glyph is
+/// never dimmer than its regular form at any pixel. `bold_never_dims_a_glyph` pins that.
+fn embolden_mask(mask: &[u8], w: u32, h: u32, d: f32) -> (Vec<u8>, u32) {
+    if d <= 0.0 || w == 0 || h == 0 {
+        return (mask.to_vec(), w);
+    }
+    let ow = w + 1;
+    let mut out = vec![0u8; (ow * h) as usize];
+    for y in 0..h {
+        let src = &mask[(y * w) as usize..((y + 1) * w) as usize];
+        for x in 0..ow {
+            let at = |i: i64| -> f32 {
+                if i < 0 || i >= w as i64 {
+                    0.0
+                } else {
+                    src[i as usize] as f32
+                }
+            };
+            let base = at(x as i64);
+            // The shifted copy sampled at a fractional offset: orig[x - d].
+            let shifted = at(x as i64 - 1) * d + base * (1.0 - d);
+            // `over`, so coverage only ever goes up.
+            let v = base + shifted * (1.0 - base / 255.0);
+            out[(y * ow + x) as usize] = v.min(255.0) as u8;
+        }
+    }
+    (out, ow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,9 +403,14 @@ mod tests {
     /// Build a `Font` whose primary is the bundled JetBrains Mono (written to a temp
     /// file — `from_path` is the only constructor), with the platform fallback chain.
     fn jetbrains_font() -> Font {
+        font_at(14.0)
+    }
+
+    /// `jetbrains_font` at an arbitrary pixel size.
+    fn font_at(px: f32) -> Font {
         let p = std::env::temp_dir().join("hp-font-test-jbmono.ttf");
         std::fs::write(&p, JETBRAINS_MONO).unwrap();
-        Font::from_path(p.to_str().unwrap(), 14.0).unwrap()
+        Font::from_path(p.to_str().unwrap(), px).unwrap()
     }
 
     #[test]
@@ -368,6 +424,50 @@ mod tests {
             font_id > 0 && gid != 0,
             "nerd icon fell to ({font_id}, {gid})"
         );
+    }
+
+    /// Peak coverage anywhere in a glyph's mask — 255 means at least one pixel is fully inked.
+    fn peak(f: &mut Font, ch: char, bold: bool) -> u8 {
+        let (font_id, gid) = f.resolve(ch);
+        let g = f.rasterize(GlyphKey {
+            font_id,
+            gid,
+            bold,
+            italic: false,
+        });
+        g.mask.iter().copied().max().unwrap_or(0)
+    }
+
+    #[test]
+    fn bold_never_dims_a_glyph() {
+        // The bug this pins: `swash`'s outline embolden turned a solid `i` into a 53%-coverage
+        // smudge, so one letter of a bold word rendered grey while its neighbours were white.
+        // Bold is a *weight* increase; it must never lower a glyph's peak coverage.
+        for px in [12.0f32, 14.0, 15.0, 16.0, 20.0] {
+            let mut f = font_at(px);
+            for ch in ['i', 'l', 'm', 'n', 'a', 'j', 't', '|', '!', '1'] {
+                let regular = peak(&mut f, ch, false);
+                let bold = peak(&mut f, ch, true);
+                assert!(
+                    bold >= regular,
+                    "{px}px bold '{ch}' peaks at {bold}, below regular's {regular}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn embolden_widens_without_losing_coverage() {
+        // A single fully-inked pixel smears right; the source pixel keeps its full coverage.
+        let (out, w) = embolden_mask(&[0, 255, 0], 3, 1, 1.0);
+        assert_eq!(w, 4);
+        assert_eq!(out, vec![0, 255, 255, 0]);
+
+        // A fractional smear adds weight to the trailing edge, never subtracts.
+        let (out, w) = embolden_mask(&[0, 255, 0], 3, 1, 0.5);
+        assert_eq!(w, 4);
+        assert_eq!(out[1], 255);
+        assert!(out[2] > 0 && out[2] < 255, "partial trailing edge, got {}", out[2]);
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]

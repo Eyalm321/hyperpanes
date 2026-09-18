@@ -64,8 +64,16 @@ fn home_dir() -> String {
 /// (no filesystem access). Expands a leading `~` to the home dir, then joins onto `base` when
 /// the token is relative, and collapses `.`/`..` segments (like Node's `path.resolve`).
 pub fn resolve_token(base: &str, token: &str) -> String {
+    resolve_token_with_home(base, token, &home_dir())
+}
+
+/// `resolve_token` with the home dir injected, so tilde expansion is testable without touching
+/// the process environment. `std::env::set_var` is process-WIDE and Rust runs a crate's tests as
+/// threads in one process, so a test that pointed `HOME` at a fixture path leaked that home into
+/// every test beside it — and into anything they spawned, which inherited the bogus `HOME`.
+pub fn resolve_token_with_home(base: &str, token: &str, home: &str) -> String {
     let expanded: String = if token == "~" || token.starts_with("~/") || token.starts_with("~\\") {
-        format!("{}{}", home_dir(), &token[1..])
+        format!("{}{}", home, &token[1..])
     } else {
         token.to_string()
     };
@@ -175,6 +183,63 @@ impl OpenResult {
     }
 }
 
+/// What `open_resolved_path` decided to do, separated from doing it. Pure: computing a plan
+/// touches neither the disk nor the process table, so the branch table can be tested without
+/// launching an editor on the machine running the tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenPlan {
+    /// A configured editor template wins, and is trusted for any extension.
+    Editor,
+    /// Zero-config VS Code, already formatted with any `line:col` suffix.
+    VsCode { target: String },
+    /// Hand to the platform opener.
+    OsDefault,
+    /// Executable extension on the OS-default branch — refused.
+    Blocked { ext: String },
+}
+
+/// Choose the open strategy. `vscode` is the detected `code` binary, or `None` when it is not on
+/// PATH. Mirrors the branch order in `openResolvedPath` in `paths.ts`.
+pub fn plan_open(
+    is_dir: bool,
+    abs_path: &str,
+    line: Option<u32>,
+    col: Option<u32>,
+    editor_command: &str,
+    vscode: Option<&str>,
+) -> OpenPlan {
+    // Directories: just open the folder via the OS handler.
+    if is_dir {
+        return OpenPlan::OsDefault;
+    }
+
+    // A configured editor wins and is trusted to handle any extension (incl. source scripts),
+    // so the executable guard does not apply to this branch.
+    if !editor_command.trim().is_empty() {
+        return OpenPlan::Editor;
+    }
+
+    // Zero-config default: VS Code if present, with a line/col jump.
+    if vscode.is_some() {
+        let target = match line {
+            Some(l) => match col {
+                Some(c) => format!("{abs_path}:{l}:{c}"),
+                None => format!("{abs_path}:{l}"),
+            },
+            None => abs_path.to_string(),
+        };
+        return OpenPlan::VsCode { target };
+    }
+
+    // OS default handler — refuse to execute scripts/binaries.
+    if let Some(ext) = ext_lower(abs_path) {
+        if EXECUTABLE_EXTS.contains(&ext.as_str()) {
+            return OpenPlan::Blocked { ext };
+        }
+    }
+    OpenPlan::OsDefault
+}
+
 /// Open a verified absolute path: a configured editor (with `line:col`) wins and is trusted for
 /// any extension; otherwise zero-config VS Code if on PATH; otherwise the OS default handler,
 /// which refuses to execute scripts/binaries. Directories just open the folder. Mirrors
@@ -190,44 +255,36 @@ pub fn open_resolved_path(
         Err(_) => return OpenResult::err("not found"),
     };
 
-    // Directories: just open the folder via the OS handler.
-    if md.is_dir() {
-        return match os_open(abs_path) {
+    // Only probe PATH on the branch that can actually use the answer — the dir and configured
+    // editor branches return before consulting it, so detection stays as lazy as it was.
+    let vscode = if md.is_dir() || !editor_command.trim().is_empty() {
+        None
+    } else {
+        detect_vscode()
+    };
+
+    match plan_open(
+        md.is_dir(),
+        abs_path,
+        line,
+        col,
+        editor_command,
+        vscode.as_deref(),
+    ) {
+        OpenPlan::Editor => {
+            run_editor_template(editor_command.trim(), abs_path, line, col);
+            OpenResult::ok()
+        }
+        OpenPlan::VsCode { target } => {
+            let code = vscode.unwrap_or_default();
+            launch(&format!("{} -g {}", quote(&code), quote(&target)));
+            OpenResult::ok()
+        }
+        OpenPlan::Blocked { ext } => OpenResult::blocked(ext),
+        OpenPlan::OsDefault => match os_open(abs_path) {
             Ok(()) => OpenResult::ok(),
             Err(e) => OpenResult::err(e),
-        };
-    }
-
-    // A configured editor wins and is trusted to handle any extension (incl. source scripts),
-    // so the executable guard does not apply to this branch.
-    let template = editor_command.trim();
-    if !template.is_empty() {
-        run_editor_template(template, abs_path, line, col);
-        return OpenResult::ok();
-    }
-
-    // Zero-config default: VS Code if present, with a line/col jump.
-    if let Some(code) = detect_vscode() {
-        let target = match line {
-            Some(l) => match col {
-                Some(c) => format!("{abs_path}:{l}:{c}"),
-                None => format!("{abs_path}:{l}"),
-            },
-            None => abs_path.to_string(),
-        };
-        launch(&format!("{} -g {}", quote(&code), quote(&target)));
-        return OpenResult::ok();
-    }
-
-    // OS default handler — refuse to execute scripts/binaries.
-    if let Some(ext) = ext_lower(abs_path) {
-        if EXECUTABLE_EXTS.contains(&ext.as_str()) {
-            return OpenResult::blocked(ext);
-        }
-    }
-    match os_open(abs_path) {
-        Ok(()) => OpenResult::ok(),
-        Err(e) => OpenResult::err(e),
+        },
     }
 }
 
@@ -403,10 +460,9 @@ mod tests {
 
     #[test]
     fn resolve_token_expands_tilde() {
-        // Force a deterministic home for the test.
-        std::env::set_var("USERPROFILE", "/Users/me");
-        std::env::set_var("HOME", "/Users/me");
-        let got = resolve_token("/whatever", "~/notes/todo.md");
+        // The home is INJECTED, never installed with std::env::set_var: that is process-wide,
+        // and these tests share one process.
+        let got = resolve_token_with_home("/whatever", "~/notes/todo.md", "/Users/me");
         let want = normalize(Path::new("/Users/me/notes/todo.md"));
         assert_eq!(got, want);
     }
@@ -480,24 +536,45 @@ mod tests {
 
     #[test]
     fn open_executable_via_os_default_is_blocked() {
-        // With no editor configured AND VS Code typically absent in CI, an executable file must
-        // be refused on the OS-default branch. (If `code` IS on PATH this returns ok instead, so
-        // only assert the blocked verdict when we actually reach the OS branch.)
-        let dir = std::env::temp_dir();
-        let sub = dir.join(format!("hp_paths_block_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&sub);
-        let exe = sub.join("danger.exe");
-        std::fs::write(&exe, b"MZ").unwrap();
-        let p = exe.to_string_lossy().to_string();
+        // Asserted against the pure plan rather than by calling open_resolved_path: with no
+        // editor configured and `code` on PATH — the normal state of a dev machine — the real
+        // call SPAWNS VS Code. A test must never open a window on the machine running it.
+        assert_eq!(
+            plan_open(false, "/tmp/danger.exe", None, None, "", None),
+            OpenPlan::Blocked { ext: ".exe".into() }
+        );
+    }
 
-        let res = open_resolved_path(&p, None, None, "");
-        if detect_vscode().is_none() {
-            assert!(
-                res.blocked,
-                "an .exe must be blocked on the OS-default branch"
-            );
-            assert_eq!(res.error.as_deref(), Some(".exe"));
-        }
-        let _ = std::fs::remove_dir_all(&sub);
+    #[test]
+    fn open_plan_branch_order_is_editor_then_vscode_then_os() {
+        // A configured editor is trusted even for an executable extension.
+        assert_eq!(
+            plan_open(false, "/tmp/danger.exe", None, None, "subl {path}", None),
+            OpenPlan::Editor
+        );
+        // Zero-config VS Code carries the line:col jump.
+        assert_eq!(
+            plan_open(
+                false,
+                "/x/y.ts",
+                Some(9),
+                Some(4),
+                "",
+                Some("/usr/bin/code")
+            ),
+            OpenPlan::VsCode {
+                target: "/x/y.ts:9:4".into()
+            }
+        );
+        // A directory always goes to the platform opener, editor or not.
+        assert_eq!(
+            plan_open(true, "/x/dir", None, None, "", Some("/usr/bin/code")),
+            OpenPlan::OsDefault
+        );
+        // A plain file with nothing configured falls through to the OS handler.
+        assert_eq!(
+            plan_open(false, "/x/notes.txt", None, None, "", None),
+            OpenPlan::OsDefault
+        );
     }
 }
