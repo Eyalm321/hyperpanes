@@ -70,7 +70,13 @@ static LINEAR_TO_SRGB: LazyLock<[u8; ENCODE_N + 1]> = LazyLock::new(|| {
 
 /// Mix `cov` of `fg_linear` into an sRGB destination byte, in linear light.
 #[inline]
-fn mix_channel(dst: u8, fg_linear: f32, cov: f32, dec: &[f32; 256], enc: &[u8; ENCODE_N + 1]) -> u8 {
+fn mix_channel(
+    dst: u8,
+    fg_linear: f32,
+    cov: f32,
+    dec: &[f32; 256],
+    enc: &[u8; ENCODE_N + 1],
+) -> u8 {
     let bg = dec[dst as usize];
     let lin = bg + (fg_linear - bg) * cov;
     let idx = (lin.max(0.0).sqrt() * ENCODE_N as f32) as usize;
