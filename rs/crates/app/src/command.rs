@@ -120,6 +120,13 @@ pub enum Command {
     SpeechToggleMuted,
     /// Toggle "only speak the focused pane" (background talkers stay silent while unfocused).
     SpeechToggleFocusedOnly,
+    // ---- dictation (push-to-talk; routed to the App's ListenEngine) ----
+    /// Push-to-talk on pane `0`: idle -> record, recording -> stop + transcribe + type it there.
+    DictateToggle(usize),
+    /// Push-to-talk on the focused pane (the keyboard/palette entry point).
+    DictateToggleFocused,
+    /// Abandon the in-flight recording without transcribing it.
+    DictateCancel,
     /// Maximize/restore (zoom-in-tab) pane `0`.
     ZoomPane(usize),
     /// Fullscreen/exit-fullscreen pane `0`.
@@ -280,6 +287,10 @@ pub enum Effect {
     SpeechStopNow,
     SpeechToggleMuted,
     SpeechToggleFocusedOnly,
+    /// Dictation runs on the App's `ListenEngine` (a worker thread above `State`), same as
+    /// speech: `dispatch` records the target pane and bubbles the engine call up.
+    DictateToggle,
+    DictateCancel,
 }
 
 /// The keyboard layout-cycle order (skips `single`, which the menu still offers).
@@ -383,6 +394,22 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SpeechStopNow => return Effect::SpeechStopNow,
         Command::SpeechToggleMuted => return Effect::SpeechToggleMuted,
         Command::SpeechToggleFocusedOnly => return Effect::SpeechToggleFocusedOnly,
+        Command::DictateToggle(i) => {
+            // Remember the pane BEFORE recording: the transcript belongs to the pane you
+            // started dictating into, whatever has focus by the time you stop talking.
+            return match state.set_dictation_target(i) {
+                Some(_) => Effect::DictateToggle,
+                None => Effect::None,
+            };
+        }
+        Command::DictateToggleFocused => {
+            let i = state.active_tab().focused;
+            return match state.set_dictation_target(i) {
+                Some(_) => Effect::DictateToggle,
+                None => Effect::None,
+            };
+        }
+        Command::DictateCancel => return Effect::DictateCancel,
         Command::ZoomPane(i) => state.zoom_pane(i),
         Command::FullscreenPane(i) => {
             state.focus_pane(i);

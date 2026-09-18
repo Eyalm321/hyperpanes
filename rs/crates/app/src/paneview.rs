@@ -196,6 +196,33 @@ fn replay_cursor_pos(_app: &AppWindow, _link_active: bool) {}
 /// Build a model row for pane `i`. `editing` flags the pane whose label is being renamed
 /// inline; `show_frame`/`show_dot` are the GLOBAL Appearance prefs, folded here over each
 /// pane's per-pane override (a clean new pane resolves OFF, a git-project pane ON).
+/// Whether an assistive client is listening. The terminal grid is drawn to a texture, so AT-SPI
+/// sees an empty rectangle unless we hand it the screen as text — but extracting that text on
+/// every model rebuild is wasted work when nobody is reading it. GNOME sets
+/// `toolkit-accessibility`/`GTK_A11Y` and AccessKit only builds a tree once a client connects;
+/// checking the well-known bus name once per process is enough to decide.
+fn a11y_wanted() -> bool {
+    use std::sync::OnceLock;
+    static WANTED: OnceLock<bool> = OnceLock::new();
+    *WANTED.get_or_init(|| {
+        if std::env::var("HYPERPANES_A11Y").is_ok_and(|v| v == "1") {
+            return true;
+        }
+        if std::env::var("NO_AT_BRIDGE").is_ok_and(|v| v == "1") {
+            return false;
+        }
+        std::process::Command::new("gsettings")
+            .args([
+                "get",
+                "org.gnome.desktop.interface",
+                "toolkit-accessibility",
+            ])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false)
+    })
+}
+
 fn pane_item(
     ps: &PaneState,
     focused: bool,
@@ -203,6 +230,7 @@ fn pane_item(
     show_frame: bool,
     show_dot: bool,
     font_px: f32,
+    dictate: i32,
 ) -> PaneItem {
     let (x, y, w, h) = ps.rect;
     // Project the clickable-path hover overlay (if any) into the model row.
@@ -265,12 +293,20 @@ fn pane_item(
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
+        // The pane's visible text for AT-SPI; empty (and free) when nothing is listening.
+        a11y_text: if a11y_wanted() {
+            ps.pane.screen_text().into()
+        } else {
+            SharedString::new()
+        },
         subtitle: ps.subtitle.clone().unwrap_or_default(),
         ai_subtitle,
         // The cached shell-type badge (computed once at pane creation; "" → not shown).
         shell_type: ps.shell_label.as_str().into(),
         // Speaker glyph in the header, shown only while this pane's "talk" is on.
         talk: ps.talk,
+        // Mic button state: non-zero only on the pane dictation is aimed at.
+        dictate,
         show_frame: ps.frame_on(show_frame),
         show_dot: ps.dot_on(show_dot),
         editing,
@@ -468,6 +504,17 @@ pub fn resync(
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
     let editing_pane = state.editing_pane;
+    // Push-to-talk state, read before the tab borrow: non-zero only on the pane dictation
+    // is aimed at (0 idle · 1 recording · 2 transcribing).
+    let dictate_uid = state.dictate_uid.clone();
+    let dictate_phase = state.dictate_phase as i32;
+    let dictate_phase_for = move |uid: &str| -> i32 {
+        if dictate_uid.as_deref() == Some(uid) {
+            dictate_phase
+        } else {
+            0
+        }
+    };
     let t = state.active_tab();
     let focused = t.focused;
     let items: Vec<PaneItem> = t
@@ -482,6 +529,7 @@ pub fn resync(
                 show_frame,
                 show_dot,
                 p.font_px,
+                dictate_phase_for(&p.uid),
             )
         })
         .collect();
@@ -1184,6 +1232,17 @@ pub fn pump(
     let show_frame = state.settings.show_frame;
     let show_dot = state.settings.show_dot;
     let editing_pane = state.editing_pane;
+    // Push-to-talk state, read before the tab borrow: non-zero only on the pane dictation
+    // is aimed at (0 idle · 1 recording · 2 transcribing).
+    let dictate_uid = state.dictate_uid.clone();
+    let dictate_phase = state.dictate_phase as i32;
+    let dictate_phase_for = move |uid: &str| -> i32 {
+        if dictate_uid.as_deref() == Some(uid) {
+            dictate_phase
+        } else {
+            0
+        }
+    };
     let active_idx = state.active;
     let focused = state.tabs[active_idx].focused;
     let tab = &mut state.tabs[active_idx];
@@ -1274,6 +1333,7 @@ pub fn pump(
                     show_frame,
                     show_dot,
                     ps.font_px,
+                    dictate_phase_for(&ps.uid),
                 ),
             );
         }

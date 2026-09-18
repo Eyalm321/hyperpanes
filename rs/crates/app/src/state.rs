@@ -321,7 +321,8 @@ fn write_goals_settings_config() -> Option<std::path::PathBuf> {
     let src = std::path::Path::new(&home)
         .join(".claude")
         .join("settings.json");
-    let parsed: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(src).ok()?).ok()?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(src).ok()?).ok()?;
     let status_line = parsed.get("statusLine").filter(|v| !v.is_null())?;
     let json = goals_settings_json(status_line);
     let path = hyperpanes_core::persistence::paths::state_dir().join("goals-settings.json");
@@ -334,7 +335,9 @@ fn write_goals_settings_config() -> Option<std::path::PathBuf> {
     match std::fs::write(&path, json) {
         Ok(()) => Some(path),
         Err(e) => {
-            eprintln!("[goals] failed to write goals-settings.json: {e}; spawning without --settings");
+            eprintln!(
+                "[goals] failed to write goals-settings.json: {e}; spawning without --settings"
+            );
             None
         }
     }
@@ -350,10 +353,7 @@ mod goals_mcp_config_tests {
             serde_json::from_str(&json).expect("goals-mcp.json contents must parse as JSON");
         let hyperpanes = &parsed["mcpServers"]["hyperpanes"];
         assert_eq!(hyperpanes["command"], "npx");
-        assert_eq!(
-            hyperpanes["env"]["HYPERPANES_CONTROL_FILE"],
-            control_path
-        );
+        assert_eq!(hyperpanes["env"]["HYPERPANES_CONTROL_FILE"], control_path);
         assert!(json.contains(control_path));
         assert!(json.contains("hyperpanes"));
     }
@@ -367,7 +367,10 @@ mod goals_mcp_config_tests {
         let json = super::goals_settings_json(&status_line);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         // Only statusLine is carried — no behavior keys (model/effort/outputStyle) leak in.
-        assert_eq!(parsed.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["statusLine"]);
+        assert_eq!(
+            parsed.as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec!["statusLine"]
+        );
         assert_eq!(parsed["statusLine"], status_line);
     }
 }
@@ -380,7 +383,10 @@ mod goal_defaults_tests {
     fn valid_indices_pass_through() {
         // A saved selection within range survives a round-trip unchanged.
         assert_eq!(clamp_goal_model_sel([2, 0, 1]), [2, 0, 1]);
-        assert_eq!(clamp_goal_model_sel(GOAL_MODEL_SEL_DEFAULT), GOAL_MODEL_SEL_DEFAULT);
+        assert_eq!(
+            clamp_goal_model_sel(GOAL_MODEL_SEL_DEFAULT),
+            GOAL_MODEL_SEL_DEFAULT
+        );
     }
 
     #[test]
@@ -734,6 +740,12 @@ pub struct State {
     pub last_hud: Instant,
     /// The UI models (tabs / panes / dividers) need a full rebuild.
     pub dirty: bool,
+    /// Push-to-talk dictation: the uid of the pane the finished transcript will be typed
+    /// into. Set when recording starts, cleared once the text lands (or is discarded).
+    pub dictate_uid: Option<String>,
+    /// The dictation engine's phase, mirrored here each tick so the pane header can show it
+    /// (0 idle · 1 recording · 2 transcribing). The engine itself is authoritative.
+    pub dictate_phase: u8,
     // ---- Wave-2: overlay panels (Seam #3) ----
     /// Which overlay panel is mounted (palette / prefs / sidebar / none).
     pub overlay: Overlay,
@@ -930,6 +942,8 @@ impl State {
             frames: 0,
             last_hud: Instant::now(),
             dirty: true,
+            dictate_uid: None,
+            dictate_phase: 0,
             overlay: Overlay::None,
             add_project_error: String::new(),
             settings: prefs::load(),
@@ -2333,7 +2347,11 @@ impl State {
         if text.is_empty() {
             return;
         }
-        let Some(path) = self.projects.get(self.goal_proj_sel).map(|p| p.path.clone()) else {
+        let Some(path) = self
+            .projects
+            .get(self.goal_proj_sel)
+            .map(|p| p.path.clone())
+        else {
             return;
         };
         let m = |i: usize| {
@@ -3031,7 +3049,11 @@ impl State {
         // the next tick — its Claude is already up, so the marker gate passes immediately) and
         // refresh its subtitle to the newest task.
         if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
-            let alive = self.tabs.iter().flat_map(|t| &t.panes).any(|p| p.uid == uid);
+            let alive = self
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .any(|p| p.uid == uid);
             if alive {
                 if let Some((ti, pi)) = self.find_pane(&uid) {
                     self.tabs[ti].panes[pi].subtitle = Some(subtitle.clone().into());
@@ -3061,7 +3083,13 @@ impl State {
             if let Some(dir) = &exe_dir {
                 candidates.push(dir.join(&rel));
                 if let Some(prefix) = dir.parent() {
-                    candidates.push(prefix.join("Resources").join("claude").join("goal-orchestrator").join("SKILL.md"));
+                    candidates.push(
+                        prefix
+                            .join("Resources")
+                            .join("claude")
+                            .join("goal-orchestrator")
+                            .join("SKILL.md"),
+                    );
                     candidates.push(prefix.join("share").join("hyperpanes").join(&rel));
                     candidates.push(prefix.join("lib").join("hyperpanes").join(&rel));
                 }
@@ -3069,7 +3097,9 @@ impl State {
             if let Some(home) = std::env::var_os("HOME") {
                 let h = std::path::Path::new(&home);
                 candidates.push(h.join(".claude/skills/goal-orchestrator/SKILL.md"));
-                candidates.push(h.join("dev/agent-orchestration-skills/skills/goal-orchestrator/SKILL.md"));
+                candidates.push(
+                    h.join("dev/agent-orchestration-skills/skills/goal-orchestrator/SKILL.md"),
+                );
             }
             candidates.into_iter().find(|p| p.is_file())
         };
@@ -3183,7 +3213,11 @@ impl State {
         // the app's own env so `fresh_env()` hands them to every pane unconditionally. The
         // goal/project-specific vars (models, project name/color, the rotated CLAUDE_CONFIG_DIR)
         // deliberately stay per-spawn — they must not leak process-wide across concurrent projects.
-        for key in ["HP_GOAL_PERSONA_DIR", "HP_GOAL_SETTINGS", "HP_GOAL_ACCOUNTS"] {
+        for key in [
+            "HP_GOAL_PERSONA_DIR",
+            "HP_GOAL_SETTINGS",
+            "HP_GOAL_ACCOUNTS",
+        ] {
             if let Some(val) = env.get(key) {
                 std::env::set_var(key, val);
             }
@@ -3587,6 +3621,58 @@ impl State {
                 mgr.write(&uid, "\u{16}");
                 self.dirty = true;
             }
+        }
+    }
+
+    // ---- push-to-talk dictation ----
+
+    /// Aim dictation at active-tab pane `idx` — the transcript will be typed there even if
+    /// focus moves while you speak. Returns that pane's uid.
+    pub fn set_dictation_target(&mut self, idx: usize) -> Option<String> {
+        let uid = self
+            .active_tab_mut()
+            .panes
+            .get(idx)
+            .map(|p| p.uid.clone())?;
+        self.dictate_uid = Some(uid.clone());
+        self.dirty = true;
+        Some(uid)
+    }
+
+    /// Type a finished transcript into the pane that started dictation, `submit`ting it with a
+    /// Return if asked. Drops the text (returns false) when that pane is gone — better than
+    /// typing a stray sentence into whatever pane inherited the focus.
+    pub fn deliver_dictation(&mut self, text: &str, submit: bool, mgr: &SessionManager) -> bool {
+        let Some(uid) = self.dictate_uid.take() else {
+            return false;
+        };
+        self.dirty = true;
+        let Some((ti, pi)) = self.find_pane(&uid) else {
+            return false;
+        };
+        let p = &mut self.tabs[ti].panes[pi];
+        // Land the caret at the live edge, as a paste does, so the typed text is on screen.
+        p.pane.selection_clear();
+        p.pane.scroll_to_bottom();
+        mgr.write(&uid, text);
+        if submit {
+            mgr.write(&uid, "\r");
+        }
+        true
+    }
+
+    /// Report a dictation failure on the pane it was aimed at (or the focused pane once the
+    /// target is gone), and stop aiming.
+    pub fn toast_dictation(&mut self, msg: &str) {
+        let target = self.dictate_uid.take();
+        self.dirty = true;
+        if let Some((ti, pi)) = target.and_then(|uid| self.find_pane(&uid)) {
+            self.tabs[ti].panes[pi].pane.set_toast(msg);
+            return;
+        }
+        let (ti, pi) = (self.active, self.active_tab().focused);
+        if let Some(p) = self.tabs.get_mut(ti).and_then(|t| t.panes.get_mut(pi)) {
+            p.pane.set_toast(msg);
         }
     }
 
@@ -4503,7 +4589,12 @@ impl State {
                 .as_deref()
                 .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
                 .unwrap_or_default();
-            let head = spawn_command.as_deref().unwrap_or("").split_whitespace().next().unwrap_or("");
+            let head = spawn_command
+                .as_deref()
+                .unwrap_or("")
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
             let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
             if spawn_command.is_none() {
                 startup = Some(match &resume_cwd {
@@ -5047,6 +5138,115 @@ mod ctx_menu_borrow_tests {
         cell.borrow_mut().close_context();
         assert!(!cell.borrow().ctx_open());
         assert!(cell.borrow().ctx_target().is_none());
+    }
+}
+
+#[cfg(test)]
+mod dictation_tests {
+    //! Push-to-talk routing: which pane a transcript belongs to. The record → whisper →
+    //! text half lives in `core::listen`; what's pinned here is that the words land in the
+    //! pane you started dictating into, even if focus moved while you were talking.
+    use super::*;
+    use crate::command::{dispatch, Command, Effect};
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    fn det(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+        }
+    }
+
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+
+    /// Toggling aims dictation at that pane and bubbles the engine call up as an effect.
+    #[test]
+    fn toggle_aims_at_the_clicked_pane() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        let eff = dispatch(&mut st, Command::DictateToggle(1), &m);
+        assert!(matches!(eff, Effect::DictateToggle));
+        assert_eq!(st.dictate_uid.as_deref(), Some("b"));
+    }
+
+    /// The keyboard entry point aims at whatever is focused.
+    #[test]
+    fn focused_toggle_aims_at_the_focused_pane() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        st.focus_pane(0);
+        let eff = dispatch(&mut st, Command::DictateToggleFocused, &m);
+        assert!(matches!(eff, Effect::DictateToggle));
+        assert_eq!(st.dictate_uid.as_deref(), Some("a"));
+    }
+
+    /// Focus moving mid-sentence must not redirect the transcript.
+    #[test]
+    fn delivery_follows_the_target_not_the_focus() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        dispatch(&mut st, Command::DictateToggle(0), &m);
+        st.focus_pane(1);
+        assert!(st.deliver_dictation("hello", false, &m));
+        assert_eq!(st.dictate_uid, None, "delivery stops aiming");
+    }
+
+    /// The pane closed while you were talking: drop the text rather than typing it into
+    /// whatever inherited the focus.
+    #[test]
+    fn delivery_is_dropped_when_the_target_is_gone() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.dictate_uid = Some("ghost".into());
+        assert!(!st.deliver_dictation("hello", false, &m));
+        assert_eq!(st.dictate_uid, None);
+    }
+
+    /// Nothing aimed (no toggle yet) is not a delivery.
+    #[test]
+    fn delivery_without_a_target_is_a_no_op() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        assert!(!st.deliver_dictation("hello", false, &m));
+    }
+
+    /// Failures surface on the pane that was listening, and stop aiming.
+    #[test]
+    fn errors_toast_the_target_pane() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a"));
+        st.adopt_pane(&m, det("b"));
+        dispatch(&mut st, Command::DictateToggle(1), &m);
+        st.toast_dictation("Nothing was said");
+        assert_eq!(st.dictate_uid, None);
+        assert_eq!(
+            st.active_tab_mut().panes[1].pane.toast_text().as_deref(),
+            Some("Nothing was said")
+        );
+        assert_eq!(st.active_tab_mut().panes[0].pane.toast_text(), None);
     }
 }
 

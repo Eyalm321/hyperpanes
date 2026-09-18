@@ -179,6 +179,20 @@ pub fn build(state: &State) -> Vec<Entry> {
         Command::SpeechToggleFocusedOnly,
     ));
 
+    // ---- dictation (push-to-talk — routed to the App's ListenEngine) ----
+    cmds.push(Entry::new(
+        "Dictate: Start/Stop",
+        "Record the mic, transcribe it locally, type it into this pane",
+        "dictation speech to text stt whisper voice mic talk",
+        Command::DictateToggleFocused,
+    ));
+    cmds.push(Entry::new(
+        "Dictate: Cancel",
+        "Throw away the recording in progress",
+        "dictation stt whisper voice mic cancel",
+        Command::DictateCancel,
+    ));
+
     // ---- preferences + sidebar ----
     cmds.push(Entry::new(
         "Preferences…",

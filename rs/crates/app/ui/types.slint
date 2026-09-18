@@ -7,6 +7,9 @@ import { HiRect } from "@widgets";
 export struct PaneItem {
     surface: image,
     title: string,
+    // Visible screen text, for assistive tech (AT-SPI). Empty unless an
+    // accessibility client is connected — see paneview::a11y_wanted().
+    a11y-text: string,
     // optional secondary line under the label (user subtitle / ambient-AI line).
     subtitle: string,
     // ambient-AI summary line, already truncated to the typewriter-revealed prefix by the
@@ -19,6 +22,9 @@ export struct PaneItem {
     // per-pane "talk" (speak new Claude assistant replies aloud): drives a small speaker
     // glyph in the header, shown only while on.
     talk: bool,
+    // push-to-talk dictation aimed at THIS pane: 0 none · 1 recording · 2 transcribing.
+    // Lights the header mic button (red while recording, amber while transcribing).
+    dictate: int,
     accent: color,
     // resolved per-pane chrome (the per-pane override already folded over the global pref
     // by the controller): a clean new pane is frame/dot OFF; a git-project pane is ON.

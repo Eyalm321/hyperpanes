@@ -214,6 +214,13 @@ pub struct App {
     last_autosave_json: RefCell<String>,
     /// Throttle for the queued-prompt delivery tick (claude-resume speak-first).
     last_prompt_delivery: Cell<Option<std::time::Instant>>,
+    /// Push-to-talk dictation: the mic-capture + transcribe worker (core::listen). Always
+    /// spawned (one idle thread); `ready()` is false until both backends exist, which is what
+    /// the toast tells the user about.
+    listen: hyperpanes_core::listen::engine::ListenHandle,
+    /// The dictation settings behind that engine — re-read only at startup; `auto_submit` is
+    /// consulted on every delivery.
+    listen_settings: RefCell<hyperpanes_core::listen::ListenSettings>,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -228,6 +235,9 @@ const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 impl App {
     pub fn new(mgr: Arc<SessionManager>, erx: UnboundedReceiver<SessionEvent>) -> Rc<Self> {
         let control = crate::control_host::ControlHost::new(&mgr);
+        let listen_settings =
+            hyperpanes_core::listen::load(&hyperpanes_core::persistence::paths::listen_json());
+        let listen = hyperpanes_core::listen::engine::ListenEngine::spawn(&listen_settings);
         Rc::new(App {
             mgr,
             windows: RefCell::new(Vec::new()),
@@ -253,6 +263,8 @@ impl App {
             last_autosave: Cell::new(None),
             last_autosave_json: RefCell::new(String::new()),
             last_prompt_delivery: Cell::new(None),
+            listen,
+            listen_settings: RefCell::new(listen_settings),
         })
     }
 
@@ -269,7 +281,9 @@ impl App {
         };
         for g in groups {
             for p in &mut g.panes {
-                let Some(uid) = p.uid.as_deref() else { continue };
+                let Some(uid) = p.uid.as_deref() else {
+                    continue;
+                };
                 let pane_id = self
                     .control
                     .pane_id_for_uid(uid)
@@ -288,10 +302,7 @@ impl App {
                     // restore re-sets it so `claude --resume` finds the right transcript
                     // store. Absent/invalid ⇒ the default account, so record nothing.
                     if claude_panes::valid_config_dir(&s.config_dir) {
-                        meta.insert(
-                            claude_panes::META_CONFIG_DIR_KEY.to_string(),
-                            s.config_dir,
-                        );
+                        meta.insert(claude_panes::META_CONFIG_DIR_KEY.to_string(), s.config_dir);
                     }
                 }
             }
@@ -318,10 +329,14 @@ impl App {
             return;
         }
         let dir = hyperpanes_core::persistence::paths::claude_sessions_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(pane_id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(pane_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
             let Some(marker) = hyperpanes_core::claude_panes::read_pane_session(pane_id) else {
                 continue;
             };
@@ -500,8 +515,16 @@ impl App {
             let systemd_run = which_systemd_run();
             let mut cmd = if let Some(sr) = &systemd_run {
                 let mut c = std::process::Command::new(sr);
-                c.args(["--user", "--quiet", "--collect", "--scope", "--", "/bin/sh", "-c"])
-                    .arg(&relaunch);
+                c.args([
+                    "--user",
+                    "--quiet",
+                    "--collect",
+                    "--scope",
+                    "--",
+                    "/bin/sh",
+                    "-c",
+                ])
+                .arg(&relaunch);
                 c
             } else {
                 let mut c = std::process::Command::new("/bin/sh");
@@ -736,6 +759,25 @@ impl App {
             Effect::SpeechToggleFocusedOnly => {
                 self.control.speech_toggle_focused_only();
             }
+            Effect::DictateToggle => {
+                if self.listen.ready() {
+                    self.listen.toggle();
+                } else {
+                    let st = self.listen.status();
+                    let msg = if st.recorder == "none" {
+                        "Dictation needs a recorder (pw-record, arecord or ffmpeg)"
+                    } else {
+                        "Dictation needs whisper.cpp — set listen.json modelPath"
+                    };
+                    win.state.borrow_mut().toast_dictation(msg);
+                }
+            }
+            Effect::DictateCancel => {
+                self.listen.cancel();
+                win.state
+                    .borrow_mut()
+                    .toast_dictation("Dictation cancelled");
+            }
         }
     }
 
@@ -765,6 +807,50 @@ impl App {
     }
 
     // ---- the central pump (one shared 8 ms timer drives every window) ----
+
+    /// Move dictation forward on the UI thread: mirror the worker's phase into every window's
+    /// state (the pane header reads it) and hand any finished transcript to the pane that
+    /// asked for it. Cheap: three atomics' worth of work on a tick with nothing to do.
+    fn pump_dictation(self: &Rc<Self>, windows: &[Rc<Window>]) {
+        let phase = self.listen.phase() as u8;
+        for w in windows {
+            let mut st = w.state.borrow_mut();
+            if st.dictate_phase != phase {
+                st.dictate_phase = phase;
+                st.dirty = true;
+            }
+        }
+        // A transcript belongs to whichever window aimed dictation; ask each in turn.
+        while let Some(text) = self.listen.take_transcript() {
+            let submit = self.listen_settings.borrow().auto_submit;
+            let mut delivered = false;
+            for w in windows {
+                if w.state
+                    .borrow_mut()
+                    .deliver_dictation(&text, submit, &self.mgr)
+                {
+                    delivered = true;
+                    break;
+                }
+            }
+            if delivered {
+                self.wake();
+            }
+        }
+        if let Some(err) = self.listen.take_error() {
+            for w in windows {
+                let aimed = w.state.borrow().dictate_uid.is_some();
+                if aimed {
+                    w.state.borrow_mut().toast_dictation(&err);
+                    return;
+                }
+            }
+            // Nothing aimed (the pane closed mid-sentence): report on the active window.
+            if let Some(w) = windows.first() {
+                w.state.borrow_mut().toast_dictation(&err);
+            }
+        }
+    }
 
     /// One UI-thread tick across all windows: realize HWNDs, drain the shared session
     /// stream into the owning windows, render each window, then reap any that closed.
@@ -838,6 +924,10 @@ impl App {
                 self.mgr.kill(&uid);
             }
         }
+
+        // 1c. Push-to-talk: mirror the engine's phase into the header indicator and deliver
+        //    any transcript that finished since the last tick.
+        self.pump_dictation(&windows);
 
         // 2. Drain the ONE shared event channel, routing each event to its window. Each event
         //    is teed to the control server (live `/events` WS frames + model cwd/exit) before
@@ -2269,6 +2359,10 @@ impl App {
         cb0!(on_toggle_fullscreen, Command::ToggleFullscreen);
         cb_i32!(on_set_layout, set_layout_from_id);
         cb_usize!(on_pane_close, Command::ClosePane);
+        // Pane-header speaker button — same toggle as the pane menu's "Talk (speak replies)".
+        cb_usize!(on_pane_talk, Command::ToggleTalk);
+        // Pane-header mic button — push-to-talk dictation into that pane.
+        cb_usize!(on_pane_dictate, Command::DictateToggle);
         // Pane-header zoom/fullscreen act on that pane: focus it first, then the action.
         {
             let app = app.clone();
@@ -3348,7 +3442,8 @@ mod option_form_tests {
     #[test]
     fn detects_claude_style_selectors() {
         // Trust-folder prompt (pointer on the highlighted row, numbered options).
-        let trust = "Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n";
+        let trust =
+            "Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n";
         assert!(screen_shows_option_form(trust));
         // Boxed permission dialog (rows inside a │ border).
         let boxed = "│ Do you want to proceed?      │\n│ ❯ 1. Yes                     │\n│   2. No, and tell Claude why │\n";
@@ -3358,7 +3453,8 @@ mod option_form_tests {
     #[test]
     fn ignores_the_ordinary_input_box_and_plain_output() {
         // Claude's normal prompt box — a `>` prompt, no `❯` pointer.
-        let prompt = "╭─────────────────╮\n│ > Try \"help\"    │\n╰─────────────────╯\n  ? for shortcuts\n";
+        let prompt =
+            "╭─────────────────╮\n│ > Try \"help\"    │\n╰─────────────────╯\n  ? for shortcuts\n";
         assert!(!screen_shows_option_form(prompt));
         // A numbered list in ordinary output (no pointer) is not a form.
         let list = "Plan:\n 1. do a thing\n 2. do another\n";

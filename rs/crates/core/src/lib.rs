@@ -16,6 +16,7 @@ pub mod claude_recovery;
 pub mod cli;
 pub mod control;
 pub mod layout;
+pub mod listen;
 pub mod paths;
 pub mod persistence;
 pub mod resume_queue;

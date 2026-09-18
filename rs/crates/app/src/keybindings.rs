@@ -381,6 +381,18 @@ pub fn default_bindings() -> Vec<Binding> {
             "Paste image (Alt+V)",
             Command::PasteImageFocused,
         ),
+        // Ctrl+Shift+M starts/stops push-to-talk dictation into the focused pane: speak, press
+        // again, and the transcript is typed at the prompt (you still press Enter).
+        b(
+            "pane.dictate",
+            true,
+            false,
+            true,
+            Char('m'),
+            "Panes",
+            "Dictate (push to talk)",
+            Command::DictateToggleFocused,
+        ),
         // Ctrl+Shift+C copies the selection — the explicit copy gesture now that copy-on-select
         // defaults off (Ctrl+C stays the shell interrupt).
         b(

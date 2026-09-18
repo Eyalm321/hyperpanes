@@ -75,16 +75,28 @@ component IconSpeaker inherits Path {
     commands: "M 2 6 L 2 10 L 5 10 L 9 13.5 L 9 2.5 L 5 6 Z M 11.5 5.5 A 4.2 4.2 0 0 1 11.5 10.5 M 13.3 3.7 A 6.7 6.7 0 0 1 13.3 12.3";
 }
 
-// A pane-header button (`.hp-pane-btn`). kind: 0 zoom · 1 fullscreen · 2 close.
+// A microphone (capsule + cradle + stand), for the pane header's push-to-talk button.
+// Drawn geometry like the other header icons — Slint has no font fallback for glyphs.
+component IconMic inherits Path {
+    in property <color> ink;
+    width: 12px; height: 12px;
+    viewbox-width: 16; viewbox-height: 16;
+    stroke: ink; stroke-width: 1.4px; fill: transparent;
+    commands: "M 6 4.5 A 2 2 0 0 1 10 4.5 L 10 8 A 2 2 0 0 1 6 8 Z M 3.8 7.6 A 4.2 4.2 0 0 0 12.2 7.6 M 8 12 L 8 14 M 5.5 14 L 10.5 14";
+}
+
+// A pane-header button (`.hp-pane-btn`). kind: 0 zoom · 1 fullscreen · 2 close · 3 talk · 4 mic.
 component PaneBtn inherits Rectangle {
     in property <int> kind;
     in property <bool> active: false;
+    // Fill for the active state; the mic overrides it per dictation phase.
+    in property <color> active-bg: Theme.accent;
     in property <bool> danger: false;
     callback clicked;
     width: 18px;
     height: 18px;
     border-radius: 4px;
-    background: root.active ? Theme.accent
+    background: root.active ? root.active-bg
               : ta.has-hover ? (root.danger ? #f38ba833 : Theme.surface2)
               : transparent;
     property <color> ink: root.active ? #11111b
@@ -99,6 +111,12 @@ component PaneBtn inherits Rectangle {
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
     }
     if root.kind == 2 : IconX {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
+    }
+    if root.kind == 3 : IconSpeaker {
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
+    }
+    if root.kind == 4 : IconMic {
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; ink: root.ink;
     }
 
@@ -261,6 +279,10 @@ export component PaneView inherits Rectangle {
     callback pane-zoom(int);
     callback pane-fullscreen(int);
     callback pane-close(int);
+    // pane-header speaker button → toggle that pane's "talk" (same Command as the pane menu).
+    callback pane-talk(int);
+    // pane-header mic button → push-to-talk dictation into that pane.
+    callback pane-dictate(int);
     // pane-header inline rename (double-click the header label).
     callback begin-rename-pane(int);
     callback rename-pane(int, string);
@@ -376,14 +398,6 @@ export component PaneView inherits Rectangle {
                                 visible: pane.show-dot;
                             }
                         }
-                        // "talk" indicator: a small speaker glyph, shown only while this
-                        // pane's talk is on (the pane menu's "Talk (speak replies)" toggle).
-                        if pane.talk : VerticalLayout {
-                            alignment: center;
-                            IconSpeaker {
-                                ink: pane.focused ? Theme.accent : Theme.subtext;
-                            }
-                        }
                         // ---- editable label + secondary line (subtitle / shell title) ----
                         // Double-click to rename (mirrors the Electron EditableLabel); a
                         // left-press here ALSO arms the pane drag (see lta below), so the
@@ -491,6 +505,25 @@ export component PaneView inherits Rectangle {
                             }
                         }
                         // each wrapped so it centres vertically against the title
+                        // push-to-talk: red while recording you, amber while transcribing.
+                        VerticalLayout {
+                            alignment: center;
+                            PaneBtn {
+                                kind: 4;
+                                active: pane.dictate > 0;
+                                active-bg: pane.dictate == 1 ? #e5484d : #f5a524;
+                                clicked => { root.pane-dictate(idx); }
+                            }
+                        }
+                        // talk toggle: lit (accent) while this pane speaks its Claude replies.
+                        VerticalLayout {
+                            alignment: center;
+                            PaneBtn {
+                                kind: 3;
+                                active: pane.talk;
+                                clicked => { root.pane-talk(idx); }
+                            }
+                        }
                         VerticalLayout {
                             alignment: center;
                             PaneBtn {
@@ -543,6 +576,8 @@ export component PaneView inherits Rectangle {
                         width: parent.width - 4px;
                         height: parent.height - 4px;
                         surface: pane.surface;
+                        title: pane.title;
+                        a11y-text: pane.a11y-text;
                         accent: pane.accent;
                         chrome: false;
                         // clickable-path hover overlay (controller-driven after hit-testing)
