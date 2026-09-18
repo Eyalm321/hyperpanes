@@ -104,6 +104,29 @@ const WHEEL_LINES_PER_NOTCH: i32 = 3;
 /// hover underline (in the pane's *logical* pixel space) plus the target. Returned by
 /// [`TerminalPane::link_at`].
 #[derive(Debug, Clone, PartialEq)]
+/// What [`TerminalPane::locate`] found under the pointer: the resolved path record plus
+/// everything the caller needs to place the underline. A struct rather than the tuple this
+/// used to be — eight positional fields, three of them bare `usize`, is a swap waiting to
+/// happen, and clippy refuses the type outright.
+struct PathHit {
+    /// The verified path record (absolute path, existence, kind).
+    resolved: ResolveResult,
+    /// 1-based line from a `path:line:col` suffix, when the token carried one.
+    line: Option<u32>,
+    /// 1-based column from a `path:line:col` suffix, when the token carried one.
+    col: Option<u32>,
+    /// First column of the token on `row`; a soft-wrapped token is clipped to this row.
+    start: usize,
+    /// One past the token's last column on `row`.
+    end: usize,
+    /// The screen row the token was hit on.
+    row: usize,
+    /// Cell width in logical px.
+    cell_w: f32,
+    /// Cell height in logical px.
+    cell_h: f32,
+}
+
 pub struct LinkHit {
     /// Underline rect in logical px within the pane surface.
     pub x: f32,
@@ -376,13 +399,7 @@ impl TerminalPane {
     /// Find a verified path token under the (logical-px) point, returning the resolved record,
     /// the candidate's column span, and the cell metrics. Resolution is cached per (cwd, token);
     /// only existing paths are cached, so freshly-created files linkify on a later hover.
-    fn locate(
-        &mut self,
-        x: f32,
-        y: f32,
-        surf_w: f32,
-        surf_h: f32,
-    ) -> Option<(ResolveResult, Option<u32>, Option<u32>, usize, usize, usize, f32, f32)> {
+    fn locate(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<PathHit> {
         let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
         if x < 0.0 || y < 0.0 {
             return None;
@@ -413,9 +430,16 @@ impl TerminalPane {
         // The candidate's line/col rides out with it: re-extracting to recover them would have
         // to rebuild the same joined line, and the span it matched on is a logical index now.
         let (start, end) = Self::row_segment(cand.start, cand.end, row, first, snap.cols);
-        Some((
-            resolved, cand.line, cand.col, start, end, row, cell_w, cell_h,
-        ))
+        Some(PathHit {
+            resolved,
+            line: cand.line,
+            col: cand.col,
+            start,
+            end,
+            row,
+            cell_w,
+            cell_h,
+        })
     }
 
     /// Find an http/https URL under the (logical-px) point, returning the candidate, its row,
@@ -465,8 +489,16 @@ impl TerminalPane {
                 is_url: true,
             });
         }
-        let (r, line, col, start, end, row, cell_w, cell_h) =
-            self.locate(x, y, surf_w, surf_h)?;
+        let PathHit {
+            resolved: r,
+            line,
+            col,
+            start,
+            end,
+            row,
+            cell_w,
+            cell_h,
+        } = self.locate(x, y, surf_w, surf_h)?;
 
         let tip = match (line, col) {
             (Some(l), Some(c)) => format!("{}:{}:{}", r.abs_path, l, c),
