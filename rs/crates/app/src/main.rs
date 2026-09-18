@@ -394,9 +394,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return worker::run(&argv0);
     }
 
-    // Everything below that is a plain command line — `pair`, `devices`, `revoke`, `attach`,
-    // `ctl` — writes its answer to stdout, and whoever asked is entitled to stop reading it:
-    // `hyperpanes ctl panes | head -3` is an ordinary thing to type. Rust starts every process
+    // Everything below that is a plain command line — `pair`, `devices`, `revoke` — writes
+    // its answer to stdout, and whoever asked is entitled to stop reading it:
+    // `hyperpanes devices | head -1` is an ordinary thing to type. Rust starts every process
     // with SIGPIPE ignored so a closed pipe arrives as an `io::Error` rather than a signal, and
     // `println!` has nowhere to put that error but a panic — so the most routine shell idiom
     // there is ends in a backtrace and a crash dialog, for a condition every other Unix tool
@@ -875,11 +875,7 @@ pub(crate) fn goal_key(field: usize, menu_open: bool, msg: &KeyMsg) -> Option<Co
 /// single place and can be tested without spawning a process. Deliberately excludes the modes
 /// that outlive their output: the session daemon, the worker, and the GUI.
 fn pipeable_cli(argv: &[String]) -> bool {
-    ctl_cli::wants_ctl(argv)
-        || pair::wants_pair(argv)
-        || devices::wants_devices(argv)
-        || devices::wants_revoke(argv)
-        || attach_cli::wants_attach(argv)
+    pair::wants_pair(argv) || devices::wants_devices(argv) || devices::wants_revoke(argv)
 }
 
 /// Put SIGPIPE back to its default disposition, so writing to a closed pipe ends this process
@@ -901,7 +897,7 @@ fn restore_default_sigpipe() {}
 
 #[cfg(test)]
 mod tests {
-    // `hyperpanes ctl panes | head -3` used to end in a panic and a crash dialog: Rust
+    // `hyperpanes devices | head -1` used to end in a panic and a crash dialog: Rust
     // ignores SIGPIPE, so the closed pipe came back to `println!` as an error it could only
     // panic on. The disposition is restored for the print-and-exit CLIs and nothing else —
     // the daemon in particular must keep ignoring it, since a broken socket write there is a
@@ -911,11 +907,9 @@ mod tests {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         for yes in [
-            vec!["hyperpanes", "ctl", "panes"],
             vec!["hyperpanes", "pair"],
             vec!["hyperpanes", "devices"],
             vec!["hyperpanes", "revoke", "phone"],
-            vec!["hyperpanes", "attach", "pane-1"],
         ] {
             assert!(
                 super::pipeable_cli(&argv(&yes)),
