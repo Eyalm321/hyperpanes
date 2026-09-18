@@ -177,10 +177,9 @@ impl ControlHost {
     /// Take (and clear) a pending `restartApp` request: 0 = none, 1 = gui, 2 = full.
     /// Set by the control route off the UI thread; the App tick executes it.
     pub fn take_restart_request(&self) -> u8 {
-        self.shared
-            .borrow()
-            .as_ref()
-            .map_or(0, |s| s.restart_app.swap(0, std::sync::atomic::Ordering::SeqCst))
+        self.shared.borrow().as_ref().map_or(0, |s| {
+            s.restart_app.swap(0, std::sync::atomic::Ordering::SeqCst)
+        })
     }
 
     /// Mirror `pane_ids` to disk. A pane's `HYPERPANES_PANE_ID` is baked into its environment

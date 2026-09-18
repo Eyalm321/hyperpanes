@@ -36,7 +36,10 @@ fn main() {
             let _ = copy_dir(&scripts, &dst);
             let _ = copy_dir(
                 &personas,
-                &profile.join("resources").join("claude").join("goal-orchestrator"),
+                &profile
+                    .join("resources")
+                    .join("claude")
+                    .join("goal-orchestrator"),
             );
             if target_windows {
                 for f in ["conpty.dll", "OpenConsole.exe"] {

@@ -1051,10 +1051,7 @@ mod tests {
             None
         );
         assert_eq!(cli_info_mode(&argv(&["hyperpanes", "pair"])), None);
-        assert_eq!(
-            cli_info_mode(&argv(&["hyperpanes", "--kill-daemon"])),
-            None
-        );
+        assert_eq!(cli_info_mode(&argv(&["hyperpanes", "--kill-daemon"])), None);
         // Only argv[1] is checked, not flags/args elsewhere on the line.
         assert_eq!(
             cli_info_mode(&argv(&["hyperpanes", "-c", "echo --help"])),

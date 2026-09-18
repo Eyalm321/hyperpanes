@@ -168,7 +168,10 @@ pub fn run(argv: &[String]) -> std::io::Result<()> {
 fn read_discovery(path: &Path) -> Option<(u16, String)> {
     let raw = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let port = v.get("port")?.as_u64().filter(|&p| (1..=65535).contains(&p))? as u16;
+    let port = v
+        .get("port")?
+        .as_u64()
+        .filter(|&p| (1..=65535).contains(&p))? as u16;
     let token = v.get("token")?.as_str()?.to_string();
     Some((port, token))
 }
