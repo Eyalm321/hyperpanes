@@ -543,6 +543,8 @@ export component PaneView inherits Rectangle {
                         width: parent.width - 4px;
                         height: parent.height - 4px;
                         surface: pane.surface;
+                        title: pane.title;
+                        a11y-text: pane.a11y-text;
                         accent: pane.accent;
                         chrome: false;
                         // clickable-path hover overlay (controller-driven after hit-testing)
