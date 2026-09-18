@@ -59,13 +59,7 @@ pub fn save_to(path: &std::path::Path, devices: &[DeviceRecord]) -> std::io::Res
     };
     let json = serde_json::to_string_pretty(&file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    paths::write_atomic(path, json.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    paths::write_atomic_private(path, json.as_bytes())
 }
 
 #[cfg(test)]

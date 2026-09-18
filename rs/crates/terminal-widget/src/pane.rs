@@ -319,6 +319,56 @@ impl TerminalPane {
             .collect()
     }
 
+    /// The hovered cell's *logical* line: viewport rows joined across soft wraps, the hovered
+    /// cell's index into that text, and the first row of the run.
+    ///
+    /// A URL or path wider than the pane is one logical token that alacritty stores across two
+    /// viewport rows, with `WRAPLINE` on the first. Extracting per visual row cuts it in half
+    /// and the half under the cursor is what gets opened -- a link reading
+    /// `http://127.0.0.1:51551/row18` opened `http://127.0.0.1:51`. The extractor in
+    /// [`crate::links`] was always written against a wrap-joined line (see `cell_from_index`);
+    /// this is the join it was waiting for.
+    fn logical_line(
+        &self,
+        snap: &crate::grid::GridSnapshot,
+        row: usize,
+        col: usize,
+    ) -> Option<(String, usize, usize)> {
+        if row >= snap.rows || col >= snap.cols {
+            return None;
+        }
+        let mut first = row;
+        while first > 0 && self.grid.row_wraps(first - 1) {
+            first -= 1;
+        }
+        let mut last = row;
+        while last + 1 < snap.rows && self.grid.row_wraps(last) {
+            last += 1;
+        }
+        let mut text = String::with_capacity((last - first + 1) * snap.cols);
+        for r in first..=last {
+            text.push_str(&Self::row_text(snap, r));
+        }
+        Some((text, (row - first) * snap.cols + col, first))
+    }
+
+    /// The part of a logical-line span `[start, end)` that falls on visual `row` of a wrap run
+    /// beginning at `first`, as columns of that row. The underline is one rect per [`LinkHit`],
+    /// so a token spanning two rows underlines the row the cursor is actually on.
+    fn row_segment(
+        start: usize,
+        end: usize,
+        row: usize,
+        first: usize,
+        cols: usize,
+    ) -> (usize, usize) {
+        let off = (row - first) * cols;
+        (
+            start.saturating_sub(off).min(cols),
+            (end.min(off + cols)).saturating_sub(off),
+        )
+    }
+
     fn cache_key(&self, token: &str) -> String {
         format!("{}\u{1f}{}", self.cwd.as_deref().unwrap_or(""), token)
     }
@@ -332,7 +382,7 @@ impl TerminalPane {
         y: f32,
         surf_w: f32,
         surf_h: f32,
-    ) -> Option<(ResolveResult, usize, usize, usize, f32, f32)> {
+    ) -> Option<(ResolveResult, Option<u32>, Option<u32>, usize, usize, usize, f32, f32)> {
         let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
         if x < 0.0 || y < 0.0 {
             return None;
@@ -344,10 +394,10 @@ impl TerminalPane {
         }
 
         let snap = self.grid.snapshot();
-        let text = Self::row_text(&snap, row);
+        let (text, idx, first) = self.logical_line(&snap, row, col)?;
         let cand = extract_path_candidates(&text)
             .into_iter()
-            .find(|c| col >= c.start && col < c.end)?;
+            .find(|c| idx >= c.start && idx < c.end)?;
 
         let key = self.cache_key(&cand.path);
         let resolved = if let Some(hit) = self.verified.get(&key) {
@@ -360,7 +410,12 @@ impl TerminalPane {
             self.verified.insert(key, r.clone());
             r
         };
-        Some((resolved, cand.start, cand.end, row, cell_w, cell_h))
+        // The candidate's line/col rides out with it: re-extracting to recover them would have
+        // to rebuild the same joined line, and the span it matched on is a logical index now.
+        let (start, end) = Self::row_segment(cand.start, cand.end, row, first, snap.cols);
+        Some((
+            resolved, cand.line, cand.col, start, end, row, cell_w, cell_h,
+        ))
     }
 
     /// Find an http/https URL under the (logical-px) point, returning the candidate, its row,
@@ -372,7 +427,7 @@ impl TerminalPane {
         y: f32,
         surf_w: f32,
         surf_h: f32,
-    ) -> Option<(UrlCandidate, usize, f32, f32)> {
+    ) -> Option<(UrlCandidate, usize, usize, usize, f32, f32)> {
         let (cell_w, cell_h, cols, rows) = self.cell_logical(surf_w, surf_h)?;
         if x < 0.0 || y < 0.0 {
             return None;
@@ -383,11 +438,12 @@ impl TerminalPane {
             return None;
         }
         let snap = self.grid.snapshot();
-        let text = Self::row_text(&snap, row);
+        let (text, idx, first) = self.logical_line(&snap, row, col)?;
         let cand = extract_url_candidates(&text)
             .into_iter()
-            .find(|c| col >= c.start && col < c.end)?;
-        Some((cand, row, cell_w, cell_h))
+            .find(|c| idx >= c.start && idx < c.end)?;
+        let (start, end) = Self::row_segment(cand.start, cand.end, row, first, snap.cols);
+        Some((cand, start, end, row, cell_w, cell_h))
     }
 
     /// Hit-test a (logical-px) hover point against the rendered grid. Returns the underline rect +
@@ -396,11 +452,12 @@ impl TerminalPane {
     /// resolved path is verified — mirroring the Electron link provider. URLs win when a token is
     /// both (a URL is path-shaped but never disk-verifies anyway).
     pub fn link_at(&mut self, x: f32, y: f32, surf_w: f32, surf_h: f32) -> Option<LinkHit> {
-        if let Some((cand, row, cell_w, cell_h)) = self.url_under(x, y, surf_w, surf_h) {
+        if let Some((cand, start, end, row, cell_w, cell_h)) = self.url_under(x, y, surf_w, surf_h)
+        {
             return Some(LinkHit {
-                x: cand.start as f32 * cell_w,
+                x: start as f32 * cell_w,
                 y: (row as f32 + 1.0) * cell_h - 1.0, // a hairline along the cell's baseline
-                w: (cand.end - cand.start) as f32 * cell_w,
+                w: (end - start) as f32 * cell_w,
                 tip: cand.url.clone(),
                 abs_path: cand.url,
                 line: None,
@@ -408,18 +465,8 @@ impl TerminalPane {
                 is_url: true,
             });
         }
-        let (r, start, end, row, cell_w, cell_h) = self.locate(x, y, surf_w, surf_h)?;
-        // Recover the candidate's line/col by re-extracting (cheap; same row). The resolved
-        // record only carries the path, so pull location off the candidate that covered the cell.
-        let snap = self.grid.snapshot();
-        let text = Self::row_text(&snap, row);
-        let cand = extract_path_candidates(&text)
-            .into_iter()
-            .find(|c| c.start == start && c.end == end);
-        let (line, col) = cand
-            .as_ref()
-            .map(|c| (c.line, c.col))
-            .unwrap_or((None, None));
+        let (r, line, col, start, end, row, cell_w, cell_h) =
+            self.locate(x, y, surf_w, surf_h)?;
 
         let tip = match (line, col) {
             (Some(l), Some(c)) => format!("{}:{}:{}", r.abs_path, l, c),
@@ -1391,6 +1438,56 @@ mod tests {
         // Over the bare word "go" → nothing; past the URL → nothing.
         assert!(p.link_at(1.5, 0.5, w, h).is_none());
         assert!(p.link_at(30.5, 0.5, w, h).is_none());
+    }
+
+    #[test]
+    fn a_url_wrapped_across_two_rows_stays_one_link() {
+        // The pane is 20 cols; the URL is 29 chars, so the terminal soft-wraps it. Hit-testing
+        // per visual row used to hand back only the half under the cursor -- a link reading
+        // `http://127.0.0.1:51551/row18` opened `http://127.0.0.1:51` and hit nothing.
+        let mut p = unit_pane(20, 4);
+        let url = "https://a.com/abcdefghijklmno"; // 29 chars
+        p.feed(url);
+        let (w, h) = (20.0, 4.0); // 1px per cell
+
+        // Hovering the first row: the whole URL, underlined across that row's 20 columns.
+        let top = p.link_at(5.5, 0.5, w, h).expect("row 0 should hit");
+        assert_eq!(top.abs_path, url);
+        assert_eq!((top.x, top.w), (0.0, 20.0));
+
+        // Hovering the continuation row: the same whole URL, underlined over its 9 columns.
+        let cont = p.link_at(3.5, 1.5, w, h).expect("row 1 should hit");
+        assert_eq!(cont.abs_path, url);
+        assert_eq!((cont.x, cont.w), (0.0, 9.0));
+
+        // Past the wrapped tail there is nothing to click.
+        assert!(p.link_at(15.5, 1.5, w, h).is_none());
+    }
+
+    #[test]
+    fn a_path_wrapped_across_two_rows_stays_one_link() {
+        let dir = std::env::temp_dir().join(format!("hp_pane_wrap_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a-rather-long-file-name.txt");
+        std::fs::write(&file, b"hi").unwrap();
+        let abs = file.to_string_lossy().to_string();
+
+        // Narrow enough that the absolute path cannot fit on one row.
+        let cols = 24;
+        let rows = abs.len().div_ceil(cols) + 2;
+        let mut p = unit_pane(cols, rows);
+        p.feed(&abs);
+        let (w, h) = (cols as f32, rows as f32);
+
+        // The last row of the wrap: still the full path, still verified on disk.
+        let last = (abs.len() - 1) / cols;
+        let hit = p
+            .link_at(1.5, last as f32 + 0.5, w, h)
+            .expect("the wrapped tail should hit");
+        assert_eq!(hit.abs_path, abs);
+        assert!(!hit.is_url);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -412,7 +412,9 @@ fn write_discovery(shared: &Arc<Shared>) -> io::Result<()> {
     };
     let json = serde_json::to_string_pretty(&discovery)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    crate::persistence::paths::write_atomic(&shared.control_file, json.as_bytes())
+    // Owner-only: this file carries the MASTER token. Created 0600 before the bytes
+    // land, so no other local user ever gets a window to read it.
+    crate::persistence::paths::write_atomic_private(&shared.control_file, json.as_bytes())
 }
 
 /// Remove the discovery file (best-effort), so a stale `control.json` never points at a dead port.
@@ -489,12 +491,7 @@ fn master_token(shared: &Arc<Shared>) -> String {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = crate::persistence::paths::write_atomic(&path, token.as_bytes());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    let _ = crate::persistence::paths::write_atomic_private(&path, token.as_bytes());
     token
 }
 

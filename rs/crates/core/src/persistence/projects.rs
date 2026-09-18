@@ -88,12 +88,44 @@ pub fn canonical_path(p: &str) -> String {
     out
 }
 
+/// [`canonical_path`] plus SYMLINK RESOLUTION, when the path actually exists on disk.
+///
+/// Lexical normalisation alone is not enough to answer "are these the same project?" on
+/// macOS, where `/tmp` is a symlink to `/private/tmp` and `/var` to `/private/var`: opening
+/// a repo once by each spelling registered it twice, with two ids and two colours, and a
+/// pane sitting in one spelling never picked up the tint of the other. The same aliasing
+/// reaches Linux and Windows through ordinary user symlinks and junctions (a `~/code` that
+/// points at an external volume is the common one).
+///
+/// Falls back to the lexical form whenever the path does not resolve — a project whose
+/// directory has been deleted or unmounted still keys the way it always did, so it keeps
+/// matching its stored entry instead of splitting off a duplicate.
+fn resolved_path(p: &str) -> String {
+    let lexical = canonical_path(p);
+    let Ok(real) = std::fs::canonicalize(&lexical) else {
+        return lexical;
+    };
+    let real = real.to_string_lossy().into_owned();
+    // Windows hands back the `\\?\` extended-length form, which is a different string for
+    // the same directory and would defeat the very dedup this exists for. Strip it back to
+    // the plain form (`\\?\UNC\srv\share` → `\\srv\share`).
+    let real = match real.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_string(),
+        },
+        None => real,
+    };
+    canonical_path(&real)
+}
+
 /// Dedup key — case-insensitive on case-insensitive filesystems (Windows NTFS, macOS
-/// APFS). Public so callers matching a pane cwd's git root against a stored
+/// APFS), and symlink-resolved (see [`resolved_path`]). Public so callers matching a pane
+/// cwd's git root against a stored
 /// [`Project::path`] compare with the SAME key the store dedups by (e.g. the app's
 /// recolor-propagation).
 pub fn path_key(p: &str) -> String {
-    let c = canonical_path(p);
+    let c = resolved_path(p);
     if case_insensitive_fs() {
         c.to_lowercase()
     } else {
@@ -262,14 +294,17 @@ fn save_to(store: &Path, list: &[Project]) -> std::io::Result<()> {
 
 /// Remember a git root (or bump its recency if already known) in `store`.
 fn upsert_project_by_root_in(store: &Path, root: &str) -> Project {
-    let path = canonical_path(root);
+    // Resolved, not merely lexical: the stored path is what every later comparison and the
+    // colour hash are derived from, so an alias like `/tmp/x` must be recorded as the
+    // `/private/tmp/x` it really is or the two spellings become two projects.
+    let path = resolved_path(root);
     let key = path_key(&path);
     let mut list = load_from(store);
     let repo = git_repo_name(&path);
 
     if let Some(idx) = list.iter().position(|p| path_key(&p.path) == key) {
         list[idx].last_opened_at = Some(now_ms());
-        list[idx].path = path.clone(); // canonicalize a legacy-stored path
+        list[idx].path = path.clone(); // canonicalize + de-alias a legacy-stored path
                                        // Heal a folder-name title to the real repo name, but never a user rename.
         if let Some(r) = &repo {
             if list[idx].name == basename(&path) && &list[idx].name != r {
@@ -516,8 +551,10 @@ mod tests {
 
         let first = upsert_project_by_root_in(&store, &root);
         assert!(PROJECT_COLORS.contains(&first.color.as_str()));
-        assert_eq!(first.name, basename(&canonical_path(&root)));
-        assert_eq!(first.path, canonical_path(&root));
+        assert_eq!(first.name, basename(&resolved_path(&root)));
+        // The STORED path is symlink-resolved, not merely lexical: on macOS `std::env::temp_dir()`
+        // hands back `/var/folders/...`, which is really `/private/var/folders/...`.
+        assert_eq!(first.path, resolved_path(&root));
         assert!(first.last_opened_at.is_some());
 
         // A second upsert of the same root keeps a single, same-id entry.
@@ -530,6 +567,55 @@ mod tests {
 
         let _ = std::fs::remove_file(&store);
         let _ = std::fs::remove_dir_all(&root_dir);
+    }
+
+    /// Two spellings of ONE directory are ONE project. macOS reaches this the moment anybody
+    /// opens something under `/tmp` or `/var` (both are symlinks into `/private`), and every
+    /// platform reaches it through an ordinary user symlink. Before the key resolved symlinks
+    /// the aliases registered separately — two ids, two colours in the sidebar, and a pane
+    /// sitting in one spelling never tinted to the project stored under the other.
+    #[test]
+    fn a_symlinked_spelling_is_the_same_project() {
+        let store = unique_temp("symlink");
+        let base = std::env::temp_dir().join(format!(
+            "hp-projects-link-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("alias");
+
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&real, &link).is_ok();
+        // Windows needs Developer Mode or elevation to create a symlink; when it is denied
+        // there is nothing to assert, so the test passes vacuously rather than failing on
+        // the machine's policy.
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&real, &link).is_ok();
+
+        if linked {
+            let by_real = upsert_project_by_root_in(&store, &real.to_string_lossy());
+            let by_link = upsert_project_by_root_in(&store, &link.to_string_lossy());
+
+            assert_eq!(
+                by_real.id, by_link.id,
+                "the alias must land on the project already registered for the real directory"
+            );
+            assert_eq!(
+                by_real.color, by_link.color,
+                "one directory, one colour — the tint is hashed from the same resolved key"
+            );
+            assert_eq!(load_from(&store).len(), 1, "no duplicate entry");
+            // ...and the shared matcher agrees, which is what actually tints a pane.
+            assert_eq!(
+                path_key(&real.to_string_lossy()),
+                path_key(&link.to_string_lossy())
+            );
+        }
+
+        let _ = std::fs::remove_file(&store);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

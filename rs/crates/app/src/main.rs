@@ -394,6 +394,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return worker::run(&argv0);
     }
 
+    // Everything below that is a plain command line — `pair`, `devices`, `revoke` — writes
+    // its answer to stdout, and whoever asked is entitled to stop reading it:
+    // `hyperpanes devices | head -1` is an ordinary thing to type. Rust starts every process
+    // with SIGPIPE ignored so a closed pipe arrives as an `io::Error` rather than a signal, and
+    // `println!` has nowhere to put that error but a panic — so the most routine shell idiom
+    // there is ends in a backtrace and a crash dialog, for a condition every other Unix tool
+    // treats as "the reader has what it wanted". Restore the default disposition, but only for
+    // those modes: the GUI, the session daemon and the worker keep the ignore, because there a
+    // broken pipe is a thing to handle and dying on one would take live terminals with it.
+    if pipeable_cli(&argv0) {
+        restore_default_sigpipe();
+    }
+
     // `pair` mode: mint a per-device token, print mobile-app pairing URLs + a terminal QR, then
     // return without launching a GUI (docs/mobile-client-plan.md).
     if pair::wants_pair(&argv0) {
@@ -855,8 +868,68 @@ pub(crate) fn goal_key(field: usize, menu_open: bool, msg: &KeyMsg) -> Option<Co
     None
 }
 
+/// Whether this argv selects a command line whose whole job is to print an answer and exit —
+/// the modes where a closed stdout means the reader is satisfied, not that something broke.
+///
+/// One predicate rather than a check at each entry point, so the SIGPIPE decision is made in a
+/// single place and can be tested without spawning a process. Deliberately excludes the modes
+/// that outlive their output: the session daemon, the worker, and the GUI.
+fn pipeable_cli(argv: &[String]) -> bool {
+    pair::wants_pair(argv) || devices::wants_devices(argv) || devices::wants_revoke(argv)
+}
+
+/// Put SIGPIPE back to its default disposition, so writing to a closed pipe ends this process
+/// the way it ends `cat` or `ls` — silently, with the conventional status — instead of
+/// returning an error that `println!` escalates into a panic.
+#[cfg(unix)]
+fn restore_default_sigpipe() {
+    // SAFETY: `signal(2)` with `SIG_DFL` only writes this process's disposition for one
+    // signal. Called once, on the main thread, before any of these CLIs has written a byte.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// No-op off unix: there is no SIGPIPE, and a closed pipe already surfaces as an ordinary
+/// write error.
+#[cfg(not(unix))]
+fn restore_default_sigpipe() {}
+
 #[cfg(test)]
 mod tests {
+    // `hyperpanes devices | head -1` used to end in a panic and a crash dialog: Rust
+    // ignores SIGPIPE, so the closed pipe came back to `println!` as an error it could only
+    // panic on. The disposition is restored for the print-and-exit CLIs and nothing else —
+    // the daemon in particular must keep ignoring it, since a broken socket write there is a
+    // condition to handle and not a reason to take the user's terminals down.
+    #[test]
+    fn only_the_print_and_exit_command_lines_die_on_a_closed_pipe() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        for yes in [
+            vec!["hyperpanes", "pair"],
+            vec!["hyperpanes", "devices"],
+            vec!["hyperpanes", "revoke", "phone"],
+        ] {
+            assert!(
+                super::pipeable_cli(&argv(&yes)),
+                "{yes:?} is a pipeable CLI"
+            );
+        }
+
+        for no in [
+            vec!["hyperpanes"],
+            vec!["hyperpanes", "--session-daemon", "/tmp/salt"],
+            vec!["hyperpanes", "worker", "--queue", "q"],
+            vec!["hyperpanes", "--kill-daemon"],
+        ] {
+            assert!(
+                !super::pipeable_cli(&argv(&no)),
+                "{no:?} keeps SIGPIPE ignored"
+            );
+        }
+    }
+
     use super::*;
 
     fn msg(text: &str, ctrl: bool, alt: bool, shift: bool) -> KeyMsg {
