@@ -407,9 +407,23 @@ mod tests {
     }
 
     /// `jetbrains_font` at an arbitrary pixel size.
+    ///
+    /// The unit tests in a crate run as threads of one process, so every test calling this
+    /// races on the same path. It is written under a unique name and *renamed* into place:
+    /// rename is atomic, so a reader either opens the old inode or the new one, never a
+    /// half-written file. Writing the shared path directly made `bold_never_dims_a_glyph`
+    /// fail intermittently in the full suite while passing when run alone.
     fn font_at(px: f32) -> Font {
-        let p = std::env::temp_dir().join("hp-font-test-jbmono.ttf");
-        std::fs::write(&p, JETBRAINS_MONO).unwrap();
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir();
+        let p = dir.join("hp-font-test-jbmono.ttf");
+        let tmp = dir.join(format!(
+            "hp-font-test-jbmono.{}.{}.part",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&tmp, JETBRAINS_MONO).unwrap();
+        std::fs::rename(&tmp, &p).unwrap();
         Font::from_path(p.to_str().unwrap(), px).unwrap()
     }
 
