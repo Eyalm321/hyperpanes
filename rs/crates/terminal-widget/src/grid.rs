@@ -528,6 +528,93 @@ impl TermGrid {
             default_fg,
         }
     }
+
+    /// Like [`snapshot`](Self::snapshot), but reuses a caller-provided cell buffer to
+    /// avoid reallocating the viewport Vec on every render.
+    pub fn snapshot_into(&self, cells: &mut Vec<RenderCell>) -> GridSnapshot {
+        let cols = self.size.cols;
+        let rows = self.size.rows;
+        cells.clear();
+        cells.resize(cols * rows, RenderCell::default());
+        let default_fg = [
+            self.palette[7].r,
+            self.palette[7].g,
+            self.palette[7].b,
+            0xff,
+        ];
+        let default_bg = [
+            self.palette[0].r,
+            self.palette[0].g,
+            self.palette[0].b,
+            0xff,
+        ];
+
+        let content = self.term.renderable_content();
+        let display_offset = content.display_offset as i32;
+        for indexed in content.display_iter {
+            let point: Point = indexed.point;
+            let cell = indexed.cell;
+            let row = point.line.0 + display_offset;
+            if row < 0 || row as usize >= rows {
+                continue;
+            }
+            let row = row as usize;
+            let col = point.column.0;
+            if col >= cols {
+                continue;
+            }
+            let flags = cell.flags;
+            let mut fg = self.resolve(cell.fg, true);
+            let mut bg = self.resolve(cell.bg, false);
+            if matches!(cell.bg, AnsiColor::Named(NamedColor::Background)) {
+                bg = [0, 0, 0, 0];
+            }
+            if flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+                if bg[3] == 0 {
+                    bg = default_fg;
+                }
+                if fg[3] == 0 {
+                    fg = default_bg;
+                }
+            }
+            if flags.contains(Flags::DIM) {
+                let towards = if bg[3] > 0 { bg } else { default_bg };
+                fg = dim_blend(fg, towards);
+            }
+            let rc = RenderCell {
+                ch: cell.c,
+                fg,
+                bg,
+                bold: flags.contains(Flags::BOLD),
+                italic: flags.contains(Flags::ITALIC),
+                underline: flags.contains(Flags::UNDERLINE)
+                    || flags.contains(Flags::DOUBLE_UNDERLINE),
+                wide: flags.contains(Flags::WIDE_CHAR),
+                wide_spacer: flags.contains(Flags::WIDE_CHAR_SPACER),
+            };
+            cells[row * cols + col] = rc;
+        }
+
+        let cpoint = content.cursor.point;
+        let crow = cpoint.line.0 + display_offset;
+        let cursor_visible = crow >= 0 && (crow as usize) < rows && (cpoint.column.0) < cols;
+        let cursor = if cursor_visible {
+            (cpoint.column.0, crow as usize)
+        } else {
+            (0, 0)
+        };
+
+        GridSnapshot {
+            cols,
+            rows,
+            cells: std::mem::take(cells),
+            cursor,
+            cursor_visible,
+            default_bg,
+            default_fg,
+        }
+    }
 }
 
 /// SGR 2 (faint/dim) colour: blend `fg` 55% toward `bg` — the common terminal approach

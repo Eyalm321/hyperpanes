@@ -163,19 +163,19 @@ impl PaneRenderer for SoftwareRenderer {
                     }
                 }
 
-                // Glyph.
+                // Glyph. A wide (CJK) glyph is centered in its 2-cell span via the layout
+                // layer (T1.5) — never left-beam-clamped.
                 if cell.ch != ' ' && cell.ch != '\0' {
                     let (font_id, gid) = font.resolve(cell.ch);
                     let ascent = font.ascent;
-                    let g = font
-                        .rasterize(GlyphKey {
-                            font_id,
-                            gid,
-                            bold: cell.bold,
-                            italic: cell.italic,
-                        })
-                        .clone();
-                    blit_glyph(px, w, h, stride, &g, x0, y0, ascent, cell.fg);
+                    let g = font.rasterize(GlyphKey {
+                        font_id,
+                        gid,
+                        bold: cell.bold,
+                        italic: cell.italic,
+                    });
+                    let gx = crate::layout::pen_x(x0, cw, cell.wide, g.w, g.left);
+                    blit_glyph(px, w, h, stride, g, gx, y0, ascent, cell.fg);
                 }
 
                 // Underline. Compute in i32 (a negative ascent must not wrap to a huge u32)
@@ -235,19 +235,19 @@ impl PaneRenderer for SoftwareRenderer {
                 }
             }
 
-            // 2) Redraw the glyph over the block in `under` so it inverts cleanly.
+            // 2) Redraw the glyph over the block in `under` so it inverts cleanly. A wide
+            //    glyph is centered in its 2-cell span (same layout call as the normal pass).
             if cell.ch != ' ' && cell.ch != '\0' {
                 let (font_id, gid) = font.resolve(cell.ch);
                 let ascent = font.ascent;
-                let g = font
-                    .rasterize(GlyphKey {
-                        font_id,
-                        gid,
-                        bold: cell.bold,
-                        italic: cell.italic,
-                    })
-                    .clone();
-                blit_glyph(px, w, h, stride, &g, x0, y0, ascent, under);
+                let g = font.rasterize(GlyphKey {
+                    font_id,
+                    gid,
+                    bold: cell.bold,
+                    italic: cell.italic,
+                });
+                let gx = crate::layout::pen_x(x0, cw, cell.wide, g.w, g.left);
+                blit_glyph(px, w, h, stride, g, gx, y0, ascent, under);
             }
         }
 
@@ -259,6 +259,7 @@ impl PaneRenderer for SoftwareRenderer {
 // GPU renderer
 // =================================================================================
 
+#[cfg(feature = "gpu")]
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -266,6 +267,7 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
+#[cfg(feature = "gpu")]
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BgInstance {
@@ -273,6 +275,7 @@ struct BgInstance {
     color: [f32; 4],
 }
 
+#[cfg(feature = "gpu")]
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlyphInstance {
@@ -281,8 +284,10 @@ struct GlyphInstance {
     color: [f32; 4],
 }
 
+#[cfg(feature = "gpu")]
 const ATLAS: u32 = 2048;
 
+#[cfg(feature = "gpu")]
 struct AtlasEntry {
     uv: [f32; 4], // normalized x,y,w,h
     w: u32,
@@ -291,6 +296,7 @@ struct AtlasEntry {
     top: i32,
 }
 
+#[cfg(feature = "gpu")]
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -323,6 +329,7 @@ pub struct GpuRenderer {
     last_image: Option<Image>,
 }
 
+#[cfg(feature = "gpu")]
 impl GpuRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -612,6 +619,8 @@ impl GpuRenderer {
     }
 }
 
+#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu")]
 impl GpuRenderer {
     /// Do the GPU work (build instances, upload, draw into the per-pane target, submit).
     /// Separated from the Slint import so the benchmark can time pure render throughput.
@@ -694,7 +703,11 @@ impl GpuRenderer {
                     self.ensure_glyph(font, key);
                     if let Some(e) = self.atlas_map.get(&key) {
                         if e.w > 0 {
-                            let gx = x0 + e.left as f32;
+                            // Center a wide (CJK) glyph in its 2-cell span (T1.5 layout).
+                            let gx =
+                                crate::layout::pen_x(col as u32 * cw, cw, cell.wide, e.w, e.left)
+                                    as f32
+                                    + e.left as f32;
                             let gy = y0 + font.ascent as f32 - e.top as f32;
                             glyphs.push(GlyphInstance {
                                 rect: [gx, gy, e.w as f32, e.h as f32],
@@ -820,6 +833,7 @@ impl GpuRenderer {
     }
 }
 
+#[cfg(feature = "gpu")]
 impl PaneRenderer for GpuRenderer {
     fn name(&self) -> &'static str {
         "gpu (swash atlas → wgpu texture → slint Image)"
@@ -845,6 +859,7 @@ impl PaneRenderer for GpuRenderer {
     }
 }
 
+#[cfg(feature = "gpu")]
 const SHADER: &str = r#"
 struct U { screen: vec2<f32>, pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> u: U;

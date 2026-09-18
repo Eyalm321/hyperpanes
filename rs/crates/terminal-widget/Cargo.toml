@@ -24,14 +24,11 @@ hyperpanes-core = { path = "../core" }
 slint = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae", default-features = false, features = [
     "std",
     "backend-default",
-    "renderer-femtovg",
     "renderer-software",
     "compat-1-2",
-    "unstable-wgpu-29",
-    "renderer-femtovg-wgpu",
 ] }
 # wgpu MUST match the version Slint links (29) so the Texture types are identical.
-wgpu = "29"
+wgpu = { version = "29", optional = true }
 
 # Terminal model + VTE parser + damage tracking (same version as core — no type clash,
 # we never pass alacritty types across the core boundary).
@@ -39,9 +36,9 @@ alacritty_terminal = "0.26"
 # Glyph rasterization (coverage masks).
 swash = "0.2"
 # Glyph-atlas shelf packer (GPU path).
-etagere = "0.2"
+etagere = { version = "0.2", optional = true }
 # Plain-old-data casts for instance/vertex buffers.
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive"], optional = true }
 anyhow = "1.0.102"
 
 # System clipboard for copy-on-select / right-click paste (matches the Electron behavior).
@@ -67,3 +64,29 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+# ---------------------------------------------------------------------------
+# Feature gating
+# ---------------------------------------------------------------------------
+# Default build is **software-only** (no GPU stack compiled). The heavy wgpu 29
+# + femtovg + etagere/bytemuck atlas path is only pulled in when the `gpu`
+# feature is enabled — that is the T1.4 GPU renderer wiring (`GpuRenderer` ->
+# `slint::Image` via a shared wgpu device). `native` (current phase) depends on
+# this crate WITHOUT `gpu`, so its build skips the entire GPU stack while keeping
+# `SoftwareRenderer` / `PaneRenderer` / `RenderOpts`.
+[features]
+default = []
+gpu = [
+    "slint/renderer-femtovg",
+    "slint/renderer-femtovg-wgpu",
+    "slint/unstable-wgpu-29",
+    "dep:wgpu",
+    "dep:etagere",
+    "dep:bytemuck",
+]
+
+# The demo showcases BOTH renderers and therefore needs the `gpu` feature.
+[[bin]]
+name = "demo"
+path = "src/bin/demo.rs"
+required-features = ["gpu"]

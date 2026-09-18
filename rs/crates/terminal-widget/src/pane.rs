@@ -48,6 +48,8 @@ const DRAG_THRESHOLD_PX: f32 = 4.0;
 pub struct TerminalPane {
     grid: TermGrid,
     renderer: Box<dyn PaneRenderer>,
+    /// Reusable snapshot cell buffer, avoiding a per-frame Vec allocation.
+    snapshot_cells: Vec<crate::grid::RenderCell>,
     /// This pane's working directory, used to resolve relative path tokens (the renderer-side
     /// half of `core::paths`). `None` falls back to the home dir, matching the pty start dir.
     cwd: Option<String>,
@@ -209,6 +211,7 @@ impl TerminalPane {
         Self {
             grid: TermGrid::new(cols, rows),
             renderer,
+            snapshot_cells: Vec::new(),
             cwd: None,
             verified: HashMap::new(),
             selection: None,
@@ -257,8 +260,11 @@ impl TerminalPane {
     /// caches its buffers/atlas — but gate it on [`take_dirty`](Self::take_dirty) plus the
     /// cursor blink for minimal CPU.
     pub fn render(&mut self, font: &mut Font, opts: &RenderOpts) -> Image {
-        let snap = self.grid.snapshot();
-        self.renderer.render(&snap, font, opts)
+        let mut snap = self.grid.snapshot_into(&mut self.snapshot_cells);
+        let image = self.renderer.render(&snap, font, opts);
+        // Keep the backing allocation for reuse on the next frame.
+        self.snapshot_cells = std::mem::take(&mut snap.cells);
+        image
     }
 
     /// Current grid size in `(cols, rows)`.
