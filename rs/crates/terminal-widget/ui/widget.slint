@@ -230,7 +230,10 @@ export component TerminalPane inherits Rectangle {
     // Bumped when a keyboard-driven overlay (the New-goal box) opens: re-focus the terminal
     // FocusScope so its `key-pressed` routes keys to `on_key` (and thence to the overlay's
     // controller-owned-mirror handler). Skipped while the in-pane search box owns the keyboard.
-    changed refocus-tick => { if (!root.search-open) { fs.focus(); } }
+    // `!fs.has-focus` guard: focusing a FocusScope that already holds focus is a no-op we do
+    // not need, and re-entering focus() from inside a `changed` handler is the shape that
+    // recurses (see the pointer handlers below).
+    changed refocus-tick => { if (!root.search-open && !fs.has-focus) { fs.focus(); } }
 
     // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
     //
@@ -273,7 +276,9 @@ export component TerminalPane inherits Rectangle {
             if (root.app-grabs-mouse && !e.modifiers.shift) {
                 if (e.kind == PointerEventKind.down) {
                     root.focus-requested();
-                    fs.focus();
+                    // Guarded: a pointer-down that lands on the ALREADY-focused pane must not
+                    // call focus() again from inside the pointer-event dispatch stack.
+                    if (!fs.has-focus) { fs.focus(); }
                     root.held-button = e.button == PointerEventButton.left ? 0
                                      : e.button == PointerEventButton.middle ? 1 : 2;
                     root.pointer-report(0, root.held-button, self.mouse-x, self.mouse-y);
@@ -303,7 +308,9 @@ export component TerminalPane inherits Rectangle {
                     // both app-side (focus-requested) and Slint-side (fs.focus(); fs itself has
                     // focus-on-click off so it can't swallow the press).
                     root.focus-requested();
-                    fs.focus();
+                    // Guarded: a pointer-down that lands on the ALREADY-focused pane must not
+                    // call focus() again from inside the pointer-event dispatch stack.
+                    if (!fs.has-focus) { fs.focus(); }
                     if (e.button == PointerEventButton.left) {
                         root.selection-begin(self.mouse-x, self.mouse-y);
                     } else if (e.button == PointerEventButton.right) {
