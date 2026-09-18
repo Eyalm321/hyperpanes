@@ -81,6 +81,11 @@ pub struct WorkerArgs {
 struct Discovery {
     port: u16,
     token: String,
+    /// Written only when the app binds a SPECIFIC address (mobile-client remote access);
+    /// omitted for the default loopback bind. When present it is the only address the
+    /// server listens on, so the worker must dial it rather than loopback.
+    #[serde(rename = "bindAddress", default)]
+    bind_address: Option<String>,
 }
 
 /// Only the task fields the worker uses (control API serializes camelCase).
@@ -291,6 +296,16 @@ fn load_discovery() -> Result<Discovery, Box<dyn Error>> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// Base URL the worker dials for the control API.
+///
+/// Honours a specific `bindAddress`: that is a single-socket bind, so loopback is NOT
+/// listening and every claim fails with ConnectionRefused — the worker then exits before
+/// claiming, which from the outside looks like an empty queue rather than a config fault.
+/// An unspecified (`0.0.0.0`/`::`) or absent bind does listen on loopback, so prefer it.
+fn control_base(disco: &Discovery) -> String {
+    crate::control_cli::base_url(disco.port, disco.bind_address.as_deref())
+}
+
 /// Entry point from `main`. Drains `--queue` until empty, then returns `Ok(())`.
 pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     let args = match parse_args(argv) {
@@ -303,7 +318,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     };
 
     let disco = load_discovery()?;
-    let base = format!("http://127.0.0.1:{}", disco.port);
+    let base = control_base(&disco);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
@@ -1018,6 +1033,50 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The worker dials whatever `control.json` says the server bound to. A specific
+    /// `bindAddress` is a single-socket bind, so loopback is NOT listening: hardcoding
+    /// 127.0.0.1 made every claim fail with ConnectionRefused and the worker exit before
+    /// claiming — indistinguishable from an empty queue.
+    fn base_from_control_json(json: &str) -> String {
+        let d: Discovery = serde_json::from_str(json).expect("control.json parses");
+        // Calls the PRODUCTION helper `run()` uses, so reverting that line turns these red.
+        control_base(&d)
+    }
+
+    #[test]
+    fn dials_a_specific_bind_address_not_loopback() {
+        assert_eq!(
+            base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"100.120.216.17"}"#),
+            "http://100.120.216.17:41419"
+        );
+    }
+
+    #[test]
+    fn brackets_a_specific_ipv6_bind_address() {
+        assert_eq!(
+            base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"fd7a::1"}"#),
+            "http://[fd7a::1]:41419"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_loopback_when_bind_address_is_absent_or_unspecified() {
+        // Legacy control.json (no bindAddress at all) must keep working.
+        assert_eq!(
+            base_from_control_json(r#"{"port":41419,"token":"t"}"#),
+            "http://127.0.0.1:41419"
+        );
+        // An unspecified bind DOES listen on loopback, so prefer it.
+        assert_eq!(
+            base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"0.0.0.0"}"#),
+            "http://127.0.0.1:41419"
+        );
+        assert_eq!(
+            base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"::"}"#),
+            "http://127.0.0.1:41419"
+        );
     }
 
     #[test]
