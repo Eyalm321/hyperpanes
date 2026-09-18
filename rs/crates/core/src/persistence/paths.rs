@@ -461,9 +461,14 @@ mod tests {
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
         write_atomic_private(&target, b"{\"token\":\"x\"}").unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "private write must not inherit the old inode's mode");
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"token\":\"x\"}");
+        assert_eq!(
+            mode, 0o600,
+            "private write must not inherit the old inode's mode"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"token\":\"x\"}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
-
 }

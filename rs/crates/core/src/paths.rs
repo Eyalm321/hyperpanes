@@ -554,7 +554,14 @@ mod tests {
         );
         // Zero-config VS Code carries the line:col jump.
         assert_eq!(
-            plan_open(false, "/x/y.ts", Some(9), Some(4), "", Some("/usr/bin/code")),
+            plan_open(
+                false,
+                "/x/y.ts",
+                Some(9),
+                Some(4),
+                "",
+                Some("/usr/bin/code")
+            ),
             OpenPlan::VsCode {
                 target: "/x/y.ts:9:4".into()
             }

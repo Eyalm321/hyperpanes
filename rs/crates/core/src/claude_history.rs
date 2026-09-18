@@ -919,7 +919,10 @@ mod tests {
         // Nor are the envelopes searchable: `/clear` would otherwise match every session
         // that ever cleared its context.
         assert!(!full_text.contains("caveat"), "full text: {full_text}");
-        assert!(!full_text.contains("command-name"), "full text: {full_text}");
+        assert!(
+            !full_text.contains("command-name"),
+            "full text: {full_text}"
+        );
         assert!(full_text.contains("flaky drop-target"));
         // The count is of *records*, not of human turns, so it is unaffected.
         assert_eq!(count, 3);
