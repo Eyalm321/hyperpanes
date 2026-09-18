@@ -34,6 +34,9 @@ _mw2_win*.png
 # Claude Code transient scheduler lock
 .claude/scheduled_tasks.lock
 
+# Claude Code headroom-wrap state (per-checkout marker/owners/lock, not shared config)
+.claude/.headroom_wrap_*
+
 # packaging artifacts (AppImage/dmg staging)
 rs/packaging/out/
 .tokensave
