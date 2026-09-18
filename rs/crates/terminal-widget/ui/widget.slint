@@ -82,9 +82,17 @@ component SearchBtn inherits Rectangle {
 }
 
 export component TerminalPane inherits Rectangle {
+    accessible-role: text;
+    accessible-label: root.title;
+    accessible-value: root.a11y-text;
+    accessible-read-only: true;
     // --- inputs (the controller / parent layout drive these) ---
     in property <image> surface;
     in property <string> title: "";
+    // What assistive tech reads instead of the rendered pixels: the terminal
+    // screen as text. The grid is drawn to a texture, so without this the pane
+    // is a blank rectangle to AT-SPI.
+    in property <string> a11y-text: "";
     in property <color> accent: #7aa2f7;
     in property <bool> chrome: true;
 

@@ -196,6 +196,28 @@ fn replay_cursor_pos(_app: &AppWindow, _link_active: bool) {}
 /// Build a model row for pane `i`. `editing` flags the pane whose label is being renamed
 /// inline; `show_frame`/`show_dot` are the GLOBAL Appearance prefs, folded here over each
 /// pane's per-pane override (a clean new pane resolves OFF, a git-project pane ON).
+/// Whether an assistive client is listening. The terminal grid is drawn to a texture, so AT-SPI
+/// sees an empty rectangle unless we hand it the screen as text — but extracting that text on
+/// every model rebuild is wasted work when nobody is reading it. Checking once per process is
+/// enough to decide: AccessKit only builds a tree after a client connects anyway.
+fn a11y_wanted() -> bool {
+    use std::sync::OnceLock;
+    static WANTED: OnceLock<bool> = OnceLock::new();
+    *WANTED.get_or_init(|| {
+        if std::env::var("HYPERPANES_A11Y").is_ok_and(|v| v == "1") {
+            return true;
+        }
+        if std::env::var("NO_AT_BRIDGE").is_ok_and(|v| v == "1") {
+            return false;
+        }
+        std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "toolkit-accessibility"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false)
+    })
+}
+
 fn pane_item(
     ps: &PaneState,
     focused: bool,
@@ -265,6 +287,12 @@ fn pane_item(
     PaneItem {
         surface: ps.surface.clone(),
         title: ps.title.clone(),
+        // The pane's visible text for AT-SPI; empty (and free) when nothing is listening.
+        a11y_text: if a11y_wanted() {
+            ps.pane.screen_text().into()
+        } else {
+            SharedString::new()
+        },
         subtitle: ps.subtitle.clone().unwrap_or_default(),
         ai_subtitle,
         // The cached shell-type badge (computed once at pane creation; "" → not shown).
