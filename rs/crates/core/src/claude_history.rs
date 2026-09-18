@@ -913,16 +913,16 @@ mod tests {
         )
         .unwrap();
 
-        let p = summarize_file(&path);
-        assert_eq!(p.first_user, "fix the flaky drop-target test");
-        assert_eq!(p.summary, "fix the flaky drop-target test");
+        let (summary, first_user, full_text, count) = summarize_file(&path);
+        assert_eq!(first_user, "fix the flaky drop-target test");
+        assert_eq!(summary, "fix the flaky drop-target test");
         // Nor are the envelopes searchable: `/clear` would otherwise match every session
         // that ever cleared its context.
-        assert!(!p.full_text.contains("caveat"), "full text: {}", p.full_text);
-        assert!(!p.full_text.contains("command-name"), "full text: {}", p.full_text);
-        assert!(p.full_text.contains("flaky drop-target"));
+        assert!(!full_text.contains("caveat"), "full text: {full_text}");
+        assert!(!full_text.contains("command-name"), "full text: {full_text}");
+        assert!(full_text.contains("flaky drop-target"));
         // The count is of *records*, not of human turns, so it is unaffected.
-        assert_eq!(p.message_count, 3);
+        assert_eq!(count, 3);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
