@@ -304,43 +304,143 @@ fn write_goals_mcp_config() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Build the contents of `goals-settings.json`: a minimal Claude settings blob carrying just
-/// the user's `statusLine`. Spawned agents rotate `CLAUDE_CONFIG_DIR` across per-account dirs
-/// whose `settings.json` has no `statusLine` (it lives only in the default `~/.claude`), so
-/// without this they show Claude's built-in default statusline instead of the user's.
-fn goals_settings_json(status_line: &serde_json::Value) -> String {
-    serde_json::json!({ "statusLine": status_line }).to_string()
+/// Build a Claude Code session name (`claude --name <this>`) for a goal-org agent.
+///
+/// Claude Code's `@`-mention typeahead takes letters, digits, hyphens and underscores unquoted;
+/// anything else has to be written `@"like this"`, which no agent will get right reliably. So the
+/// project part is folded to that alphabet, runs of separators collapse to one hyphen, and the
+/// result is capped — a name is an address, not a description.
+///
+/// An empty or fully-unmappable project yields just `prefix`, which is still a valid name.
+fn goal_session_name(prefix: &str, project: &str) -> String {
+    const MAX_PROJECT: usize = 24;
+    let mut out = String::with_capacity(prefix.len() + 1 + MAX_PROJECT);
+    out.push_str(prefix);
+    let mut wrote_sep = false;
+    let mut written = 0usize;
+    for ch in project.chars() {
+        if written >= MAX_PROJECT {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            if !wrote_sep && written == 0 {
+                out.push('-');
+                wrote_sep = true;
+            }
+            out.push(ch.to_ascii_lowercase());
+            written += 1;
+        } else if written > 0 && !out.ends_with('-') {
+            out.push('-');
+            written += 1;
+        }
+    }
+    // A trailing separator is legal but reads badly in `/list-agents`.
+    while out.ends_with('-') && out.len() > prefix.len() {
+        out.pop();
+    }
+    out
 }
 
-/// Write `goals-settings.json` for a spawned `claude --settings <this file>`, mirroring the
-/// user's `statusLine` from `~/.claude/settings.json` (the config a manual, no-`CLAUDE_CONFIG_DIR`
-/// launch reads). Returns `None` — and the caller omits `--settings` — when there's no
-/// statusLine to carry or the copy fails; a settings hiccup must never block a goal spawn.
-fn write_goals_settings_config() -> Option<std::path::PathBuf> {
+/// Which tier of the goal org a settings blob is for. The tiers differ in exactly one thing:
+/// whether the agent may use Claude Code's cross-session messaging tools.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GoalTier {
+    /// Orchestrator and spec agents. They coordinate across panes, so they keep the tools.
+    Coordinator,
+    /// Impl workers. They consult their advisor over the SCOPED control-plane bus instead.
+    Worker,
+}
+
+/// Build the contents of a goal settings blob.
+///
+/// Carries three things, and each is load-bearing for an unattended pane:
+///
+/// * `statusLine` (when the user has one) — spawned agents rotate `CLAUDE_CONFIG_DIR` across
+///   per-account dirs whose `settings.json` has no `statusLine` (it lives only in the default
+///   `~/.claude`), so without this they show Claude's built-in statusline instead of the user's.
+/// * `crossSessionInbound: "accept"` — every goal pane runs `--dangerously-skip-permissions`,
+///   which puts it in Claude Code's bypass-permissions class. The inbound DEFAULT for that class
+///   HOLDS every message whose sender is not also bypassing, behind an approval dialog. Nobody is
+///   watching an unattended pane, and a `claude -p` worker cannot show a dialog at all — it just
+///   expires after `dialogExpiry` (5 min default) and the sender is told it lapsed. Opting in is
+///   what makes agent-to-agent messaging reach a goal pane at all.
+/// * `permissions.deny` on the worker tier — see [`GoalTier::Worker`] below.
+///
+/// Deliberately nothing else: no model / effort / outputStyle keys leak in from the user's
+/// settings, so a goal pane's behaviour is a function of its persona and flags, not of whatever
+/// the user last toggled.
+fn goals_settings_json(status_line: Option<&serde_json::Value>, tier: GoalTier) -> String {
+    let mut root = serde_json::Map::new();
+    if let Some(status_line) = status_line {
+        root.insert("statusLine".to_string(), status_line.clone());
+    }
+    root.insert(
+        "crossSessionInbound".to_string(),
+        serde_json::Value::String("accept".to_string()),
+    );
+    if tier == GoalTier::Worker {
+        // `SendMessage` and `ListAgents` carry NO scope: any session of this OS user can
+        // enumerate and message any other, including sessions belonging to unrelated projects.
+        // The control plane's capability scoping (scoped tokens, scope-filtered /state and
+        // /events, control-file suppression in `session::spawn::build_env`) exists precisely so a
+        // worker cannot reach its siblings, and handing it an unscoped side channel would undo
+        // that. Workers keep talking to their advisor through the scoped bus (`send_message` to
+        // the `advisor=<spec paneId>` stamped on their task payload), so they lose nothing.
+        root.insert(
+            "permissions".to_string(),
+            serde_json::json!({ "deny": ["SendMessage", "ListAgents"] }),
+        );
+    }
+    serde_json::Value::Object(root).to_string()
+}
+
+/// The user's `statusLine` from `~/.claude/settings.json`, when they have one.
+fn user_status_line() -> Option<serde_json::Value> {
     let home = std::env::var_os("HOME")?;
     let src = std::path::Path::new(&home)
         .join(".claude")
         .join("settings.json");
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(src).ok()?).ok()?;
-    let status_line = parsed.get("statusLine").filter(|v| !v.is_null())?;
-    let json = goals_settings_json(status_line);
-    let path = hyperpanes_core::persistence::paths::state_dir().join("goals-settings.json");
+    parsed.get("statusLine").filter(|v| !v.is_null()).cloned()
+}
+
+/// Write a goal settings file for a spawned `claude --settings <this file>`.
+///
+/// Written UNCONDITIONALLY, unlike the original statusLine-only version: `crossSessionInbound`
+/// has to reach the pane whether or not the user happens to have a `statusLine`, and the old
+/// early-return meant a user without one got no `--settings` flag at all and therefore no way to
+/// opt an unattended pane into receiving messages. A missing statusLine now just omits that one
+/// key. Returns `None` — and the caller omits `--settings` — only when the write itself fails; a
+/// settings hiccup must never block a goal spawn.
+fn write_goals_settings_file(file_name: &str, tier: GoalTier) -> Option<std::path::PathBuf> {
+    let json = goals_settings_json(user_status_line().as_ref(), tier);
+    let path = hyperpanes_core::persistence::paths::state_dir().join(file_name);
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("[goals] failed to create state dir for goals-settings.json: {e}; spawning without --settings");
+            eprintln!("[goals] failed to create state dir for {file_name}: {e}; spawning without --settings");
             return None;
         }
     }
     match std::fs::write(&path, json) {
         Ok(()) => Some(path),
         Err(e) => {
-            eprintln!(
-                "[goals] failed to write goals-settings.json: {e}; spawning without --settings"
-            );
+            eprintln!("[goals] failed to write {file_name}: {e}; spawning without --settings");
             None
         }
     }
+}
+
+/// Settings for the orchestrator and spec tiers: statusLine, inbound messages accepted, and the
+/// cross-session messaging tools left available so they can coordinate.
+fn write_goals_settings_config() -> Option<std::path::PathBuf> {
+    write_goals_settings_file("goals-settings.json", GoalTier::Coordinator)
+}
+
+/// Settings for impl workers: as above, but with `SendMessage` / `ListAgents` denied so an
+/// unscoped side channel cannot bypass the control plane's capability scoping.
+fn write_goals_worker_settings_config() -> Option<std::path::PathBuf> {
+    write_goals_settings_file("goals-worker-settings.json", GoalTier::Worker)
 }
 
 #[cfg(test)]
@@ -358,20 +458,91 @@ mod goals_mcp_config_tests {
         assert!(json.contains("hyperpanes"));
     }
 
+    fn status_line() -> serde_json::Value {
+        serde_json::json!({ "type": "command", "command": "~/.claude/statusline-tee.sh" })
+    }
+
     #[test]
-    fn settings_json_wraps_status_line_only() {
-        let status_line = serde_json::json!({
-            "type": "command",
-            "command": "~/.claude/statusline-tee.sh",
-        });
-        let json = super::goals_settings_json(&status_line);
+    fn settings_json_carries_status_line_and_nothing_behavioural() {
+        let sl = status_line();
+        let json = super::goals_settings_json(Some(&sl), super::GoalTier::Coordinator);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        // Only statusLine is carried — no behavior keys (model/effort/outputStyle) leak in.
-        assert_eq!(
-            parsed.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["statusLine"]
+        assert_eq!(parsed["statusLine"], sl);
+        // No behaviour keys (model/effort/outputStyle) leak in from the user's settings.
+        let mut keys = parsed
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, vec!["crossSessionInbound", "statusLine"]);
+    }
+
+    /// The whole point of writing the file unconditionally: a user with no statusLine still needs
+    /// `crossSessionInbound`, and the old code returned None here so the pane got no --settings.
+    #[test]
+    fn settings_json_without_a_status_line_still_opts_into_messages() {
+        let json = super::goals_settings_json(None, super::GoalTier::Coordinator);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("statusLine").is_none());
+        assert_eq!(parsed["crossSessionInbound"], "accept");
+    }
+
+    /// A goal pane runs --dangerously-skip-permissions; without this key the bypass-class inbound
+    /// DEFAULT holds every message from a non-bypassing sender behind a dialog nobody answers.
+    #[test]
+    fn every_tier_accepts_inbound_messages() {
+        for tier in [super::GoalTier::Coordinator, super::GoalTier::Worker] {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&super::goals_settings_json(None, tier)).unwrap();
+            assert_eq!(parsed["crossSessionInbound"], "accept", "tier {tier:?}");
+        }
+    }
+
+    /// SendMessage/ListAgents are unscoped — a worker holding them could enumerate and message
+    /// every session of this OS user, straight around the control plane's capability scoping.
+    #[test]
+    fn only_the_worker_tier_is_denied_the_messaging_tools() {
+        let worker: serde_json::Value =
+            serde_json::from_str(&super::goals_settings_json(None, super::GoalTier::Worker))
+                .unwrap();
+        let denied = worker["permissions"]["deny"].as_array().unwrap();
+        assert!(denied.iter().any(|v| v == "SendMessage"));
+        assert!(denied.iter().any(|v| v == "ListAgents"));
+
+        let coord: serde_json::Value = serde_json::from_str(&super::goals_settings_json(
+            None,
+            super::GoalTier::Coordinator,
+        ))
+        .unwrap();
+        assert!(
+            coord.get("permissions").is_none(),
+            "coordinators keep the tools — they are what coordinates across panes"
         );
-        assert_eq!(parsed["statusLine"], status_line);
+    }
+
+    #[test]
+    fn session_names_are_mentionable_without_quoting() {
+        // `@`-mention typeahead takes [A-Za-z0-9_-] unquoted; everything else must fold away.
+        assert_eq!(
+            super::goal_session_name("goals", "hyperpanes"),
+            "goals-hyperpanes"
+        );
+        assert_eq!(
+            super::goal_session_name("goals", "My Project!"),
+            "goals-my-project"
+        );
+        assert_eq!(super::goal_session_name("goals", "a/b\\c"), "goals-a-b-c");
+        // Nothing mappable, or nothing at all, still leaves a usable name.
+        assert_eq!(super::goal_session_name("goals", ""), "goals");
+        assert_eq!(super::goal_session_name("goals", "///"), "goals");
+        // Long project names are capped — a name is an address, not a description.
+        let long = super::goal_session_name("goals", &"x".repeat(80));
+        assert!(long.len() <= "goals-".len() + 24, "got {long}");
+        assert!(long
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 }
 
@@ -3121,6 +3292,14 @@ impl State {
             "claude --dangerously-skip-permissions --append-system-prompt-file {} --model {orch_model}",
             persona.display()
         );
+        // Give the session a stable, addressable name. Claude Code otherwise derives one from the
+        // cwd basename, so every agent in a goal org — orchestrator, spec, and up to 16 impl
+        // workers, often in the SAME worktree — ends up as `<project>-<2 hex chars>`, which is
+        // useless both to an agent picking a `SendMessage` target and to a human reading
+        // `/list-agents`. One orchestrator exists per project (find-or-spawn on
+        // `self.goal_orchestrators`), so `goals-<project>` is unique by construction.
+        let session_name = goal_session_name("goals", &proj_name);
+        command.push_str(&format!(" --name {session_name}"));
         // Account rotation hides the user-scoped hyperpanes MCP registration (it only lives in
         // the default `~/.claude.json`), so hand every spawned claude an explicit config that
         // re-registers it. Best-effort: a write failure just drops the flag, not the spawn.
@@ -3160,6 +3339,16 @@ impl State {
             env.insert(
                 "HP_GOAL_SETTINGS".to_string(),
                 settings_path.to_string_lossy().into_owned(),
+            );
+        }
+        // Impl workers get a STRICTER settings file than the tier that spawns them: same
+        // statusLine and inbound-accept, but `SendMessage`/`ListAgents` denied. The spec persona
+        // passes this to `spawn_workers`; see `goals_settings_json`'s GoalTier::Worker arm for
+        // why an unscoped messaging channel must not reach a scoped worker.
+        if let Some(worker_settings) = write_goals_worker_settings_config() {
+            env.insert(
+                "HP_GOAL_WORKER_SETTINGS".to_string(),
+                worker_settings.to_string_lossy().into_owned(),
             );
         }
         env.insert(
@@ -3216,6 +3405,7 @@ impl State {
         for key in [
             "HP_GOAL_PERSONA_DIR",
             "HP_GOAL_SETTINGS",
+            "HP_GOAL_WORKER_SETTINGS",
             "HP_GOAL_ACCOUNTS",
         ] {
             if let Some(val) = env.get(key) {

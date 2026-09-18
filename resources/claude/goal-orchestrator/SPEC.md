@@ -57,8 +57,8 @@ prompt wedges the pane).
   project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
   split on newlines>, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config
   <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
-  --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_SETTINGS:+--settings
-  $HP_GOAL_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+  --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings
+  $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
   — **keep the visibility trio**: `stream:true` + `--output-format stream-json --verbose` makes the
   impl agent's turn readable in its pane (a bare `claude -p` prints nothing until it exits, so the
   pane looks dead for the whole build), and `lingerSecs` holds the pane open after the queue drains
@@ -68,7 +68,14 @@ prompt wedges the pane).
   `count:N` = N readable panes; `layout:"single-pane"` multiplexes them into one if you'd rather.
   The `--mcp-config` flag is required (see `SKILL.md` "MCP config on every spawned claude");
   without it, account rotation hides `mcp__hyperpanes__*` tools from the impl agent.
-  `${HP_GOAL_SETTINGS:+--settings $HP_GOAL_SETTINGS}` likewise carries the user's statusline
+  `${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS}` likewise carries the user's statusline
+  — note this is the **worker** settings file, NOT the `$HP_GOAL_SETTINGS` you run under. It
+  additionally sets `crossSessionInbound: "accept"` (an unattended `-p` pane otherwise HOLDS
+  incoming messages behind an approval dialog it cannot show, and they expire in 5 minutes) and
+  denies `SendMessage`/`ListAgents`: those tools are UNSCOPED, so a worker holding them could
+  enumerate and message every Claude session on the machine, straight around the control
+  plane's capability scoping. Workers consult you over the scoped bus (`send_message` to the
+  `advisor` pane id stamped on their payload) — that path is unchanged.
   (see `SKILL.md` "Statusline on every spawned claude") — harmless when the var is unset.
   (or the bare `hyperpanes worker --queue <q> --count N --worktree --base <committish> -- …`).
   Impl agents run on
