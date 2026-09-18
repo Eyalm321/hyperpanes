@@ -14,6 +14,7 @@
 use crate::font::{CachedGlyph, Font, GlyphKey};
 use crate::grid::GridSnapshot;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
+use std::sync::LazyLock;
 
 pub struct RenderOpts {
     pub cursor_on: bool,
@@ -26,11 +27,54 @@ pub trait PaneRenderer {
     fn render(&mut self, grid: &GridSnapshot, font: &mut Font, opts: &RenderOpts) -> Image;
 }
 
+/// sRGB — the encoding of every byte in a theme and in the framebuffer — is *perceptual*, not
+/// a linear measure of light. So the midpoint of two sRGB bytes is not the colour of the light
+/// halfway between them; it lands well below it. Antialiasing coverage is exactly such a mix
+/// (a pixel `cov`-covered by a glyph emits `cov` of the glyph's light and `1 - cov` of the
+/// background's), so mixing in sRGB space renders every partially-covered pixel too dark.
+///
+/// Thin strokes are mostly partial coverage, which is why they were the visible casualty: they
+/// came out grey rather than the colour the terminal asked for. Measured on the real screen,
+/// a 32%-covered stem over an 18/255 background in a 214/255 word landed at 81 — sRGB-mixed.
+/// Mixed in light it is 129.
+///
+/// [`SRGB_TO_LINEAR`] decodes a byte to linear light; [`LINEAR_TO_SRGB`] encodes it back.
+static SRGB_TO_LINEAR: LazyLock<[f32; 256]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let c = i as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
+});
+
+/// Samples of the inverse transfer function. Indexed by `sqrt(linear) * ENCODE_N` rather than
+/// by linear value directly: sRGB devotes most of its 256 steps to the dark end, and `sqrt`'s
+/// gamma-2-ish spacing puts the samples where those steps are, so the byte → linear → byte
+/// round trip is exact everywhere (`srgb_round_trips_through_linear`). `sqrt` is one
+/// instruction, which a `powf` per channel per pixel would not be.
+const ENCODE_N: usize = 1024;
+static LINEAR_TO_SRGB: LazyLock<[u8; ENCODE_N + 1]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let lin = (i as f32 / ENCODE_N as f32).powi(2);
+        let c = if lin <= 0.003_130_8 {
+            lin * 12.92
+        } else {
+            1.055 * lin.powf(1.0 / 2.4) - 0.055
+        };
+        (c * 255.0).round().clamp(0.0, 255.0) as u8
+    })
+});
+
+/// Mix `cov` of `fg_linear` into an sRGB destination byte, in linear light.
 #[inline]
-fn lerp_u8(b: u8, f: u8, cov: u8) -> u8 {
-    let b = b as i32;
-    let f = f as i32;
-    (b + (f - b) * cov as i32 / 255) as u8
+fn mix_channel(dst: u8, fg_linear: f32, cov: f32, dec: &[f32; 256], enc: &[u8; ENCODE_N + 1]) -> u8 {
+    let bg = dec[dst as usize];
+    let lin = bg + (fg_linear - bg) * cov;
+    let idx = (lin.max(0.0).sqrt() * ENCODE_N as f32) as usize;
+    enc[idx.min(ENCODE_N)]
 }
 
 /// Blend a rasterized glyph's coverage mask into `px` in `color`, with the cell's pen at
@@ -53,6 +97,15 @@ fn blit_glyph(
     if g.w == 0 {
         return;
     }
+    // Hoisted: the tables are behind a `LazyLock` and the foreground is constant for the
+    // whole glyph, so both are resolved once rather than per pixel.
+    let dec = &*SRGB_TO_LINEAR;
+    let enc = &*LINEAR_TO_SRGB;
+    let fg = [
+        dec[color[0] as usize],
+        dec[color[1] as usize],
+        dec[color[2] as usize],
+    ];
     let pen_x = x0 as i32 + g.left;
     let gy0 = y0 as i32 + ascent - g.top;
     for gy in 0..g.h as i32 {
@@ -69,10 +122,11 @@ fn blit_glyph(
             if cov == 0 {
                 continue;
             }
+            let a = cov as f32 / 255.0;
             let p = &mut px[dy as usize * stride + dx as usize];
-            p.r = lerp_u8(p.r, color[0], cov);
-            p.g = lerp_u8(p.g, color[1], cov);
-            p.b = lerp_u8(p.b, color[2], cov);
+            p.r = mix_channel(p.r, fg[0], a, dec, enc);
+            p.g = mix_channel(p.g, fg[1], a, dec, enc);
+            p.b = mix_channel(p.b, fg[2], a, dec, enc);
             p.a = 255;
         }
     }
@@ -839,6 +893,16 @@ impl PaneRenderer for GpuRenderer {
         "gpu (swash atlas → wgpu texture → slint Image)"
     }
 
+    // NOTE: this path still composites glyph coverage in *encoded* sRGB — its target is
+    // `Rgba8Unorm`, so the fixed-function blender mixes the stored bytes directly. That is the
+    // same error `mix_channel` was written to fix on the software side, and it will show the
+    // same grey thin strokes. The fix is to give the target an `…UnormSrgb` format (the
+    // hardware then decodes on read and encodes on write, blending in light) and to feed
+    // `to_f` linear values. It is deliberately NOT done here: nothing in the app constructs a
+    // `GpuRenderer` — only `bin/demo.rs` does — so the change could not be verified on screen,
+    // and an unverified format swap risks breaking the Slint texture import. Do it, and check
+    // it against `partial_coverage_lands_in_light_not_in_srgb`, when this path is adopted.
+
     fn render(&mut self, grid: &GridSnapshot, font: &mut Font, opts: &RenderOpts) -> Image {
         self.render_to_texture(grid, font, opts);
         // Import the freshly-rendered texture as a Slint Image (shared device → zero copy).
@@ -911,3 +975,50 @@ struct GlyphOut { @builtin(position) pos: vec4<f32>,
     return vec4<f32>(i.color.rgb, i.color.a * cov);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srgb_round_trips_through_linear() {
+        // The encode table is sampled, not computed, so this is the guard that its resolution
+        // is actually sufficient: decoding a byte and re-encoding it must return that byte.
+        let dec = &*SRGB_TO_LINEAR;
+        let enc = &*LINEAR_TO_SRGB;
+        for v in 0u8..=255 {
+            let got = mix_channel(v, dec[v as usize], 1.0, dec, enc);
+            assert_eq!(got, v, "{v} round-tripped to {got}");
+        }
+    }
+
+    #[test]
+    fn coverage_endpoints_are_exact() {
+        let dec = &*SRGB_TO_LINEAR;
+        let enc = &*LINEAR_TO_SRGB;
+        // No coverage leaves the destination untouched; full coverage lands on the foreground.
+        for (bg, fg) in [(18u8, 214u8), (0, 255), (255, 0), (7, 9)] {
+            assert_eq!(mix_channel(bg, dec[fg as usize], 0.0, dec, enc), bg);
+            assert_eq!(mix_channel(bg, dec[fg as usize], 1.0, dec, enc), fg);
+        }
+    }
+
+    #[test]
+    fn partial_coverage_lands_in_light_not_in_srgb() {
+        // The measured case: a 32%-covered stem of a 214/255 glyph over an 18/255 background.
+        // Mixing the bytes gives 18 + (214-18)*0.32 = 81 — the grey `i`. Mixing the light they
+        // stand for gives ~129, which is what the eye expects of a third-covered pixel.
+        let dec = &*SRGB_TO_LINEAR;
+        let enc = &*LINEAR_TO_SRGB;
+        let got = mix_channel(18, dec[214], 0.32, dec, enc);
+        assert!((127..=131).contains(&got), "expected ~129, got {got}");
+
+        // And it is monotone in coverage, so this can never invert the old ordering.
+        let mut prev = 0u8;
+        for i in 0..=100 {
+            let v = mix_channel(18, dec[214], i as f32 / 100.0, dec, enc);
+            assert!(v >= prev, "coverage {i}% dipped: {v} < {prev}");
+            prev = v;
+        }
+    }
+}
