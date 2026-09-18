@@ -22,7 +22,13 @@ name: Test (Rust native)
 # `false` once a one-time `cargo fmt` + clippy cleanup has landed to make them blocking.
 
 on:
+  # main only. A bare `push:` fired this workflow a SECOND time for every push to a PR
+  # branch, and because the two runs carry different `github.ref` (refs/heads/<branch> vs
+  # refs/pull/N/merge) the concurrency group below cannot dedupe them. The surplus run
+  # raced the real one and cancelled jobs in it, which the `verify` gate reads as a failure
+  # — that is why PR #30 sat red for a month on `lint=cancelled` with nothing wrong in it.
   push:
+    branches: [main]
   pull_request:
 
 # Cancel superseded runs on the same ref to save CI minutes.

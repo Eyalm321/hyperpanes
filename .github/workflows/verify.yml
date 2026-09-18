@@ -7,7 +7,10 @@ name: verify
 # job at the bottom `needs:` every language gate, so adding a future gate is a one-line
 # `needs:` edit and never a ruleset change. The required-check context name is `verify`.
 #
-# Differences from the legacy test.yml (which stays as-is for ordinary human pushes):
+# Runs on pull_request, on the merge queue, AND on direct pushes to main (see `on:` below —
+# a push to main used to skip the lint and build-gui gates entirely).
+#
+# Differences from the legacy test.yml:
 #   * clippy + rustfmt are BLOCKING here (no continue-on-error) — unattended merge must
 #     not inherit test.yml's report-only leniency.
 #   * adds `merge_group:` so every check also runs against the merge queue's rebased
@@ -25,6 +28,13 @@ name: verify
 on:
   pull_request:
   merge_group: # required: runs against the merge-queue's rebased branch
+  # Direct pushes to main get the SAME gate as a PR. Without this, `lint` and `build-gui`
+  # were pull-request-only, so anything landed straight on main was unlinted and its GUI
+  # build unverified — main went green on 2026-09-17 while carrying a clippy
+  # `type_complexity` error AND a state where `cargo build --locked` on the app crate
+  # failed, and a PR opened against main was the first thing to notice.
+  push:
+    branches: [main]
 
 concurrency:
   group: verify-${{ github.ref }}
