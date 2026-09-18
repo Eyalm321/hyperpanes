@@ -100,10 +100,6 @@ const SCROLLBAR_MIN_THUMB_PX: f32 = 24.0;
 /// to collapse a notch back to one mouse-wheel report when forwarding to a mouse-grabbing app.
 const WHEEL_LINES_PER_NOTCH: i32 = 3;
 
-/// A link under the cursor — an on-disk-verified path or an http/https URL: where to draw the
-/// hover underline (in the pane's *logical* pixel space) plus the target. Returned by
-/// [`TerminalPane::link_at`].
-#[derive(Debug, Clone, PartialEq)]
 /// What [`TerminalPane::locate`] found under the pointer: the resolved path record plus
 /// everything the caller needs to place the underline. A struct rather than the tuple this
 /// used to be — eight positional fields, three of them bare `usize`, is a swap waiting to
@@ -127,6 +123,10 @@ struct PathHit {
     cell_h: f32,
 }
 
+/// A link under the cursor — an on-disk-verified path or an http/https URL: where to draw the
+/// hover underline (in the pane's *logical* pixel space) plus the target. Returned by
+/// [`TerminalPane::link_at`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct LinkHit {
     /// Underline rect in logical px within the pane surface.
     pub x: f32,
