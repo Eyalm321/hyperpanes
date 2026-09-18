@@ -224,6 +224,21 @@ pub fn claude_sessions_dir() -> PathBuf {
 /// temp file, then rename over the target (a single filesystem op — readers never see
 /// a half-written file). `std::fs::rename` replaces the destination on Windows.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_atomic_inner(path, contents, false)
+}
+
+/// [`write_atomic`] for files that hold a secret (the control-plane master token, device
+/// tokens). The temp file is CREATED owner-only (0600 on Unix), so the bytes never sit on
+/// disk under the process umask — chmod-after-rename left a window in which `control.json`
+/// was world-readable, and the rename keeps the temp file's mode, so setting it up front
+/// is the only place that closes the window. The mode also survives an overwrite of a
+/// file created earlier with the wrong mode, because the rename swaps in the new inode.
+/// Windows: no ACL narrowing today — the per-user profile directory is the boundary there.
+pub fn write_atomic_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_atomic_inner(path, contents, true)
+}
+
+fn write_atomic_inner(path: &Path, contents: &[u8], private: bool) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let file_name = path
@@ -237,7 +252,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
-    std::fs::write(&tmp, contents)?;
+    write_tmp(&tmp, contents, private)?;
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -245,6 +260,25 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Create-and-write the temp file. `private` opens it with mode 0600 at creation (Unix)
+/// via `OpenOptions::mode`, which applies before the first byte lands; `create_new` so a
+/// stale temp from a crashed writer can never be reused with its old mode.
+fn write_tmp(tmp: &Path, contents: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut f = opts.open(tmp)?;
+    f.write_all(contents)?;
+    f.flush()
 }
 
 #[cfg(test)]
@@ -414,4 +448,22 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":2}");
         let _ = std::fs::remove_dir_all(&base);
     }
+    /// The control-plane master token lives in `control.json`; a world-readable copy hands
+    /// full control of the app to any local user. Private writes must come out 0600 even
+    /// when overwriting a file that was created 0644 by an older build.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_is_owner_only_even_over_a_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("hp-paths-test-{}-{}", std::process::id(), 2));
+        let target = base.join("control.json");
+        write_atomic(&target, b"{}").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_private(&target, b"{\"token\":\"x\"}").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "private write must not inherit the old inode's mode");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"token\":\"x\"}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
 }
