@@ -10,7 +10,9 @@
      ![Avada](docs/screenshot.png) — a tiled, multi-pane layout shows the app off best. -->
 <p align="center"><em>📸 Screenshot coming soon — see <code>docs/screenshot.png</code>.</em></p>
 
-**Avada Terminal** — formerly Hyperpanes; upgrade notes in [docs/rename-compat.md](docs/rename-compat.md) —
+**Avada Terminal** — forked from [hyperpanes](https://github.com/Eyalm321/hyperpanes) by
+[@Eyalm321](https://github.com/Eyalm321), and shipped as Hyperpanes through 0.0.36; upgrade notes in
+[docs/rename-compat.md](docs/rename-compat.md) —
 is a desktop **terminal workspace**: tabbed windows that tile multiple live terminal panes, where each
 pane is spawned with a **locked label** and its **own frame color**, arranged via **layout presets**.
 Every tab is a self-contained workspace; panes and whole tabs can be **dragged between tabs and torn
@@ -405,6 +407,10 @@ rasterisation) · `tokio` · `wgpu` · `arboard` (clipboard) · `reqwest` (self�
 subtitles).
 
 ## Acknowledgements
+
+Forked from [hyperpanes](https://github.com/Eyalm321/hyperpanes) (MIT) by
+[@Eyalm321](https://github.com/Eyalm321) — the native Rust + Slint terminal workspace this project
+started from, and the origin of everything below.
 
 Built on [Slint](https://slint.dev) (UI), [`alacritty_terminal`](https://github.com/alacritty/alacritty)
 (VTE), [`portable-pty`](https://github.com/wezterm/wezterm) (from WezTerm), and
