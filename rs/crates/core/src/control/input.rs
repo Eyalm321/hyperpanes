@@ -180,7 +180,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn shift_and_alt_enter_are_a_meta_prefixed_cr() {
         // Byte-for-byte what `terminal-widget::keys::encode_key` emits for the same
         // gesture; an agent's Shift+Enter must land as a newline, not a submit.
