@@ -10,6 +10,7 @@
 //! TS test suite (which mocks `fs.statSync` and assumes win32) can be mirrored 1:1
 //! without spawning anything or depending on the host platform.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -210,6 +211,246 @@ fn normalize_win(path: &str) -> String {
     }
 }
 
+/// Byte spans of the whitespace-separated tokens in `s`, in order. Char-boundary safe
+/// (`char::is_whitespace`), so every span can be used to slice `s` verbatim.
+fn token_spans(s: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, ch) in s.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(st) = start.take() {
+                spans.push((st, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(st) = start {
+        spans.push((st, s.len()));
+    }
+    spans
+}
+
+/// Shell punctuation that attaches to a token without belonging to it: the quote of an enclosing
+/// `sh -c '…'` string and the separators that end a command. Strips a leading quote run, then a
+/// trailing separator run, then a trailing quote run, looping until stable (bounded — every pass
+/// removes at least one byte) so `claude';` and `"claude"` both reduce to `claude`.
+fn unquote_token(token: &str) -> &str {
+    let mut s = token;
+    for _ in 0..4 {
+        let before = s;
+        s = s.trim_start_matches(['\'', '"']);
+        s = s.trim_end_matches([';', '&', '|']);
+        s = s.trim_end_matches(['\'', '"']);
+        if s == before {
+            break;
+        }
+    }
+    s
+}
+
+/// Is this token a `claude` launch target: exactly `claude`, or a path whose basename is
+/// `claude` (`/usr/local/bin/claude`, `C:\bin\claude`)? Anything else is left untouched.
+///
+/// Quote-aware: a launch nested in a shell string reads `'claude` inside `sh -c 'claude …'`, and
+/// `"claude"` when doubly quoted, so the enclosing punctuation is stripped FOR THE TEST only —
+/// this predicate never rewrites a byte.
+fn is_claude_command(token: &str) -> bool {
+    let token = unquote_token(token);
+    token == "claude" || token.rsplit(['\\', '/']).next() == Some("claude")
+}
+
+/// Byte offset of the first non-whitespace byte at or after `from` (char-boundary safe), or
+/// `command.len()` when only whitespace follows.
+fn skip_whitespace(command: &str, from: usize) -> usize {
+    let Some(tail) = command.get(from..) else {
+        return command.len();
+    };
+    match tail.find(|c: char| !c.is_whitespace()) {
+        Some(i) => from + i,
+        None => command.len(),
+    }
+}
+
+/// Byte offset just past the `--mcp-config` value that begins at or after `from`, respecting
+/// shell quoting: a `'`-opened value runs to the next `'`, a `"`-opened value to the next
+/// unescaped `"` (honouring `\`), anything else to the next whitespace or the string's end.
+/// `None` when there is no value — only whitespace follows, or a bare command separator does
+/// (`--mcp-config; sleep 1` has nothing to attach to). Char-boundary safe: every offset it
+/// compares or returns is an ASCII quote/whitespace boundary, never inside a multi-byte char.
+fn mcp_config_value_end(command: &str, from: usize) -> Option<usize> {
+    let start = skip_whitespace(command, from);
+    let bytes = command.as_bytes();
+    match bytes.get(start) {
+        None => return None,
+        // A separator is not a value: the flag would be attached to nothing.
+        Some(b';') | Some(b'&') | Some(b'|') => return None,
+        _ => {}
+    }
+    let quote = match bytes[start] {
+        b'\'' => Some(b'\''),
+        b'"' => Some(b'"'),
+        _ => None,
+    };
+    if let Some(quote) = quote {
+        let mut i = start + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                // Inside double quotes a backslash escapes the next char (possibly multi-byte;
+                // a continuation byte never equals an ASCII quote, so skipping two is safe).
+                b'\\' if quote == b'"' => i += 2,
+                b if b == quote => return Some(i + 1),
+                _ => i += 1,
+            }
+        }
+        // Unterminated quote: fall through to the whitespace scan (best effort).
+    }
+    match command[start..].find(char::is_whitespace) {
+        Some(i) => Some(start + i),
+        None => Some(command.len()),
+    }
+}
+
+/// Roll an insertion offset back over a trailing run of quotes and command separators, so the
+/// flag lands INSIDE the quoting the value belongs to: `--mcp-config /x/m.json'` (that `'` closes
+/// an enclosing `sh -c '…'` string) takes the flag before the quote, `--mcp-config /x/m.json;`
+/// before the `;`. Every byte rolled over is ASCII, so the result stays on a char boundary.
+fn trim_insert_point(command: &str, end: usize) -> usize {
+    let bytes = command.as_bytes();
+    let mut i = end;
+    while i > 0 && matches!(bytes[i - 1], b'\'' | b'"' | b';' | b'&' | b'|') {
+        i -= 1;
+    }
+    i
+}
+
+/// The `--mcp-config` prefix, both spellings (`--mcp-config <path>` / `--mcp-config=<path>`).
+const MCP_CONFIG_ARG: &str = "--mcp-config";
+const MCP_CONFIG_EQ: &str = "--mcp-config=";
+const STRICT_MCP_CONFIG_ARG: &str = "--strict-mcp-config";
+
+/// Insert `--strict-mcp-config` into a pane command that launches `claude` with an explicit
+/// `--mcp-config`, unless it already carries the flag.
+///
+/// Why this is structural rather than prose: `claude --mcp-config <file>` WITHOUT
+/// `--strict-mcp-config` does not restrict claude to that file, it MERGES the config with every
+/// server the account dir (`CLAUDE_CONFIG_DIR`, rotated per goal agent) registers. The
+/// code-index servers in there (tokensave, serena) then index the repo once per agent — 6-10GB
+/// each against a ~300MB normal footprint — which is how a goal org drove the machine into an
+/// OOM kill loop. Agents spawn agents here (`open_pane`, `spawn_workers`), so the guard has to
+/// live at the pane-spawn choke point, not in a persona that an LLM may or may not follow.
+///
+/// Rules (byte-preserving: every other byte of `command`, including quoting, spacing and the
+/// prompt text, comes back verbatim):
+///   1. no `--mcp-config` / `--mcp-config=` token → unchanged;
+///   2. a `--strict-mcp-config` token already present → unchanged (idempotent);
+///   3. no `claude` token (exact, or basename `claude`, both quote-stripped — `sh -c 'claude …'`
+///      and `"claude"` count) → unchanged (never touch other tools);
+///   4. else insert ` --strict-mcp-config` immediately after the value of the FIRST `--mcp-config`
+///      occurrence, resolved quote-aware (`'…'` / `"…"` values keep their closing quote before the
+///      flag; a trailing quote or `;` that belongs to an enclosing construct stays after it);
+///   5. a `--mcp-config` with no value (end of string, a bare separator, or an empty
+///      `--mcp-config=`) → unchanged, rather than emitting a dangling flag;
+///   6. `Cow::Borrowed` whenever nothing is edited.
+///
+/// The nested worker-runner shape is covered: the `claude … --mcp-config <f>` inside
+/// `hyperpanes worker … --command "sh -c '…'"` is still a token sequence (`'claude` reduces to
+/// `claude`), and the insertion lands on a token boundary so the shell string stays valid.
+pub fn ensure_strict_mcp_config(command: &str) -> Cow<'_, str> {
+    let spans = token_spans(command);
+    let mut has_claude = false;
+    let mut has_strict = false;
+    let mut has_mcp = false;
+    // Byte offset to insert at: just past the value of the FIRST `--mcp-config` occurrence.
+    let mut insert_at: Option<usize> = None;
+    for &(start, end) in &spans {
+        let token = &command[start..end];
+        if is_claude_command(token) {
+            has_claude = true;
+        } else if token == STRICT_MCP_CONFIG_ARG {
+            has_strict = true;
+        } else if !has_mcp && (token == MCP_CONFIG_ARG || token.starts_with(MCP_CONFIG_EQ)) {
+            has_mcp = true;
+            // The first occurrence decides. Spaced form: the value starts after this token.
+            // Equals form: it starts right after the `=` — an empty `--mcp-config=` has none.
+            let value_start = if token == MCP_CONFIG_ARG {
+                Some(end)
+            } else if token.len() > MCP_CONFIG_EQ.len() {
+                Some(start + MCP_CONFIG_EQ.len())
+            } else {
+                None
+            };
+            if let Some(value_start) = value_start {
+                if let Some(value_end) = mcp_config_value_end(command, value_start) {
+                    // The spaced form's value must be a FOLLOWING token; the equals form carries
+                    // its value inside the token, where `value_end == end` is the normal case.
+                    let value_ok = if token == MCP_CONFIG_ARG {
+                        value_end > end
+                    } else {
+                        value_end >= end
+                    };
+                    if value_ok {
+                        let value_at = skip_whitespace(command, value_start);
+                        let quoted = matches!(
+                            command.as_bytes().get(value_at),
+                            Some(b'\'') | Some(b'"')
+                        );
+                        insert_at = Some(if quoted {
+                            // A quoted value owns its closing quote: the flag goes after it.
+                            value_end
+                        } else {
+                            // A trailing quote/separator here closes an enclosing construct, so
+                            // the flag goes inside it, before that punctuation.
+                            trim_insert_point(command, value_end)
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let Some(insert_at) = insert_at else {
+        return Cow::Borrowed(command);
+    };
+    if has_strict || !has_claude {
+        return Cow::Borrowed(command);
+    }
+    let mut out = String::with_capacity(command.len() + STRICT_MCP_CONFIG_ARG.len() + 1);
+    out.push_str(&command[..insert_at]);
+    out.push(' ');
+    out.push_str(STRICT_MCP_CONFIG_ARG);
+    out.push_str(&command[insert_at..]);
+    Cow::Owned(out)
+}
+
+/// [`ensure_strict_mcp_config`] for an already-split argv (the direct, no-shell spawn shape):
+/// same rule, no re-parse — the flag goes right after the `--mcp-config` value element. A no-op
+/// when the argv already carries the strict flag, has no `--mcp-config`, or leaves it dangling.
+/// The caller decides whether this argv is a `claude` launch.
+fn ensure_strict_mcp_config_in_args(args: &mut Vec<String>) {
+    if args.iter().any(|a| a == STRICT_MCP_CONFIG_ARG) {
+        return;
+    }
+    let Some(i) = args
+        .iter()
+        .position(|a| a == MCP_CONFIG_ARG || a.starts_with(MCP_CONFIG_EQ))
+    else {
+        return;
+    };
+    let at = if args[i] == MCP_CONFIG_ARG {
+        // Spaced form: the next element is the value; nothing after it to insert behind.
+        if i + 1 < args.len() {
+            i + 2
+        } else {
+            return;
+        }
+    } else if args[i].len() > MCP_CONFIG_EQ.len() {
+        i + 1
+    } else {
+        return;
+    };
+    args.insert(at, STRICT_MCP_CONFIG_ARG.to_string());
+}
+
 /// Resolve the actual pty spawn target from a pane's shell/command/args
 /// (interactive-pane-driving plan P4a). Three shapes:
 ///   * `command` + non-empty `args` → spawn `command` DIRECTLY with `args` as its
@@ -247,15 +488,22 @@ pub fn resolve_spawn_with(
             } else {
                 command.to_string()
             };
-            return Spawn {
-                file,
-                args: args.to_vec(),
-            };
+            // Structural MCP guard (see [`ensure_strict_mcp_config`]): a direct `claude` argv
+            // carrying an explicit `--mcp-config` must also carry `--strict-mcp-config`, whatever
+            // an upstream agent did or forgot. Every other direct spawn is untouched.
+            let mut argv = args.to_vec();
+            if is_claude_command(command) {
+                ensure_strict_mcp_config_in_args(&mut argv);
+            }
+            return Spawn { file, args: argv };
         }
     }
+    // The shell-wrapped shape (and, for free, an agent-built string that nests a claude launch
+    // inside a worker-runner command): same guard on the command string itself.
+    let guarded = command.map(ensure_strict_mcp_config);
     Spawn {
         file: shell.to_string(),
-        args: build_args(shell, command, args),
+        args: build_args(shell, guarded.as_deref(), args),
     }
 }
 
@@ -745,5 +993,127 @@ mod tests {
         assert!(!is_posix_shell("powershell.exe"));
         assert!(!is_posix_shell("pwsh"));
         assert!(!is_posix_shell("cmd.exe"));
+    }
+
+    // ---- ensure_strict_mcp_config (the goal-agent MCP guard) ----
+
+    #[test]
+    fn strict_mcp_config_added_after_mcp_config_value() {
+        let cmd = "claude --dangerously-skip-permissions --mcp-config /x/mcp.json -p hello";
+        let out = ensure_strict_mcp_config(cmd);
+        assert!(
+            out.contains("--mcp-config /x/mcp.json --strict-mcp-config"),
+            "got {out}"
+        );
+        assert!(out.ends_with(" -p hello"), "got {out}");
+    }
+
+    #[test]
+    fn strict_mcp_config_is_idempotent() {
+        let cmd = "claude --dangerously-skip-permissions --mcp-config /x/mcp.json --strict-mcp-config -p hi";
+        let out = ensure_strict_mcp_config(cmd);
+        assert_eq!(out, cmd);
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strict_mcp_config_leaves_non_claude_commands_alone() {
+        let cmd = "tokensave --mcp-config /x.json serve";
+        let out = ensure_strict_mcp_config(cmd);
+        assert_eq!(out, cmd);
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strict_mcp_config_leaves_commands_without_mcp_config_alone() {
+        let cmd = "claude --resume abc";
+        let out = ensure_strict_mcp_config(cmd);
+        assert_eq!(out, cmd);
+        assert!(matches!(out, Cow::Borrowed(_)));
+
+        let wrapped = "headroom wrap claude --tool-search false --resume abc";
+        let out = ensure_strict_mcp_config(wrapped);
+        assert_eq!(out, wrapped);
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strict_mcp_config_handles_equals_form() {
+        let cmd = "claude --mcp-config=/x/m.json -p hi";
+        let out = ensure_strict_mcp_config(cmd);
+        assert!(
+            out.contains("--mcp-config=/x/m.json --strict-mcp-config"),
+            "got {out}"
+        );
+    }
+
+    /// A quoted value containing spaces must not be split at the whitespace: the guard has to
+    /// find the value's closing quote, insert after it, and leave every other byte alone.
+    #[test]
+    fn strict_mcp_config_handles_quoted_value_with_spaces() {
+        let cmd = "claude --dangerously-skip-permissions --mcp-config '/x/my config.json' -p hi";
+        let out = ensure_strict_mcp_config(cmd);
+        assert_eq!(
+            out,
+            "claude --dangerously-skip-permissions --mcp-config '/x/my config.json' --strict-mcp-config -p hi"
+        );
+    }
+
+    /// The worker-runner shape: the claude launch lives inside a shell string an agent built, so
+    /// the guard has to fire on the token stream and insert on a token boundary — the surrounding
+    /// quoting and the `$HP_TASK_PAYLOAD` text must come back byte-for-byte.
+    #[test]
+    fn strict_mcp_config_handles_worker_runner_shell_string() {
+        let cmd = "hyperpanes worker --queue g1 --command \"sh -c 'claude --dangerously-skip-permissions --mcp-config /home/u/.local/state/hyperpanes/goals-mcp.json -p \"$HP_TASK_PAYLOAD\"'\"";
+        let out = ensure_strict_mcp_config(cmd);
+        assert!(
+            out.contains(
+                "--mcp-config /home/u/.local/state/hyperpanes/goals-mcp.json --strict-mcp-config"
+            ),
+            "got {out}"
+        );
+        assert!(out.contains("sh -c 'claude"), "got {out}");
+        assert!(out.contains("$HP_TASK_PAYLOAD"), "got {out}");
+    }
+
+    #[test]
+    fn strict_mcp_config_skips_dangling_mcp_config() {
+        let cmd = "claude --dangerously-skip-permissions --mcp-config";
+        let out = ensure_strict_mcp_config(cmd);
+        assert_eq!(out, cmd);
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn resolve_spawn_shell_wraps_claude_with_strict_mcp_config() {
+        let spawn = resolve_spawn(
+            "/bin/bash",
+            Some("claude --dangerously-skip-permissions --mcp-config /x/mcp.json -p hi"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(spawn.args[0], "-c");
+        assert!(
+            spawn.args[1].contains("--strict-mcp-config"),
+            "got {:?}",
+            spawn.args
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_direct_args_gain_strict_mcp_config() {
+        let args = argv(&["--mcp-config", "/x/m.json", "-p", "hi"]);
+        let spawn = resolve_spawn("/bin/bash", Some("claude"), Some(&args), None, None);
+        assert_eq!(
+            spawn.args,
+            argv(&[
+                "--mcp-config",
+                "/x/m.json",
+                "--strict-mcp-config",
+                "-p",
+                "hi"
+            ])
+        );
     }
 }
