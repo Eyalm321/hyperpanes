@@ -17,12 +17,22 @@ use crate::theme;
 /// The `--model` ids for the goals-system model pickers, indexed by the New-goal dialog's model
 /// options. ORDER MUST MATCH [`GOAL_MODEL_LABELS`]. Defaults per tier: orchestrator/spec =
 /// index 0 (opus), implementation = 1 (sonnet).
-pub const GOAL_MODELS: [&str; 4] = [
-    "claude-opus-5[1m]",
-    "claude-sonnet-5[1m]",
-    "claude-fable-5[1m]",
-    "claude-haiku-4-5",
-];
+///
+/// These are Claude Code's **aliases**, not dated ids: `--model` resolves an alias to the latest
+/// model in that family ("Provide an alias for the latest model (e.g. 'fable', 'opus', or
+/// 'sonnet')"), so a new Opus is picked up without a hyperpanes release. Pinned ids like
+/// `claude-opus-5[1m]` were the opposite — every model launch silently left long-running goal
+/// orgs on the previous generation until someone noticed and edited this array.
+///
+/// The `[1m]` suffix selects the 1M-context variant and is valid ON an alias: Claude Code's own
+/// accepted set is `["sonnet","opus","haiku","fable","best","sonnet[1m]","opus[1m]","fable[1m]",
+/// "opusplan"]`, and it builds `"opus[1m]"` itself. `haiku` has no 1M variant in that set, which
+/// is why index 3 is bare.
+///
+/// That makes this array identical to [`GOAL_MODEL_LABELS`] today. They stay separate on
+/// purpose: one is a wire value, the other is UI text, and a future label ("opus (1M)") must not
+/// change what gets spawned.
+pub const GOAL_MODELS: [&str; 4] = ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku"];
 
 /// Display labels for [`GOAL_MODELS`] (the New-goal dialog's chips + option rows).
 pub const GOAL_MODEL_LABELS: [&str; 4] = ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku"];
@@ -527,4 +537,61 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
 /// Map a layout menu id (from the Slint picker) to a `SetLayout` command.
 pub fn set_layout_from_id(id: i32) -> Command {
     Command::SetLayout(theme::layout_from_id(id))
+}
+
+#[cfg(test)]
+mod goal_model_tests {
+    use super::{GOAL_MODELS, GOAL_MODEL_LABELS};
+
+    /// Claude Code's accepted `--model` alias set, read out of the 2.1.280 binary:
+    /// `["sonnet","opus","haiku","fable","best","sonnet[1m]","opus[1m]","fable[1m]","opusplan"]`.
+    const CLAUDE_CODE_ALIASES: [&str; 9] = [
+        "sonnet",
+        "opus",
+        "haiku",
+        "fable",
+        "best",
+        "sonnet[1m]",
+        "opus[1m]",
+        "fable[1m]",
+        "opusplan",
+    ];
+
+    /// The point of the picker holding aliases rather than dated ids: `--model opus` resolves to
+    /// the latest Opus, so a model launch reaches long-running goal orgs without a hyperpanes
+    /// release. A dated id here (`claude-opus-5[1m]`) still spawns fine, which is exactly why it
+    /// needs a test — nothing else would notice the org had been pinned to last generation.
+    #[test]
+    fn every_picker_model_is_a_latest_tracking_alias() {
+        for m in GOAL_MODELS {
+            assert!(
+                CLAUDE_CODE_ALIASES.contains(&m),
+                "{m:?} is not a Claude Code alias — a dated id pins goal orgs to one generation"
+            );
+            assert!(
+                !m.starts_with("claude-"),
+                "{m:?} looks like a full model name; use the alias so it tracks latest"
+            );
+        }
+    }
+
+    /// `haiku` has no `[1m]` entry in Claude Code's set, so asking for one would be rejected.
+    #[test]
+    fn only_families_with_a_1m_variant_carry_the_suffix() {
+        for m in GOAL_MODELS {
+            if m.starts_with("haiku") {
+                assert_eq!(m, "haiku", "haiku has no 1M variant to select");
+            }
+        }
+    }
+
+    /// The arrays are identical today but serve different jobs — a label reworded for the dialog
+    /// must never silently change which model gets spawned.
+    #[test]
+    fn labels_and_ids_stay_index_aligned() {
+        assert_eq!(GOAL_MODELS.len(), GOAL_MODEL_LABELS.len());
+        for (i, label) in GOAL_MODEL_LABELS.iter().enumerate() {
+            assert!(!label.is_empty(), "label {i} is empty");
+        }
+    }
 }
