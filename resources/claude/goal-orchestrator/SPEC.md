@@ -56,7 +56,7 @@ prompt wedges the pane).
 - `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
   project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
   split on newlines>, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config
-  <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
+  <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
   --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings
   $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
   — **keep the visibility trio**: `stream:true` + `--output-format stream-json --verbose` makes the
@@ -68,6 +68,9 @@ prompt wedges the pane).
   `count:N` = N readable panes; `layout:"single-pane"` multiplexes them into one if you'd rather.
   The `--mcp-config` flag is required (see `SKILL.md` "MCP config on every spawned claude");
   without it, account rotation hides `mcp__hyperpanes__*` tools from the impl agent.
+  `--strict-mcp-config` is required too: without it the worker also loads every code-index MCP
+  server (tokensave, serena) the account dir / worktree registers, and each one indexes the repo
+  separately per worktree — a handful of workers on a big repo eats tens of GB.
   `${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS}` likewise carries the user's statusline
   — note this is the **worker** settings file, NOT the `$HP_GOAL_SETTINGS` you run under. It
   additionally sets `crossSessionInbound: "accept"` (an unattended `-p` pane otherwise HOLDS

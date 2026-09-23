@@ -173,14 +173,17 @@ not a code limit; hold the line so concurrent goals don't explode the pane count
 ### MCP config on every spawned claude
 
 Every `claude` the goals system spawns — this orchestrator, spec agents, impl agents — must carry
-`--mcp-config <state-dir>/goals-mcp.json` (state dir = `hyperpanes_core::persistence::paths::state_dir()`,
-e.g. `~/.local/state/hyperpanes` on Linux). Account rotation below points `CLAUDE_CONFIG_DIR` at
-per-account dirs whose `.claude.json` has no user-scoped MCP registrations, and `claude` ignores
-the default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without the flag, the pane loses
-every `mcp__hyperpanes__*` tool. The app already appends it on your own spawn; pass it down the
-same way when you spawn a spec agent, and tell the spec agent to do the same in its
-`spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
+`--mcp-config <state-dir>/goals-mcp.json --strict-mcp-config` (state dir =
+`hyperpanes_core::persistence::paths::state_dir()`, e.g. `~/.local/state/hyperpanes` on Linux).
+Account rotation below points `CLAUDE_CONFIG_DIR` at per-account dirs, and `claude` ignores the
+default `~/.claude.json` once `CLAUDE_CONFIG_DIR` is set — without `--mcp-config`, the pane loses
+every `mcp__hyperpanes__*` tool. `--strict-mcp-config` stops `claude` merging whatever else the
+account dir or the worktree's `.mcp.json` registers: code-index servers (tokensave, serena) index
+the whole repo **per agent** because every agent sits in its own worktree, so a few agents on a big
+repo cost tens of GB. Goal agents run on hyperpanes tools + the built-ins only. The app already
+appends both flags on your own spawn; pass them down the same way when you spawn a spec agent,
+and tell the spec agent to do the same in its `spawn_workers` command, e.g.:
+`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-claude-sonnet-5[1m]}'"}`
 
 ### If the `mcp__hyperpanes__*` tools won't load — drop to the Control API, don't reverse-engineer
 
