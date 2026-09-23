@@ -459,11 +459,13 @@ fn reader_loop(
                 // daemon's retained buffer so a re-attaching view restores history. Only
                 // seed when the local mirror is still empty (a fresh/just-reconnected
                 // shadow) — never clobber output already mirrored live.
+                // A shadow the manager already dropped (killed mid-attach) stays dropped.
                 if !data.is_empty() {
                     let mut shadows = shadows.lock().unwrap();
-                    let shadow = shadows.entry(uid).or_insert_with(Shadow::new);
-                    if shadow.replay.get().is_empty() {
-                        shadow.replay.append(&data);
+                    if let Some(shadow) = shadows.get_mut(&uid) {
+                        if shadow.replay.get().is_empty() {
+                            shadow.replay.append(&data);
+                        }
                     }
                 }
             }
@@ -482,19 +484,29 @@ fn reader_loop(
 /// Fold one streamed [`SessionEvent`] into the shadow: `Data` grows the mirror + counters,
 /// `Cwd` updates the cached cwd, `Exit` drops the session (mirrors the in-process driver
 /// removing a session from the map on terminal exit, so `has`/`uids` go false).
+///
+/// Events only UPDATE an existing shadow — they never create one. Shadows are born in
+/// `create` / `seed_from_daemon`, both before any event can stream for that uid. After a
+/// deliberate `kill` the local shadow is gone but the dying process keeps emitting output
+/// (Claude prints its "Resume this session with…" goodbye on SIGHUP) and the daemon
+/// suppresses the `Exit`; re-creating the shadow from that trailing `Data` made `has(uid)`
+/// true forever, so the control host's self-heal resurrected every closed agent pane as
+/// `label:"recovered"`.
 #[cfg(unix)]
 fn apply_event_to_shadow(shadows: &Mutex<HashMap<String, Shadow>>, ev: &SessionEvent) {
     let mut shadows = shadows.lock().unwrap();
     match ev {
         SessionEvent::Data { uid, data, .. } => {
-            let shadow = shadows.entry(uid.clone()).or_insert_with(Shadow::new);
-            shadow.replay.append(data);
-            shadow.output_bytes += data.encode_utf16().count() as u64;
-            shadow.last_output_at = Some(epoch_ms());
+            if let Some(shadow) = shadows.get_mut(uid) {
+                shadow.replay.append(data);
+                shadow.output_bytes += data.encode_utf16().count() as u64;
+                shadow.last_output_at = Some(epoch_ms());
+            }
         }
         SessionEvent::Cwd { uid, cwd } => {
-            let shadow = shadows.entry(uid.clone()).or_insert_with(Shadow::new);
-            shadow.cwd = Some(cwd.clone());
+            if let Some(shadow) = shadows.get_mut(uid) {
+                shadow.cwd = Some(cwd.clone());
+            }
         }
         SessionEvent::Exit { uid, .. } => {
             shadows.remove(uid);
@@ -885,7 +897,33 @@ mod tests {
     // ---- shadow folding (no socket needed) ----
 
     fn shadows() -> Arc<Mutex<HashMap<String, Shadow>>> {
-        Arc::default()
+        let s: Arc<Mutex<HashMap<String, Shadow>>> = Arc::default();
+        s.lock().unwrap().insert("u1".into(), Shadow::new());
+        s
+    }
+
+    #[test]
+    fn events_never_resurrect_a_killed_shadow() {
+        // `kill` drops the shadow; the dying process's trailing output (and the daemon's
+        // suppressed Exit) must not bring it back, or the self-heal resurrects the pane.
+        let s = shadows();
+        s.lock().unwrap().remove("u1");
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Data {
+                uid: "u1".into(),
+                data: "Resume this session with: claude --resume x".into(),
+                cursor: 1,
+            },
+        );
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Cwd {
+                uid: "u1".into(),
+                cwd: "/tmp".into(),
+            },
+        );
+        assert!(!s.lock().unwrap().contains_key("u1"));
     }
 
     #[test]
