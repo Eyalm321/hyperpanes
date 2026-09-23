@@ -391,10 +391,8 @@ pub fn ensure_strict_mcp_config(command: &str) -> Cow<'_, str> {
                     };
                     if value_ok {
                         let value_at = skip_whitespace(command, value_start);
-                        let quoted = matches!(
-                            command.as_bytes().get(value_at),
-                            Some(b'\'') | Some(b'"')
-                        );
+                        let quoted =
+                            matches!(command.as_bytes().get(value_at), Some(b'\'') | Some(b'"'));
                         insert_at = Some(if quoted {
                             // A quoted value owns its closing quote: the flag goes after it.
                             value_end
