@@ -56,6 +56,16 @@ struct CtlFields {
     meta: Option<BTreeMap<String, String>>,
 }
 
+/// Meta queued for a pane that may not be in the read model yet (see `ControlHost::queue_meta`).
+struct PendingMeta {
+    /// Session uid of the target pane.
+    uid: String,
+    /// Keys to set on it.
+    meta: BTreeMap<String, String>,
+    /// Ticks spent waiting for the pane to appear.
+    waited: u32,
+}
+
 /// A baseline snapshot of one pane's chrome as last written to the read-model, so the next
 /// tick can diff the model (which a `/command` may have mutated off-thread) against what the
 /// GUI published — the delta is exactly what the control plane changed.
@@ -97,6 +107,10 @@ pub struct ControlHost {
     pane_ids: RefCell<HashMap<String, String>>,
     /// Control-owned launch/meta fields per session uid.
     ctl: RefCell<HashMap<String, CtlFields>>,
+    /// Meta the GUI wants stamped on a pane once it is in the read model — `(session uid, meta,
+    /// ticks waited)`. Fed by [`Self::queue_meta`], applied after each publish. Needed because a
+    /// pane restored this tick is not in the model until the publish that follows.
+    pending_meta: RefCell<Vec<PendingMeta>>,
     /// The read-model panes as last published (baseline for the next reconcile diff).
     prev: RefCell<HashMap<String, PaneSnap>>,
     /// The active tab id per window as last published (baseline for focus reconcile).
@@ -144,6 +158,7 @@ impl ControlHost {
             reaper: RefCell::new(None),
             pane_ids: RefCell::new(HashMap::new()),
             ctl: RefCell::new(HashMap::new()),
+            pending_meta: RefCell::new(Vec::new()),
             prev: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
             prev_windows: RefCell::new(Vec::new()),
@@ -394,6 +409,49 @@ impl ControlHost {
 
     // ---- per-tick reconcile + publish ----
 
+    /// Queue control-plane meta for pane `uid`, applied once the pane is in the read model.
+    ///
+    /// The GUI's restore path uses this to give a restored goal orchestrator back its
+    /// `role=goals-orch` / `project`. That meta lives only in the read model, which a GUI restart
+    /// wipes, and the persona that normally stamps it does so "on start" — which a `--resume`d
+    /// orchestrator never repeats.
+    pub fn queue_meta(&self, uid: String, meta: BTreeMap<String, String>) {
+        self.pending_meta.borrow_mut().push(PendingMeta {
+            uid,
+            meta,
+            waited: 0,
+        });
+    }
+
+    /// Apply queued meta to every pane that has reached the read model; keep the rest.
+    ///
+    /// A pane id is the control alias when one exists, else the session uid itself. Entries are
+    /// dropped after `MAX_WAIT_TICKS` so a pane that never materializes (closed mid-restore) cannot
+    /// pin its entry forever. The applied meta then survives on its own: the next reconcile copies
+    /// model meta into `ctl`, and publish re-stamps `ctl` onto the model every tick.
+    fn apply_pending_meta(&self, model: &mut ReadModel) {
+        const MAX_WAIT_TICKS: u32 = 600;
+        let mut pending = self.pending_meta.borrow_mut();
+        if pending.is_empty() {
+            return;
+        }
+        pending.retain_mut(|p| {
+            let pane_id = self
+                .pane_id_for_uid(&p.uid)
+                .unwrap_or_else(|| p.uid.clone());
+            let patch: BTreeMap<String, Option<String>> = p
+                .meta
+                .iter()
+                .map(|(k, v)| (k.clone(), Some(v.clone())))
+                .collect();
+            if model.set_meta(&pane_id, &patch).is_some() {
+                return false; // applied
+            }
+            p.waited += 1;
+            p.waited < MAX_WAIT_TICKS
+        });
+    }
+
     /// The read-model bridge: reconcile any control-originated structural change back into the
     /// live GUI (on the UI thread), then republish the GUI tree into the read-model. No-op when
     /// the server is stopped.
@@ -432,6 +490,9 @@ impl ControlHost {
 
             // 3. Republish the (now-updated) live GUI tree into the read-model.
             let republished = self.publish(&mut model, windows);
+
+            // 3b. Stamp any meta the GUI queued for panes that now exist in the model.
+            self.apply_pending_meta(&mut model);
             (reconciled || healed, republished)
         };
 
