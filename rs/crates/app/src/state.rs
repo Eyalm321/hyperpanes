@@ -1082,11 +1082,17 @@ pub struct State {
     /// empty map after launch used to make the next goal spawn a SECOND orchestrator beside the
     /// restored one. `make_pane_from_spec` re-registers every restored orchestrator here.
     pub goal_orchestrators: std::collections::HashMap<String, String>,
-    /// Goals system: orchestrator session uid → the `[orchestrator, spec, impl]` models it was
-    /// launched with. Written into the workspace snapshot as `goals.*` meta so a restore relaunches
-    /// with the same tiers (normalized to latest-tracking aliases) rather than replaying the
-    /// dated `--model` baked into the saved command line.
-    pub goal_orch_models: std::collections::HashMap<String, [String; 3]>,
+    /// Goals system: orchestrator session uid → `(project, [orchestrator, spec, impl] models)`.
+    /// Written into the workspace snapshot as `goals.*` meta so a restore relaunches with the same
+    /// tiers (normalized to latest-tracking aliases) rather than replaying the dated `--model`
+    /// baked into the saved command line.
+    ///
+    /// Keyed by uid and carrying its own project ON PURPOSE, separate from `goal_orchestrators`:
+    /// that map holds ONE uid per project (it is the router), so when two orchestrators exist for
+    /// a project the second one's registration evicts the first — and a snapshot lookup through
+    /// the router silently dropped the evicted one's record. Seen live with two canora-sync
+    /// orchestrators.
+    pub goal_orch_models: std::collections::HashMap<String, (String, [String; 3])>,
     /// Control-plane meta to stamp on panes once they appear in the read model — `(session uid,
     /// key → value)`. Drained by the App each tick into the control host, which applies it after
     /// its publish (a freshly restored pane is not in the model until then).
@@ -3648,18 +3654,12 @@ impl State {
     /// [`Self::build_goal_orchestrator_launch`]. `claude.*` (the conversation id / cwd / account)
     /// is added on top by `App::embed_claude_sessions`, which merges into this map.
     fn goal_snapshot_meta(&self, uid: &str) -> Option<std::collections::BTreeMap<String, String>> {
-        let project = self
-            .goal_orchestrators
-            .iter()
-            .find(|(_, u)| u.as_str() == uid)
-            .map(|(p, _)| p.clone())?;
+        let (project, [orch, spec, implm]) = self.goal_orch_models.get(uid)?;
         let mut meta = std::collections::BTreeMap::new();
-        meta.insert(GOAL_META_PROJECT.to_string(), project);
-        if let Some([orch, spec, implm]) = self.goal_orch_models.get(uid) {
-            meta.insert(GOAL_META_ORCH_MODEL.to_string(), orch.clone());
-            meta.insert(GOAL_META_SPEC_MODEL.to_string(), spec.clone());
-            meta.insert(GOAL_META_IMPL_MODEL.to_string(), implm.clone());
-        }
+        meta.insert(GOAL_META_PROJECT.to_string(), project.clone());
+        meta.insert(GOAL_META_ORCH_MODEL.to_string(), orch.clone());
+        meta.insert(GOAL_META_SPEC_MODEL.to_string(), spec.clone());
+        meta.insert(GOAL_META_IMPL_MODEL.to_string(), implm.clone());
         Some(meta)
     }
 
@@ -3674,7 +3674,8 @@ impl State {
     fn register_goal_orchestrator(&mut self, uid: &str, project_path: &str, models: [String; 3]) {
         self.goal_orchestrators
             .insert(project_path.to_string(), uid.to_string());
-        self.goal_orch_models.insert(uid.to_string(), models);
+        self.goal_orch_models
+            .insert(uid.to_string(), (project_path.to_string(), models));
         let mut meta = std::collections::BTreeMap::new();
         meta.insert("role".to_string(), "goals-orch".to_string());
         meta.insert("project".to_string(), project_path.to_string());
@@ -6549,6 +6550,39 @@ mod goal_restore_tests {
             if let Some(dir) = env.get("CLAUDE_CONFIG_DIR") {
                 assert_eq!(dir, "/home/u/.claude-acct");
             }
+        }
+    }
+    /// Two orchestrators for one project (a duplicate restored beside a fresh one — seen live):
+    /// the router keeps only the last, but BOTH must still snapshot their own record, or the
+    /// evicted one restores with nothing but the legacy command-path fallback.
+    #[test]
+    fn both_of_two_orchestrators_keep_their_snapshot_meta() {
+        let mut st = fresh();
+        let models = || {
+            [
+                "opus[1m]".to_string(),
+                "fable[1m]".to_string(),
+                "sonnet[1m]".to_string(),
+            ]
+        };
+        st.register_goal_orchestrator("uid-old", "/home/u/dev/canora-sync", models());
+        st.register_goal_orchestrator("uid-new", "/home/u/dev/canora-sync", models());
+        // The router routes to the newest.
+        assert_eq!(
+            st.goal_orchestrators
+                .get("/home/u/dev/canora-sync")
+                .map(String::as_str),
+            Some("uid-new")
+        );
+        // ...but neither loses its record.
+        for uid in ["uid-old", "uid-new"] {
+            let meta = st
+                .goal_snapshot_meta(uid)
+                .unwrap_or_else(|| panic!("{uid} lost its meta"));
+            assert_eq!(
+                meta.get(GOAL_META_PROJECT).map(String::as_str),
+                Some("/home/u/dev/canora-sync")
+            );
         }
     }
 }
