@@ -1,0 +1,22 @@
+name: persona-sync
+
+# Daily drift check for the goal-orchestrator personas, in the direction verify.yml can't
+# cover: an edit made only to github.com/Eyalm321/agent-orchestration-skills. verify.yml gates
+# PRs that touch the bundled copy; this catches the skills repo moving on its own.
+# Non-gating by design: it fails the run, which surfaces in Actions without blocking any PR.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  persona-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bundled personas match the skills repo
+        run: bash scripts/check-persona-sync.sh

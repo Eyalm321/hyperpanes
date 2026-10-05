@@ -125,6 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      personas: ${{ steps.filter.outputs.personas }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -134,6 +135,9 @@ jobs:
             rust:
               - 'rs/crates/**'
               - 'rs/Cargo.lock'
+            personas:
+              - 'resources/claude/goal-orchestrator/**'
+              - 'scripts/check-persona-sync.sh'
 
   # The GUI/GPU crate (rs/crates/app) is tag-time-only by default. Build-verify it whenever a
   # PR touches any Rust crate (see `changes`), carries the `area:app` label, or runs inside the
@@ -166,16 +170,33 @@ jobs:
       - name: Build GUI crate
         run: cd rs/crates/app && cargo build --locked
 
+  # The goal-orchestrator personas live twice: here (resources/claude/goal-orchestrator/, what
+  # the installed app ships) and in github.com/Eyalm321/agent-orchestration-skills (the
+  # documented source of truth). They drifted apart twice by 60+ lines, both times through edits
+  # made only to this copy. So a change touching the bundled personas must leave them matching
+  # the skills repo. Path-filtered on purpose: gating EVERY PR on another repo's state would turn
+  # unrelated PRs red the moment someone edited the skills repo alone. That direction is
+  # covered by the daily persona-sync workflow instead.
+  persona-sync:
+    name: persona-sync
+    needs: changes
+    if: needs.changes.outputs.personas == 'true' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bundled personas match the skills repo
+        run: bash scripts/check-persona-sync.sh
+
   # Umbrella gate: the ONLY required status check (context name `verify`). It aggregates
   # the matrix legs so the ruleset never has to enumerate per-OS / per-workspace contexts.
   verify:
-    needs: [changes, test, lint, build-gui]
+    needs: [changes, test, lint, build-gui, persona-sync]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Gate on upstream job results
         run: |
-          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }} lint=${{ needs.lint.result }} build-gui=${{ needs.build-gui.result }}"
+          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }} lint=${{ needs.lint.result }} build-gui=${{ needs.build-gui.result }} persona-sync=${{ needs.persona-sync.result }}"
           # build-gui is intentionally skipped on PRs that don't touch any Rust crate; treat
           # skipped as pass, but fail on any failure/cancellation. `changes` must succeed —
           # if the path filter breaks, build-gui skips and we must NOT silently pass the GUI gate.
@@ -183,4 +204,5 @@ jobs:
           [[ "${{ needs.test.result }}" == "success" ]] || { echo "::error::test gate failed"; exit 1; }
           [[ "${{ needs.lint.result }}" == "success" ]] || { echo "::error::lint gate failed"; exit 1; }
           [[ "${{ needs.build-gui.result }}" =~ ^(success|skipped)$ ]] || { echo "::error::build-gui gate failed"; exit 1; }
+          [[ "${{ needs.persona-sync.result }}" =~ ^(success|skipped)$ ]] || { echo "::error::persona-sync gate failed — bundled personas drifted from the skills repo"; exit 1; }
           echo "all required gates green"
