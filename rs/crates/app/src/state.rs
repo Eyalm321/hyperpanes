@@ -341,6 +341,80 @@ fn goal_session_name(prefix: &str, project: &str) -> String {
     out
 }
 
+/// Workspace-snapshot meta keys that mark a pane as a goal orchestrator, so a restore can
+/// rebuild it instead of replaying a stale command line.
+///
+/// Namespaced `goals.` on purpose: `role` / `project` are the *live* control-plane meta the
+/// orchestrator persona and the inbox nudge read, and those are re-stamped at restore time from
+/// these — the snapshot records what we know, not what an agent happened to set.
+pub(crate) const GOAL_META_PROJECT: &str = "goals.project";
+pub(crate) const GOAL_META_ORCH_MODEL: &str = "goals.orch_model";
+pub(crate) const GOAL_META_SPEC_MODEL: &str = "goals.spec_model";
+pub(crate) const GOAL_META_IMPL_MODEL: &str = "goals.impl_model";
+
+/// Map a model id to the Claude Code alias that tracks the latest model in its family.
+///
+/// Workspace snapshots written before the alias change carry dated ids such as
+/// `claude-fable-5[1m]`, and a restored orchestrator would otherwise be pinned to that generation
+/// for as long as it lives. `claude-<family>-<version…>[suffix]` becomes `<family>[suffix]` for
+/// the families [`crate::command::GOAL_MODELS`] offers; `haiku` drops any suffix because it has
+/// no 1M variant. Anything unrecognised — already an alias, or a family we don't know — passes
+/// through unchanged, since rewriting a model we can't vouch for is worse than leaving it.
+pub(crate) fn normalize_goal_model(raw: &str) -> String {
+    let raw = raw.trim();
+    let Some(rest) = raw.strip_prefix("claude-") else {
+        return raw.to_string();
+    };
+    let (body, suffix) = match rest.find('[') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let family = body.split('-').next().unwrap_or("");
+    match family {
+        "opus" | "sonnet" | "fable" => format!("{family}{suffix}"),
+        "haiku" => "haiku".to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+/// Whether a saved pane command is a goal orchestrator's launch line.
+///
+/// The fallback detector for snapshots written before `goals.*` meta existed: the only durable
+/// fingerprint such a pane carries is its persona file. Matching the persona PATH, not just
+/// "claude", keeps an ordinary claude pane — or a spec agent, whose persona is `SPEC.md` — from
+/// being mistaken for an orchestrator and rebuilt.
+pub(crate) fn is_goal_orchestrator_command(command: &str) -> bool {
+    let head = command.split_whitespace().next().unwrap_or("");
+    let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
+    (head == "claude" || head == "claude.exe")
+        && (command.contains("goal-orchestrator/SKILL.md")
+            || command.contains("goal-orchestrator\\SKILL.md"))
+}
+
+/// The value following `--model` in a saved command line, when present.
+pub(crate) fn command_model(command: &str) -> Option<&str> {
+    let mut it = command.split_whitespace();
+    while let Some(tok) = it.next() {
+        if tok == "--model" {
+            return it.next();
+        }
+        if let Some(v) = tok.strip_prefix("--model=") {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Which Claude account an orchestrator launch uses.
+pub(crate) enum GoalAccount {
+    /// The next account in the rotation — a fresh "New goal".
+    Rotate,
+    /// A specific account dir, or `None` for the default. A restore MUST reuse the account the
+    /// conversation was saved under: `claude --resume` looks for the transcript in
+    /// `$CLAUDE_CONFIG_DIR/projects`, so rotating here would resume into an empty store.
+    Fixed(Option<String>),
+}
+
 /// Which tier of the goal org a settings blob is for. The tiers differ in exactly one thing:
 /// whether the agent may use Claude Code's cross-session messaging tools.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1001,9 +1075,33 @@ pub struct State {
     pub reminders: Vec<Reminder>,
     /// Goals system: project canonical path → the session uid of that project's live
     /// goals-orchestrator pane. Lets "New goal" route to the existing orchestrator (inject the
-    /// goal) instead of spawning a duplicate. NOT persisted — orchestrator panes don't survive
-    /// a relaunch; the entry is re-established on the next "New goal" for the project.
+    /// goal) instead of spawning a duplicate.
+    ///
+    /// Not itself serialized, but REBUILT on restore: orchestrator panes DO survive a relaunch —
+    /// the daemon re-attaches a live one, and a dead one comes back via `claude --resume` — so an
+    /// empty map after launch used to make the next goal spawn a SECOND orchestrator beside the
+    /// restored one. `make_pane_from_spec` re-registers every restored orchestrator here.
     pub goal_orchestrators: std::collections::HashMap<String, String>,
+    /// Goals system: orchestrator session uid → `(project, [orchestrator, spec, impl] models)`.
+    /// Written into the workspace snapshot as `goals.*` meta so a restore relaunches with the same
+    /// tiers (normalized to latest-tracking aliases) rather than replaying the dated `--model`
+    /// baked into the saved command line.
+    ///
+    /// Keyed by uid and carrying its own project ON PURPOSE, separate from `goal_orchestrators`:
+    /// that map holds ONE uid per project (it is the router), so when two orchestrators exist for
+    /// a project the second one's registration evicts the first — and a snapshot lookup through
+    /// the router silently dropped the evicted one's record. Seen live with two canora-sync
+    /// orchestrators.
+    pub goal_orch_models: std::collections::HashMap<String, (String, [String; 3])>,
+    /// Control-plane meta to stamp on panes once they appear in the read model — `(session uid,
+    /// key → value)`. Drained by the App each tick into the control host, which applies it after
+    /// its publish (a freshly restored pane is not in the model until then).
+    ///
+    /// Exists because `role` / `project` live only in the control host's in-memory read model,
+    /// which a GUI restart wipes; an orchestrator's persona stamps them "on start", and a
+    /// `--resume`d orchestrator never starts again. Without the role the inbox nudge never fires,
+    /// so a spec agent reporting back is never heard — the goal org goes silent.
+    pub pending_pane_meta: Vec<(String, std::collections::BTreeMap<String, String>)>,
     /// Goals system: images attached to the in-progress New-goal dialog, held as file
     /// paths (clipboard images are captured to temp PNGs) until submit, when their paths are
     /// written into the goal prompt. Cleared on open and on submit.
@@ -1141,6 +1239,8 @@ impl State {
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
             goal_orchestrators: std::collections::HashMap::new(),
+            goal_orch_models: std::collections::HashMap::new(),
+            pending_pane_meta: Vec::new(),
             goal_draft_images: Vec::new(),
             goal_text: String::new(),
             goal_field: 0,
@@ -3172,71 +3272,29 @@ impl State {
         self.dirty = true;
     }
 
-    /// Goals system: hand a free-text goal to the project's goals orchestrator, spawning one if
-    /// it isn't already live. Either way the goal is not written to the pty immediately — it is
-    /// queued as a [`PendingGoal`] and delivered by the app tick (`deliver_pending_goals`) once the
-    /// pane's Claude TUI is ready (marker-gated, with a fallback timeout), reusing the resume
-    /// queue's proven gap+CR cadence. For an existing orchestrator that's near-instant (its marker
-    /// is already old); for a fresh spawn it waits out the boot. The orchestrator self-registers
-    /// `role`/`project` meta and drives spec agents → impl agents (see the goal-orchestrator skill).
+    /// Build an orchestrator's launch line and spawn env: persona, `--model`, `--name`,
+    /// `--mcp-config`, `--settings`, the `HP_GOAL_*` env, the account, and the env-inheritance
+    /// backstop.
     ///
-    /// Returns `false` (with an eprintln) only if the orchestrator persona file can't be found.
-    pub fn submit_new_goal(
+    /// Shared by a fresh "New goal" and by restore. Restore used to replay the saved command line
+    /// verbatim, which kept every flag frozen at first launch: a dated `--model` that never tracks
+    /// a new generation, and none of the spawn env (persona dir, settings, accounts,
+    /// `ENABLE_TOOL_SEARCH=false`) — so a restored orchestrator could not spawn working agents.
+    /// Building it in one place makes the two paths impossible to drift apart.
+    ///
+    /// `None` when the persona can't be found (the caller refuses the goal / keeps the old line).
+    #[allow(clippy::too_many_arguments)]
+    fn build_goal_orchestrator_launch(
         &mut self,
-        mgr: &SessionManager,
-        project_path: &str,
-        intent: &str,
+        proj_name: &str,
+        proj_color: &str,
         orch_model: &str,
         spec_model: &str,
         impl_model: &str,
-    ) -> bool {
-        let intent = intent.trim();
-        if intent.is_empty() || project_path.is_empty() {
-            return false;
-        }
-
-        // Build the goal payload: the intent + any attached image paths (Claude reads image
-        // files referenced by path — the reliable delivery; a live clipboard-paste of the same
-        // images is best-effort on top) + the per-goal spec/impl model tiers as a hint the
-        // orchestrator honors when it spawns those agents.
-        let mut payload = intent.to_string();
-        for img in &self.goal_draft_images {
-            payload.push_str(&format!("\n[image: {}]", img.display()));
-        }
-        payload.push_str(&format!(
-            "\n(models — spec: {spec_model}, implementation: {impl_model})"
-        ));
-
-        // The pane carries the project's identity (title = project name, frame = project
-        // color) and the current task as its subtitle.
-        let project = self.projects.iter().find(|p| p.path == project_path);
-        let (proj_name, proj_color) = match project {
-            Some(p) => (p.name.clone(), p.color.clone()),
-            None => (String::new(), String::new()),
-        };
-        let subtitle = goal_subtitle(intent);
-
-        // Existing orchestrator for this project still live? Queue the goal for it (delivered on
-        // the next tick — its Claude is already up, so the marker gate passes immediately) and
-        // refresh its subtitle to the newest task.
-        if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
-            let alive = self
-                .tabs
-                .iter()
-                .flat_map(|t| &t.panes)
-                .any(|p| p.uid == uid);
-            if alive {
-                if let Some((ti, pi)) = self.find_pane(&uid) {
-                    self.tabs[ti].panes[pi].subtitle = Some(subtitle.clone().into());
-                }
-                self.queue_pending_goal(uid, payload);
-                self.close_overlay();
-                self.dirty = true;
-                return true;
-            }
-            self.goal_orchestrators.remove(project_path); // stale (pane closed) — respawn below
-        }
-
+        account: GoalAccount,
+    ) -> Option<(String, hyperpanes_core::session::spawn::EnvMap)> {
+        let proj_name = proj_name.to_string();
+        let proj_color = proj_color.to_string();
         // Locate the goal-orchestrator persona `SKILL.md`. Bundled with the app under
         // `resources/claude/goal-orchestrator/` — mirror the packaged layouts
         // `shell_integration_dir()` handles (exe-relative, macOS `.app` Resources, and FHS
@@ -3279,7 +3337,7 @@ impl State {
                 "[goals] orchestrator persona not found — bundle resources/claude/goal-orchestrator/ \
                  or symlink the skill into ~/.claude/skills; goal not started"
             );
-            return false;
+            return None;
         };
 
         // Spawn a fresh orchestrator in the project cwd. `--model` = the orchestrator tier; the
@@ -3297,7 +3355,8 @@ impl State {
         // workers, often in the SAME worktree — ends up as `<project>-<2 hex chars>`, which is
         // useless both to an agent picking a `SendMessage` target and to a human reading
         // `/list-agents`. One orchestrator exists per project (find-or-spawn on
-        // `self.goal_orchestrators`), so `goals-<project>` is unique by construction.
+        // `self.goal_orchestrators`, which restore re-registers), so `goals-<project>` stays
+        // unique across relaunches too.
         let session_name = goal_session_name("goals", &proj_name);
         command.push_str(&format!(" --name {session_name}"));
         // Account rotation hides the user-scoped hyperpanes MCP registration (it only lives in
@@ -3381,12 +3440,19 @@ impl State {
         // accounts. No registry / single account ⇒ nothing injected (Claude uses its default).
         let accounts = hyperpanes_core::claude_accounts::config_dirs();
         if !accounts.is_empty() {
-            let chosen = &accounts[self.goal_account_cursor % accounts.len()];
-            self.goal_account_cursor = self.goal_account_cursor.wrapping_add(1);
-            env.insert(
-                "CLAUDE_CONFIG_DIR".to_string(),
-                chosen.to_string_lossy().into_owned(),
-            );
+            let chosen = match &account {
+                GoalAccount::Rotate => {
+                    let c = accounts[self.goal_account_cursor % accounts.len()]
+                        .to_string_lossy()
+                        .into_owned();
+                    self.goal_account_cursor = self.goal_account_cursor.wrapping_add(1);
+                    Some(c)
+                }
+                GoalAccount::Fixed(dir) => dir.clone(),
+            };
+            if let Some(dir) = chosen {
+                env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
+            }
             let list = accounts
                 .iter()
                 .map(|d| d.to_string_lossy().into_owned())
@@ -3412,6 +3478,84 @@ impl State {
                 std::env::set_var(key, val);
             }
         }
+        Some((command, env))
+    }
+
+    /// Goals system: hand a free-text goal to the project's goals orchestrator, spawning one if
+    /// it isn't already live. Either way the goal is not written to the pty immediately — it is
+    /// queued as a [`PendingGoal`] and delivered by the app tick (`deliver_pending_goals`) once the
+    /// pane's Claude TUI is ready (marker-gated, with a fallback timeout), reusing the resume
+    /// queue's proven gap+CR cadence. For an existing orchestrator that's near-instant (its marker
+    /// is already old); for a fresh spawn it waits out the boot. The orchestrator self-registers
+    /// `role`/`project` meta and drives spec agents → impl agents (see the goal-orchestrator skill).
+    ///
+    /// Returns `false` (with an eprintln) only if the orchestrator persona file can't be found.
+    pub fn submit_new_goal(
+        &mut self,
+        mgr: &SessionManager,
+        project_path: &str,
+        intent: &str,
+        orch_model: &str,
+        spec_model: &str,
+        impl_model: &str,
+    ) -> bool {
+        let intent = intent.trim();
+        if intent.is_empty() || project_path.is_empty() {
+            return false;
+        }
+
+        // Build the goal payload: the intent + any attached image paths (Claude reads image
+        // files referenced by path — the reliable delivery; a live clipboard-paste of the same
+        // images is best-effort on top) + the per-goal spec/impl model tiers as a hint the
+        // orchestrator honors when it spawns those agents.
+        let mut payload = intent.to_string();
+        for img in &self.goal_draft_images {
+            payload.push_str(&format!("\n[image: {}]", img.display()));
+        }
+        payload.push_str(&format!(
+            "\n(models — spec: {spec_model}, implementation: {impl_model})"
+        ));
+
+        // The pane carries the project's identity (title = project name, frame = project
+        // color) and the current task as its subtitle.
+        let project = self.projects.iter().find(|p| p.path == project_path);
+        let (proj_name, proj_color) = match project {
+            Some(p) => (p.name.clone(), p.color.clone()),
+            None => (String::new(), String::new()),
+        };
+        let subtitle = goal_subtitle(intent);
+
+        // Existing orchestrator for this project still live? Queue the goal for it (delivered on
+        // the next tick — its Claude is already up, so the marker gate passes immediately) and
+        // refresh its subtitle to the newest task.
+        if let Some(uid) = self.goal_orchestrators.get(project_path).cloned() {
+            let alive = self
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .any(|p| p.uid == uid);
+            if alive {
+                if let Some((ti, pi)) = self.find_pane(&uid) {
+                    self.tabs[ti].panes[pi].subtitle = Some(subtitle.clone().into());
+                }
+                self.queue_pending_goal(uid, payload);
+                self.close_overlay();
+                self.dirty = true;
+                return true;
+            }
+            self.goal_orchestrators.remove(project_path); // stale (pane closed) — respawn below
+        }
+
+        let Some((command, env)) = self.build_goal_orchestrator_launch(
+            &proj_name,
+            &proj_color,
+            orch_model,
+            spec_model,
+            impl_model,
+            GoalAccount::Rotate,
+        ) else {
+            return false;
+        };
         let opts = NewPaneOpts {
             label: Some(if proj_name.is_empty() {
                 "goals".to_string()
@@ -3430,13 +3574,112 @@ impl State {
             if let Some((ti, pi)) = self.find_pane(&uid) {
                 self.tabs[ti].panes[pi].subtitle = Some(subtitle.clone().into());
             }
-            self.goal_orchestrators
-                .insert(project_path.to_string(), uid.clone());
+            self.register_goal_orchestrator(
+                &uid,
+                project_path,
+                [
+                    orch_model.to_string(),
+                    spec_model.to_string(),
+                    impl_model.to_string(),
+                ],
+            );
             self.queue_pending_goal(uid, payload);
         }
         self.close_overlay();
         self.dirty = true;
         true
+    }
+
+    /// When restored pane `spec` is a goal orchestrator: its project and `[orch, spec, impl]` models.
+    ///
+    /// Recognised by its `goals.*` snapshot meta, or — for snapshots written before that meta
+    /// existed — by the persona path in its saved command. For those older snapshots the project is
+    /// recovered from the pane: its cwd when that is a known project, else the project whose name
+    /// matches the pane label (a resumed orchestrator's cwd has been seen to be `$HOME`), else the
+    /// cwd as-is. Missing tiers fall back to the saved New-goal defaults, and every model is
+    /// normalized to its latest-tracking alias.
+    fn restored_goal_orchestrator(&self, spec: &PaneSpec) -> Option<(String, [String; 3])> {
+        let meta = spec.meta.as_ref();
+        let command = spec.command.as_deref().unwrap_or("");
+        let project = match meta.and_then(|m| m.get(GOAL_META_PROJECT)) {
+            Some(p) => p.clone(),
+            None => {
+                if !is_goal_orchestrator_command(command) {
+                    return None;
+                }
+                let cwd = spec.cwd.clone().unwrap_or_default();
+                if self.projects.iter().any(|p| p.path == cwd) {
+                    cwd
+                } else if let Some(p) = spec
+                    .label
+                    .as_deref()
+                    .and_then(|l| self.projects.iter().find(|p| p.name == l))
+                {
+                    p.path.clone()
+                } else {
+                    cwd
+                }
+            }
+        };
+        if project.is_empty() {
+            return None;
+        }
+        let default = |tier: usize| {
+            let idx = self.goal_model_sel.get(tier).copied().unwrap_or(0);
+            crate::command::GOAL_MODELS
+                .get(idx)
+                .copied()
+                .unwrap_or(crate::command::GOAL_MODELS[0])
+                .to_string()
+        };
+        let from_meta = |key: &str| meta.and_then(|m| m.get(key)).cloned();
+        let orch = from_meta(GOAL_META_ORCH_MODEL)
+            .or_else(|| command_model(command).map(str::to_string))
+            .unwrap_or_else(|| default(0));
+        let spec_m = from_meta(GOAL_META_SPEC_MODEL).unwrap_or_else(|| default(1));
+        let impl_m = from_meta(GOAL_META_IMPL_MODEL).unwrap_or_else(|| default(2));
+        Some((
+            project,
+            [
+                normalize_goal_model(&orch),
+                normalize_goal_model(&spec_m),
+                normalize_goal_model(&impl_m),
+            ],
+        ))
+    }
+
+    /// The `goals.*` snapshot meta for pane `uid`, when it is a registered goal orchestrator.
+    ///
+    /// Records the project and the model tiers so restore can rebuild the launch with
+    /// [`Self::build_goal_orchestrator_launch`]. `claude.*` (the conversation id / cwd / account)
+    /// is added on top by `App::embed_claude_sessions`, which merges into this map.
+    fn goal_snapshot_meta(&self, uid: &str) -> Option<std::collections::BTreeMap<String, String>> {
+        let (project, [orch, spec, implm]) = self.goal_orch_models.get(uid)?;
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert(GOAL_META_PROJECT.to_string(), project.clone());
+        meta.insert(GOAL_META_ORCH_MODEL.to_string(), orch.clone());
+        meta.insert(GOAL_META_SPEC_MODEL.to_string(), spec.clone());
+        meta.insert(GOAL_META_IMPL_MODEL.to_string(), implm.clone());
+        Some(meta)
+    }
+
+    /// Record pane `uid` as `project_path`'s goal orchestrator: route new goals for the project to
+    /// it, remember its model tiers for the next snapshot, and queue the control-plane meta that
+    /// identifies it.
+    ///
+    /// Called for a fresh spawn AND for every restored orchestrator. The meta is stamped by the app
+    /// rather than left to the persona's "on start `set_meta`", because a `--resume`d orchestrator
+    /// never starts again — and without `role=goals-orch` the inbox nudge (`nudge::NUDGED_ROLES`)
+    /// skips the pane, so a spec agent reporting back is never heard.
+    fn register_goal_orchestrator(&mut self, uid: &str, project_path: &str, models: [String; 3]) {
+        self.goal_orchestrators
+            .insert(project_path.to_string(), uid.to_string());
+        self.goal_orch_models
+            .insert(uid.to_string(), (project_path.to_string(), models));
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("role".to_string(), "goals-orch".to_string());
+        meta.insert("project".to_string(), project_path.to_string());
+        self.pending_pane_meta.push((uid.to_string(), meta));
     }
 
     /// Enqueue a goal for robust delivery into pane `uid` (see [`PendingGoal`] /
@@ -4508,6 +4751,8 @@ impl State {
                             cwd: p.cwd.clone(),
                             font_size: (px != base).then_some(px),
                             uid: Some(p.uid.clone()),
+                            // A goal orchestrator records what restore needs to rebuild it.
+                            meta: self.goal_snapshot_meta(&p.uid),
                             ..Default::default()
                         }
                     })
@@ -4771,6 +5016,43 @@ impl State {
         let mut spawn_args = spec.args.clone();
         let mut spawn_cwd = spec.cwd.clone();
         let mut spawn_env: Option<hyperpanes_core::session::spawn::EnvMap> = None;
+        // ---- Goal orchestrator: rebuild the launch, don't replay it ----
+        // The saved command froze every flag at first launch: a dated `--model` that never tracks
+        // a new generation, and none of the spawn env (persona dir, settings, account list,
+        // `ENABLE_TOOL_SEARCH=false`). Rebuild it with the same builder "New goal" uses, keeping
+        // the conversation's own account so `--resume` (appended below) finds its transcript.
+        // A re-attached survivor is still the original live process — nothing to relaunch — but it
+        // is re-registered either way so new goals route to it and its control meta comes back.
+        let restored_goal = self.restored_goal_orchestrator(spec);
+        if let Some((project, models)) = &restored_goal {
+            if !reattach {
+                let (name, color) = self
+                    .projects
+                    .iter()
+                    .find(|p| &p.path == project)
+                    .map(|p| (p.name.clone(), p.color.clone()))
+                    .unwrap_or_default();
+                if let Some((cmd, env)) = self.build_goal_orchestrator_launch(
+                    &name,
+                    &color,
+                    &models[0],
+                    &models[1],
+                    &models[2],
+                    GoalAccount::Fixed(resume_config_dir.clone()),
+                ) {
+                    spawn_command = Some(cmd);
+                    spawn_args = None;
+                    spawn_env = Some(env);
+                }
+            }
+            if self.goal_orchestrators.contains_key(project) {
+                eprintln!(
+                    "[goals] restored a second orchestrator for {project}; new goals route to the \
+                     most recently restored one — close the other"
+                );
+            }
+            self.register_goal_orchestrator(&uid, project, models.clone());
+        }
         let mut startup = None;
         if let Some(id) = &resume_id {
             // `CLAUDE_CONFIG_DIR='<dir>' ` prefix for typed resume lines (the shell-pane path);
@@ -6022,5 +6304,285 @@ mod reminder_tests {
         // a Custom 90 min from 23:00 rolls over midnight too.
         let (d, l) = due_for(23 * 3600, ReminderOffset::Custom(90));
         assert_eq!((d, l.as_str()), (90 * 60_000, "tomorrow 00:30"));
+    }
+}
+
+#[cfg(test)]
+mod goal_restore_tests {
+    //! A goal orchestrator survives a GUI restart: the daemon re-attaches it, or restore relaunches
+    //! it with `claude --resume`. These pin the three things restore used to lose — its model (a
+    //! dated `--model` replayed forever), its identity (`role` meta, so the nudge skips it), and its
+    //! routing (the in-memory project → orchestrator map, so a second one got spawned).
+    use super::*;
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    fn project(path: &str, name: &str) -> Project {
+        Project {
+            id: name.to_string(),
+            path: path.to_string(),
+            name: name.to_string(),
+            color: "#00aaff".to_string(),
+            last_opened_at: None,
+        }
+    }
+
+    /// The exact shape of an orchestrator line saved by a pre-fix build (from a live workspace).
+    const LEGACY_ORCH_CMD: &str = "claude --dangerously-skip-permissions \
+        --append-system-prompt-file /usr/share/hyperpanes/resources/claude/goal-orchestrator/SKILL.md \
+        --model claude-opus-5[1m] --name goals-canora-sync \
+        --mcp-config /home/u/.local/state/hyperpanes/goals-mcp.json --strict-mcp-config \
+        --settings /home/u/.local/state/hyperpanes/goals-settings.json";
+
+    #[test]
+    fn dated_ids_normalize_to_latest_tracking_aliases() {
+        assert_eq!(normalize_goal_model("claude-opus-5[1m]"), "opus[1m]");
+        assert_eq!(normalize_goal_model("claude-sonnet-5[1m]"), "sonnet[1m]");
+        assert_eq!(normalize_goal_model("claude-fable-5[1m]"), "fable[1m]");
+        assert_eq!(normalize_goal_model("claude-opus-4-1-20250805"), "opus");
+        // haiku has no 1M variant in Claude Code's alias set — never emit one.
+        assert_eq!(normalize_goal_model("claude-haiku-4-5"), "haiku");
+        assert_eq!(normalize_goal_model("claude-haiku-4-5[1m]"), "haiku");
+    }
+
+    #[test]
+    fn aliases_and_unknown_models_pass_through() {
+        for m in crate::command::GOAL_MODELS {
+            assert_eq!(normalize_goal_model(m), m, "an alias must be a fixed point");
+        }
+        // A family we can't vouch for is left exactly as written.
+        assert_eq!(
+            normalize_goal_model("claude-mythos-preview"),
+            "claude-mythos-preview"
+        );
+        assert_eq!(normalize_goal_model("  opus[1m] "), "opus[1m]");
+    }
+
+    #[test]
+    fn only_an_orchestrator_launch_line_is_detected() {
+        assert!(is_goal_orchestrator_command(LEGACY_ORCH_CMD));
+        assert!(is_goal_orchestrator_command(
+            "/usr/bin/claude --append-system-prompt-file C:\\x\\goal-orchestrator\\SKILL.md"
+        ));
+        // A spec agent carries SPEC.md, not SKILL.md.
+        assert!(!is_goal_orchestrator_command(
+            "claude --append-system-prompt-file /x/goal-orchestrator/SPEC.md"
+        ));
+        assert!(!is_goal_orchestrator_command("claude --resume abc"));
+        // The persona path alone is not enough — it has to be claude that runs it.
+        assert!(!is_goal_orchestrator_command(
+            "vim /x/goal-orchestrator/SKILL.md"
+        ));
+        assert!(!is_goal_orchestrator_command(""));
+    }
+
+    #[test]
+    fn model_flag_is_read_in_both_spellings() {
+        assert_eq!(command_model(LEGACY_ORCH_CMD), Some("claude-opus-5[1m]"));
+        assert_eq!(
+            command_model("claude --model=sonnet[1m] -p x"),
+            Some("sonnet[1m]")
+        );
+        assert_eq!(command_model("claude -p x"), None);
+        assert_eq!(command_model("claude --model"), None);
+    }
+
+    /// The case actually sitting on disk: a pre-fix snapshot with no `goals.*` meta. Recognised by
+    /// its persona path; the project recovered from the pane label because a resumed orchestrator's
+    /// cwd was observed to be `$HOME`; the dated model normalized.
+    #[test]
+    fn a_legacy_snapshot_is_recognised_and_its_model_unpinned() {
+        let mut st = fresh();
+        st.projects = vec![project("/home/u/dev/canora-sync", "canora-sync")];
+        let spec = PaneSpec {
+            label: Some("canora-sync".to_string()),
+            cwd: Some("/home/u".to_string()),
+            command: Some(LEGACY_ORCH_CMD.to_string()),
+            ..Default::default()
+        };
+        let (proj, models) = st
+            .restored_goal_orchestrator(&spec)
+            .expect("is an orchestrator");
+        assert_eq!(proj, "/home/u/dev/canora-sync");
+        assert_eq!(
+            models[0], "opus[1m]",
+            "the dated --model must not survive a restore"
+        );
+        // No tiers were recorded, so spec/impl come from the saved New-goal defaults.
+        for m in &models[1..] {
+            assert!(crate::command::GOAL_MODELS.contains(&m.as_str()), "{m}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_snapshot_prefers_a_cwd_that_is_a_known_project() {
+        let mut st = fresh();
+        st.projects = vec![project("/home/u/dev/canora-sync", "canora-sync")];
+        let spec = PaneSpec {
+            label: Some("something else".to_string()),
+            cwd: Some("/home/u/dev/canora-sync".to_string()),
+            command: Some(LEGACY_ORCH_CMD.to_string()),
+            ..Default::default()
+        };
+        let (proj, _) = st.restored_goal_orchestrator(&spec).unwrap();
+        assert_eq!(proj, "/home/u/dev/canora-sync");
+    }
+
+    #[test]
+    fn ordinary_panes_are_not_orchestrators() {
+        let st = fresh();
+        for cmd in [
+            None,
+            Some("claude --resume abc".to_string()),
+            Some("claude --append-system-prompt-file /x/goal-orchestrator/SPEC.md".to_string()),
+            Some("htop".to_string()),
+        ] {
+            let spec = PaneSpec {
+                command: cmd.clone(),
+                cwd: Some("/home/u/dev/canora-sync".to_string()),
+                ..Default::default()
+            };
+            assert!(st.restored_goal_orchestrator(&spec).is_none(), "{cmd:?}");
+        }
+    }
+
+    /// Spawn → snapshot → restore round-trips the project and tiers, and registering queues the
+    /// control meta the inbox nudge keys on.
+    #[test]
+    fn registration_round_trips_through_the_snapshot() {
+        let mut st = fresh();
+        st.register_goal_orchestrator(
+            "uid-1",
+            "/home/u/dev/canora-sync",
+            [
+                "opus[1m]".to_string(),
+                "fable[1m]".to_string(),
+                "sonnet[1m]".to_string(),
+            ],
+        );
+        assert_eq!(
+            st.goal_orchestrators
+                .get("/home/u/dev/canora-sync")
+                .map(String::as_str),
+            Some("uid-1")
+        );
+
+        // Identity for the control plane: exactly what `nudge::NUDGED_ROLES` matches on.
+        let (uid, meta) = st.pending_pane_meta.last().expect("meta queued");
+        assert_eq!(uid, "uid-1");
+        assert_eq!(meta.get("role").map(String::as_str), Some("goals-orch"));
+        assert_eq!(
+            meta.get("project").map(String::as_str),
+            Some("/home/u/dev/canora-sync")
+        );
+        assert!(hyperpanes_core::control::nudge::NUDGED_ROLES.contains(&"goals-orch"));
+
+        let saved = st
+            .goal_snapshot_meta("uid-1")
+            .expect("orchestrator gets snapshot meta");
+        let spec = PaneSpec {
+            // Even with a dated line on disk, recorded tiers win and are normalized.
+            command: Some(LEGACY_ORCH_CMD.to_string()),
+            meta: Some(saved),
+            ..Default::default()
+        };
+        let restored = fresh().restored_goal_orchestrator(&spec).unwrap();
+        assert_eq!(restored.0, "/home/u/dev/canora-sync");
+        assert_eq!(
+            restored.1,
+            [
+                "opus[1m]".to_string(),
+                "fable[1m]".to_string(),
+                "sonnet[1m]".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn only_orchestrators_get_snapshot_meta() {
+        let st = fresh();
+        assert!(st.goal_snapshot_meta("some-ordinary-pane").is_none());
+    }
+
+    /// Restore must keep the conversation's account — rotating would resume into an empty
+    /// transcript store. When the persona resolves (it does on a dev box, may not on CI), the
+    /// rebuilt line also carries the alias model and the spawn env the replayed line lacked.
+    ///
+    /// Ignored by default: the real builder writes `goals-mcp.json` / `goals-settings.json` into
+    /// the user's state dir and mirrors `HP_GOAL_*` into the process env. The content matches what
+    /// the app itself writes, but a unit test has no business touching host state. Run on demand:
+    /// `cargo test --bin hyperpanes a_fixed_account_launch -- --ignored`.
+    #[test]
+    #[ignore = "writes goals-*.json into the real state dir"]
+    fn a_fixed_account_launch_never_rotates() {
+        let mut st = fresh();
+        let before = st.goal_account_cursor;
+        let built = st.build_goal_orchestrator_launch(
+            "canora-sync",
+            "#00aaff",
+            "opus[1m]",
+            "fable[1m]",
+            "sonnet[1m]",
+            GoalAccount::Fixed(Some("/home/u/.claude-acct".to_string())),
+        );
+        assert_eq!(
+            st.goal_account_cursor, before,
+            "a restore must not advance rotation"
+        );
+        if let Some((cmd, env)) = built {
+            assert!(cmd.contains("--model opus[1m]"), "{cmd}");
+            assert!(cmd.contains("--name goals-canora-sync"), "{cmd}");
+            assert_eq!(
+                env.get("ENABLE_TOOL_SEARCH").map(String::as_str),
+                Some("false"),
+                "a restored orchestrator must register its MCP tools eagerly"
+            );
+            assert_eq!(
+                env.get("HP_GOAL_SPEC_MODEL").map(String::as_str),
+                Some("fable[1m]")
+            );
+            assert_eq!(
+                env.get("HP_GOAL_IMPL_MODEL").map(String::as_str),
+                Some("sonnet[1m]")
+            );
+            if let Some(dir) = env.get("CLAUDE_CONFIG_DIR") {
+                assert_eq!(dir, "/home/u/.claude-acct");
+            }
+        }
+    }
+    /// Two orchestrators for one project (a duplicate restored beside a fresh one — seen live):
+    /// the router keeps only the last, but BOTH must still snapshot their own record, or the
+    /// evicted one restores with nothing but the legacy command-path fallback.
+    #[test]
+    fn both_of_two_orchestrators_keep_their_snapshot_meta() {
+        let mut st = fresh();
+        let models = || {
+            [
+                "opus[1m]".to_string(),
+                "fable[1m]".to_string(),
+                "sonnet[1m]".to_string(),
+            ]
+        };
+        st.register_goal_orchestrator("uid-old", "/home/u/dev/canora-sync", models());
+        st.register_goal_orchestrator("uid-new", "/home/u/dev/canora-sync", models());
+        // The router routes to the newest.
+        assert_eq!(
+            st.goal_orchestrators
+                .get("/home/u/dev/canora-sync")
+                .map(String::as_str),
+            Some("uid-new")
+        );
+        // ...but neither loses its record.
+        for uid in ["uid-old", "uid-new"] {
+            let meta = st
+                .goal_snapshot_meta(uid)
+                .unwrap_or_else(|| panic!("{uid} lost its meta"));
+            assert_eq!(
+                meta.get(GOAL_META_PROJECT).map(String::as_str),
+                Some("/home/u/dev/canora-sync")
+            );
+        }
     }
 }

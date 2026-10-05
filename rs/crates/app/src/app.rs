@@ -948,6 +948,14 @@ impl App {
         // 2c. Control plane: reconcile any inbound `/command` structural change into the live
         //     GUI (on this UI thread), then republish the live tree into the read-model so
         //     `/state` / `list_panes` reflect the GUI. No-op when the server is stopped.
+        // Control meta the GUI queued — restored goal orchestrators reclaiming `role` /
+        // `project` — goes to the control host, which applies it after this tick's publish.
+        for w in &windows {
+            let queued = std::mem::take(&mut w.state.borrow_mut().pending_pane_meta);
+            for (uid, meta) in queued {
+                self.control.queue_meta(uid, meta);
+            }
+        }
         self.control.sync(&windows, &self.mgr);
         // Mirror the control-server status into every window's Preferences props.
         {
