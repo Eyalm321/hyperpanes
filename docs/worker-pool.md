@@ -132,10 +132,10 @@ keep *its own* claim alive across a relaunch (until the re-armed lease lapses wi
 heartbeat); it cannot pin or release anyone else's claim, and a pid that is not a live local
 process is ignored (no holder ⇒ legacy requeue).
 
-**Follow-up: MCP holders.** Agents claiming through the `hyperpanes-mcp` bridge (`claim_task`)
-do not send `holderPid` yet, so their claims keep the legacy behaviour (requeued at boot). The
-bridge already re-reads `control.json` on every call, so it reconnects to a relaunched app on
-its own; it only needs to send its pid on claim.
+**MCP holders.** Agents claiming through the `hyperpanes-mcp` bridge (`claim_task`) keep the
+legacy behaviour (requeued at boot) until the bridge sends `holderPid`; Eyalm321/hyperpanes-mcp#9
+makes it send its own pid (the bridge lives exactly as long as its agent session). The bridge
+already re-reads `control.json` on every call, so it reconnects to a relaunched app on its own.
 
 ## maxAttempts, priority, dedupeKey
 

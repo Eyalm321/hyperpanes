@@ -236,8 +236,8 @@ or unknown (`docs/worker-pool.md`, "Across an app relaunch"). What a watchdog sh
   down, then reconnects on its own (it re-reads its `control.json`: the relaunched app has a new
   port and token) and acks with its original fence. No restart or nudge is needed.
 - A **409** on ack/extend right after a relaunch now means the claim really was recovered: its
-  holder was dead or recycled at boot, or it named no holder (an MCP `claim_task` claim, or a
-  runner older than this change). The task is back in the queue and will run again; treat the
+  holder was dead or recycled at boot, or it named no holder (an MCP `claim_task` claim from a
+  bridge without Eyalm321/hyperpanes-mcp#9, or a runner older than this change). The task is back in the queue and will run again; treat the
   late worker's result as a duplicate.
 - After `restartApp {scope:"full"}`, a crash that takes the daemon down, or a reboot, every
   worker is dead and every claim is requeued at boot, immediately, as before.
