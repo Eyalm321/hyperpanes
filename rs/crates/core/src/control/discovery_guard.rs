@@ -1,9 +1,10 @@
 //! Discovery-file ownership guard — a second instance must not silently take over a
 //! `control.json` owned by a live instance.
 //!
-//! `core/src/app.rs:44-46` resolves the control file as `HYPERPANES_CONTROL_FILE` over
-//! the XDG-derived default — and every spawned pane INHERITS that variable pointing at
-//! the LIVE file (`session::spawn`), so a dev/test build booted from an agent pane with
+//! `persistence::paths::resolve_control_file` resolves the control file as
+//! `HYPERPANES_CONTROL_FILE` over the XDG-derived default — and every spawned pane
+//! INHERITS that variable pointing at the LIVE file (`session::spawn`), so a dev/test
+//! build booted from an agent pane with
 //! only `XDG_STATE_HOME` overridden still targets the live `control.json`. Before this
 //! guard it would overwrite the live port+token on start (`write_discovery`), and every
 //! agent reading the file began failing with `fetch failed` / `unauthorized` /
@@ -131,11 +132,14 @@ fn refusal_message(path: &Path, owner: &Owner) -> String {
          (pid {pid}, port {port}, version {version}). Starting against the shared file \
          would hijack the live control plane — agents on the recorded port/token then \
          fail with 'fetch failed' / 'unauthorized' / 'no such pane' (see \
-         docs/agent-recovery.md). To run an isolated dev instance, relaunch with both \
-         env vars set: XDG_STATE_HOME=<dir> HYPERPANES_CONTROL_FILE=<dir>/control.json \
+         docs/agent-recovery.md). To run an isolated dev instance, relaunch with all \
+         four set under one scratch dir: \
+         HYPERPANES_CONTROL_FILE=<dir>/state/hyperpanes/control.json \
+         XDG_STATE_HOME=<dir>/state XDG_DATA_HOME=<dir>/data XDG_CONFIG_HOME=<dir>/config \
          <your-binary> (HYPERPANES_CONTROL_FILE overrides the XDG-derived default — \
-         core/src/app.rs:44-46). If pid {pid} is not a hyperpanes instance, delete \
-         {path} and retry.",
+         persistence::paths::resolve_control_file; a partly isolated instance refuses to \
+         start, see docs/dev-instance-isolation.md). If pid {pid} is not a hyperpanes \
+         instance, delete {path} and retry.",
         path = path.display(),
         pid = owner.pid,
         port = owner.port,
@@ -374,13 +378,18 @@ mod tests {
             msg.contains(&path.display().to_string()),
             "names the file: {msg}"
         );
-        // …and the exact copy-pasteable isolation recipe + the precedence rule.
+        // …and the exact copy-pasteable isolation recipe (all four, including the data
+        // dir: see persistence::isolation) + the precedence rule.
         assert!(
-            msg.contains("XDG_STATE_HOME=<dir> HYPERPANES_CONTROL_FILE=<dir>/control.json"),
+            msg.contains(
+                "HYPERPANES_CONTROL_FILE=<dir>/state/hyperpanes/control.json \
+                 XDG_STATE_HOME=<dir>/state XDG_DATA_HOME=<dir>/data \
+                 XDG_CONFIG_HOME=<dir>/config"
+            ),
             "gives the exact env line: {msg}"
         );
         assert!(
-            msg.contains("app.rs:44-46"),
+            msg.contains("resolve_control_file"),
             "cites the precedence site: {msg}"
         );
         let _ = child.kill();

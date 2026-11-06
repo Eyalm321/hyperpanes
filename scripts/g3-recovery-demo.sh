@@ -66,7 +66,7 @@ CONTROL_JSON="$XDG_STATE_HOME/hyperpanes/control.json"
 
 # ---- production-state guard (hard requirement, see docs/agent-recovery.md) ----------------
 # The headless boot MUST be pointed away from the live org's control file EXPLICITLY:
-# HYPERPANES_CONTROL_FILE takes precedence over the XDG-derived path (app.rs:44-46), and this
+# HYPERPANES_CONTROL_FILE takes precedence over the XDG-derived path (persistence::paths::resolve_control_file), and this
 # very script inherited it pointing at production three times before this guard existed. A test
 # that CAN reach production state eventually WILL.
 LIVE_CONTROL_JSON="$HOME/.local/state/hyperpanes/control.json"
@@ -171,7 +171,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 HEADLESS_BIN="$CARGO_TARGET_DIR/debug/headless"
-# HYPERPANES_CONTROL_FILE must be overridden HERE: it wins over XDG_STATE_HOME (app.rs:44-46)
+# HYPERPANES_CONTROL_FILE must be overridden HERE: it wins over XDG_STATE_HOME (persistence::paths::resolve_control_file)
 # and the surrounding environment carries it pointing at the live org's control file.
 XDG_STATE_HOME="$XDG_STATE_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
     HYPERPANES_CONTROL_FILE="$CONTROL_JSON" \
