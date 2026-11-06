@@ -38,7 +38,8 @@
 //! Relaunch resilience: with the session daemon on, a worker pane outlives a GUI relaunch, but
 //! the relaunched control server binds a fresh port and mints a fresh token (rewriting
 //! `control.json`). Every control call therefore goes through [`Control`], which on a transport
-//! error or HTTP 401 re-reads `control.json` and retries. claim/ack/nack keep retrying (~1s
+//! error or HTTP 401 re-reads the control file it resolved at startup (never a different one)
+//! and retries. claim/ack/nack keep retrying (~1s
 //! apart) until a reconnect window (default 5 min; override with `HP_WORKER_RECONNECT_SECS`,
 //! read once at startup) has elapsed since the first failure; the lease heartbeat never gives
 //! up on transient failures (only 409/404 stop it). The claim carries `holderPid` so the server
@@ -289,14 +290,20 @@ fn short(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-/// Read `control.json` (env override `HYPERPANES_CONTROL_FILE`, else the state-dir default).
-/// Panes may inherit `HYPERPANES_CONTROL_FILE` set-but-empty from the app; treat empty as unset.
-fn load_discovery() -> Result<Discovery, Box<dyn Error>> {
-    let path = std::env::var_os("HYPERPANES_CONTROL_FILE")
+/// Which `control.json` this runner talks to: env override `HYPERPANES_CONTROL_FILE`, else the
+/// state-dir default. Panes may inherit `HYPERPANES_CONTROL_FILE` set-but-empty from the app;
+/// treat empty as unset. Resolved ONCE at startup: every later rediscovery re-reads this same
+/// file, so a runner can never hop onto a different (e.g. dev) instance mid-run.
+fn control_file_path() -> PathBuf {
+    std::env::var_os("HYPERPANES_CONTROL_FILE")
         .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(hyperpanes_core::persistence::paths::control_json);
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        .map(PathBuf::from)
+        .unwrap_or_else(hyperpanes_core::persistence::paths::control_json)
+}
+
+/// Read and parse the control file at `path`.
+fn load_discovery_from(path: &Path) -> Result<Discovery, Box<dyn Error>> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
         format!(
             "cannot read control.json at {} ({e}); is the app running with the control API enabled?",
             path.display()
@@ -326,12 +333,18 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let disco = load_discovery()?;
+    let control_file = control_file_path();
+    let disco = load_discovery_from(&control_file)?;
     let base = control_base(&disco);
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
-    let ctl = Arc::new(Control::new(client, base.clone(), disco.token.clone()));
+    let ctl = Arc::new(Control::new(
+        client,
+        control_file,
+        base.clone(),
+        disco.token.clone(),
+    ));
 
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
@@ -896,21 +909,29 @@ enum ExtendResult {
 }
 
 /// Control-API connection that survives a server relaunch: the (base, token) pair is re-read from
-/// `control.json` whenever a call fails transiently.
+/// the runner's control file (resolved once, at startup) whenever a call fails transiently.
 struct Control {
     client: reqwest::blocking::Client,
+    /// The control file resolved at startup; rediscovery only ever re-reads this path.
+    control_file: PathBuf,
     disco: Mutex<(String, String)>,
     window: Duration,
 }
 
 impl Control {
-    fn new(client: reqwest::blocking::Client, base: String, token: String) -> Self {
+    fn new(
+        client: reqwest::blocking::Client,
+        control_file: PathBuf,
+        base: String,
+        token: String,
+    ) -> Self {
         let secs = std::env::var("HP_WORKER_RECONNECT_SECS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(DEFAULT_RECONNECT_SECS);
         Self {
             client,
+            control_file,
             disco: Mutex::new((base, token)),
             window: Duration::from_secs(secs),
         }
@@ -920,9 +941,10 @@ impl Control {
         self.disco.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Re-read `control.json`; a missing/mid-rewrite file keeps the old pair (next try re-reads).
+    /// Re-read the startup control file (never re-resolved from env/defaults); a missing or
+    /// mid-rewrite file keeps the old pair (the next try re-reads).
     fn refresh(&self) {
-        if let Ok(d) = load_discovery() {
+        if let Ok(d) = load_discovery_from(&self.control_file) {
             *self.disco.lock().unwrap_or_else(|e| e.into_inner()) = (control_base(&d), d.token);
         }
     }
@@ -1185,6 +1207,39 @@ mod tests {
             base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"::"}"#),
             "http://127.0.0.1:41419"
         );
+    }
+
+    #[test]
+    fn rediscovery_rereads_the_startup_control_file_only() {
+        let dir = std::env::temp_dir().join(format!("hp-worker-ctlpath-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("control.json");
+        std::fs::write(&file, r#"{"port":1111,"token":"first"}"#).unwrap();
+        let ctl = Control::new(
+            reqwest::blocking::Client::new(),
+            file.clone(),
+            "http://127.0.0.1:1".into(),
+            "stale".into(),
+        );
+        ctl.refresh();
+        let (base, token) = ctl.snapshot();
+        assert!(base.ends_with(":1111"), "{base}");
+        assert_eq!(token, "first");
+        // The app relaunches and rewrites THAT file: the runner follows it.
+        std::fs::write(&file, r#"{"port":2222,"token":"second"}"#).unwrap();
+        ctl.refresh();
+        let (base, token) = ctl.snapshot();
+        assert!(base.ends_with(":2222"), "{base}");
+        assert_eq!(token, "second");
+        // A missing / half-written file keeps the last good pair rather than resolving
+        // some other control file.
+        std::fs::write(&file, "{").unwrap();
+        ctl.refresh();
+        assert_eq!(ctl.snapshot().1, "second");
+        std::fs::remove_file(&file).unwrap();
+        ctl.refresh();
+        assert_eq!(ctl.snapshot().1, "second");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
