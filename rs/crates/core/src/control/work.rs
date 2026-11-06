@@ -744,10 +744,21 @@ impl WorkQueue {
     ) -> Recovery {
         let mut dead = Vec::new();
         let mut live = Vec::new();
+        // One probe per distinct holder: a `--count N` runner holds N claims under one pid, and
+        // off Linux a probe spawns `ps`.
+        let mut probed: std::collections::HashMap<(u32, Option<String>), bool> =
+            std::collections::HashMap::new();
         for (id, pid, start) in self.claimed_holders() {
-            match pid {
-                Some(pid) if alive(pid, start.as_deref()) => live.push(id),
-                _ => dead.push(id),
+            let is_live = match pid {
+                Some(pid) => *probed
+                    .entry((pid, start.clone()))
+                    .or_insert_with(|| alive(pid, start.as_deref())),
+                None => false,
+            };
+            if is_live {
+                live.push(id);
+            } else {
+                dead.push(id);
             }
         }
         let reaped = self.requeue_or_dead_letter(
