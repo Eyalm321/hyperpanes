@@ -14,9 +14,12 @@ were run; the originals live in `C:\hyperpanes-mcp` (where Node resolves `@model
    ```
    cd C:\hyperpanes-mcp && npm install && npm run build
    ```
-3. Start the daemon against an **isolated** discovery file (so it never fights the Electron app's
-   `%APPDATA%\hyperpanes\control.json`; the daemon's single-instance lock is also headless-salted):
+3. Start the daemon against an **isolated** discovery file AND data dir (so it never fights the
+   live app's `%APPDATA%\hyperpanes\control.json` or attaches its work queue; the daemon's
+   single-instance lock is also headless-salted). Without `APPDATA` the daemon refuses to start as
+   partly isolated (see `docs/dev-instance-isolation.md`):
    ```
+   set APPDATA=C:\hp-gate
    set HYPERPANES_CONTROL_FILE=C:\hp-gate\control.json
    set HYPERPANES_ALLOW_INPUT=1
    cargo run --manifest-path rs/Cargo.toml --bin headless

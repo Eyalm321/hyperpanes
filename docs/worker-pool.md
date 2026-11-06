@@ -75,7 +75,9 @@ the now-stale token on the row, fencing the late worker out.
   shortens).
 - Faster recovery paths exist beside the timer: `requeue_worker` (on a worker pane's exit)
   and `recover_in_flight` (on control-server boot — every worker is a dead child, so all
-  in-flight claims are recovered).
+  in-flight claims are recovered). Boot recovery and the reaper run **only in the process
+  that owns `work.db`** (an OS lock on `work.db.lock`). A second instance never attaches the
+  DB, and `/health` reports its `workQueue` as `"refused"` (`docs/dev-instance-isolation.md`).
 
 ## maxAttempts, priority, dedupeKey
 

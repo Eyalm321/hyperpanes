@@ -2,8 +2,8 @@
 
 ## The failure mode this closes
 
-`core/src/app.rs:44-46` resolves the discovery file as `HYPERPANES_CONTROL_FILE` with
-precedence over the XDG-derived default (`~/.local/state/hyperpanes/control.json`).
+`persistence::paths::resolve_control_file` resolves the discovery file as
+`HYPERPANES_CONTROL_FILE` with precedence over the XDG-derived default (`~/.local/state/hyperpanes/control.json`).
 Every spawned pane **inherits** that variable pointing at the LIVE file
 (`session::spawn`), so a dev/test build launched from an agent pane — even one that
 overrides `XDG_STATE_HOME` — still targets the live `control.json`. On start it
@@ -58,15 +58,17 @@ live instance, where the file always exists first.
 ## Running an isolated dev instance (the supported way)
 
 ```sh
-d=$(mktemp -d -p ~/.cache)   # not /tmp: tmpfs
-XDG_STATE_HOME=$d HYPERPANES_CONTROL_FILE=$d/control.json \
+D=$(mktemp -d -p ~/.cache)   # not /tmp: tmpfs
+HYPERPANES_CONTROL_FILE=$D/state/hyperpanes/control.json \
+  XDG_STATE_HOME=$D/state XDG_DATA_HOME=$D/data XDG_CONFIG_HOME=$D/config \
   cargo run --bin headless
 ```
 
-Both variables matter: `XDG_STATE_HOME` isolates the rest of the state dir, and
-`HYPERPANES_CONTROL_FILE` must be set explicitly because the inherited value would
-otherwise win (that precedence is the whole failure mode). Optionally add
-`XDG_CONFIG_HOME=$d` too: `control-settings.json` lives in the config dir, so a dev
-instance otherwise inherits the live bind address — harmless (the live port is taken
-and it falls back to loopback), just noisy. An unisolated dev launch
-now fails fast with the refusal message instead of hijacking the live control plane.
+All four matter. `HYPERPANES_CONTROL_FILE` must be set explicitly because the inherited value
+would otherwise win (that precedence is the whole failure mode). `XDG_STATE_HOME` isolates the
+rest of the state dir. `XDG_DATA_HOME` isolates the durable work queue (`work.db`): leaving it
+out was the second incident, a dev instance requeueing the live queue's claimed tasks.
+`XDG_CONFIG_HOME` keeps the live `control-settings.json` (bind address) out. An unisolated dev
+launch now fails fast with this guard's refusal instead of hijacking the live control plane,
+and a partly isolated one (control file / state dir moved, data dir not) refuses to start, see
+`docs/dev-instance-isolation.md`.

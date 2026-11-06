@@ -162,3 +162,6 @@ Then **exit** — you are per-goal; the orchestrator tears down your pane.
   the building.
 - Keep worktrees clean: land or discard each impl branch, no orphans.
 - Report up honestly — real evidence for `done`, real reasons for `blocked`/`failed`.
+- Booting a hyperpanes binary yourself (acceptance, a demo)? Same rule as IMPL.md "Booting a
+  dev/test instance": all four of `HYPERPANES_CONTROL_FILE`, `XDG_STATE_HOME`, `XDG_DATA_HOME`
+  and `XDG_CONFIG_HOME` under one scratch dir, or you can requeue live goals' claimed tasks.

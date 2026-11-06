@@ -185,17 +185,38 @@ inlined `curl` line.
 
 ## Named failure mode: control-plane hijack by a dev/test instance
 
-`app.rs:44-46`: `HYPERPANES_CONTROL_FILE` takes **precedence** over the XDG-derived
-control-file path. Every agent pane inherits that variable pointing at the LIVE
+`HYPERPANES_CONTROL_FILE` takes **precedence** over the XDG-derived control-file path
+(`persistence::paths::resolve_control_file`). Every agent pane inherits that variable pointing at the LIVE
 `~/.local/state/hyperpanes/control.json` — so a dev build booted from a pane with only
 `XDG_STATE_HOME` overridden still writes its port+token over the live file, silently
 repointing every agent (and the orchestrator's MCP bridge) at a dead instance. This
 happened three times in one session while building this very feature. Two rules follow:
 
-- Any dev/test boot of a hyperpanes binary must override `HYPERPANES_CONTROL_FILE`
-  **on the command line itself** (not in prose, not via XDG alone) and assert afterwards
-  that the live control.json is byte-identical to a pre-run snapshot —
-  `scripts/g3-recovery-demo.sh` is the reference implementation.
+- Any dev/test boot of a hyperpanes binary must override **all four** of
+  `HYPERPANES_CONTROL_FILE`, `XDG_STATE_HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME`
+  **on the command line itself** (not in prose, not via XDG alone), under one scratch dir,
+  and assert afterwards that the live control.json is byte-identical to a pre-run snapshot.
+  `scripts/g3-recovery-demo.sh` is the reference implementation. See
+  `docs/dev-instance-isolation.md` for the exact line per platform.
 - A watchdog seeing sudden `unauthorized` or `"no such pane"` for panes that were just
   alive must **re-read control.json** before concluding anything died: the symptoms of a
   hijacked control file lie about their cause.
+
+### The work-queue variant: a dev instance requeueing live claimed tasks
+
+Isolating the control file is not enough. The durable work queue lives in the **data** dir
+(`~/.local/share/hyperpanes/work.db`). A dev headless booted with `HYPERPANES_CONTROL_FILE` +
+`XDG_STATE_HOME` overridden but not `XDG_DATA_HOME` opened the live queue, and its boot
+recovery requeued another goal's in-flight task. The symptom is a worker whose `ack`/`extend`
+suddenly gets **409 Conflict** (stale fencing token) while a second worker runs the same task.
+This is now prevented structurally (`docs/dev-instance-isolation.md`):
+
+- A **partly isolated** headless/GUI boot (control file or state dir moved, data dir still the
+  default) refuses to start and names `XDG_DATA_HOME`. `HYPERPANES_ALLOW_SHARED_DATA=1` is the
+  deliberate override; do not use it to get past the refusal.
+- `work.db` is **single-owner** (an OS lock on `work.db.lock`). A second process never opens
+  it: no boot recovery, no reaper, an in-memory queue, and `/health` reports
+  `"workQueue":"refused"`. A watchdog seeing `"refused"` on an instance it expected to own the
+  queue is looking at a dev/second instance, not the primary. Read `work.db.lock`
+  (`{pid, exe, controlFile}`) to see who owns it.
+
