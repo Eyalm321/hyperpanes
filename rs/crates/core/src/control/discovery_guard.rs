@@ -43,6 +43,8 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
+use super::holder::pid_alive;
+
 /// How long a refusal is retried while the recorded owner is alive, covering an
 /// exiting owner (restart overlap) that has not released the file yet.
 const RETRY_TOTAL: Duration = Duration::from_secs(5);
@@ -145,61 +147,6 @@ fn refusal_message(path: &Path, owner: &Owner) -> String {
         port = owner.port,
         version = owner.version,
     )
-}
-
-/// Is a process with this pid alive right now? Zombies count as DEAD: an exiting
-/// owner that its parent has not reaped yet must not block a claim.
-#[cfg(target_os = "linux")]
-fn pid_alive(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    // The state field is the first token after the comm's closing paren (the comm
-    // itself may contain parens, so split on the LAST one): "pid (comm) S ...".
-    match stat
-        .rsplit(')')
-        .next()
-        .and_then(|rest| rest.trim_start().chars().next())
-    {
-        None | Some('Z') | Some('X') => false,
-        Some(_) => true,
-    }
-}
-
-/// Non-Linux unix (macOS) has no procfs, std exposes no `kill(2)`, and this crate's
-/// Cargo.toml is frozen (no `libc`) — so probe with `ps`. No output ⇒ dead; a
-/// leading `Z` state ⇒ zombie, dead for our purposes.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn pid_alive(pid: u32) -> bool {
-    match std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()
-    {
-        Ok(out) => {
-            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            !stat.is_empty() && !stat.starts_with('Z')
-        }
-        Err(_) => false,
-    }
-}
-
-#[cfg(windows)]
-fn pid_alive(pid: u32) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
-    use windows::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-        Ok(handle) => {
-            let mut code = 0u32;
-            let alive = unsafe { GetExitCodeProcess(handle, &mut code) }.is_ok()
-                && code == STILL_ACTIVE.0 as u32;
-            let _ = unsafe { CloseHandle(handle) };
-            alive
-        }
-        // Access denied ⇒ the process exists but is another user's / elevated.
-        Err(e) => e.code() == windows::core::HRESULT::from(ERROR_ACCESS_DENIED),
-    }
 }
 
 /// The process's name/path, best-effort: comm + argv0 on Linux, `ps -o comm=`

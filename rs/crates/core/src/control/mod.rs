@@ -1,6 +1,7 @@
 //! Control plane. The pure cores (scope/inbox/lock/input/output — done, Wave 0) plus the
 //! HTTP+WS server stack (this wave): tokens / readmodel / events / dispatch / routes / server.
 //! Frozen module map.
+pub mod holder;
 pub mod inbox;
 pub mod input;
 pub mod lock;

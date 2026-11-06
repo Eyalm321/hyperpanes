@@ -55,6 +55,8 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 use serde::{Deserialize, Serialize};
 
+use super::holder::{self, Holder};
+
 /// Default dead-letter threshold (doc 01 §1: dead-letter once `attempts == max_attempts`).
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Default lease length minted on claim when the caller passes `lease_ms <= 0`.
@@ -65,7 +67,7 @@ pub const BACKOFF_BASE_MS: i64 = 1_000;
 pub const BACKOFF_CAP_MS: i64 = 60_000;
 
 /// Bump on any schema change; gates forward migrations on open (doc 01 §3.4).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 // ---------------------------------------------------------------------------
 // Pure value types + rules (no DB — unit-tested with plain values, inbox-style)
@@ -275,6 +277,14 @@ pub struct Reaped {
     pub disposition: Disposition,
 }
 
+/// What boot recovery did: `reaped` = claims of dead holders, requeued or dead-lettered;
+/// `kept` = claims of live holders, left `Claimed` (same fence) with a re-armed lease.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recovery {
+    pub reaped: Vec<Reaped>,
+    pub kept: Vec<Task>,
+}
+
 /// Queue depth by state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,8 +324,10 @@ pub struct QueueSummary {
 // The stateful shell: WorkQueue over SQLite
 // ---------------------------------------------------------------------------
 
-/// All `Task` columns, in the order [`row_to_task`] reads them. (Excludes
-/// `visibility_timeout_ms`, an internal column only `claim` reads.)
+/// All `Task` columns, in the order [`row_to_task`] reads them. (Excludes the internal
+/// columns: `visibility_timeout_ms`, which only `claim` and boot recovery read, and
+/// `holder_pid`/`holder_start`, the claim holder's identity, which only boot recovery reads.
+/// None of them are on the wire.)
 const COLS: &str = "id, queue, seq, kind, title, state, payload, priority, attempts, \
                     max_attempts, available_at, claimed_by, fencing_token, \
                     visibility_deadline, result, error, dedupe_key, created_at, updated_at, \
@@ -345,7 +357,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at            INTEGER NOT NULL,
     updated_at            INTEGER NOT NULL,
     goal_id               TEXT,
-    depends_on            TEXT
+    depends_on            TEXT,
+    holder_pid            INTEGER,
+    holder_start          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_claimable  ON tasks(queue, state, available_at, priority, seq);
 CREATE INDEX IF NOT EXISTS idx_visibility ON tasks(state, visibility_deadline);
@@ -410,6 +424,13 @@ impl WorkQueue {
                 conn.execute_batch(
                     "ALTER TABLE tasks ADD COLUMN goal_id TEXT;
                      ALTER TABLE tasks ADD COLUMN depends_on TEXT;",
+                )?;
+            }
+            // v2 -> v3: claim-holder identity (boot recovery keeps a live holder's claim).
+            if current < 3 {
+                conn.execute_batch(
+                    "ALTER TABLE tasks ADD COLUMN holder_pid INTEGER;
+                     ALTER TABLE tasks ADD COLUMN holder_start TEXT;",
                 )?;
             }
             conn.execute("UPDATE schema_version SET v = ?1", params![SCHEMA_VERSION])?;
@@ -491,8 +512,24 @@ impl WorkQueue {
     /// `None` if nothing is claimable. Ordered priority DESC, then FIFO (`available_at`,
     /// `seq`). Runs in a single `BEGIN IMMEDIATE` transaction with a guarded re-check, so
     /// two concurrent claimers can never win the same row. `lease_ms <= 0` falls back to
-    /// the task's `visibility_timeout_ms`.
+    /// the task's `visibility_timeout_ms`. Records no holder process, so boot recovery
+    /// treats the claim as dead (see [`claim_held`](Self::claim_held)).
     pub fn claim(&mut self, queue: &str, worker: &str, lease_ms: i64, now: i64) -> Option<Claim> {
+        self.claim_held(queue, worker, None, lease_ms, now)
+    }
+
+    /// [`claim`](Self::claim), recording the claiming process as the claim's `holder`
+    /// (from [`holder::identify`]). Boot recovery leaves a claim whose holder is still
+    /// alive in place, fence and all, instead of requeueing it, so a worker that survived
+    /// the previous owner (a GUI relaunch with the session daemon on) can still ack.
+    pub fn claim_held(
+        &mut self,
+        queue: &str,
+        worker: &str,
+        holder: Option<&Holder>,
+        lease_ms: i64,
+        now: i64,
+    ) -> Option<Claim> {
         let next_fence = self.fence + 1;
         let tx = self
             .conn
@@ -525,11 +562,22 @@ impl WorkQueue {
             default_lease
         };
         let deadline = now + lease;
+        // Always overwrite the holder columns (NULL when none), so a previous claim's holder
+        // can never be mistaken for this one's.
         tx.execute(
             "UPDATE tasks SET state='claimed', claimed_by=?2, fencing_token=?3,
-                 attempts = attempts + 1, visibility_deadline=?4, updated_at=?5
+                 attempts = attempts + 1, visibility_deadline=?4, updated_at=?5,
+                 holder_pid=?6, holder_start=?7
              WHERE id=?1 AND state='queued'",
-            params![id, worker, next_fence as i64, deadline, now],
+            params![
+                id,
+                worker,
+                next_fence as i64,
+                deadline,
+                now,
+                holder.map(|h| h.pid as i64),
+                holder.and_then(|h| h.start.as_deref()),
+            ],
         )
         .ok()?;
         let task = Self::fetch(&tx, &id).ok().flatten()?;
@@ -665,17 +713,84 @@ impl WorkQueue {
         self.requeue_or_dead_letter(ids, now, "worker exited: lease released")
     }
 
-    /// Boot recovery (doc 01 §3.3): worker panes are children of this process, so on a
-    /// control-server restart *every* worker is already dead — proactively requeue all
-    /// `claimed` rows (exhausted ones dead-letter). No queued work is lost; only genuinely
-    /// in-flight tasks re-run (the at-least-once contract).
+    /// Boot recovery (doc 01 §3.3), run once by the DB's new owner: requeue every claim
+    /// whose holder died with (or since) the previous owner, and leave live holders alone.
+    /// Returns what was requeued / dead-lettered; see
+    /// [`recover_in_flight_with`](Self::recover_in_flight_with) for the rules.
     pub fn recover_in_flight(&mut self, now: i64) -> Vec<Reaped> {
-        let ids = self.claimed_ids("1 = 1", []);
-        self.requeue_or_dead_letter(
-            ids,
+        self.recover_in_flight_with(now, &holder::is_alive).reaped
+    }
+
+    /// Boot recovery with an injectable liveness probe (`alive(pid, start_fingerprint)`;
+    /// production passes [`holder::is_alive`]). Per `claimed` row:
+    ///
+    /// - **No holder recorded** (an in-process claim, an MCP `claim_task`, a pre-v3 row, a
+    ///   remote claimer): requeue now (exhausted ones dead-letter). That is the original
+    ///   premise: the holder lived in the previous owner and died with it.
+    /// - **Holder recorded but dead** (pid gone or a zombie, or its start fingerprint no
+    ///   longer matches: the pid was recycled, or the machine rebooted): requeue now. A
+    ///   full restart, a crash that took the session daemon down, and a reboot all land
+    ///   here, so recovering a truly dead claim is as immediate as before.
+    /// - **Holder alive** (a worker that survived a GUI relaunch in the session daemon):
+    ///   keep it `Claimed` with its fencing token, so its ack/extend still succeed, and
+    ///   re-arm the lease to `max(deadline, now + visibility_timeout_ms)`, giving it one
+    ///   full lease to reconnect even if the app was down longer than its lease. If the
+    ///   probe was fooled (a recycled pid on a platform without a start fingerprint), the
+    ///   lease reaper requeues the claim once that re-armed lease expires.
+    pub fn recover_in_flight_with(
+        &mut self,
+        now: i64,
+        alive: &dyn Fn(u32, Option<&str>) -> bool,
+    ) -> Recovery {
+        let mut dead = Vec::new();
+        let mut live = Vec::new();
+        for (id, pid, start) in self.claimed_holders() {
+            match pid {
+                Some(pid) if alive(pid, start.as_deref()) => live.push(id),
+                _ => dead.push(id),
+            }
+        }
+        let reaped = self.requeue_or_dead_letter(
+            dead,
             now,
             "control server restarted: in-flight task recovered",
-        )
+        );
+        let mut kept = Vec::new();
+        for id in live {
+            let _ = self.conn.execute(
+                "UPDATE tasks SET visibility_deadline =
+                     MAX(COALESCE(visibility_deadline, ?2), ?2 + visibility_timeout_ms),
+                     updated_at = ?2
+                 WHERE id = ?1 AND state = 'claimed'",
+                params![id, now],
+            );
+            if let Some(t) = Self::fetch(&self.conn, &id).ok().flatten() {
+                kept.push(t);
+            }
+        }
+        Recovery { reaped, kept }
+    }
+
+    /// `(id, holder_pid, holder_start)` of every `claimed` row.
+    fn claimed_holders(&self) -> Vec<(String, Option<u32>, Option<String>)> {
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT id, holder_pid, holder_start FROM tasks WHERE state='claimed'")
+        else {
+            return Vec::new();
+        };
+        let rows = match stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?
+                    .and_then(|p| u32::try_from(p).ok()),
+                r.get::<_, Option<String>>(2)?,
+            ))
+        }) {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        };
+        rows
     }
 
     /// Collect ids of `claimed` rows matching an extra predicate.
@@ -1317,6 +1432,224 @@ mod tests {
         let c2 = wq.claim("build", "w2", 100_000, 2000).unwrap();
         assert_eq!(c2.fencing_token, 2);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- boot recovery: holder liveness (GUI relaunch with the session daemon on) ---
+
+    fn holder(pid: u32, start: &str) -> Holder {
+        Holder {
+            pid,
+            start: Some(start.to_string()),
+        }
+    }
+
+    /// The bug: a worker that survived a GUI relaunch had its claim requeued by the new
+    /// owner's boot recovery. A live holder's claim must stay Claimed with the SAME fence,
+    /// and the surviving worker's ack with that fence must succeed.
+    #[test]
+    fn boot_recovery_keeps_a_live_holders_claim_and_its_fence() {
+        let mut wq = q();
+        let t = enq(&mut wq, "build", "x", 0);
+        let c = wq
+            .claim_held("build", "w", Some(&holder(4242, "boot:1")), 30_000, 10)
+            .unwrap();
+        let rec =
+            wq.recover_in_flight_with(1_000, &|pid, start| pid == 4242 && start == Some("boot:1"));
+        assert!(rec.reaped.is_empty(), "a live holder's claim was requeued");
+        assert_eq!(rec.kept.len(), 1);
+        let kept = wq.get(&t.id).unwrap();
+        assert_eq!(kept.state, TaskState::Claimed);
+        assert_eq!(kept.fencing_token, Some(c.fencing_token));
+        assert_eq!(kept.attempts, 1, "kept, not re-claimed");
+        assert!(matches!(
+            wq.ack(&t.id, c.fencing_token, Some("ok"), 2_000),
+            LeaseOutcome::Ok(_)
+        ));
+        assert_eq!(wq.get(&t.id).unwrap().state, TaskState::Done);
+    }
+
+    /// Crash / full restart / reboot: the holder is dead (or its pid now belongs to some
+    /// other process: fingerprint mismatch), so recovery is immediate, exactly as before.
+    #[test]
+    fn boot_recovery_requeues_dead_recycled_and_holderless_claims_immediately() {
+        let mut wq = q();
+        let dead = enq(&mut wq, "build", "dead", 0);
+        let recycled = enq(&mut wq, "build", "recycled", 0);
+        let anon = enq(&mut wq, "build", "anon", 0);
+        let live = enq(&mut wq, "build", "live", 0);
+        // Long leases, so only recovery (never lease expiry) can move them.
+        wq.claim_held("build", "w", Some(&holder(1, "boot:1")), 600_000, 10)
+            .unwrap();
+        wq.claim_held("build", "w", Some(&holder(2, "boot:OLD")), 600_000, 10)
+            .unwrap();
+        wq.claim("build", "w", 600_000, 10).unwrap(); // no holder (in-process / MCP)
+        wq.claim_held("build", "w", Some(&holder(3, "boot:1")), 600_000, 10)
+            .unwrap();
+        // pid 1 is gone; pid 2 is alive but started at a different time (recycled /
+        // rebooted); pid 3 is the same live process.
+        let alive = |pid: u32, start: Option<&str>| match pid {
+            2 | 3 => start == Some("boot:1"),
+            _ => false,
+        };
+        let rec = wq.recover_in_flight_with(1_000, &alive);
+        let mut reaped: Vec<_> = rec.reaped.iter().map(|r| r.task.id.clone()).collect();
+        reaped.sort();
+        let mut want = vec![dead.id.clone(), recycled.id.clone(), anon.id.clone()];
+        want.sort();
+        assert_eq!(reaped, want);
+        for id in [&dead.id, &recycled.id, &anon.id] {
+            let t = wq.get(id).unwrap();
+            assert_eq!(
+                t.state,
+                TaskState::Queued,
+                "dead holder's claim must requeue at boot"
+            );
+            assert_eq!(
+                t.available_at, 1_000,
+                "claimable immediately (zero added latency)"
+            );
+        }
+        assert_eq!(wq.get(&live.id).unwrap().state, TaskState::Claimed);
+    }
+
+    /// A kept claim gets one full lease from boot even if the app was down longer than its
+    /// lease, and the lease is never shortened. This is also the stated worst case for a
+    /// claim whose holder only LOOKED alive (a recycled pid without a fingerprint): the
+    /// reaper requeues it at max(old deadline, boot + visibility_timeout_ms).
+    #[test]
+    fn boot_recovery_rearms_a_kept_lease_and_bounds_the_worst_case() {
+        let mut wq = q();
+        let a = enq(&mut wq, "build", "expired-while-down", 0); // vt = 30s default
+        let b = enq(&mut wq, "build", "long-lease", 0);
+        wq.claim_held("build", "w", Some(&holder(7, "s")), 5_000, 0)
+            .unwrap(); // deadline 5_000
+        wq.claim_held("build", "w", Some(&holder(7, "s")), 600_000, 0)
+            .unwrap(); // deadline 600_000
+        let boot = 100_000; // the app was down well past a's lease
+        let rec = wq.recover_in_flight_with(boot, &|_, _| true);
+        assert_eq!(rec.kept.len(), 2);
+        assert_eq!(
+            wq.get(&a.id).unwrap().visibility_deadline,
+            Some(boot + DEFAULT_VISIBILITY_MS),
+            "an expired kept lease is re-armed to boot + visibility_timeout_ms"
+        );
+        assert_eq!(
+            wq.get(&b.id).unwrap().visibility_deadline,
+            Some(600_000),
+            "re-arm never shortens a lease"
+        );
+        // If that holder was in fact dead (pid reused, no fingerprint), nothing heartbeats:
+        // the reaper requeues it exactly at the re-armed deadline, not before.
+        assert!(wq.reap_expired(boot + DEFAULT_VISIBILITY_MS - 1).is_empty());
+        let reaped = wq.reap_expired(boot + DEFAULT_VISIBILITY_MS);
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].task.id, a.id);
+        assert_eq!(reaped[0].disposition, Disposition::Requeued);
+    }
+
+    /// The production probe, end to end: a claim held by THIS (live) process survives boot
+    /// recovery; one held by a reaped child process does not.
+    #[test]
+    fn boot_recovery_with_the_os_probe() {
+        let mut wq = q();
+        let mine = enq(&mut wq, "build", "mine", 0);
+        let gone = enq(&mut wq, "build", "gone", 0);
+        let me = holder::identify(std::process::id()).unwrap();
+        wq.claim_held("build", "w", Some(&me), 600_000, 10).unwrap();
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit 0"])
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("true").spawn().unwrap()
+        };
+        let child_holder = holder::identify(child.id()); // may already be None if it exited
+        child.wait().unwrap();
+        let dead = child_holder.unwrap_or(Holder {
+            pid: child.id(),
+            start: None,
+        });
+        wq.claim_held("build", "w", Some(&dead), 600_000, 10)
+            .unwrap();
+        let reaped = wq.recover_in_flight(1_000);
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].task.id, gone.id);
+        assert_eq!(wq.get(&mine.id).unwrap().state, TaskState::Claimed);
+    }
+
+    /// A re-claim overwrites the holder: a requeued task claimed again WITHOUT a holder
+    /// must not inherit the previous claim's (still live) holder.
+    #[test]
+    fn a_reclaim_never_inherits_the_previous_holder() {
+        let mut wq = q();
+        let t = enq(&mut wq, "build", "x", 0);
+        let c = wq
+            .claim_held("build", "w1", Some(&holder(9, "s")), 600_000, 0)
+            .unwrap();
+        wq.nack(
+            &t.id,
+            c.fencing_token,
+            NackOpts {
+                requeue: true,
+                delay_ms: Some(0),
+                ..Default::default()
+            },
+            1,
+        );
+        wq.claim("build", "w2", 600_000, 2).unwrap(); // holder-less re-claim
+        let rec = wq.recover_in_flight_with(3, &|_, _| true);
+        assert_eq!(rec.reaped.len(), 1, "a holder-less claim requeues at boot");
+        assert!(rec.kept.is_empty());
+    }
+
+    /// A v2 DB (pre-holder) migrates to v3; its in-flight claims have no holder, so the
+    /// first boot on the new schema requeues them, as the old code would have.
+    #[test]
+    fn migrates_a_v2_database_and_requeues_its_claims_at_boot() {
+        let path =
+            std::env::temp_dir().join(format!("hp-work-migrate-v2-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (v INTEGER NOT NULL);
+                 CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY, queue TEXT NOT NULL, seq INTEGER NOT NULL UNIQUE,
+                     kind TEXT NOT NULL, title TEXT NOT NULL, state TEXT NOT NULL,
+                     payload TEXT NOT NULL, priority INTEGER NOT NULL, attempts INTEGER NOT NULL,
+                     max_attempts INTEGER NOT NULL, visibility_timeout_ms INTEGER NOT NULL,
+                     available_at INTEGER NOT NULL, claimed_by TEXT, fencing_token INTEGER,
+                     visibility_deadline INTEGER, result TEXT, error TEXT, dedupe_key TEXT,
+                     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                     goal_id TEXT, depends_on TEXT);
+                 INSERT INTO schema_version (v) VALUES (2);
+                 INSERT INTO tasks (id, queue, seq, kind, title, state, payload, priority,
+                     attempts, max_attempts, visibility_timeout_ms, available_at, claimed_by,
+                     fencing_token, visibility_deadline, created_at, updated_at)
+                 VALUES ('c1','g1',1,'manual','','claimed','p',0,1,5,30000,0,'w',3,9999999,0,0);",
+            )
+            .unwrap();
+        }
+        let mut wq = WorkQueue::open(&path).unwrap();
+        let v: i64 = wq
+            .conn
+            .query_row("SELECT MAX(v) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let reaped = wq.recover_in_flight(1_000);
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(wq.get("c1").unwrap().state, TaskState::Queued);
+        assert_eq!(wq.get("c1").unwrap().fencing_token, Some(3));
+        // ...and the holder columns work post-migration.
+        let me = holder::identify(std::process::id()).unwrap();
+        let c = wq.claim_held("g1", "w", Some(&me), 600_000, 2_000).unwrap();
+        assert_eq!(
+            c.fencing_token, 4,
+            "fence resumes from MAX across the migration"
+        );
+        assert!(wq.recover_in_flight(3_000).is_empty());
         let _ = std::fs::remove_file(&path);
     }
 
