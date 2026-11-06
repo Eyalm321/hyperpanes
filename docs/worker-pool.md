@@ -72,12 +72,70 @@ the now-stale token on the row, fencing the late worker out.
 - `leaseMs <= 0` on claim falls back to the task's own `visibilityTimeoutMs` (default
   **30 000 ms**).
 - Long-running workers heartbeat with `extend` (extends from the current deadline, never
-  shortens).
+  shortens). The `hyperpanes worker` runner asks for just enough to put the deadline back at
+  `now + lease` each beat (half a lease apart), so its deadline stays within one lease of
+  now. A dead runner's claim therefore expires within one lease, not "as long as the task
+  had been running".
 - Faster recovery paths exist beside the timer: `requeue_worker` (on a worker pane's exit)
-  and `recover_in_flight` (on control-server boot — every worker is a dead child, so all
-  in-flight claims are recovered). Boot recovery and the reaper run **only in the process
-  that owns `work.db`** (an OS lock on `work.db.lock`). A second instance never attaches the
-  DB, and `/health` reports its `workQueue` as `"refused"` (`docs/dev-instance-isolation.md`).
+  and `recover_in_flight` (on control-server boot: requeues every claim whose holder is
+  dead, keeps live holders' claims; see [Across an app relaunch](#across-an-app-relaunch)).
+  Boot recovery and the reaper run **only in the process that owns `work.db`** (an OS lock
+  on `work.db.lock`). A second instance never attaches the DB, and `/health` reports its
+  `workQueue` as `"refused"` (`docs/dev-instance-isolation.md`).
+
+## Across an app relaunch
+
+With the session daemon on, worker panes outlive the GUI: `restartApp {scope:"gui"}`, or the
+GUI crashing or being closed while the daemon lives, leaves every `hyperpanes worker` runner
+(and its `claude` child) running. The relaunched GUI then owns `work.db` and runs boot
+recovery. Recovery must not requeue those claims (the surviving runner would be fenced out
+with a 409 and the task would run twice), but it must still requeue every claim whose worker
+really died.
+
+**Holder identity.** A claim may name its holder process: `POST /queues/{q}/claim` takes an
+optional `holderPid`. The runner sends its own pid. The server records it only if it is a live
+**local** process, together with a process-start fingerprint (`<boot_id>:<starttime>` from
+procfs on Linux, `ps -o lstart=` on other unix, none on Windows), in internal `work.db`
+columns (`holder_pid`, `holder_start`, schema v3) that are not on the task wire. Every claim
+overwrites them, so a re-claim never inherits a previous holder.
+
+**Boot recovery rules** (`WorkQueue::recover_in_flight`), per `claimed` row:
+
+| Holder | At boot | Covers |
+|---|---|---|
+| none recorded | requeue now (exhausted ⇒ dead-letter) | in-process claims, MCP `claim_task`, pre-v3 rows, remote claimers |
+| recorded, dead: pid gone or zombie, or fingerprint mismatch (recycled pid, rebooted) | requeue now | `restartApp {scope:"full"}`, crash taking the daemon down, reboot |
+| recorded, alive | stay `claimed`, same `fencingToken`; lease re-armed to `max(deadline, boot + visibilityTimeoutMs)` | `restartApp {scope:"gui"}`, GUI crash with the daemon alive |
+
+The re-arm gives a surviving runner one full lease to reconnect even when the app was down
+longer than its lease; it never shortens a lease.
+
+**Worst-case recovery latency for a truly dead claim.** Zero (requeued at boot, claimable
+immediately) whenever its holder can be judged dead, which is every case above on Linux and
+macOS. The only exception is a holder whose pid has been recycled by an unrelated live process
+on a platform without a fingerprint (Windows): recovery keeps the claim, and the reaper
+requeues it once the re-armed lease expires: at most `max(remaining lease, visibilityTimeoutMs)
++ 5 s` (the reaper tick) after boot, i.e. **35 s** with the default 30 s visibility timeout and
+a runner-held lease.
+
+**The runner rides out the relaunch.** On a loopback bind the relaunched app listens on a fresh
+port with a freshly minted token. The runner resolves its control file once at start
+(`HYPERPANES_CONTROL_FILE`, else the default) and, on a connection error or a 401, re-reads
+that same file and retries: claim/ack/nack within a 5-minute reconnect window, the heartbeat
+every second until the child exits (it stops only on 409/404: a lost lease). Ack is idempotent
+for the same fence, so retrying a lost ack is safe. If the app stays away past the window the
+runner exits; its claim then has a dead holder, so the next boot requeues it.
+
+**Trust.** `holderPid` is self-reported by the claimant (the server cannot see a loopback peer's
+pid). It only ever affects the claim made by that same request, so a token holder can at most
+keep *its own* claim alive across a relaunch (until the re-armed lease lapses with no
+heartbeat); it cannot pin or release anyone else's claim, and a pid that is not a live local
+process is ignored (no holder ⇒ legacy requeue).
+
+**MCP holders.** Agents claiming through the `hyperpanes-mcp` bridge (`claim_task`) keep the
+legacy behaviour (requeued at boot) until the bridge sends `holderPid`; Eyalm321/hyperpanes-mcp#9
+makes it send its own pid (the bridge lives exactly as long as its agent session). The bridge
+already re-reads `control.json` on every call, so it reconnects to a relaunched app on its own.
 
 ## maxAttempts, priority, dedupeKey
 
@@ -113,7 +171,7 @@ serialize camelCase with epoch-ms timestamps.
 | `GET /queues` | Every queue with at least one task + its depth-by-state (scope-filtered) |
 | `POST /queues/{q}/tasks` | **Enqueue.** Body: `{ payload, kind?, title?, priority?, maxAttempts?, visibilityTimeoutMs?, availableAt?\|delayMs?, dedupeKey? }`. Returns `{ ok, id, seq }` |
 | `GET /queues/{q}/tasks` | **List/inspect.** Query: `after` (seq cursor), `state`, `limit` (≤1000). Returns `{ queue, tasks, counts, latestSeq }` |
-| `POST /queues/{q}/claim` | **Claim.** Body: `{ worker, leaseMs?, count? }`. Returns `{ ok, tasks }` (0..count tasks) |
+| `POST /queues/{q}/claim` | **Claim.** Body: `{ worker, leaseMs?, count?, holderPid? }` (`holderPid`: the claiming process, see [Across an app relaunch](#across-an-app-relaunch)). Returns `{ ok, tasks }` (0..count tasks) |
 | `POST /queues/{q}/purge` | **Retention.** Drop terminal tasks. Body: `{ olderThan?\|olderThanMs? }` (none ⇒ all terminal). Returns `{ ok, removed }` |
 | `GET /tasks/{id}` | Fetch one task (scope resolved from its queue) |
 | `POST /tasks/{id}/ack` | **Complete.** Body: `{ fencingToken, result? }`. `claimed → done` |
