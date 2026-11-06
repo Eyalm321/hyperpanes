@@ -220,3 +220,24 @@ This is now prevented structurally (`docs/dev-instance-isolation.md`):
   queue is looking at a dev/second instance, not the primary. Read `work.db.lock`
   (`{pid, exe, controlFile}`) to see who owns it.
 
+
+### Worker claims across a GUI relaunch
+
+With the session daemon on, a GUI relaunch (`restartApp {scope:"gui"}`, or the GUI crashing or
+being closed while the daemon lives) does **not** kill worker panes. Their claims survive too:
+the relaunched primary's boot recovery keeps a claim whose holder process is still alive
+(`claimed`, same `fencingToken`, lease re-armed), and requeues only claims whose holder is dead
+or unknown (`docs/worker-pool.md`, "Across an app relaunch"). What a watchdog should expect:
+
+- The new primary logs `[work] durable queue opened (…); recovered N in-flight task(s), kept M
+  claim(s) held by live workers`. `kept` claims are not orphans: do not requeue or re-enqueue
+  them.
+- A surviving `hyperpanes worker` pane logs that the control API is unreachable while the app is
+  down, then reconnects on its own (it re-reads its `control.json`: the relaunched app has a new
+  port and token) and acks with its original fence. No restart or nudge is needed.
+- A **409** on ack/extend right after a relaunch now means the claim really was recovered: its
+  holder was dead or recycled at boot, or it named no holder (an MCP `claim_task` claim, or a
+  runner older than this change). The task is back in the queue and will run again; treat the
+  late worker's result as a duplicate.
+- After `restartApp {scope:"full"}`, a crash that takes the daemon down, or a reboot, every
+  worker is dead and every claim is requeued at boot, immediately, as before.

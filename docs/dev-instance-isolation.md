@@ -9,9 +9,10 @@ On 2026-11-06 an "isolated" headless control server was booted from an agent pan
 lives in the **data** dir (`$XDG_DATA_HOME/hyperpanes/work.db`, default
 `~/.local/share/hyperpanes/work.db`), so the instance opened the LIVE queue. Its boot
 recovery (`WorkQueue::recover_in_flight`) then requeued another project's claimed task. Boot
-recovery requeues every `claimed` row on the premise that all workers died with this process.
-That premise is only true for the process that owns the queue. The live worker's fencing token
-went stale and the task ran twice.
+recovery requeued every `claimed` row on the premise that all workers died with this process.
+That premise is only true for the process that owns the queue (and, since the session daemon,
+not always even then: see [the primary across GUI relaunch](#the-primary-across-gui-relaunch-and-daemon-re-attach)).
+The live worker's fencing token went stale and the task ran twice.
 
 Two guards now close this, plus the discovery guard that already existed:
 
@@ -128,17 +129,29 @@ worse wedge. Guard 1 still covers dev instances there.
 - `restartApp {scope:"gui"|"full"}`: the relaunched GUI only gets past the single-instance
   gate once the old process has died (that lock is held until death, plus the relauncher's 2s
   sleep), and by then the kernel has dropped the old process's `work.db` lock. The new GUI
-  acquires it immediately and runs boot recovery as before. If the old process lingers anyway,
-  the 5s wait covers it.
+  acquires it immediately and runs boot recovery. If the old process lingers anyway, the 5s
+  wait covers it.
 - The session daemon never opens `work.db`. It owns the PTYs only, so daemon re-attach does
   not interact with the lock.
 - Headless respawn: same as the GUI, through the restart-overlap wait.
 
-Pre-existing and **not** changed here: with the session daemon on, worker panes *survive* a GUI
-relaunch, yet the new owner's boot recovery still requeues their claims, because recovery's
-"every worker died with us" premise predates the daemon. That is the same duplicate-run class as
-this incident, but for the legitimate primary. It is tracked as a follow-up, not addressed by
-this guard.
+**Resolved follow-up: live workers across a GUI relaunch.** With the session daemon on, worker
+panes *survive* a GUI relaunch, and the new owner's boot recovery used to requeue their claims
+anyway, because recovery's "every worker died with us" premise predates the daemon: the same
+duplicate-run class as this incident, but for the legitimate primary. Boot recovery is now
+holder-aware. The `hyperpanes worker` runner names its pid on claim (`holderPid`); the server
+records it with a process-start fingerprint, and on boot:
+
+- a claim whose holder is **still alive** stays `claimed` with its fencing token, and its lease
+  is re-armed to `max(deadline, boot + visibilityTimeoutMs)`, so the surviving runner (which
+  re-reads `control.json` to find the relaunched app's new port and token) acks normally;
+- a claim whose holder is **dead** (pid gone, zombie, or a recycled pid: fingerprint mismatch,
+  including after a reboot) or that **named no holder** (in-process, MCP `claim_task`, older
+  clients) is requeued immediately, exactly as before.
+
+So `restartApp {scope:"full"}`, a crash that takes the daemon down, and a reboot still recover
+every orphaned claim at boot with no added latency. Details, the worst case and the trust model
+are in `docs/worker-pool.md` ("Across an app relaunch").
 
 ## Tests
 
@@ -153,4 +166,11 @@ this guard.
   `headless_refuses_a_partly_isolated_boot`, `headless_starts_partly_isolated_with_allow_shared_data`,
   `headless_starts_fully_isolated` and `second_headless_on_a_shared_data_dir_reports_refused`
   (`/health` → `durable` vs `refused`).
-- Unit tests: `control::work_lock::tests::*` and `persistence::isolation::tests::*`.
+- `rs/crates/core/tests/relaunch_live_claims.rs` (real primary + worker processes over the
+  real control API, holder-aware recovery): `gui_relaunch_keeps_a_surviving_workers_claim_and_fence`
+  and `gui_crash_keeps_a_surviving_workers_claim_and_fence` (red before, green after; the
+  surviving worker acks with its original fence), `relaunch_after_the_lease_lapsed_rearms_a_live_claim`
+  (red before, green after), `full_restart_requeues_a_dead_workers_claim_at_boot` and
+  `holderless_claim_is_requeued_at_boot`.
+- Unit tests: `control::work_lock::tests::*`, `persistence::isolation::tests::*`,
+  `control::holder::tests::*` and the `control::work::tests::boot_recovery_*` set.
