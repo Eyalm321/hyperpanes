@@ -171,7 +171,7 @@ fn registry_key(lock_path: &Path) -> PathBuf {
 
 /// Become the single owner of `db`, retrying for up to `wait` while another live process
 /// holds it. `me` is recorded in the lock file on success. See the module docs.
-pub fn acquire(db: &Path, me: &OwnerRecord, wait: Duration) -> Result<Acquired, Contended> {
+pub fn acquire(db: &Path, me: &OwnerRecord, wait: Duration) -> Result<Acquired, Box<Contended>> {
     let lock_path = lock_path_for(db);
     if let Some(dir) = lock_path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -200,11 +200,11 @@ pub fn acquire(db: &Path, me: &OwnerRecord, wait: Duration) -> Result<Acquired, 
             Ok(()) => break,
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
-                    return Err(Contended {
+                    return Err(Box::new(Contended {
                         db_path: db.to_path_buf(),
                         owner: read_owner(&lock_path),
                         lock_path,
-                    });
+                    }));
                 }
                 std::thread::sleep(ACQUIRE_STEP);
             }

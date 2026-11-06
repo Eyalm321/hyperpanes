@@ -136,7 +136,7 @@ pub enum WorkAttach {
     Durable { recovered: usize },
     /// Another live process owns the DB. Nothing was opened or recovered; the queue stays
     /// in-memory for this instance's lifetime.
-    Refused(crate::control::work_lock::Contended),
+    Refused(Box<crate::control::work_lock::Contended>),
     /// We own it but SQLite would not open it; the queue stays in-memory.
     OpenFailed(String),
 }
