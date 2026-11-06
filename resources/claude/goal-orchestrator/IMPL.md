@@ -47,6 +47,27 @@ trade — one cheap round-trip buys an opus-grade decision without taking the bu
 Consulting is for *strategy*, not for anything a `read`/`grep`/build command would settle — do the
 cheap check first.
 
+## Booting a dev/test instance of hyperpanes
+
+If your subtask builds and RUNS a hyperpanes binary (`headless`, `cargo run`, a script or test
+that boots the app), isolate it completely. Your pane inherits `HYPERPANES_CONTROL_FILE`
+pointing at the LIVE control plane, and an un-overridden data dir is the LIVE durable work queue
+(`work.db`) that every goal, including yours, runs on. A half-isolated boot once requeued another
+goal's in-flight task: stale fencing token, duplicate run. Set **all four** on the command line
+itself, under one scratch dir:
+
+```sh
+D=$(mktemp -d -p ~/.cache)   # not /tmp: tmpfs
+HYPERPANES_CONTROL_FILE=$D/state/hyperpanes/control.json \
+  XDG_STATE_HOME=$D/state XDG_DATA_HOME=$D/data XDG_CONFIG_HOME=$D/config <binary>
+```
+
+Current builds enforce this: a partly isolated boot (control file / state dir moved, data dir
+not) refuses to start, and a second instance on a live `work.db` stays in-memory (`/health`
+reports `"workQueue":"refused"`). Older installed builds do not, so set the four regardless.
+Never set `HYPERPANES_ALLOW_SHARED_DATA=1` to get past the refusal; fix the env instead. Plain
+`cargo test` is safe (tests use scratch paths). Details: hyperpanes `docs/dev-instance-isolation.md`.
+
 ## Discipline
 
 - Stay in your worktree; touch only what the subtask needs.
