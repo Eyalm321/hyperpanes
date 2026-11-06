@@ -421,6 +421,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return devices::run_revoke(&argv0).map_err(Into::into);
     }
 
+    // GUI mode from here on. Refuse a partly isolated instance (control file / state dir
+    // diverted while the data dir is still the live default): it would attach the live work
+    // queue and requeue other agents' in-flight tasks on boot. `HYPERPANES_ALLOW_SHARED_DATA=1`
+    // overrides (see `persistence::isolation`). The CLI modes above never open the data dir's
+    // work queue, so they are not gated.
+    if let Err(refusal) = hyperpanes_core::persistence::isolation::check(
+        &hyperpanes_core::persistence::paths::resolve_control_file(),
+    ) {
+        let msg = refusal.to_string();
+        eprintln!("hyperpanes: {msg}");
+        dbg_log(&format!("isolation: {msg}"));
+        // A desktop launch has no visible stderr, so say it in a dialog too (best-effort).
+        if let Ok(rt) = tokio::runtime::Runtime::new() {
+            let _guard = rt.enter();
+            let _ = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Hyperpanes: partly isolated instance")
+                .set_description(msg)
+                .show();
+        }
+        std::process::exit(2);
+    }
+
     // Extract the baked-in OFL fonts (Fira Code / JetBrains Mono) so they always resolve.
     crate::prefs::init_bundled_fonts();
 

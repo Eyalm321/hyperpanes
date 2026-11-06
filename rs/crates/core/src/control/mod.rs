@@ -8,6 +8,7 @@ pub mod nudge;
 pub mod output;
 pub mod scope;
 pub mod work;
+pub mod work_lock;
 
 pub mod discovery_guard;
 pub mod dispatch;

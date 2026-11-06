@@ -103,6 +103,18 @@ pub struct Shared {
     pub speech: SpeechService,
 }
 
+/// What [`Shared::attach_durable_work_queue`] did.
+#[derive(Debug)]
+pub enum WorkAttach {
+    /// Attached the on-disk DB as its single owner; boot recovery requeued `recovered` tasks.
+    Durable { recovered: usize },
+    /// Another live process owns the DB. Nothing was opened or recovered; the queue stays
+    /// in-memory for this instance's lifetime.
+    Refused(crate::control::work_lock::Contended),
+    /// We own it but SQLite would not open it; the queue stays in-memory.
+    OpenFailed(String),
+}
+
 impl Shared {
     /// Build the shared state. `allow_input` mirrors control-settings; `control_file` is both the
     /// path written on start and the `HYPERPANES_CONTROL_FILE` injected into spawned panes.
@@ -184,20 +196,60 @@ impl Shared {
     }
 
     /// Swap the (default in-memory) work queue for the durable on-disk DB at
-    /// [`paths::work_db`](crate::persistence::paths::work_db) and run boot recovery. A real
+    /// [`paths::work_db`](crate::persistence::paths::work_db) and run boot recovery — but only
+    /// as that DB's single owner (see [`work_lock`](crate::control::work_lock)). A real
     /// embedder (GUI control host / headless daemon) calls this once after [`Shared::new`];
-    /// tests never do, so they keep the ephemeral in-memory queue. Failure is non-fatal — we
-    /// log and keep the in-memory queue rather than take down the control plane over a queue
-    /// that many sessions never touch.
-    pub fn attach_durable_work_queue(&self) {
-        let path = crate::persistence::paths::work_db();
+    /// tests never do, so they keep the ephemeral in-memory queue. Never fatal: a refused or
+    /// failed attach logs loudly and keeps the in-memory queue rather than take down the
+    /// control plane over a queue that many sessions never touch.
+    pub fn attach_durable_work_queue(&self) -> WorkAttach {
+        self.attach_durable_work_queue_at(
+            &crate::persistence::paths::work_db(),
+            crate::control::work_lock::ACQUIRE_WAIT,
+        )
+    }
+
+    /// [`attach_durable_work_queue`](Self::attach_durable_work_queue) against an explicit DB
+    /// path, waiting up to `wait` for a live owner to let go (restart overlap).
+    ///
+    /// The single-owner lock comes FIRST: boot recovery requeues every `claimed` row on the
+    /// premise that all workers died with this process, which is only true for the process
+    /// that owns the DB. A second opener (a half-isolated dev instance, a headless server beside
+    /// the GUI) running it would requeue a live instance's in-flight tasks. So a non-owner never
+    /// opens the DB at all: no recovery, no writes, and the reaper ticker only ever sweeps its
+    /// in-memory queue.
+    pub fn attach_durable_work_queue_at(
+        &self,
+        path: &std::path::Path,
+        wait: Duration,
+    ) -> WorkAttach {
+        use crate::control::work_lock::{self, Acquired, OwnerRecord};
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        match crate::control::work::WorkQueue::open(&path) {
+        let me = OwnerRecord::current(&self.version, &self.control_file, now_ms());
+        match work_lock::acquire(path, &me, wait) {
+            Err(contended) => {
+                eprintln!("[work] {}", contended.message());
+                return WorkAttach::Refused(contended);
+            }
+            Ok(Acquired::Unavailable(e)) => {
+                // Fail open: losing the primary's durable queue on a lock-less filesystem
+                // would be worse; the startup isolation check still guards dev instances.
+                eprintln!(
+                    "[work] could not take the single-owner lock {} ({e}); attaching {} \
+                     WITHOUT single-owner protection",
+                    work_lock::lock_path_for(path).display(),
+                    path.display()
+                );
+            }
+            Ok(Acquired::Owner) | Ok(Acquired::AlreadyOwner) => {}
+        }
+        match crate::control::work::WorkQueue::open(path) {
             Ok(mut wq) => {
-                // Every worker pane is a child of this process, so on restart all in-flight
-                // claims belong to dead workers — requeue them (exhausted ones dead-letter).
+                // We own the DB, and every worker pane is a child of this process (or of the
+                // previous owner, now gone), so on (re)start all in-flight claims belong to
+                // dead workers. Requeue them (exhausted ones dead-letter).
                 let recovered = wq.recover_in_flight(now_ms());
                 if !recovered.is_empty() {
                     eprintln!(
@@ -207,12 +259,16 @@ impl Shared {
                     );
                 }
                 *self.work.lock().unwrap() = wq;
+                WorkAttach::Durable {
+                    recovered: recovered.len(),
+                }
             }
             Err(e) => {
                 eprintln!(
                     "[work] could not open durable queue at {} ({e}); staying in-memory",
                     path.display()
                 );
+                WorkAttach::OpenFailed(e.to_string())
             }
         }
     }

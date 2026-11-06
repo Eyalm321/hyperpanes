@@ -9,6 +9,11 @@
 //! Env overrides (for the MCP acceptance gate against an isolated userData dir):
 //!   * `HYPERPANES_CONTROL_FILE`  — discovery file path (also injected into spawned panes).
 //!   * `HYPERPANES_ALLOW_INPUT`   — `1`/`true`/`yes` forces `allowInput` on (else from settings).
+//!   * `HYPERPANES_ALLOW_SHARED_DATA` — `1` starts even when only partly isolated (control file /
+//!     state dir diverted, data dir still the default); see `persistence::isolation`.
+//!
+//! An isolated instance must move the data dir too (`XDG_DATA_HOME` on Linux), or it refuses
+//! to start. The durable work queue is additionally single-owner (`control::work_lock`).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -42,9 +47,17 @@ struct MetaUpdate {
 /// Run the headless daemon: wire the engine + control server + AI + single-instance gate, seed the
 /// launch workspace, and serve the loopback control API until the process exits.
 pub async fn run(version: &str) -> io::Result<()> {
-    let control_file = std::env::var_os("HYPERPANES_CONTROL_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(paths::control_json);
+    let control_file = paths::resolve_control_file();
+
+    // A partly isolated instance (control file / state dir diverted, data dir still the live
+    // default) would attach the live work queue: refuse before touching anything.
+    // `HYPERPANES_ALLOW_SHARED_DATA=1` overrides (see persistence::isolation).
+    if let Err(refusal) = crate::persistence::isolation::check(&control_file) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            refusal.to_string(),
+        ));
+    }
 
     let settings = control_settings::load();
     let allow_input = settings.allow_input || env_truthy("HYPERPANES_ALLOW_INPUT");

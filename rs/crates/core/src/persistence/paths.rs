@@ -144,6 +144,58 @@ pub fn control_json() -> PathBuf {
     state_dir().join("control.json")
 }
 
+/// The discovery file this process serves: `HYPERPANES_CONTROL_FILE` when set and non-empty
+/// (panes may inherit it set-but-empty, which means unset), else [`control_json`]. Every
+/// control-plane entry point (GUI control host, headless daemon) resolves it here.
+pub fn resolve_control_file() -> PathBuf {
+    std::env::var_os("HYPERPANES_CONTROL_FILE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(control_json)
+}
+
+/// [`state_dir`] as it resolves with NO override env var: on Linux `$HOME/.local/state/
+/// hyperpanes`, with `XDG_STATE_HOME` ignored; on Windows the Roaming known folder, with
+/// `APPDATA` ignored; on macOS the same as [`state_dir`]. This is the baseline the startup
+/// isolation check (`persistence::isolation`) compares against to spot a partly isolated
+/// dev instance.
+pub fn default_state_dir() -> PathBuf {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        default_user_data_dir()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        home_dir().join(".local/state").join(PRODUCT_NAME)
+    }
+}
+
+/// [`data_dir`] as it resolves with NO override env var (see [`default_state_dir`]).
+pub fn default_data_dir() -> PathBuf {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        default_user_data_dir()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        home_dir().join(".local/share").join(PRODUCT_NAME)
+    }
+}
+
+/// [`user_data_dir`] ignoring the `APPDATA` override: the Roaming known folder itself.
+#[cfg(windows)]
+fn default_user_data_dir() -> PathBuf {
+    directories::BaseDirs::new()
+        .map(|d| d.data_dir().join(PRODUCT_NAME))
+        .unwrap_or_else(user_data_dir)
+}
+
+/// On macOS there is no override short of `HOME`, so the default IS [`user_data_dir`].
+#[cfg(target_os = "macos")]
+fn default_user_data_dir() -> PathBuf {
+    user_data_dir()
+}
+
 /// `{ enabled, allowInput }` control-server settings. User setting → [`config_dir`].
 pub fn control_settings_json() -> PathBuf {
     config_dir().join("control-settings.json")
