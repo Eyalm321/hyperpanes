@@ -34,12 +34,21 @@
 //! The child reads its task from the environment, so
 //! shell expansion like `$HP_TASK_PAYLOAD` needs an explicit inner shell:
 //! `-- sh -c 'claude -p "$HP_TASK_PAYLOAD"'`.
+//!
+//! Relaunch resilience: with the session daemon on, a worker pane outlives a GUI relaunch, but
+//! the relaunched control server binds a fresh port and mints a fresh token (rewriting
+//! `control.json`). Every control call therefore goes through [`Control`], which on a transport
+//! error or HTTP 401 re-reads `control.json` and retries. claim/ack/nack keep retrying (~1s
+//! apart) until a reconnect window (default 5 min; override with `HP_WORKER_RECONNECT_SECS`,
+//! read once at startup) has elapsed since the first failure; the lease heartbeat never gives
+//! up on transient failures (only 409/404 stop it). The claim carries `holderPid` so the server
+//! can keep a live holder's claim (and fencing token) across its own boot recovery.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -322,6 +331,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
+    let ctl = Arc::new(Control::new(client, base.clone(), disco.token.clone()));
 
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
@@ -351,9 +361,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     // with its own id, and the process exits once they have all seen the queue empty.
     if args.count <= 1 {
         let done = drain(
-            &client,
-            &base,
-            &disco.token,
+            &ctl,
             &args.queue,
             &args.worker,
             &args.child,
@@ -377,9 +385,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     );
     let mut handles = Vec::with_capacity(args.count);
     for i in 1..=args.count {
-        let client = client.clone();
-        let base = base.clone();
-        let token = disco.token.clone();
+        let ctl = Arc::clone(&ctl);
         let queue = args.queue.clone();
         let child = args.child.clone();
         let worker = format!("{}-{i}", args.worker);
@@ -387,9 +393,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         let fork_base = fork_base.clone();
         handles.push(std::thread::spawn(move || {
             match drain(
-                &client,
-                &base,
-                &token,
+                &ctl,
                 &queue,
                 &worker,
                 &child,
@@ -430,9 +434,7 @@ fn linger(secs: u64) {
 /// claim comes back empty. Shared by the single-worker and `--count` paths.
 #[allow(clippy::too_many_arguments)]
 fn drain(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: &str,
+    ctl: &Arc<Control>,
     queue: &str,
     worker: &str,
     child: &[String],
@@ -446,7 +448,7 @@ fn drain(
     let mut done: u64 = 0;
     let mut empty_since: Option<Instant> = None;
     loop {
-        let task = match claim_one(client, base, token, queue, worker)? {
+        let task = match claim_one(ctl, queue, worker)? {
             Some(t) => {
                 empty_since = None;
                 t
@@ -486,15 +488,7 @@ fn drain(
                     let reason = format!("worktree create failed (base {fork_base}): {e}");
                     eprintln!("[{worker}] !! {reason}");
                     eprintln!("[{worker}] !! child NOT run — refusing to execute without the requested isolation");
-                    let state = nack(
-                        client,
-                        base,
-                        token,
-                        &task.id,
-                        task.fencing_token,
-                        &reason,
-                        nack_delay_ms,
-                    )?;
+                    let state = nack(ctl, &task.id, task.fencing_token, &reason, nack_delay_ms)?;
                     eprintln!(
                         "[{worker}] !! nacked {} (attempt {}/{}) → {state}",
                         short(&task.id),
@@ -508,14 +502,14 @@ fn drain(
             None
         };
         let cwd = wt.as_ref().map(|w| w.path.as_path());
-        let outcome = run_child(child, &task, queue, client, base, token, cwd, worker, out);
+        let outcome = run_child(child, &task, queue, ctl, cwd, worker, out);
         if let Some(w) = &wt {
             w.remove();
         }
 
         match outcome {
             Ok(true) => {
-                ack(client, base, token, &task.id, task.fencing_token)?;
+                ack(ctl, &task.id, task.fencing_token)?;
                 done += 1;
                 eprintln!("[{worker}] << acked  {}", short(&task.id));
             }
@@ -525,15 +519,7 @@ fn drain(
                     Err(e) => e.to_string(),
                     Ok(true) => unreachable!(),
                 };
-                let state = nack(
-                    client,
-                    base,
-                    token,
-                    &task.id,
-                    task.fencing_token,
-                    &reason,
-                    nack_delay_ms,
-                )?;
+                let state = nack(ctl, &task.id, task.fencing_token, &reason, nack_delay_ms)?;
                 eprintln!(
                     "[{worker}] !! nacked {} (attempt {}/{}) → {state} ({reason})",
                     short(&task.id),
@@ -545,18 +531,11 @@ fn drain(
     }
 }
 
-fn claim_one(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: &str,
-    queue: &str,
-    worker: &str,
-) -> Result<Option<Task>, Box<dyn Error>> {
-    let resp = client
-        .post(format!("{base}/queues/{queue}/claim"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({ "worker": worker, "count": 1 }))
-        .send()?;
+fn claim_one(ctl: &Control, queue: &str, worker: &str) -> Result<Option<Task>, Box<dyn Error>> {
+    let resp = ctl.post_retrying(
+        &format!("/queues/{queue}/claim"),
+        &serde_json::json!({ "worker": worker, "count": 1, "holderPid": std::process::id() }),
+    )?;
     if !resp.status().is_success() {
         return Err(format!("claim failed: HTTP {}", resp.status().as_u16()).into());
     }
@@ -592,30 +571,37 @@ fn run_child(
     child: &[String],
     task: &Task,
     queue: &str,
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: &str,
+    ctl: &Arc<Control>,
     cwd: Option<&Path>,
     worker: &str,
     out: &ChildOutput,
 ) -> Result<bool, Box<dyn Error>> {
-    // Heartbeat: while the child runs, `extend` the lease at ~half the remaining lease interval.
+    // Heartbeat: while the child runs, keep the lease in about [now+L/2, now+L]. One extend
+    // attempt per beat (never a blocking retry loop: this thread is joined right after the child
+    // exits, so it must stay responsive to `stop`); transient failures retry in ~1s and the
+    // thread only gives up when the lease is lost (409) or the task is gone (404).
     let stop = Arc::new(AtomicBool::new(false));
     let heartbeat = task.visibility_deadline.map(|deadline| {
         let lease_ms = (deadline - now_ms()).max(2_000);
         let interval_ms = (lease_ms / 2).max(1_000) as u64;
-        let extra_ms = lease_ms; // renew by a full lease each beat
         let stop = Arc::clone(&stop);
-        let client = client.clone();
-        let base = base.to_string();
-        let token = token.to_string();
+        let ctl = Arc::clone(ctl);
         let id = task.id.clone();
         let fence = task.fencing_token;
         std::thread::spawn(move || {
-            // sleep, then extend, until the child finishes (stop flag set)
-            while !sleep_interruptible(&stop, interval_ms) {
-                if extend(&client, &base, &token, &id, fence, extra_ms).is_err() {
-                    return; // lost lease / server gone — the ack will surface it
+            let mut known = deadline;
+            let mut wait = interval_ms;
+            while !sleep_interruptible(&stop, wait) {
+                wait = interval_ms;
+                let extra = extend_extra_ms(known, now_ms(), lease_ms);
+                if extra <= 0 {
+                    continue;
+                }
+                match ctl.extend_once(&id, fence, extra) {
+                    ExtendResult::Renewed(d) => known = d.unwrap_or(known + extra),
+                    ExtendResult::Transient => wait = RETRY_MS,
+                    ExtendResult::Lost => return, // fenced out / task gone — the ack will surface it
+                    ExtendResult::Other => {}
                 }
             }
         })
@@ -825,18 +811,13 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn ack(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: &str,
-    id: &str,
-    fence: u64,
-) -> Result<(), Box<dyn Error>> {
-    let resp = client
-        .post(format!("{base}/tasks/{id}/ack"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({ "fencingToken": fence, "result": "ok" }))
-        .send()?;
+/// Ack a finished task. Idempotent server-side for the same fence, so retrying an ack whose
+/// response was lost across a relaunch is safe.
+fn ack(ctl: &Control, id: &str, fence: u64) -> Result<(), Box<dyn Error>> {
+    let resp = ctl.post_retrying(
+        &format!("/tasks/{id}/ack"),
+        &serde_json::json!({ "fencingToken": fence, "result": "ok" }),
+    )?;
     if !resp.status().is_success() {
         return Err(format!("ack failed: HTTP {}", resp.status().as_u16()).into());
     }
@@ -846,9 +827,7 @@ fn ack(
 /// Nack a failed task. Returns the resulting queue state: `queued` (will retry) | `failed` |
 /// `dead` (retries exhausted). `delay_ms` overrides the backoff when set (#13).
 fn nack(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: &str,
+    ctl: &Control,
     id: &str,
     fence: u64,
     error: &str,
@@ -858,11 +837,7 @@ fn nack(
     if let Some(d) = delay_ms {
         body["delayMs"] = serde_json::json!(d);
     }
-    let resp = client
-        .post(format!("{base}/tasks/{id}/nack"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&body)
-        .send()?;
+    let resp = ctl.post_retrying(&format!("/tasks/{id}/nack"), &body)?;
     if !resp.status().is_success() {
         return Err(format!("nack failed: HTTP {}", resp.status().as_u16()).into());
     }
@@ -874,24 +849,157 @@ fn nack(
         .to_string())
 }
 
-/// POST /tasks/{id}/extend — renew the lease (heartbeat, #12).
-fn extend(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: &str,
-    id: &str,
-    fence: u64,
-    extra_ms: i64,
-) -> Result<(), Box<dyn Error>> {
-    let resp = client
-        .post(format!("{base}/tasks/{id}/extend"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({ "fencingToken": fence, "extraMs": extra_ms }))
-        .send()?;
-    if !resp.status().is_success() {
-        return Err(format!("extend failed: HTTP {}", resp.status().as_u16()).into());
+/// Delay between retries of a transient control-API failure.
+const RETRY_MS: u64 = 1_000;
+/// Default reconnect window; `HP_WORKER_RECONNECT_SECS` overrides it (read once).
+const DEFAULT_RECONNECT_SECS: u64 = 300;
+
+/// How a control-API outcome is handled. `None` status = transport error (refused/reset/timeout).
+#[derive(Debug, PartialEq, Eq)]
+enum Class {
+    Success,
+    /// Server restarting / token rotated: refresh `control.json` and retry.
+    Transient,
+    /// 409 (fenced out) or 404 (task gone): the lease is lost.
+    Lost,
+    /// Anything else: surface as today.
+    Error,
+}
+
+fn classify(status: Option<u16>) -> Class {
+    match status {
+        None | Some(401) => Class::Transient,
+        Some(409) | Some(404) => Class::Lost,
+        Some(s) if (200..300).contains(&s) => Class::Success,
+        Some(_) => Class::Error,
     }
-    Ok(())
+}
+
+/// Extra ms to request so the lease deadline lands at `now + lease`, given the deadline the
+/// server last reported. ≤ 0 means the lease is already that fresh: skip the call. (The server's
+/// `extend` ADDS to the current deadline, so asking for a full lease each beat creeps ahead.)
+fn extend_extra_ms(known_deadline: i64, now: i64, lease_ms: i64) -> i64 {
+    (now + lease_ms) - known_deadline
+}
+
+enum Attempt {
+    Resp(reqwest::blocking::Response),
+    Transient(String),
+}
+
+enum ExtendResult {
+    /// Renewed; the server's new deadline if it reported one.
+    Renewed(Option<i64>),
+    Transient,
+    Lost,
+    Other,
+}
+
+/// Control-API connection that survives a server relaunch: the (base, token) pair is re-read from
+/// `control.json` whenever a call fails transiently.
+struct Control {
+    client: reqwest::blocking::Client,
+    disco: Mutex<(String, String)>,
+    window: Duration,
+}
+
+impl Control {
+    fn new(client: reqwest::blocking::Client, base: String, token: String) -> Self {
+        let secs = std::env::var("HP_WORKER_RECONNECT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_RECONNECT_SECS);
+        Self {
+            client,
+            disco: Mutex::new((base, token)),
+            window: Duration::from_secs(secs),
+        }
+    }
+
+    fn snapshot(&self) -> (String, String) {
+        self.disco.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Re-read `control.json`; a missing/mid-rewrite file keeps the old pair (next try re-reads).
+    fn refresh(&self) {
+        if let Ok(d) = load_discovery() {
+            *self.disco.lock().unwrap_or_else(|e| e.into_inner()) = (control_base(&d), d.token);
+        }
+    }
+
+    /// One POST. Transport errors and 401 refresh the discovery and report `Transient`.
+    fn post_once(&self, path: &str, body: &serde_json::Value) -> Attempt {
+        let (base, token) = self.snapshot();
+        let sent = self
+            .client
+            .post(format!("{base}{path}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .json(body)
+            .send();
+        match sent {
+            Err(e) => {
+                self.refresh();
+                Attempt::Transient(e.to_string())
+            }
+            Ok(r) if classify(Some(r.status().as_u16())) == Class::Transient => {
+                self.refresh();
+                Attempt::Transient(format!("HTTP {}", r.status().as_u16()))
+            }
+            Ok(r) => Attempt::Resp(r),
+        }
+    }
+
+    /// POST, retrying transient failures every ~1s until the reconnect window has elapsed since
+    /// the first failure. Non-transient statuses are returned for the caller to judge.
+    fn post_retrying(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::blocking::Response, Box<dyn Error>> {
+        let mut first_failure: Option<Instant> = None;
+        loop {
+            match self.post_once(path, body) {
+                Attempt::Resp(r) => {
+                    if first_failure.is_some() {
+                        eprintln!("[worker] reconnected to {}", self.snapshot().0);
+                    }
+                    return Ok(r);
+                }
+                Attempt::Transient(why) => {
+                    let since = *first_failure.get_or_insert_with(|| {
+                        eprintln!(
+                            "[worker] control API unreachable, waiting for the app to come back…"
+                        );
+                        Instant::now()
+                    });
+                    if since.elapsed() >= self.window {
+                        return Err(format!(
+                            "control API unreachable for {}s ({why}); giving up",
+                            self.window.as_secs()
+                        )
+                        .into());
+                    }
+                    std::thread::sleep(Duration::from_millis(RETRY_MS));
+                }
+            }
+        }
+    }
+
+    /// POST /tasks/{id}/extend — a single attempt (heartbeat, #12).
+    fn extend_once(&self, id: &str, fence: u64, extra_ms: i64) -> ExtendResult {
+        let body = serde_json::json!({ "fencingToken": fence, "extraMs": extra_ms });
+        match self.post_once(&format!("/tasks/{id}/extend"), &body) {
+            Attempt::Transient(_) => ExtendResult::Transient,
+            Attempt::Resp(r) => match classify(Some(r.status().as_u16())) {
+                Class::Success => {
+                    let v: serde_json::Value = r.json().unwrap_or(serde_json::Value::Null);
+                    ExtendResult::Renewed(v.get("visibilityDeadline").and_then(|d| d.as_i64()))
+                }
+                Class::Lost => ExtendResult::Lost,
+                _ => ExtendResult::Other,
+            },
+        }
+    }
 }
 
 /// Early, loud check that the `--worktree` fork point resolves to a commit in the runner's cwd,
@@ -1077,6 +1185,39 @@ mod tests {
             base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"::"}"#),
             "http://127.0.0.1:41419"
         );
+    }
+
+    #[test]
+    fn classifies_control_outcomes() {
+        assert_eq!(classify(None), Class::Transient);
+        assert_eq!(classify(Some(401)), Class::Transient);
+        assert_eq!(classify(Some(409)), Class::Lost);
+        assert_eq!(classify(Some(404)), Class::Lost);
+        assert_eq!(classify(Some(200)), Class::Success);
+        assert_eq!(classify(Some(500)), Class::Error);
+        assert_eq!(classify(Some(400)), Class::Error);
+    }
+
+    #[test]
+    fn extend_extra_targets_now_plus_lease_without_creeping() {
+        assert_eq!(extend_extra_ms(10_000, 8_000, 4_000), 2_000);
+        // Fresh enough already: skip.
+        assert!(extend_extra_ms(20_000, 8_000, 4_000) <= 0);
+        // Simulate beats every L/2 against a server that adds extra to the deadline.
+        let lease = 4_000;
+        let mut now = 0;
+        let mut deadline = lease;
+        for _ in 0..20 {
+            now += lease / 2;
+            let extra = extend_extra_ms(deadline, now, lease);
+            if extra > 0 {
+                deadline += extra;
+            }
+            assert!(
+                deadline >= now + lease / 2 && deadline <= now + lease,
+                "{now} {deadline}"
+            );
+        }
     }
 
     #[test]
