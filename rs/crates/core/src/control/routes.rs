@@ -182,6 +182,11 @@ struct HealthOut {
     pid: u32,
     version: String,
     allow_input: bool,
+    /// Additive, stable: `"durable"` (this instance owns the on-disk work queue),
+    /// `"refused"` (another live instance owns `work.db`; this one runs an in-memory queue,
+    /// no boot recovery, no reaper on the DB) or `"memory"` (never attached / open failed).
+    /// Deliberately no paths or pids — `/health` is unauthenticated.
+    work_queue: &'static str,
 }
 
 async fn health(State(shared): State<Arc<Shared>>) -> Response {
@@ -191,6 +196,7 @@ async fn health(State(shared): State<Arc<Shared>>) -> Response {
         pid: shared.pid,
         version: shared.version.clone(),
         allow_input: shared.allow_input(),
+        work_queue: shared.work_queue_mode().as_str(),
     })
 }
 
@@ -2001,7 +2007,7 @@ mod golden {
         assert_eq!(
             body,
             format!(
-                r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true}}"#
+                r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true,"workQueue":"memory"}}"#
             )
         );
     }

@@ -64,6 +64,9 @@ pub struct Shared {
     /// queue ops. Opened in-memory here (test-safe, zero-config); a durable embedder
     /// swaps in `WorkQueue::open(paths::work_db())` + boot recovery (work.rs §3.3).
     pub work: Mutex<WorkQueue>,
+    /// Which queue `work` is: a [`WorkQueueMode`] as `u8`, set by
+    /// [`attach_durable_work_queue`](Self::attach_durable_work_queue), reported on `/health`.
+    work_mode: AtomicU8,
     pub events: EventHub,
     /// Phase-5 auto-restart supervisor: per-pane policy + retry ledger. Default-empty ⇒
     /// every `Exit` runs the legacy path until a pane opts in via `hp.supervise` meta.
@@ -103,6 +106,29 @@ pub struct Shared {
     pub speech: SpeechService,
 }
 
+/// Which work queue an instance runs — `/health`'s stable `workQueue` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WorkQueueMode {
+    /// The ephemeral in-memory queue: never attached (tests) or the DB would not open.
+    Memory = 0,
+    /// The on-disk `work.db`, owned by this instance.
+    Durable = 1,
+    /// Another live instance owns `work.db`; this one stays in-memory and never recovers
+    /// or reaps the DB.
+    Refused = 2,
+}
+
+impl WorkQueueMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkQueueMode::Memory => "memory",
+            WorkQueueMode::Durable => "durable",
+            WorkQueueMode::Refused => "refused",
+        }
+    }
+}
+
 /// What [`Shared::attach_durable_work_queue`] did.
 #[derive(Debug)]
 pub enum WorkAttach {
@@ -135,6 +161,7 @@ impl Shared {
             nudges: Mutex::new(NudgeLedger::new()),
             locks: Mutex::new(PaneLocks::new()),
             work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
+            work_mode: AtomicU8::new(WorkQueueMode::Memory as u8),
             events: EventHub::new(),
             supervisor: Mutex::new(Supervisor::new()),
             sessions,
@@ -231,6 +258,8 @@ impl Shared {
         match work_lock::acquire(path, &me, wait) {
             Err(contended) => {
                 eprintln!("[work] {}", contended.message());
+                self.work_mode
+                    .store(WorkQueueMode::Refused as u8, Ordering::SeqCst);
                 return WorkAttach::Refused(contended);
             }
             Ok(Acquired::Unavailable(e)) => {
@@ -259,6 +288,8 @@ impl Shared {
                     );
                 }
                 *self.work.lock().unwrap() = wq;
+                self.work_mode
+                    .store(WorkQueueMode::Durable as u8, Ordering::SeqCst);
                 WorkAttach::Durable {
                     recovered: recovered.len(),
                 }
@@ -270,6 +301,15 @@ impl Shared {
                 );
                 WorkAttach::OpenFailed(e.to_string())
             }
+        }
+    }
+
+    /// Which queue this instance runs (reported on `/health` as `workQueue`).
+    pub fn work_queue_mode(&self) -> WorkQueueMode {
+        match self.work_mode.load(Ordering::SeqCst) {
+            x if x == WorkQueueMode::Durable as u8 => WorkQueueMode::Durable,
+            x if x == WorkQueueMode::Refused as u8 => WorkQueueMode::Refused,
+            _ => WorkQueueMode::Memory,
         }
     }
 

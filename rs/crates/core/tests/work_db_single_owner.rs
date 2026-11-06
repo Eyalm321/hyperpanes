@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hyperpanes_core::control::server::Shared;
 use hyperpanes_core::control::work::{EnqueueOpts, LeaseOutcome, TaskState, WorkQueue};
+use hyperpanes_core::control::work_lock;
 use hyperpanes_core::session_manager::SessionManager;
 
 /// Selects the child-process role; unset ⇒ [`child_entry`] is a no-op.
@@ -225,7 +226,11 @@ fn second_opener_does_not_requeue_claimed_task() {
 
     // The second instance boots and runs the production attach path to completion.
     let mut second = Proc::spawn(s.child("opener"));
-    second.expect("ATTACHED");
+    assert_eq!(
+        second.expect("ATTACHED "),
+        "refused",
+        "the second opener must report /health workQueue=refused"
+    );
     second.wait_exit();
 
     let (state, token, error) = inspect(&db, &id);
@@ -254,11 +259,27 @@ fn second_opener_does_not_requeue_claimed_task() {
 fn relaunched_primary_recovers_its_claimed_task() {
     let s = Scratch::new("relaunch");
     let (mut primary, db, id, fence) = start_primary(&s);
+    let dead_pid = primary.child.id();
     primary.kill();
 
+    // The crashed owner leaves its record behind: the record is informational only.
+    let lock = work_lock::lock_path_for(&db);
+    assert_eq!(
+        work_lock::read_owner(&lock).map(|o| o.pid),
+        Some(dead_pid),
+        "a SIGKILLed owner's stale record stays in the lock file"
+    );
+
+    // ...yet it must never block the next primary: the OS dropped the lock with the process.
     let mut next = Proc::spawn(s.child("opener"));
-    next.expect("ATTACHED");
+    let next_pid = next.child.id();
+    assert_eq!(next.expect("ATTACHED "), "durable");
     next.wait_exit();
+    assert_eq!(
+        work_lock::read_owner(&lock).map(|o| o.pid),
+        Some(next_pid),
+        "the new owner replaced the stale record"
+    );
 
     // Boot recovery, not the lease reaper: the claim's lease is 10 minutes and no child
     // runs the reaper ticker, so only `recover_in_flight` can have moved it.
@@ -295,7 +316,7 @@ fn relaunch_overlap_waits_for_outgoing_owner() {
 
     outgoing.send("exit");
     outgoing.wait_exit();
-    incoming.expect("ATTACHED");
+    assert_eq!(incoming.expect("ATTACHED "), "durable");
     incoming.wait_exit();
 
     let (state, _, error) = inspect(&db, &id);
@@ -386,7 +407,7 @@ fn child_entry() {
         "opener" => {
             let shared = new_shared();
             shared.attach_durable_work_queue();
-            say("ATTACHED".to_string());
+            say(format!("ATTACHED {}", shared.work_queue_mode().as_str()));
         }
         "reattach" => {
             let first = new_shared();

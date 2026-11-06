@@ -12,6 +12,8 @@
 //! the pure rule is unit-tested in `persistence::isolation` on every platform).
 #![cfg(all(unix, not(target_os = "macos")))]
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,7 +32,9 @@ impl Scratch {
             .as_nanos();
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("devguard-{name}-{}-{nanos}", std::process::id()));
-        for sub in ["home", "xstate", "xconfig", "xdata", "run"] {
+        for sub in [
+            "home", "xstate", "xconfig", "xdata", "run", "xstate2", "xconfig2", "run2",
+        ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
         Scratch { root }
@@ -163,5 +167,63 @@ fn headless_starts_fully_isolated() {
     assert!(
         !s.default_data_dir().join("work.db").exists(),
         "an isolated instance must not touch the default data dir"
+    );
+}
+
+/// `GET /health` (unauthenticated) from the instance whose discovery file is `control_file`.
+fn health(control_file: &Path) -> String {
+    let disc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(control_file).unwrap()).unwrap();
+    let port = disc["port"].as_u64().expect("port") as u16;
+    let mut conn = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    conn.set_read_timeout(Some(BOOT_TIMEOUT)).unwrap();
+    write!(
+        conn,
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = String::new();
+    conn.read_to_string(&mut raw).unwrap();
+    raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+}
+
+/// The incident at the binary level: two control servers on ONE data dir. The first owns
+/// work.db (`workQueue: "durable"`); the second, booted while the first is live, is refused
+/// the DB after the restart-overlap wait and says so on `/health` (`"refused"`). Both are
+/// otherwise fully isolated from each other, so neither the startup check nor the discovery
+/// guard is what stops it: only the single-owner lock.
+#[test]
+fn second_headless_on_a_shared_data_dir_reports_refused() {
+    let s = Scratch::new("two");
+    let mut a = s.partly_isolated();
+    a.env("XDG_DATA_HOME", s.p("xdata"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut a = Running(a.spawn().expect("spawn headless A"));
+    wait_for_file(&mut a, &s.control_file());
+    assert!(
+        health(&s.control_file()).contains(r#""workQueue":"durable""#),
+        "the first instance owns work.db"
+    );
+
+    let b_control = s.p("xstate2/hyperpanes/control.json");
+    let mut b = s.partly_isolated();
+    b.env("XDG_DATA_HOME", s.p("xdata"))
+        .env("XDG_STATE_HOME", s.p("xstate2"))
+        .env("XDG_CONFIG_HOME", s.p("xconfig2"))
+        .env("XDG_RUNTIME_DIR", s.p("run2"))
+        .env("HYPERPANES_CONTROL_FILE", &b_control)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut b = Running(b.spawn().expect("spawn headless B"));
+    wait_for_file(&mut b, &b_control);
+    let b_health = health(&b_control);
+    assert!(
+        b_health.contains(r#""workQueue":"refused""#),
+        "the second instance must be refused the shared work.db: {b_health}"
+    );
+    assert!(
+        health(&s.control_file()).contains(r#""workQueue":"durable""#),
+        "the owner is unaffected"
     );
 }
