@@ -480,3 +480,101 @@ fn concurrent_cargo_builds_use_distinct_cache_slots() {
     assert!(a.join("cargo-target").is_dir() && b.join("cargo-target").is_dir());
     cleanup(&e);
 }
+
+/// 7. `--max-cache-slots 1` with two concurrent tasks: one gets slot-0, the other an uncached
+///    per-task dir under `wt/` (a cold build, not a shared slot), and that dir is removed with
+///    its worktree. Both still ack.
+#[test]
+fn slot_cap_falls_back_to_an_uncached_per_task_dir() {
+    let (port, records) = start_mock_queue(vec![
+        claim_with("capa0000-0000-0000"),
+        claim_with("capb1111-0000-0000"),
+    ]);
+    let e = scratch("cap", port);
+    let out = run_worker(
+        &e,
+        &["--count", "2", "--max-cache-slots", "1"],
+        &["sh", "-c", &concurrency_child(&e.rec)],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(ids(&records, "/ack").len(), 2, "both acked: {stderr}");
+    let kd = key_dir(&e.root);
+    let mut caches = [
+        cache_of(&e.rec, "capa0000-0000-0000"),
+        cache_of(&e.rec, "capb1111-0000-0000"),
+    ];
+    caches.sort_by_key(|p| !p.starts_with(kd.join("cache")));
+    assert_eq!(caches[0], kd.join("cache/slot-0"), "{stderr}");
+    assert!(
+        caches[1].starts_with(kd.join("wt")) && caches[1].to_string_lossy().ends_with(".cache"),
+        "over the cap: uncached per-task dir, got {:?}",
+        caches[1]
+    );
+    assert!(!caches[1].exists(), "uncached dir removed with its task");
+    assert!(
+        !kd.join("cache/slot-1.lock").exists(),
+        "no slot created past the cap"
+    );
+    assert!(
+        entries(&e.rec).iter().all(|n| !n.starts_with("no-overlap")),
+        "the two tasks overlapped (so the cap was actually exercised)"
+    );
+    assert_eq!(entries(&kd.join("wt")), Vec::<String>::new());
+    cleanup(&e);
+}
+
+/// 8. Disk guard evicts idle cache slots before giving up: a warm slot left by an earlier run is
+///    deleted (its lock file kept), and the task is still nacked when that isn't enough.
+#[test]
+fn disk_guard_evicts_idle_slots_before_nacking() {
+    let (port, records) = start_mock_queue(vec![
+        claim_with("warm0000-0000-0000"),
+        claim_with("evic1111-0000-0000"),
+    ]);
+    let e = scratch("evict", port);
+    // Run 1 (no guard): warms slot-0 with an artifact, then drains... but the mock hands out
+    // both claims in order, so run it with a child that only succeeds for the warm task.
+    let warm = run_worker(
+        &e,
+        &["--count", "1"],
+        &[
+            "sh",
+            "-c",
+            r#"[ "$HP_TASK_ID" = warm0000-0000-0000 ] || exit 3; echo built > "$HP_WORKTREE_CACHE_DIR/artifact""#,
+        ],
+    );
+    assert!(
+        warm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let kd = key_dir(&e.root);
+    let slot0 = kd.join("cache/slot-0");
+    assert!(slot0.join("artifact").exists(), "slot-0 warmed");
+    let nacks_before = ids(&records, "/nack").len();
+
+    // Run 2 with an impossible floor: eviction can't satisfy it, so the slot goes AND the task
+    // is nacked.
+    let (port2, records2) = start_mock_queue(vec![claim_with("evic2222-0000-0000")]);
+    std::fs::write(&e.control, format!(r#"{{"port":{port2},"token":"t"}}"#)).unwrap();
+    let out = worker_cmd(&e, &e.root, "1000000T", &[], &["sh", "-c", "exit 0"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("evicted idle cache slot"),
+        "eviction logged: {stderr}"
+    );
+    assert!(!slot0.join("artifact").exists(), "idle slot evicted");
+    assert!(kd.join("cache/slot-0.lock").exists(), "slot lock kept");
+    let recs = records2.lock().unwrap().clone();
+    let nack = recs
+        .iter()
+        .find(|(p, _)| p.ends_with("/nack"))
+        .unwrap_or_else(|| panic!("nacked: {recs:?}"));
+    assert!(nack.1.contains("insufficient disk space"), "{}", nack.1);
+    let _ = nacks_before;
+    cleanup(&e);
+}

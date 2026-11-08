@@ -33,6 +33,8 @@ pub const ROOT_ENV: &str = "HYPERPANES_WORKTREE_ROOT";
 pub const MIN_FREE_ENV: &str = "HYPERPANES_WORKTREE_MIN_FREE";
 /// Default free-space floor: 10 GiB.
 pub const DEFAULT_MIN_FREE: u64 = 10 * 1024 * 1024 * 1024;
+/// Env override for the cache-slot cap (`--max-cache-slots`); `0` = unlimited (the default).
+pub const MAX_SLOTS_ENV: &str = "HYPERPANES_WORKTREE_MAX_SLOTS";
 
 /// A lone `*.lock` (no dir) older than this is debris.
 const LONE_LOCK_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -379,7 +381,9 @@ fn sweep_with(
             let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                 continue;
             };
-            let lock_path = wt.join(format!("{name}.lock"));
+            // `<name>.cache` is a task's uncached build dir: owned by `<name>.lock`, plain delete.
+            let uncached_owner = name.strip_suffix(UNCACHED_SUFFIX);
+            let lock_path = wt.join(format!("{}.lock", uncached_owner.unwrap_or(&name)));
             let held = match probe_lock(&lock_path) {
                 LockState::Live | LockState::Unknown => {
                     rep.kept_live.push(dir.clone());
@@ -388,6 +392,11 @@ fn sweep_with(
                 LockState::Missing => None,
                 LockState::Free(f) => Some(f),
             };
+            if uncached_owner.is_some() {
+                let _ = std::fs::remove_dir_all(dir);
+                drop(held);
+                continue;
+            }
             let dirty_lines = git_out(dir, &["status", "--porcelain"])
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
@@ -474,12 +483,22 @@ pub struct CacheSlot {
     lock: File,
 }
 
-/// Take the lowest free `cache/slot-<k>` under `key_dir`.
+/// Take the lowest free `cache/slot-<k>` under `key_dir` (no cap).
 pub fn acquire_slot(key_dir: &Path) -> io::Result<CacheSlot> {
+    acquire_slot_capped(key_dir, 0).map(|s| s.expect("an uncapped acquire always finds a slot"))
+}
+
+/// Take the lowest free `cache/slot-<k>` with `k < max_slots` (`0` = no cap). `Ok(None)` when
+/// every slot under the cap is busy: the caller then runs the task with an uncached per-task dir
+/// (a cold build) instead of blocking or sharing a slot.
+pub fn acquire_slot_capped(key_dir: &Path, max_slots: usize) -> io::Result<Option<CacheSlot>> {
     let cache = key_dir.join("cache");
     std::fs::create_dir_all(&cache)?;
     let mut k = 0usize;
     loop {
+        if max_slots > 0 && k >= max_slots {
+            return Ok(None);
+        }
         let lock_path = cache.join(format!("slot-{k}.lock"));
         let f = OpenOptions::new()
             .read(true)
@@ -491,11 +510,11 @@ pub fn acquire_slot(key_dir: &Path) -> io::Result<CacheSlot> {
             Ok(()) => {
                 let path = cache.join(format!("slot-{k}"));
                 std::fs::create_dir_all(&path)?;
-                return Ok(CacheSlot {
+                return Ok(Some(CacheSlot {
                     index: k,
                     path,
                     lock: f,
-                });
+                }));
             }
             Err(TryLockError::WouldBlock) => k += 1,
             Err(TryLockError::Error(e)) => return Err(e),
@@ -509,6 +528,59 @@ impl Drop for CacheSlot {
         let _ = self.lock.unlock();
     }
 }
+
+/// Disk-pressure eviction: delete idle cache slots under `root` (every repo key, since they all
+/// share the root's filesystem), least recently used first (lock-file mtime = last release),
+/// until `enough()` says the space is back. A slot is idle when its lock can be taken. The lock
+/// is held while the slot dir is deleted and its lock file is kept (deleting slot lock files
+/// races acquirers). Returns the evicted slot dirs. Called by the disk guard before it gives up
+/// on a claim, so peak-concurrency slots don't pin disk until the 14-day GC.
+pub fn evict_idle_slots(root: &Path, mut enough: impl FnMut() -> bool) -> Vec<PathBuf> {
+    let mut slots: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for key in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let cache = key.path().join("cache");
+        for p in std::fs::read_dir(&cache).into_iter().flatten().flatten() {
+            let p = p.path();
+            let is_slot_lock = p.extension().is_some_and(|e| e == "lock")
+                && p.file_stem()
+                    .is_some_and(|s| s.to_string_lossy().starts_with("slot-"));
+            if !is_slot_lock || !p.with_extension("").is_dir() {
+                continue;
+            }
+            let mtime = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            slots.push((mtime, p));
+        }
+    }
+    slots.sort();
+    let mut evicted = Vec::new();
+    for (_, lock_path) in slots {
+        if enough() {
+            break;
+        }
+        if let LockState::Free(f) = probe_lock(&lock_path) {
+            let dir = lock_path.with_extension("");
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                evicted.push(dir);
+            }
+            drop(f);
+        }
+    }
+    evicted
+}
+
+/// Uncached per-task cache dir used when every slot under the cap is busy: `wt/<name>.cache`,
+/// owned by the task's [`TaskLock`] (the sweep reclaims it with its worktree) and deleted when
+/// the task ends.
+pub fn uncached_dir(lock: &TaskLock) -> PathBuf {
+    let mut name = lock.worktree_path().as_os_str().to_os_string();
+    name.push(UNCACHED_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Suffix of [`uncached_dir`] entries under `wt/`.
+pub const UNCACHED_SUFFIX: &str = ".cache";
 
 /// Record the canonical git common dir in `<key_dir>/repo` (for humans), creating `key_dir`.
 pub fn write_repo_file(key_dir: &Path, common_dir: &Path) -> io::Result<()> {
@@ -824,5 +896,108 @@ mod tests {
         // A not-yet-created path resolves via its nearest existing ancestor.
         let p = std::env::temp_dir().join("hp-wtstore-nope/deeper");
         assert!(available_bytes(&p).unwrap() > 0);
+    }
+
+    #[test]
+    fn capped_slots_return_none_when_all_busy() {
+        let kd = scratch("cap");
+        let a = acquire_slot_capped(&kd, 2).unwrap().expect("slot 0");
+        let b = acquire_slot_capped(&kd, 2).unwrap().expect("slot 1");
+        assert_eq!((a.index, b.index), (0, 1));
+        assert!(
+            acquire_slot_capped(&kd, 2).unwrap().is_none(),
+            "cap reached: no third slot"
+        );
+        assert!(
+            !kd.join("cache/slot-2.lock").exists(),
+            "nothing created past the cap"
+        );
+        drop(a);
+        assert_eq!(acquire_slot_capped(&kd, 2).unwrap().unwrap().index, 0);
+        // 0 = unlimited.
+        assert_eq!(acquire_slot_capped(&kd, 0).unwrap().unwrap().index, 0);
+        drop(b);
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn eviction_is_lru_first_skips_busy_slots_and_stops_when_enough() {
+        let root = scratch("evict");
+        let (ka, kb) = (root.join("a-00000000"), root.join("b-11111111"));
+        // Three idle slots across two repo keys with distinct ages, plus one busy (oldest).
+        let mk = |kd: &Path, age_h: u64| {
+            let s = acquire_slot(kd).unwrap();
+            std::fs::write(s.path.join("artifact"), b"x").unwrap();
+            let lock = kd.join(format!("cache/slot-{}.lock", s.index));
+            (s, lock, age_h)
+        };
+        let busy = mk(&ka, 100);
+        let a1 = mk(&ka, 50);
+        let b0 = mk(&kb, 70);
+        let b1 = mk(&kb, 10);
+        let (busy_slot, a1_slot, b0_slot, b1_slot) = (busy.0, a1.0, b0.0, b1.0);
+        let paths = [
+            busy_slot.path.clone(),
+            a1_slot.path.clone(),
+            b0_slot.path.clone(),
+            b1_slot.path.clone(),
+        ];
+        drop(a1_slot);
+        drop(b0_slot);
+        drop(b1_slot);
+        for (lock, h) in [
+            (&busy.1, busy.2),
+            (&a1.1, a1.2),
+            (&b0.1, b0.2),
+            (&b1.1, b1.2),
+        ] {
+            File::options()
+                .write(true)
+                .open(lock)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(h * 3600))
+                .unwrap();
+        }
+        // Enough after one eviction: only the least recently used IDLE slot goes (b0, 70h),
+        // never the busy one even though it is older.
+        let b0_dir = paths[2].clone();
+        let ev = evict_idle_slots(&root, || !b0_dir.exists());
+        assert_eq!(ev, vec![paths[2].clone()]);
+        assert!(paths[0].exists() && paths[1].exists() && paths[3].exists());
+        // Never enough: every idle slot goes, oldest first; the busy one and all locks stay.
+        let ev = evict_idle_slots(&root, || false);
+        assert_eq!(ev, vec![paths[1].clone(), paths[3].clone()]);
+        assert!(paths[0].join("artifact").exists(), "busy slot untouched");
+        assert!(ka.join("cache/slot-1.lock").exists() && kb.join("cache/slot-0.lock").exists());
+        // Evicted slots are reacquirable (recreated empty).
+        let again = acquire_slot(&kb).unwrap();
+        assert!(again.path.is_dir() && !again.path.join("artifact").exists());
+        drop(again);
+        drop(busy_slot);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sweep_reclaims_orphan_uncached_dirs_and_keeps_live_ones() {
+        let r = repo("unc");
+        let kd = scratch("unckd");
+        // Live: lock held by us, uncached dir present.
+        let live = TaskLock::create(&kd, "q-live0000-1", "q", "t", "b").unwrap();
+        let live_unc = uncached_dir(&live);
+        std::fs::create_dir_all(&live_unc).unwrap();
+        assert!(live_unc.to_string_lossy().ends_with("q-live0000-1.cache"));
+        // Orphan: uncached dir with no lock file at all (owner gone).
+        let dead_unc = kd.join("wt/q-dead0000-2.cache");
+        std::fs::create_dir_all(dead_unc.join("cargo-target")).unwrap();
+        let rep = sweep(&r, &kd);
+        assert!(live_unc.exists(), "live task's uncached dir kept");
+        assert!(!dead_unc.exists(), "orphan uncached dir reclaimed");
+        assert!(
+            rep.swept.is_empty(),
+            "uncached dirs are not reported as worktrees"
+        );
+        drop(live);
+        let _ = std::fs::remove_dir_all(&r);
+        let _ = std::fs::remove_dir_all(&kd);
     }
 }

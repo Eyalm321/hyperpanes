@@ -3,7 +3,8 @@
 //! Usage:
 //! ```text
 //! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>] \
-//!   [--worktree-root <dir>] [--min-free <size>] [--retry-window <secs>] [--nack-delay <ms>] \
+//!   [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>] \
+//!   [--retry-window <secs>] [--nack-delay <ms>] \
 //!   [--stream] [--log-dir <dir>] [--linger <secs>] -- <cmd> [args...]
 //! ```
 //!
@@ -61,7 +62,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hyperpanes_core::worktree_store::{self, acquire_slot, fmt_bytes, parse_size, TaskLock};
+use hyperpanes_core::worktree_store::{self, acquire_slot_capped, fmt_bytes, parse_size, TaskLock};
 use serde::Deserialize;
 
 /// Parsed `hyperpanes worker` invocation.
@@ -87,6 +88,8 @@ pub struct WorkerArgs {
     pub worktree_root: Option<PathBuf>,
     /// `--min-free <size>` in bytes (overrides `HYPERPANES_WORKTREE_MIN_FREE`); `None` = unset.
     pub min_free: Option<u64>,
+    /// `--max-cache-slots <n>` (overrides `HYPERPANES_WORKTREE_MAX_SLOTS`); `Some(0)` = no cap.
+    pub max_cache_slots: Option<usize>,
     /// Render the child's Claude `--output-format stream-json` lines as readable progress
     /// instead of raw JSON, so a worker pane shows what the agent is doing while it runs.
     pub stream: bool,
@@ -158,6 +161,7 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut base: Option<String> = None;
     let mut worktree_root: Option<PathBuf> = None;
     let mut min_free_arg: Option<String> = None;
+    let mut max_slots_arg: Option<String> = None;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -205,6 +209,14 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                 min_free_arg = Some(argv.get(i + 1).ok_or("--min-free needs a value")?.clone());
                 i += 2;
             }
+            "--max-cache-slots" => {
+                max_slots_arg = Some(
+                    argv.get(i + 1)
+                        .ok_or("--max-cache-slots needs a value")?
+                        .clone(),
+                );
+                i += 2;
+            }
             "--stream" => {
                 stream = true;
                 i += 1;
@@ -240,6 +252,8 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                     worktree_root = Some(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--min-free=") {
                     min_free_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--max-cache-slots=") {
+                    max_slots_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--log-dir=") {
                     log_dir = Some(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--linger=") {
@@ -300,6 +314,10 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         Some(s) => Some(parse_size(&s).map_err(|e| format!("--min-free: {e}"))?),
         None => None,
     };
+    let max_cache_slots = match max_slots_arg {
+        Some(s) => Some(parse_max_slots(&s).map_err(|e| format!("--max-cache-slots: {e}"))?),
+        None => None,
+    };
     Ok(WorkerArgs {
         queue,
         worker,
@@ -310,11 +328,19 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         base,
         worktree_root,
         min_free,
+        max_cache_slots,
         stream,
         log_dir,
         linger_secs,
         child,
     })
+}
+
+/// `--max-cache-slots` / `HYPERPANES_WORKTREE_MAX_SLOTS`: a non-negative integer, `0` = no cap.
+fn parse_max_slots(s: &str) -> Result<usize, String> {
+    s.trim()
+        .parse()
+        .map_err(|_| format!("must be a non-negative integer (0 = no cap), got '{s}'"))
 }
 
 /// pid-suffixed default so two bare `hyperpanes worker` invocations don't share an id.
@@ -364,7 +390,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         Ok(a) => a,
         Err(e) => {
             eprintln!("hyperpanes worker: {e}");
-            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>]] -- <cmd> [args...]");
+            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>]] -- <cmd> [args...]");
             return Err(e.into());
         }
     };
@@ -528,18 +554,23 @@ fn drain(
             task.title
         );
 
-        // Optional per-task throwaway worktree (#14): create it, run the child there, remove it
-        // after (the commit, if any, stays on its branch). If the worktree can't be created,
-        // the task must NOT fall through to the runner's own cwd — that silently strips the
-        // isolation the caller asked for and puts the child in the shared checkout (the
-        // 2026-07-30 incident class). Nack instead: worktree failures are usually environmental
-        // (stale branch, git lock, disk), so the standard retry path applies, bounded by the
-        // queue's max_attempts.
-        // Disk guard: a worktree (and its build cache) needs real free space. This is a
-        // machine-wide condition, so do not create anything, nack once with a long backoff and
-        // STOP this worker rather than churning through the queue burning attempts.
+        // Disk guard: a worktree (and its build cache) needs real free space. Short on it, first
+        // evict idle cache slots (least recently used first, any repo under the root) so slots
+        // left over from a concurrency peak don't pin the disk; only if that still isn't enough,
+        // treat it as the machine-wide condition it is: create nothing, nack once with a long
+        // backoff and STOP this worker rather than churning through the queue burning attempts.
         if let Some(st) = store {
             if st.min_free > 0 {
+                let short =
+                    |r: &Path| worktree_store::available_bytes(r).is_ok_and(|a| a < st.min_free);
+                if short(&st.root) {
+                    for p in worktree_store::evict_idle_slots(&st.root, || !short(&st.root)) {
+                        eprintln!(
+                            "[{worker}] disk guard: evicted idle cache slot {}",
+                            p.display()
+                        );
+                    }
+                }
                 if let Ok(avail) = worktree_store::available_bytes(&st.root) {
                     if avail < st.min_free {
                         let reason = format!(
@@ -596,29 +627,53 @@ fn drain(
         } else {
             None
         };
-        // Warm build-cache slot: exclusive while this task runs, reused by later tasks. Failure
-        // to get one never fails the task — it just runs without HP_WORKTREE_CACHE_DIR.
-        let slot = match store {
-            Some(st) => match acquire_slot(&st.key_dir) {
-                Ok(s) => Some(s),
+        // Warm build-cache slot: exclusive while this task runs, reused by later tasks. With
+        // every slot under `--max-cache-slots` busy, the task gets an uncached per-task dir
+        // (`wt/<name>.cache`, a cold build, deleted with the worktree) rather than blocking or
+        // sharing a slot. Failure to get either never fails the task — it just runs without
+        // HP_WORKTREE_CACHE_DIR.
+        let mut slot = None;
+        let mut uncached: Option<PathBuf> = None;
+        if let (Some(st), Some(w)) = (store, wt.as_ref()) {
+            match acquire_slot_capped(&st.key_dir, st.max_slots) {
+                Ok(Some(s)) => slot = Some(s),
+                Ok(None) => {
+                    let dir = worktree_store::uncached_dir(&w.lock);
+                    match std::fs::create_dir_all(&dir) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[{worker}] all {} cache slot(s) busy — uncached build dir {}",
+                                st.max_slots,
+                                dir.display()
+                            );
+                            uncached = Some(dir);
+                        }
+                        Err(e) => eprintln!("[{worker}] warn: cannot create {}: {e}; running without HP_WORKTREE_CACHE_DIR", dir.display()),
+                    }
+                }
                 Err(e) => {
                     eprintln!("[{worker}] warn: no cache slot ({e}); running without HP_WORKTREE_CACHE_DIR");
-                    None
                 }
-            },
-            None => None,
-        };
+            }
+        }
+        let cache_dir = slot
+            .as_ref()
+            .map(|s| s.path.clone())
+            .or_else(|| uncached.clone());
         let outcome = run_child(
             child,
             &task,
             queue,
             ctl,
             wt.as_ref(),
-            slot.as_ref().map(|s| s.path.as_path()),
+            cache_dir.as_deref(),
             worker,
             out,
         );
         drop(slot);
+        if let Some(dir) = uncached {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         if let Some(w) = wt {
             w.remove();
         }
@@ -1177,6 +1232,8 @@ struct WtStore {
     /// `<root>/<repo-key>`: wt/ and cache/ live under it.
     key_dir: PathBuf,
     min_free: u64,
+    /// Cache-slot cap; 0 = unlimited.
+    max_slots: usize,
 }
 
 impl WtStore {
@@ -1191,6 +1248,17 @@ impl WtStore {
                 parse_size(&v).map_err(|e| format!("{}: {e}", worktree_store::MIN_FREE_ENV))?
             }
             _ => worktree_store::DEFAULT_MIN_FREE,
+        };
+        // Default: no cap. Idle slots are evicted under disk pressure (see the disk guard), and
+        // at peak the busy slots hold what per-worktree target/ dirs would have held anyway.
+        let max_slots = match (
+            args.max_cache_slots,
+            std::env::var(worktree_store::MAX_SLOTS_ENV),
+        ) {
+            (Some(v), _) => v,
+            (None, Ok(v)) if !v.trim().is_empty() => parse_max_slots(&v)
+                .map_err(|e| format!("{}: {e}", worktree_store::MAX_SLOTS_ENV))?,
+            _ => 0,
         };
         let out = Command::new("git")
             .current_dir(&cwd)
@@ -1212,9 +1280,14 @@ impl WtStore {
             .map_err(|e| format!("worktree: cannot create {}: {e}", key_dir.display()))?;
         let rep = worktree_store::sweep(&cwd, &key_dir);
         eprintln!(
-            "worker: worktrees under {} (cache slots in {}), min free {}",
+            "worker: worktrees under {} (cache slots in {}{}), min free {}",
             key_dir.display(),
             key_dir.join("cache").display(),
+            if max_slots == 0 {
+                String::new()
+            } else {
+                format!(", max {max_slots}")
+            },
             fmt_bytes(min_free)
         );
         for o in &rep.swept {
@@ -1232,6 +1305,7 @@ impl WtStore {
             root,
             key_dir,
             min_free,
+            max_slots,
         })
     }
 }
@@ -1881,6 +1955,40 @@ mod tests {
         assert_eq!(e.min_free, Some(0));
         let d = parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).unwrap();
         assert_eq!((d.worktree_root, d.min_free), (None, None));
+        assert_eq!(d.max_cache_slots, None);
+        let c = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--max-cache-slots",
+            "3",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(c.max_cache_slots, Some(3));
+        let c = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue=q",
+            "--max-cache-slots=0",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(c.max_cache_slots, Some(0));
+        assert!(parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--max-cache-slots",
+            "-1",
+            "--",
+            "true"
+        ]))
+        .is_err());
         assert!(parse_args(&argv(&[
             "hp",
             "worker",
