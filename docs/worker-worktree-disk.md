@@ -108,9 +108,22 @@ path packages relative to the workspace root, so the expensive part (registry an
 dependencies) stays fresh. Only the workspace's own crates rebuild, because the fresh checkout's
 files are newer than their artifacts. Measured numbers are in the PR that introduced this.
 
-Slots whose lock is free and that haven't been used for 14 days are deleted by the startup sweep.
-Slot lock files are never deleted. To reclaim everything for a repo, stop its runners and
-`rm -rf <root>/<repo>-<hash8>/cache`.
+**Bounding disk.** A slot persists after its task, so a concurrency peak would otherwise pin its
+disk:
+
+- **Eviction under disk pressure.** When the disk guard (below) finds the root short of space,
+  it first deletes idle slots, those whose lock it can take, least recently used first, across
+  every repo under the root, until the minimum is met. Only then does it give up on the claim.
+- **Age GC.** The startup sweep deletes idle slots unused for 14 days.
+- **Optional cap.** `--max-cache-slots <n>` / `HYPERPANES_WORKTREE_MAX_SLOTS` (default `0`, no
+  cap). A task that finds every slot under the cap busy gets an uncached `wt/<name>.cache` dir:
+  a cold build, owned by its task lock and deleted with the worktree. It doesn't block, and it
+  never shares a slot. There's no cap by default because eviction already reclaims idle slots
+  on demand, and at peak a busy slot holds exactly what a per-worktree `target/` would have held
+  anyway.
+
+Slot lock files are never deleted, because deleting one races a concurrent acquirer. To reclaim
+everything for a repo by hand, stop its runners and `rm -rf <root>/<repo>-<hash8>/cache`.
 
 ### Alternatives considered
 
@@ -133,7 +146,8 @@ worktree root's filesystem against a minimum:
 - `--min-free <size>` > `HYPERPANES_WORKTREE_MIN_FREE` > default **10G**. Sizes are bytes or
   `K/M/G/T` (binary units, optional `B`/`iB`). `0` disables the check. An invalid env value is a
   startup error.
-- If space is short, nothing is created and the child is not run. The task is nacked with
+- If space is short, idle cache slots are evicted first (LRU, see above). If that doesn't free
+  enough, nothing is created and the child is not run. The task is nacked with
   `insufficient disk space for a worktree on <root>: <avail> free < <min> required (set
   HYPERPANES_WORKTREE_MIN_FREE / --min-free; 0 disables)` and a 60 s backoff (`--nack-delay`
   overrides it). Then **that worker stops**: low disk is machine-wide, so claiming more tasks

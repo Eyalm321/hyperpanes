@@ -224,9 +224,11 @@ The native runner can run each claimed task in a throwaway git worktree on a fre
   exclusively for the task. Concurrent tasks get distinct slots, and a slot is reused warm by
   later tasks. The goal personas set `CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target`.
 - **Disk guard.** Before creating a worktree, the runner checks free space on the root
-  (`--min-free` / `HYPERPANES_WORKTREE_MIN_FREE`, default `10G`, `0` = off). If it's short, the
+  (`--min-free` / `HYPERPANES_WORKTREE_MIN_FREE`, default `10G`, `0` = off). If it's short, it
+  first evicts idle cache slots, least recently used first. If that doesn't free enough, the
   task is nacked with an `insufficient disk space …` reason and a 60 s backoff, the child is not
-  run, and the worker stops.
+  run, and the worker stops. `--max-cache-slots` / `HYPERPANES_WORKTREE_MAX_SLOTS` optionally
+  caps the slot pool (default none). Over the cap, a task builds uncached.
 
 Child environment: `HP_TASK_ID`, `HP_TASK_PAYLOAD`, `HP_TASK_TITLE`, `HP_FENCING_TOKEN`,
 `HP_QUEUE`, plus `HP_WORKTREE` and `HP_WORKTREE_CACHE_DIR` under `--worktree`.
