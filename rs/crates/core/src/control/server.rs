@@ -132,8 +132,10 @@ impl WorkQueueMode {
 /// What [`Shared::attach_durable_work_queue`] did.
 #[derive(Debug)]
 pub enum WorkAttach {
-    /// Attached the on-disk DB as its single owner; boot recovery requeued `recovered` tasks.
-    Durable { recovered: usize },
+    /// Attached the on-disk DB as its single owner; boot recovery requeued (or dead-lettered)
+    /// `recovered` tasks whose holder was dead and kept `kept` claims whose holder process
+    /// is still alive (a worker that survived a GUI relaunch in the session daemon).
+    Durable { recovered: usize, kept: usize },
     /// Another live process owns the DB. Nothing was opened or recovered; the queue stays
     /// in-memory for this instance's lifetime.
     Refused(Box<crate::control::work_lock::Contended>),
@@ -239,12 +241,12 @@ impl Shared {
     /// [`attach_durable_work_queue`](Self::attach_durable_work_queue) against an explicit DB
     /// path, waiting up to `wait` for a live owner to let go (restart overlap).
     ///
-    /// The single-owner lock comes FIRST: boot recovery requeues every `claimed` row on the
-    /// premise that all workers died with this process, which is only true for the process
-    /// that owns the DB. A second opener (a half-isolated dev instance, a headless server beside
-    /// the GUI) running it would requeue a live instance's in-flight tasks. So a non-owner never
-    /// opens the DB at all: no recovery, no writes, and the reaper ticker only ever sweeps its
-    /// in-memory queue.
+    /// The single-owner lock comes FIRST: boot recovery requeues every claim it cannot prove
+    /// is held by a live process, and claims made through another live instance (in-process
+    /// or holder-less) look dead to it. A second opener (a half-isolated dev instance, a
+    /// headless server beside the GUI) running it would requeue a live instance's in-flight
+    /// tasks. So a non-owner never opens the DB at all: no recovery, no writes, and the reaper
+    /// ticker only ever sweeps its in-memory queue.
     pub fn attach_durable_work_queue_at(
         &self,
         path: &std::path::Path,
@@ -276,22 +278,26 @@ impl Shared {
         }
         match crate::control::work::WorkQueue::open(path) {
             Ok(mut wq) => {
-                // We own the DB, and every worker pane is a child of this process (or of the
-                // previous owner, now gone), so on (re)start all in-flight claims belong to
-                // dead workers. Requeue them (exhausted ones dead-letter).
-                let recovered = wq.recover_in_flight(now_ms());
-                if !recovered.is_empty() {
+                // We own the DB. Claims whose holder died with the previous owner (or never
+                // named one) are requeued (exhausted ones dead-letter); claims whose holder
+                // process is still alive, i.e. workers that survived a GUI relaunch in the
+                // session daemon, stay claimed with their fence and get a re-armed lease.
+                let rec = wq.recover_in_flight_with(now_ms(), &crate::control::holder::is_alive);
+                if !rec.reaped.is_empty() || !rec.kept.is_empty() {
                     eprintln!(
-                        "[work] durable queue opened ({}); recovered {} in-flight task(s)",
+                        "[work] durable queue opened ({}); recovered {} in-flight task(s), \
+                         kept {} claim(s) held by live workers",
                         path.display(),
-                        recovered.len()
+                        rec.reaped.len(),
+                        rec.kept.len()
                     );
                 }
                 *self.work.lock().unwrap() = wq;
                 self.work_mode
                     .store(WorkQueueMode::Durable as u8, Ordering::SeqCst);
                 WorkAttach::Durable {
-                    recovered: recovered.len(),
+                    recovered: rec.reaped.len(),
+                    kept: rec.kept.len(),
                 }
             }
             Err(e) => {

@@ -1250,7 +1250,7 @@ async fn task_claim(
         None => {
             return jstatus(
                 400,
-                json!({ "error": "expected { worker: string, leaseMs?, count? }" }),
+                json!({ "error": "expected { worker: string, leaseMs?, count?, holderPid? }" }),
             )
         }
     };
@@ -1266,12 +1266,21 @@ async fn task_claim(
         .filter(|&c| c > 0)
         .map(|c| c.min(100) as usize)
         .unwrap_or(1);
+    // `holderPid`: the claiming process (the `hyperpanes worker` runner sends its own pid).
+    // Recorded only if it is a live LOCAL process; boot recovery then keeps this claim, fence
+    // and all, for as long as that process lives (a GUI relaunch with the session daemon on).
+    // Absent / not a live local pid ⇒ no holder ⇒ the claim is requeued on the next boot.
+    let holder = b
+        .get("holderPid")
+        .and_then(Value::as_u64)
+        .and_then(|p| u32::try_from(p).ok())
+        .and_then(crate::control::holder::identify);
     let now = now_ms();
     let mut tasks = Vec::new();
     {
         let mut wq = shared.work.lock().unwrap();
         for _ in 0..count {
-            match wq.claim(&queue, &worker, lease_ms, now) {
+            match wq.claim_held(&queue, &worker, holder.as_ref(), lease_ms, now) {
                 Some(c) => tasks.push(c.task),
                 None => break, // queue drained — an EMPTY claim is 200 {tasks:[]}, never 204
             }
