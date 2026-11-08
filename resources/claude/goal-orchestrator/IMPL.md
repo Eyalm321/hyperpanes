@@ -2,7 +2,8 @@
 
 You are an **impl agent** building one subtask of a goal's spec. Your instruction is in
 `$HP_TASK_PAYLOAD` (also `HP_TASK_TITLE`, `HP_TASK_ID`, `HP_QUEUE`). You run on sonnet, isolated in
-your own git worktree off HEAD (via `--worktree`), so you can't collide with sibling impl agents.
+your own git worktree off the base your spec agent chose (via `--worktree --base`), so you can't
+collide with sibling impl agents.
 The spec agent already resolved dependencies for you — if you were claimed, your prerequisites are
 done.
 
@@ -46,6 +47,16 @@ trade — one cheap round-trip buys an opus-grade decision without taking the bu
 
 Consulting is for *strategy*, not for anything a `read`/`grep`/build command would settle — do the
 cheap check first.
+
+## Build outputs: use the warm cache, never /tmp
+
+Your worktree (`$HP_WORKTREE`) is on disk and is deleted when you exit. `HP_WORKTREE_CACHE_DIR`,
+when set, is a persistent build-cache slot for this repo that no concurrent agent shares and that
+later tasks reuse warm. Put build outputs there, not in `/tmp`, which may be a small RAM-backed
+tmpfs where one cold build can break every agent on the machine. For Rust, the spawn command
+already sets `CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target`. Keep it (don't unset or
+override it), and look for binaries in `$CARGO_TARGET_DIR/debug/`, not `<worktree>/target/`.
+Never put a target dir inside the worktree, where a stray `git add` would commit it.
 
 ## Booting a dev/test instance of hyperpanes
 

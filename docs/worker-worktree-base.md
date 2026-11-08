@@ -54,6 +54,12 @@ Now:
   instead of spinning.
 - The runner keeps draining: one task's broken worktree doesn't take the worker down or block the
   rest of the queue.
+- One exception: the **disk guard**. When free space on the worktree root is below the minimum,
+  the task is nacked with an `insufficient disk space …` reason (60 s backoff) *before* anything
+  is created, and that worker stops instead of draining on. Low disk is machine-wide, so
+  churning through the queue would only burn attempts. See
+  [`worker-worktree-disk.md`](worker-worktree-disk.md), which also covers where worktrees live
+  (a disk-backed root, no longer `/tmp`), the orphan sweep, and the shared build cache.
 
 ## Migration
 
