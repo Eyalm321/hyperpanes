@@ -26,10 +26,18 @@
 //! a single warning naming the features that are off for this run. The AT-SPI terminal text
 //! (`paneview::a11y_wanted`) is then not extracted. The features themselves already fail soft
 //! without a bus: accesskit's thread exits, slint keeps its default theme and rfd falls back to
-//! zenity. [`is_contained_dbus_panic`] lets the panic hook downgrade a panic on a D-Bus client
-//! thread (a misbehaving bus, or a future regression of the executor contract) from a crash
-//! report to that same single warning. Such a thread dies alone: the process keeps running, so
-//! a crash dialog would only scare the user.
+//! zenity.
+//!
+//! **Panic containment.** [`is_contained_dbus_panic`] (via `crash::route`) narrows the panic hook
+//! for one case: a panic located in a D-Bus crate, off the main thread. That thread dies alone
+//! and the process keeps running, so instead of raising the crash reporter over a live app the
+//! hook logs a `CONTAINED …` record plus one ERROR line with the full panic text
+//! ([`contain_panic`]), and the D-Bus features switch off. Every other panic, including any panic
+//! on the UI thread, still reaches the reporter. The executor fix above removes the panic that
+//! actually fired. This guard stays because `accesskit_unix` still panics by design on a broken
+//! accessibility bus (`panic!("Accessibility event loop failed")` on `InterfaceExists` /
+//! `MissingParameter`, and `unique_name().unwrap()` in its bus wrapper). A misbehaving D-Bus
+//! peer must not look like a hyperpanes crash.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(target_os = "linux")]
@@ -74,7 +82,7 @@ pub fn session_bus_unavailable() -> bool {
 /// The one warning printed when the session bus is unusable.
 pub fn warning_text(reason: &str) -> String {
     format!(
-        "D-Bus session bus unavailable ({reason}). Running without it: accessibility (AT-SPI) \
+        "warning: D-Bus session bus unavailable ({reason}). Running without it: accessibility (AT-SPI) \
          and desktop theme/portal settings are off for this run, and file dialogs use zenity \
          instead of the desktop portal."
     )
@@ -238,12 +246,25 @@ pub fn is_contained_dbus_panic(location_file: &str, on_main_thread: bool) -> boo
     false
 }
 
-/// Called by the panic hook for a contained D-Bus panic: the features behind the bus are gone
-/// for this run, so say so once, the same way a failed probe does.
-pub fn contain_panic(location: &str, message: &str) {
-    mark_unavailable(&format!(
-        "a D-Bus client thread panicked at {location}: {message}"
-    ));
+/// Called by the panic hook for a contained D-Bus panic (`crash::PanicRoute::ContainDbus`). Logs
+/// it at ERROR with the full panic text, every time: it is not deduplicated like the
+/// unavailable-bus warning. Then marks the bus unusable so D-Bus-backed features switch off.
+pub fn contain_panic(thread: &str, info: &str) {
+    let msg = contained_panic_text(thread, info);
+    eprintln!("[hyperpanes] {msg}");
+    crate::dbg_log(&format!("dbus: {msg}"));
+    WARNED.store(true, Ordering::Release);
+    STATE.store(UNAVAILABLE, Ordering::Release);
+}
+
+/// The ERROR line for a contained D-Bus panic. `info` is the panic's `Display` ("panicked at
+/// file:line:col:\nmessage"), flattened onto one line.
+pub fn contained_panic_text(thread: &str, info: &str) -> String {
+    let info = info.split('\n').collect::<Vec<_>>().join(" ");
+    format!(
+        "ERROR: D-Bus client thread '{thread}' {info} (contained: the app keeps running; \
+         accessibility (AT-SPI) and desktop portal integration are off for this run)"
+    )
 }
 
 #[cfg(test)]
@@ -295,6 +316,18 @@ mod tests {
         assert!(w.contains("D-Bus session bus unavailable (No such file or directory"));
         assert!(w.contains("accessibility (AT-SPI)"));
         assert!(w.contains("zenity"));
+    }
+
+    #[test]
+    fn contained_panic_is_one_error_line_with_the_full_payload() {
+        let info = "panicked at /r/zbus-5.16.0/src/abstractions/executor.rs:190:27:\n\
+                    there is no reactor running, must be called from the context of a Tokio 1.x runtime";
+        let line = contained_panic_text("<unnamed>", info);
+        assert!(
+            line.starts_with("ERROR: D-Bus client thread '<unnamed>' panicked at /r/zbus-5.16.0/")
+        );
+        assert!(line.contains("executor.rs:190:27: there is no reactor running"));
+        assert!(!line.contains('\n'));
     }
 
     #[test]

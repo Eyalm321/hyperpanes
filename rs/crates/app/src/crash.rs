@@ -21,6 +21,69 @@ pub fn default_log_path() -> PathBuf {
     std::env::temp_dir().join("hyperpanes-crash.log")
 }
 
+/// Where the panic hook sends a panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicRoute {
+    /// A crash: write a `PANIC:` record and raise the crash reporter.
+    Report,
+    /// A panic on a D-Bus client thread (see [`crate::dbus::is_contained_dbus_panic`]). Only that
+    /// thread dies and the app keeps running, so log it at ERROR (`CONTAINED …` record + stderr)
+    /// and don't raise the reporter.
+    ContainDbus,
+}
+
+/// Route a panic from its `PanicHookInfo::location()` file and thread. Anything that is not
+/// positively a D-Bus client thread is a crash: no location, the main thread, app code,
+/// tokio, everything else.
+pub fn route(location_file: Option<&str>, on_main_thread: bool) -> PanicRoute {
+    match location_file {
+        Some(file) if crate::dbus::is_contained_dbus_panic(file, on_main_thread) => {
+            PanicRoute::ContainDbus
+        }
+        _ => PanicRoute::Report,
+    }
+}
+
+/// The process panic hook. Appends every panic to `log_path` with a backtrace. For a
+/// [`PanicRoute::Report`] it then calls `report(log_path)`; `main` passes "write the pending
+/// marker + spawn `--crash-report`". A contained D-Bus panic never calls `report`.
+pub fn panic_hook(
+    main_thread: std::thread::ThreadId,
+    log_path: PathBuf,
+    report: impl Fn(&Path) + Send + Sync + 'static,
+) -> Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static> {
+    Box::new(move |info| {
+        use std::io::Write;
+        let current = std::thread::current();
+        let thread = current.name().unwrap_or("<unnamed>").to_string();
+        let on_main = current.id() == main_thread;
+        let routed = route(info.location().map(|l| l.file()), on_main);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            match routed {
+                PanicRoute::Report => {
+                    let _ = writeln!(f, "PANIC: {info}");
+                }
+                PanicRoute::ContainDbus => {
+                    let _ = writeln!(
+                        f,
+                        "CONTAINED D-Bus thread panic (non-fatal, thread '{thread}'): {info}"
+                    );
+                }
+            }
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(f, "{bt}");
+        }
+        match routed {
+            PanicRoute::Report => report(&log_path),
+            PanicRoute::ContainDbus => crate::dbus::contain_panic(&thread, &info.to_string()),
+        }
+    })
+}
+
 /// The "unhandled crash" marker. Its presence means a crash hasn't been surfaced to the user yet;
 /// its contents are the crash-log path to read.
 fn marker_path() -> PathBuf {
@@ -209,6 +272,87 @@ pub fn relaunch() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_dbus_crate_panics_off_the_main_thread_are_contained() {
+        let zbus = "/r/index.crates.io-1949cf8c6b5b557f/zbus-5.16.0/src/abstractions/executor.rs";
+        let ak = "/r/index.crates.io-1949cf8c6b5b557f/accesskit_unix-0.22.1/src/context.rs";
+        assert_eq!(route(Some(zbus), false), PanicRoute::ContainDbus);
+        assert_eq!(route(Some(ak), false), PanicRoute::ContainDbus);
+        // Same panic on the UI thread: a real crash.
+        assert_eq!(route(Some(zbus), true), PanicRoute::Report);
+        // App code, tokio, unknown location: always reported, whatever the thread.
+        for (file, main) in [
+            (Some("src/state.rs"), false),
+            (Some("src/state.rs"), true),
+            (
+                Some(
+                    "/r/index.crates.io-1949cf8c6b5b557f/tokio-1.52.3/src/runtime/scheduler/mod.rs",
+                ),
+                false,
+            ),
+            (None, false),
+        ] {
+            assert_eq!(
+                route(file, main),
+                PanicRoute::Report,
+                "{file:?} main={main}"
+            );
+        }
+    }
+
+    /// Child half of [`non_dbus_background_panic_reaches_the_crash_reporter`]. A no-op unless that
+    /// test re-runs this binary with `HP_PANIC_HOOK_CHILD` set (a panic hook is process-global,
+    /// so it must not be installed inside the shared test process).
+    #[test]
+    fn panic_hook_child() {
+        let Some(dir) = std::env::var_os("HP_PANIC_HOOK_CHILD").map(PathBuf::from) else {
+            return;
+        };
+        let reported = dir.join("reported");
+        // This test's thread plays the UI thread; the panic below is on a background thread.
+        std::panic::set_hook(panic_hook(
+            std::thread::current().id(),
+            dir.join("crash.log"),
+            move |log| std::fs::write(&reported, log.to_string_lossy().as_bytes()).unwrap(),
+        ));
+        let joined = std::thread::Builder::new()
+            .name("hp-app-worker".into())
+            .spawn(|| panic!("background failure in app code"))
+            .unwrap()
+            .join();
+        assert!(joined.is_err());
+    }
+
+    /// The D-Bus containment must not swallow anything else: a panic on an ordinary background
+    /// thread, through the REAL hook, still writes a `PANIC:` record and calls the reporter.
+    #[test]
+    fn non_dbus_background_panic_reaches_the_crash_reporter() {
+        let dir = std::env::temp_dir().join(format!("hp-panic-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "crash::tests::panic_hook_child",
+                "--test-threads=1",
+            ])
+            .env("HP_PANIC_HOOK_CHILD", &dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "child run failed: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let log = std::fs::read_to_string(dir.join("crash.log")).unwrap_or_default();
+        let reported = dir.join("reported").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(reported, "crash reporter was not called; log:\n{log}");
+        assert!(log.starts_with("PANIC: panicked at"), "{log}");
+        assert!(log.contains("background failure in app code"), "{log}");
+        assert!(!log.contains("CONTAINED"), "{log}");
+    }
 
     const LOG: &str = "PANIC: panicked at src/foo.rs:1:2:\nold crash\n   0: frame\nPANIC: panicked at src/bar.rs:3:4:\nboom\n   0: aaa\n   1: bbb\n";
 

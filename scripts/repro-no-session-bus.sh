@@ -16,8 +16,8 @@
 #   --bus none     (default) unset DBUS_SESSION_BUS_ADDRESS and point XDG_RUNTIME_DIR at an
 #                  empty dir: zbus then dials $XDG_RUNTIME_DIR/bus, which does not exist.
 #   --bus session  keep the real session bus (the "feature still works" control run).
-#   --then CMD     run CMD (via sh -c, with $GUI_PID set) while the GUI is still up, before
-#                  teardown; e.g. scripts/atspi-check.sh to list its D-Bus/AT-SPI presence.
+#   --then CMD     run CMD (via sh -c, with $GUI_PID set, and DISPLAY set to the Xvfb display in
+#                  xvfb mode) while the GUI is still up, before teardown; e.g. scripts/atspi-check.sh to list its D-Bus/AT-SPI presence.
 #
 # Exit: 0 = no panic and the GUI is still running after --secs; 1 = panicked (crash log has a
 # PANIC record) or the GUI died; 2 = usage/setup error.
@@ -129,7 +129,11 @@ echo "--- D-Bus lines on stderr ---"
 grep -i -E 'd-bus|dbus|session bus|accessib' "$D/stderr.log" | head -5
 if [ -n "$THEN" ] && [ -n "$GUI_PID" ]; then
   echo "--- --then: $THEN ---"
-  GUI_PID=$GUI_PID sh -c "$THEN"
+  if [ -n "${DPY:-}" ]; then
+    GUI_PID=$GUI_PID DISPLAY=$DPY sh -c "$THEN"
+  else
+    GUI_PID=$GUI_PID sh -c "$THEN"
+  fi
 fi
 
 systemctl --user stop "$UNIT.scope" 2>/dev/null

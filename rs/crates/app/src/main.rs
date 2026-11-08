@@ -333,50 +333,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Capture any panic to a crash log (the windowed subsystem has no console), then pop a crash
-    // reporter from a fresh process (this one is unwinding) — see `crate::crash`.
-    let main_thread = std::thread::current().id();
-    std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        let path = std::env::temp_dir().join("hyperpanes-crash.log");
-        // A panic on a D-Bus client thread (AT-SPI bridge, portal, tray) kills only that thread,
-        // and the app keeps running without the feature. Record it, warn once, and skip the crash
-        // reporter: a "hyperpanes crashed" dialog over a running app is the bug this prevents.
-        if let Some(loc) = info.location() {
-            let on_main = std::thread::current().id() == main_thread;
-            if crate::dbus::is_contained_dbus_panic(loc.file(), on_main) {
-                let msg = crate::dbus::panic_message(info.payload());
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                {
-                    let _ = writeln!(f, "CONTAINED D-Bus thread panic (non-fatal): {info}");
+    // reporter from a fresh process (this one is unwinding) — see `crate::crash`. A panic on a
+    // D-Bus client thread (AT-SPI bridge, portal, tray) kills only that thread, and the app keeps
+    // running without the feature, so the hook logs it at ERROR instead of raising the reporter
+    // over a live app (`crash::route`).
+    std::panic::set_hook(crash::panic_hook(
+        std::thread::current().id(),
+        crash::default_log_path(),
+        |path| {
+            crate::crash::write_marker(path);
+            // Guard against recursion if the reporter itself panics (it sets this env on its child).
+            if std::env::var_os("HYPERPANES_CRASH_CHILD").is_none() {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe)
+                        .arg("--crash-report")
+                        .arg(path)
+                        .env("HYPERPANES_CRASH_CHILD", "1")
+                        .spawn();
                 }
-                crate::dbus::contain_panic(&loc.to_string(), &msg);
-                return;
             }
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "PANIC: {info}");
-            let bt = std::backtrace::Backtrace::force_capture();
-            let _ = writeln!(f, "{bt}");
-        }
-        crate::crash::write_marker(&path);
-        // Guard against recursion if the reporter itself panics (it sets this env on its child).
-        if std::env::var_os("HYPERPANES_CRASH_CHILD").is_none() {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe)
-                    .arg("--crash-report")
-                    .arg(&path)
-                    .env("HYPERPANES_CRASH_CHILD", "1")
-                    .spawn();
-            }
-        }
-    }));
+        },
+    ));
 
     // Session-daemon mode (`--session-daemon <salt>`): run the headless PTY-owning daemon
     // and return — no GUI, no fonts, no window. The daemon owns the sessions so they
