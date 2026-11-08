@@ -167,6 +167,11 @@ jobs:
         with:
           workspaces: rs/crates/app
 
+      # zbus with its `tokio` feature panics on every thread outside a Tokio runtime, which is
+      # how the AT-SPI thread crashed every Linux launch. Feature resolution only, no compile.
+      - name: zbus must not use Tokio
+        run: scripts/check-zbus-no-tokio.sh
+
       - name: Build GUI crate
         run: cd rs/crates/app && cargo build --locked
 
