@@ -209,6 +209,8 @@ pub struct TaskLock {
     name: String,
     lock_path: PathBuf,
     wt_path: PathBuf,
+    /// Held for its lock (RAII); only read on unix, for `raw_fd`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     file: File,
 }
 
@@ -804,11 +806,16 @@ mod tests {
         let b = TaskLock::create(&kd, "n", "q", "t", "b").unwrap();
         assert_eq!(a.name(), "n");
         assert_eq!(b.name(), "n-1");
-        let info = std::fs::read_to_string(a.lock_path()).unwrap();
-        assert!(
-            info.contains("queue=q") && info.contains("branch=b"),
-            "{info}"
-        );
+        // Readable while held only on unix (flock is advisory); Windows' LockFileEx is a
+        // mandatory byte-range lock, so another handle can't read it until it's released.
+        #[cfg(unix)]
+        {
+            let info = std::fs::read_to_string(a.lock_path()).unwrap();
+            assert!(
+                info.contains("queue=q") && info.contains("branch=b"),
+                "{info}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&kd);
     }
 
