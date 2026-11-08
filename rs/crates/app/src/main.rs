@@ -26,6 +26,7 @@ mod contextmenu;
 mod control_cli;
 mod control_host;
 mod crash;
+mod dbus;
 mod devices;
 mod drag;
 mod glow;
@@ -312,8 +313,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Crash-reporter mode: a fresh process spawned by the panic hook (or by the next launch when a
     // crash went unacknowledged) to show the recovery dialog. Handle it before ANY app init or the
-    // single-instance gate — it only needs a Tokio runtime for rfd's portal backend, and it never
-    // installs the panic hook below (so a panic in the reporter can't recurse).
+    // single-instance gate. It needs no Tokio runtime: rfd's dialogs run on zenity and the
+    // async-io portal transport (see `crate::dbus`). It never installs the panic hook below (so a
+    // panic in the reporter can't recurse).
     {
         let args: Vec<String> = std::env::args().collect();
         if let Some(i) = args.iter().position(|a| a == "--crash-report") {
@@ -321,8 +323,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .get(i + 1)
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(crash::default_log_path);
-            let rt = tokio::runtime::Runtime::new()?;
-            let _guard = rt.enter();
             let outcome = crash::run_report(&log);
             crash::clear_marker();
             if matches!(outcome, crash::Outcome::Relaunch) {
@@ -333,31 +333,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Capture any panic to a crash log (the windowed subsystem has no console), then pop a crash
-    // reporter from a fresh process (this one is unwinding) — see `crate::crash`.
-    std::panic::set_hook(Box::new(|info| {
-        use std::io::Write;
-        let path = std::env::temp_dir().join("hyperpanes-crash.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "PANIC: {info}");
-            let bt = std::backtrace::Backtrace::force_capture();
-            let _ = writeln!(f, "{bt}");
-        }
-        crate::crash::write_marker(&path);
-        // Guard against recursion if the reporter itself panics (it sets this env on its child).
-        if std::env::var_os("HYPERPANES_CRASH_CHILD").is_none() {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe)
-                    .arg("--crash-report")
-                    .arg(&path)
-                    .env("HYPERPANES_CRASH_CHILD", "1")
-                    .spawn();
+    // reporter from a fresh process (this one is unwinding) — see `crate::crash`. A panic on a
+    // D-Bus client thread (AT-SPI bridge, portal, tray) kills only that thread, and the app keeps
+    // running without the feature, so the hook logs it at ERROR instead of raising the reporter
+    // over a live app (`crash::route`).
+    std::panic::set_hook(crash::panic_hook(
+        std::thread::current().id(),
+        crash::default_log_path(),
+        |path| {
+            crate::crash::write_marker(path);
+            // Guard against recursion if the reporter itself panics (it sets this env on its child).
+            if std::env::var_os("HYPERPANES_CRASH_CHILD").is_none() {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe)
+                        .arg("--crash-report")
+                        .arg(path)
+                        .env("HYPERPANES_CRASH_CHILD", "1")
+                        .spawn();
+                }
             }
-        }
-    }));
+        },
+    ));
 
     // Session-daemon mode (`--session-daemon <salt>`): run the headless PTY-owning daemon
     // and return — no GUI, no fonts, no window. The daemon owns the sessions so they
@@ -433,14 +429,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("hyperpanes: {msg}");
         dbg_log(&format!("isolation: {msg}"));
         // A desktop launch has no visible stderr, so say it in a dialog too (best-effort).
-        if let Ok(rt) = tokio::runtime::Runtime::new() {
-            let _guard = rt.enter();
-            let _ = rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Error)
-                .set_title("Hyperpanes: partly isolated instance")
-                .set_description(msg)
-                .show();
-        }
+        let _ = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Hyperpanes: partly isolated instance")
+            .set_description(msg)
+            .show();
         std::process::exit(2);
     }
 
@@ -485,6 +478,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dbg_log(&format!("single-instance: gate unavailable ({e})"));
         }
     }
+
+    // Probe the D-Bus session bus once, off the UI thread: a missing or broken bus prints one
+    // warning and switches the D-Bus-backed features off instead of failing later.
+    dbus::start_probe();
 
     let (etx, erx) = unbounded_channel::<SessionEvent>();
     // Backend selection (session-daemon-plan M4 — daemon DEFAULT-ON on unix): sessions run in

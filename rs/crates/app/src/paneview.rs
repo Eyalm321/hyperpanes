@@ -200,10 +200,15 @@ fn replay_cursor_pos(_app: &AppWindow, _link_active: bool) {}
 /// sees an empty rectangle unless we hand it the screen as text — but extracting that text on
 /// every model rebuild is wasted work when nobody is reading it. GNOME sets
 /// `toolkit-accessibility`/`GTK_A11Y` and AccessKit only builds a tree once a client connects;
-/// checking the well-known bus name once per process is enough to decide.
+/// checking the well-known bus name once per process is enough to decide. AT-SPI rides the D-Bus
+/// session bus, so the answer is always no once `crate::dbus` has found that bus unusable: no
+/// screen reader can connect, so the text would never be read.
 fn a11y_wanted() -> bool {
     use std::sync::OnceLock;
     static WANTED: OnceLock<bool> = OnceLock::new();
+    if crate::dbus::session_bus_unavailable() {
+        return false;
+    }
     *WANTED.get_or_init(|| {
         if std::env::var("HYPERPANES_A11Y").is_ok_and(|v| v == "1") {
             return true;
