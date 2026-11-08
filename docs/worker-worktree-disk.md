@@ -1,0 +1,158 @@
+# Worker worktrees on disk: root, orphan sweep, shared build cache, disk guard
+
+`hyperpanes worker --worktree` runs every task in a throwaway git worktree. This page covers
+**where** those worktrees live, how a crashed runner's leftovers get cleaned up, how task
+worktrees of one repo share a warm build cache, and the free-space check made before each
+worktree is created. The fork point (`--base`) is covered in
+[`worker-worktree-base.md`](worker-worktree-base.md).
+
+## The defect
+
+Task worktrees used to go to `std::env::temp_dir()/hp-wt-<queue>-<id8>-<pid>`, which is `/tmp`
+on Linux. On a machine where `/tmp` is a RAM-backed tmpfs with a per-user quota (Fedora's
+default), every Rust impl agent cold-built its own `target/` (about 7.5 GB for the app crate)
+inside its worktree:
+
+- Two or three concurrent goals filled the 32 GB quota. Every process of that user writing to
+  `/tmp` then failed with `EDQUOT`, including every Claude Code session's Bash tool, which keeps
+  its output under `/tmp`. Agents had to delete their own build caches to recover, twice in one
+  day.
+- Those builds were billed to RAM.
+- Every worktree started from a cold `target/`, so each task paid for a full dependency build.
+
+## Where worktrees live now
+
+The **worktree root** resolves in this order:
+
+1. `--worktree-root <dir>`
+2. `HYPERPANES_WORKTREE_ROOT` (empty means unset)
+3. the default, `<cache dir>/hyperpanes/worktrees`, where the cache dir is
+   - Linux: `$XDG_CACHE_HOME` (absolute values only), default `~/.cache`
+   - macOS: `~/Library/Caches`
+   - Windows: `%LOCALAPPDATA%`
+
+A relative value is resolved against the runner's cwd. The default is never under the system
+temp dir.
+
+Each repo gets its own directory under the root, keyed by the repo's git **common dir**, so every
+linked worktree of one repo (for example a goal's private integration worktree) shares it:
+
+```text
+<root>/<repo>-<hash8>/
+  repo                         # the repo's git common dir, for humans
+  wt/<queue>-<id8>-<pid>/      # a task worktree (branch worker/<queue>/<id8>)
+  wt/<queue>-<id8>-<pid>.lock  # its owner lock
+  cache/slot-<k>/              # build-cache slot k  → HP_WORKTREE_CACHE_DIR
+  cache/slot-<k>.lock          # its lock; mtime = last release
+```
+
+From an MCP client, `spawn_workers` carries the override through its existing `env` passthrough,
+so the bridge needs no change: `spawn_workers {…, isolation:"worktree", base:"main",
+env:{HYPERPANES_WORKTREE_ROOT:"/data/hp-worktrees"}}`.
+
+## Auto-removal and the orphan sweep
+
+A finished task's worktree is removed as before (`git worktree remove --force`, then whatever is
+left), and its branch stays.
+
+Each task worktree also has an **owner lock**, an OS file lock (`flock` on unix, `LockFileEx` on
+Windows) on `wt/<name>.lock`. The runner takes it *before* creating the worktree and holds it
+until the worktree is gone. On unix the lock's file descriptor is also inherited by that task's
+child process, and only that one. So the lock stays held while *any* process of the task tree is
+alive: a runner that dies while its `claude` child keeps working does not get the child's tree
+swept out from under it.
+
+When a `--worktree` runner starts, it sweeps its repo's directory:
+
+- A `wt/<name>` whose lock file is missing, or whose lock it can take, is an **orphan** (its
+  owner is dead). The runner logs the orphan's branch and how many uncommitted changes it
+  discards, removes it (`git worktree remove --force`, falling back to deleting the directory),
+  then deletes the lock file.
+- A `wt/<name>` whose lock is held is live and left alone.
+- A lone lock file older than 24 hours with a free lock is deleted.
+- Then `git worktree prune` drops stale admin entries.
+
+The OS releases a dead process's locks, so a SIGKILLed or OOM-killed runner's worktree is
+reclaimed by the next runner that starts for the same repo. Pid reuse can't fool the check the
+way a pid-liveness test could. Branches are never deleted, so commits made under the
+commit-first protocol survive.
+
+Worktrees left in `/tmp/hp-wt-*` by older builds aren't swept. They're on tmpfs and disappear at
+reboot, and `git worktree prune` clears their admin entries.
+
+## Shared warm build cache: per-repo slots
+
+Every task gets `HP_WORKTREE_CACHE_DIR`, a persistent **cache slot** for its repo, next to the
+existing `HP_WORKTREE`. The runner takes the lowest-numbered slot whose lock is free and holds
+that lock exclusively for the whole task:
+
+- **Concurrent workers never share a slot**, so N workers can never corrupt each other's build
+  state or queue behind each other's build locks.
+- **A slot is reused serially**, so a worker's next task, or the next runner on the same repo
+  (another goal, a later wave), starts warm.
+- It is plain directories plus locks, so it works on any filesystem.
+
+The runner stays language-agnostic: it only exports the directory. Projects decide what to put
+there. The goal personas point cargo at it in the impl-agent spawn command:
+
+```sh
+env ${HP_WORKTREE_CACHE_DIR:+"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target"} claude …
+```
+
+`CARGO_TARGET_DIR` is set only when the runner exported a slot, so older runners and non-worktree
+runs are unaffected. Build outputs then land in `$CARGO_TARGET_DIR/debug/…`, not
+`<worktree>/target/`.
+
+The slot's target dir was last used by a worktree at a different path. Cargo hashes workspace
+path packages relative to the workspace root, so the expensive part (registry and git
+dependencies) stays fresh. Only the workspace's own crates rebuild, because the fresh checkout's
+files are newer than their artifacts. Measured numbers are in the PR that introduced this.
+
+**Bounding disk.** A slot persists after its task, so a concurrency peak would otherwise pin its
+disk:
+
+- **Eviction under disk pressure.** When the disk guard (below) finds the root short of space,
+  it first deletes idle slots, those whose lock it can take, least recently used first, across
+  every repo under the root, until the minimum is met. Only then does it give up on the claim.
+- **Age GC.** The startup sweep deletes idle slots unused for 14 days.
+- **Optional cap.** `--max-cache-slots <n>` / `HYPERPANES_WORKTREE_MAX_SLOTS` (default `0`, no
+  cap). A task that finds every slot under the cap busy gets an uncached `wt/<name>.cache` dir:
+  a cold build, owned by its task lock and deleted with the worktree. It doesn't block, and it
+  never shares a slot. There's no cap by default because eviction already reclaims idle slots
+  on demand, and at peak a busy slot holds exactly what a per-worktree `target/` would have held
+  anyway.
+
+Slot lock files are never deleted, because deleting one races a concurrent acquirer. To reclaim
+everything for a repo by hand, stop its runners and `rm -rf <root>/<repo>-<hash8>/cache`.
+
+### Alternatives considered
+
+- **One shared `CARGO_TARGET_DIR` per repo or base.** Cargo takes an exclusive lock on the
+  target dir, so N concurrent workers run their builds one at a time. Worktrees at different
+  paths also keep invalidating each other's workspace crates.
+- **sccache.** It isn't installed by default and can't cache bin, dylib or proc-macro crates
+  (the final link and slint's macros). Keying across different absolute paths needs extra setup.
+  It stays compatible: an agent can still set `RUSTC_WRAPPER` itself.
+- **A reflink copy of a warm seed per task.** It needs a copy-on-write filesystem (it degrades to
+  a full copy on ext4), plus seed-promotion races and locking. Under the lowest-free-slot policy,
+  a new slot is only created when every existing slot is busy, so a seed only beats slots when
+  concurrency exceeds the previous peak.
+
+## Disk guard
+
+After claiming a task and **before** creating its worktree, the runner checks free space on the
+worktree root's filesystem against a minimum:
+
+- `--min-free <size>` > `HYPERPANES_WORKTREE_MIN_FREE` > default **10G**. Sizes are bytes or
+  `K/M/G/T` (binary units, optional `B`/`iB`). `0` disables the check. An invalid env value is a
+  startup error.
+- If space is short, idle cache slots are evicted first (LRU, see above). If that doesn't free
+  enough, nothing is created and the child is not run. The task is nacked with
+  `insufficient disk space for a worktree on <root>: <avail> free < <min> required (set
+  HYPERPANES_WORKTREE_MIN_FREE / --min-free; 0 disables)` and a 60 s backoff (`--nack-delay`
+  overrides it). Then **that worker stops**: low disk is machine-wide, so claiming more tasks
+  would only burn their attempts. The reason shows in the task's last error, so whoever watches
+  the queue sees why and can free space and respawn.
+
+The check reads filesystem free space (`statvfs` / `GetDiskFreeSpaceExW`). It doesn't see
+per-user quotas, which is one more reason not to point the root at a quota'd tmpfs.

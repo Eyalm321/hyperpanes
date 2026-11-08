@@ -3,6 +3,7 @@
 //! Usage:
 //! ```text
 //! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>] \
+//!   [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>] \
 //!   [--retry-window <secs>] [--nack-delay <ms>] \
 //!   [--stream] [--log-dir <dir>] [--linger <secs>] -- <cmd> [args...]
 //! ```
@@ -18,6 +19,15 @@
 //! (any branch, tag, or sha) — `--base` is REQUIRED with `--worktree`: the old implicit fork
 //! point was the runner cwd's HEAD, i.e. whatever a shared checkout happened to have checked
 //! out, and `--base HEAD` stays expressible for anyone who really means that;
+//! Worktree storage is disk-backed, never `/tmp` (RAM-backed tmpfs with a per-user quota on many
+//! hosts; cold Rust builds there exhaust it): task worktrees live under
+//! `<root>/<repo-key>/wt/` where `<root>` is `--worktree-root`, else `HYPERPANES_WORKTREE_ROOT`,
+//! else `<cache_dir>/worktrees`. Each worktree holds an flock owner lock; at startup the runner
+//! sweeps orphans (worktrees whose lock is free = owner dead) of that repo. Each task also gets
+//! an exclusive warm build-cache slot, exported as `HP_WORKTREE_CACHE_DIR` (languages stay the
+//! persona's business: e.g. `CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target`). Before each
+//! worktree the runner requires `--min-free <size>` (env `HYPERPANES_WORKTREE_MIN_FREE`, default
+//! 10GiB, 0 disables) free on the root's filesystem, else it nacks the task and stops.
 //! `--retry-window <secs>` keeps
 //! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
 //! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
@@ -52,6 +62,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use hyperpanes_core::worktree_store::{self, acquire_slot_capped, fmt_bytes, parse_size, TaskLock};
 use serde::Deserialize;
 
 /// Parsed `hyperpanes worker` invocation.
@@ -73,6 +84,12 @@ pub struct WorkerArgs {
     /// the runner cwd's HEAD, whatever a shared checkout happened to have checked out — is the
     /// footgun `--base` exists to remove. `None` only when `--worktree` is off.
     pub base: Option<String>,
+    /// `--worktree-root <dir>`: where task worktrees live (overrides `HYPERPANES_WORKTREE_ROOT`).
+    pub worktree_root: Option<PathBuf>,
+    /// `--min-free <size>` in bytes (overrides `HYPERPANES_WORKTREE_MIN_FREE`); `None` = unset.
+    pub min_free: Option<u64>,
+    /// `--max-cache-slots <n>` (overrides `HYPERPANES_WORKTREE_MAX_SLOTS`); `Some(0)` = no cap.
+    pub max_cache_slots: Option<usize>,
     /// Render the child's Claude `--output-format stream-json` lines as readable progress
     /// instead of raw JSON, so a worker pane shows what the agent is doing while it runs.
     pub stream: bool,
@@ -142,6 +159,9 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
     let mut stream = false;
     let mut worktree = false;
     let mut base: Option<String> = None;
+    let mut worktree_root: Option<PathBuf> = None;
+    let mut min_free_arg: Option<String> = None;
+    let mut max_slots_arg: Option<String> = None;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -179,6 +199,24 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                 base = Some(argv.get(i + 1).ok_or("--base needs a value")?.clone());
                 i += 2;
             }
+            "--worktree-root" => {
+                worktree_root = Some(PathBuf::from(
+                    argv.get(i + 1).ok_or("--worktree-root needs a value")?,
+                ));
+                i += 2;
+            }
+            "--min-free" => {
+                min_free_arg = Some(argv.get(i + 1).ok_or("--min-free needs a value")?.clone());
+                i += 2;
+            }
+            "--max-cache-slots" => {
+                max_slots_arg = Some(
+                    argv.get(i + 1)
+                        .ok_or("--max-cache-slots needs a value")?
+                        .clone(),
+                );
+                i += 2;
+            }
             "--stream" => {
                 stream = true;
                 i += 1;
@@ -210,6 +248,12 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
                     nack_delay_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--base=") {
                     base = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--worktree-root=") {
+                    worktree_root = Some(PathBuf::from(v));
+                } else if let Some(v) = other.strip_prefix("--min-free=") {
+                    min_free_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--max-cache-slots=") {
+                    max_slots_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--log-dir=") {
                     log_dir = Some(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--linger=") {
@@ -266,6 +310,14 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
             .map_err(|_| format!("--linger must be a non-negative integer (secs), got '{s}'"))?,
         None => 0,
     };
+    let min_free = match min_free_arg {
+        Some(s) => Some(parse_size(&s).map_err(|e| format!("--min-free: {e}"))?),
+        None => None,
+    };
+    let max_cache_slots = match max_slots_arg {
+        Some(s) => Some(parse_max_slots(&s).map_err(|e| format!("--max-cache-slots: {e}"))?),
+        None => None,
+    };
     Ok(WorkerArgs {
         queue,
         worker,
@@ -274,11 +326,21 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
         nack_delay_ms,
         worktree,
         base,
+        worktree_root,
+        min_free,
+        max_cache_slots,
         stream,
         log_dir,
         linger_secs,
         child,
     })
+}
+
+/// `--max-cache-slots` / `HYPERPANES_WORKTREE_MAX_SLOTS`: a non-negative integer, `0` = no cap.
+fn parse_max_slots(s: &str) -> Result<usize, String> {
+    s.trim()
+        .parse()
+        .map_err(|_| format!("must be a non-negative integer (0 = no cap), got '{s}'"))
 }
 
 /// pid-suffixed default so two bare `hyperpanes worker` invocations don't share an id.
@@ -328,7 +390,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         Ok(a) => a,
         Err(e) => {
             eprintln!("hyperpanes worker: {e}");
-            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] -- <cmd> [args...]");
+            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>]] -- <cmd> [args...]");
             return Err(e.into());
         }
     };
@@ -348,14 +410,18 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
 
     let retry_window = Duration::from_secs(args.retry_window_secs);
     let nack_delay = args.nack_delay_ms;
-    let worktree = args.worktree;
     // Fork point for per-task worktrees — parse guarantees `--base` whenever `--worktree` is on
     // (the "HEAD" fallback only feeds the non-worktree path, where it is never used). Resolve it
     // up front so a typo'd committish fails loudly here, before any task is claimed.
     let fork_base = args.base.clone().unwrap_or_else(|| "HEAD".to_string());
-    if worktree {
+    if args.worktree {
         validate_base(&fork_base)?;
     }
+    let store: Option<WtStore> = if args.worktree {
+        Some(WtStore::init(&args)?)
+    } else {
+        None
+    };
     // Output policy shared by every worker thread: render Claude's stream-json readably and/or
     // tee raw child output to a per-task log that outlives the pane.
     let out = Arc::new(ChildOutput {
@@ -380,7 +446,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
             &args.child,
             retry_window,
             nack_delay,
-            worktree,
+            store.as_ref(),
             &fork_base,
             &out,
         )?;
@@ -404,6 +470,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         let worker = format!("{}-{i}", args.worker);
         let out = Arc::clone(&out);
         let fork_base = fork_base.clone();
+        let store = store.clone();
         handles.push(std::thread::spawn(move || {
             match drain(
                 &ctl,
@@ -412,7 +479,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
                 &child,
                 retry_window,
                 nack_delay,
-                worktree,
+                store.as_ref(),
                 &fork_base,
                 &out,
             ) {
@@ -453,7 +520,7 @@ fn drain(
     child: &[String],
     retry_window: Duration,
     nack_delay_ms: Option<i64>,
-    worktree: bool,
+    store: Option<&WtStore>,
     fork_base: &str,
     out: &ChildOutput,
 ) -> Result<u64, Box<dyn Error>> {
@@ -487,6 +554,52 @@ fn drain(
             task.title
         );
 
+        // Disk guard: a worktree (and its build cache) needs real free space. Short on it, first
+        // evict idle cache slots (least recently used first, any repo under the root) so slots
+        // left over from a concurrency peak don't pin the disk; only if that still isn't enough,
+        // treat it as the machine-wide condition it is: create nothing, nack once with a long
+        // backoff and STOP this worker rather than churning through the queue burning attempts.
+        if let Some(st) = store {
+            if st.min_free > 0 {
+                let low_disk =
+                    |r: &Path| worktree_store::available_bytes(r).is_ok_and(|a| a < st.min_free);
+                if low_disk(&st.root) {
+                    for p in worktree_store::evict_idle_slots(&st.root, || !low_disk(&st.root)) {
+                        eprintln!(
+                            "[{worker}] disk guard: evicted idle cache slot {}",
+                            p.display()
+                        );
+                    }
+                }
+                if let Ok(avail) = worktree_store::available_bytes(&st.root) {
+                    if avail < st.min_free {
+                        let reason = format!(
+                            "insufficient disk space for a worktree on {}: {} free < {} required (set HYPERPANES_WORKTREE_MIN_FREE / --min-free; 0 disables)",
+                            st.root.display(),
+                            fmt_bytes(avail),
+                            fmt_bytes(st.min_free)
+                        );
+                        eprintln!("[{worker}] !! {reason}");
+                        eprintln!("[{worker}] !! child NOT run — stopping this worker");
+                        let state = nack(
+                            ctl,
+                            &task.id,
+                            task.fencing_token,
+                            &reason,
+                            Some(nack_delay_ms.unwrap_or(60_000)),
+                        )?;
+                        eprintln!(
+                            "[{worker}] !! nacked {} (attempt {}/{}) → {state}",
+                            short(&task.id),
+                            task.attempts,
+                            task.max_attempts
+                        );
+                        return Ok(done);
+                    }
+                }
+            }
+        }
+
         // Optional per-task throwaway worktree (#14): create it, run the child there, remove it
         // after (the commit, if any, stays on its branch). If the worktree can't be created,
         // the task must NOT fall through to the runner's own cwd — that silently strips the
@@ -494,8 +607,8 @@ fn drain(
         // 2026-07-30 incident class). Nack instead: worktree failures are usually environmental
         // (stale branch, git lock, disk), so the standard retry path applies, bounded by the
         // queue's max_attempts.
-        let wt = if worktree {
-            match Worktree::create(queue, &task.id, fork_base) {
+        let wt = if let Some(st) = store {
+            match Worktree::create(&st.key_dir, queue, &task.id, fork_base) {
                 Ok(w) => Some(w),
                 Err(e) => {
                     let reason = format!("worktree create failed (base {fork_base}): {e}");
@@ -514,9 +627,54 @@ fn drain(
         } else {
             None
         };
-        let cwd = wt.as_ref().map(|w| w.path.as_path());
-        let outcome = run_child(child, &task, queue, ctl, cwd, worker, out);
-        if let Some(w) = &wt {
+        // Warm build-cache slot: exclusive while this task runs, reused by later tasks. With
+        // every slot under `--max-cache-slots` busy, the task gets an uncached per-task dir
+        // (`wt/<name>.cache`, a cold build, deleted with the worktree) rather than blocking or
+        // sharing a slot. Failure to get either never fails the task — it just runs without
+        // HP_WORKTREE_CACHE_DIR.
+        let mut slot = None;
+        let mut uncached: Option<PathBuf> = None;
+        if let (Some(st), Some(w)) = (store, wt.as_ref()) {
+            match acquire_slot_capped(&st.key_dir, st.max_slots) {
+                Ok(Some(s)) => slot = Some(s),
+                Ok(None) => {
+                    let dir = worktree_store::uncached_dir(&w.lock);
+                    match std::fs::create_dir_all(&dir) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[{worker}] all {} cache slot(s) busy — uncached build dir {}",
+                                st.max_slots,
+                                dir.display()
+                            );
+                            uncached = Some(dir);
+                        }
+                        Err(e) => eprintln!("[{worker}] warn: cannot create {}: {e}; running without HP_WORKTREE_CACHE_DIR", dir.display()),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[{worker}] warn: no cache slot ({e}); running without HP_WORKTREE_CACHE_DIR");
+                }
+            }
+        }
+        let cache_dir = slot
+            .as_ref()
+            .map(|s| s.path.clone())
+            .or_else(|| uncached.clone());
+        let outcome = run_child(
+            child,
+            &task,
+            queue,
+            ctl,
+            wt.as_ref(),
+            cache_dir.as_deref(),
+            worker,
+            out,
+        );
+        drop(slot);
+        if let Some(dir) = uncached {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some(w) = wt {
             w.remove();
         }
 
@@ -585,7 +743,8 @@ fn run_child(
     task: &Task,
     queue: &str,
     ctl: &Arc<Control>,
-    cwd: Option<&Path>,
+    wt: Option<&Worktree>,
+    cache: Option<&Path>,
     worker: &str,
     out: &ChildOutput,
 ) -> Result<bool, Box<dyn Error>> {
@@ -627,8 +786,30 @@ fn run_child(
         .env("HP_TASK_TITLE", &task.title)
         .env("HP_FENCING_TOKEN", task.fencing_token.to_string())
         .env("HP_QUEUE", queue);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir).env("HP_WORKTREE", dir);
+    if let Some(w) = wt {
+        cmd.current_dir(&w.path).env("HP_WORKTREE", &w.path);
+        #[cfg(unix)]
+        {
+            // Make ONLY this task's owner-lock fd survive exec (every fd Rust opens is
+            // CLOEXEC), so the flock stays held while ANY process of the task tree lives: a
+            // runner that dies with a live child must not get its still-running tree swept
+            // as an orphan. Slot locks stay CLOEXEC. `fcntl` is async-signal-safe, as
+            // required between fork and exec.
+            use std::os::unix::process::CommandExt;
+            let fd = w.lock.raw_fd();
+            // SAFETY: only calls the async-signal-safe fcntl(2) on an fd valid in the child.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    if let Some(dir) = cache {
+        cmd.env("HP_WORKTREE_CACHE_DIR", dir);
     }
     let result = if out.piped() {
         run_child_piped(cmd, task, queue, worker, out)
@@ -1043,22 +1224,115 @@ fn validate_base(base: &str) -> Result<(), Box<dyn Error>> {
     Err(format!("--base {base}: does not resolve to a commit in {cwd} — pass a branch, tag, or sha that exists there").into())
 }
 
+/// Everything the runner needs about where worktrees live, resolved once at startup.
+#[derive(Clone, Debug)]
+struct WtStore {
+    /// The resolved worktree root (the disk guard measures free space here).
+    root: PathBuf,
+    /// `<root>/<repo-key>`: wt/ and cache/ live under it.
+    key_dir: PathBuf,
+    min_free: u64,
+    /// Cache-slot cap; 0 = unlimited.
+    max_slots: usize,
+}
+
+impl WtStore {
+    /// Resolve root + repo key + min-free, record the repo, sweep this repo's orphans, and
+    /// announce the layout. Any failure is a startup error (before a task is claimed).
+    fn init(args: &WorkerArgs) -> Result<Self, Box<dyn Error>> {
+        let cwd =
+            std::env::current_dir().map_err(|e| format!("worktree: cannot resolve cwd: {e}"))?;
+        let min_free = match (args.min_free, std::env::var(worktree_store::MIN_FREE_ENV)) {
+            (Some(v), _) => v,
+            (None, Ok(v)) if !v.trim().is_empty() => {
+                parse_size(&v).map_err(|e| format!("{}: {e}", worktree_store::MIN_FREE_ENV))?
+            }
+            _ => worktree_store::DEFAULT_MIN_FREE,
+        };
+        // Default: no cap. Idle slots are evicted under disk pressure (see the disk guard), and
+        // at peak the busy slots hold what per-worktree target/ dirs would have held anyway.
+        let max_slots = match (
+            args.max_cache_slots,
+            std::env::var(worktree_store::MAX_SLOTS_ENV),
+        ) {
+            (Some(v), _) => v,
+            (None, Ok(v)) if !v.trim().is_empty() => parse_max_slots(&v)
+                .map_err(|e| format!("{}: {e}", worktree_store::MAX_SLOTS_ENV))?,
+            _ => 0,
+        };
+        let out = Command::new("git")
+            .current_dir(&cwd)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .map_err(|e| format!("worktree: git rev-parse failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "worktree: not inside a git repo ({}): {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+            .into());
+        }
+        let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let root = worktree_store::root_from_env(args.worktree_root.as_deref(), &cwd);
+        let key_dir = root.join(worktree_store::repo_key(&common));
+        worktree_store::write_repo_file(&key_dir, &common)
+            .map_err(|e| format!("worktree: cannot create {}: {e}", key_dir.display()))?;
+        let rep = worktree_store::sweep(&cwd, &key_dir);
+        eprintln!(
+            "worker: worktrees under {} (cache slots in {}{}), min free {}",
+            key_dir.display(),
+            key_dir.join("cache").display(),
+            if max_slots == 0 {
+                String::new()
+            } else {
+                format!(", max {max_slots}")
+            },
+            fmt_bytes(min_free)
+        );
+        for o in &rep.swept {
+            eprintln!(
+                "worker: swept orphan worktree {} (branch {}, {} uncommitted path(s) discarded)",
+                o.path.display(),
+                if o.branch.is_empty() { "?" } else { &o.branch },
+                o.dirty_lines
+            );
+        }
+        for p in &rep.gc_slots {
+            eprintln!("worker: reclaimed unused cache slot {}", p.display());
+        }
+        Ok(Self {
+            root,
+            key_dir,
+            min_free,
+            max_slots,
+        })
+    }
+}
+
 /// A throwaway git worktree for one task (#14). Created off an explicit base committish on a
-/// fresh branch; the working dir is removed when the task finishes (a commit, if any, stays on
-/// the branch). Created from the worker's cwd, so `--worktree` requires running inside a git
-/// repo.
+/// fresh branch under `<key_dir>/wt/`; the working dir is removed when the task finishes (a
+/// commit, if any, stays on the branch). Created from the worker's cwd, so `--worktree`
+/// requires running inside a git repo. Owns the task's flock owner lock for its lifetime.
 struct Worktree {
     path: PathBuf,
     /// The repo the worktree was created from — `remove()` must run git there, not in whatever
     /// the process cwd is by then.
     repo: PathBuf,
+    /// Owner lock; dropped (lock file removed) by `remove()`.
+    lock: TaskLock,
 }
 
 impl Worktree {
-    fn create(queue: &str, task_id: &str, base: &str) -> Result<Self, Box<dyn Error>> {
+    fn create(
+        key_dir: &Path,
+        queue: &str,
+        task_id: &str,
+        base: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let repo =
             std::env::current_dir().map_err(|e| format!("worktree: cannot resolve cwd: {e}"))?;
-        Self::create_in(&repo, queue, task_id, base)
+        Self::create_in(&repo, key_dir, queue, task_id, base)
     }
 
     /// Explicit-repo body so tests can prove the fork point without touching the process cwd.
@@ -1066,6 +1340,7 @@ impl Worktree {
     /// that advances between tasks forks from its current tip.
     fn create_in(
         repo: &Path,
+        key_dir: &Path,
         queue: &str,
         task_id: &str,
         base: &str,
@@ -1073,7 +1348,17 @@ impl Worktree {
         let id8 = &task_id[..8.min(task_id.len())];
         let safe = queue.replace(['/', ' '], "-");
         let branch = format!("worker/{safe}/{id8}");
-        let path = std::env::temp_dir().join(format!("hp-wt-{safe}-{id8}-{}", std::process::id()));
+        // Owner lock first (it also picks a unique name), THEN the worktree dir: a crash at any
+        // point leaves either nothing or a dir whose lock is free, which the next sweep reclaims.
+        let lock = TaskLock::create(
+            key_dir,
+            &format!("{safe}-{id8}-{}", std::process::id()),
+            queue,
+            task_id,
+            &branch,
+        )
+        .map_err(|e| format!("worktree lock under {}: {e}", key_dir.display()))?;
+        let path = lock.worktree_path().to_path_buf();
         // The branch name is deterministic (per task id), so a stale `worker/<q>/<id8>` left by a
         // prior run makes `git worktree add -b` fail. Prune dead worktree admin entries first, then
         // decide by whether the stale branch carries uncollected commits: if it's an ancestor of
@@ -1145,15 +1430,21 @@ impl Worktree {
         Ok(Self {
             path,
             repo: repo.to_path_buf(),
+            lock,
         })
     }
 
-    fn remove(&self) {
+    /// `git worktree remove --force`, then anything git left behind, then release the owner lock.
+    fn remove(self) {
         let _ = Command::new("git")
             .current_dir(&self.repo)
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
             .output();
+        if self.path.exists() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+        drop(self.lock);
     }
 }
 
@@ -1625,6 +1916,93 @@ mod tests {
         repo
     }
 
+    /// Scratch key dir (the disk-backed worktree store) beside the scratch repo.
+    fn kd(repo: &Path) -> PathBuf {
+        PathBuf::from(format!("{}-kd", repo.display()))
+    }
+
+    #[test]
+    fn parses_worktree_root_and_min_free() {
+        let a = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--worktree",
+            "--base",
+            "main",
+            "--worktree-root",
+            "/data/wt",
+            "--min-free",
+            "5G",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(a.worktree_root.as_deref(), Some(Path::new("/data/wt")));
+        assert_eq!(a.min_free, Some(5 << 30));
+        let e = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue=q",
+            "--worktree-root=rel",
+            "--min-free=0",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(e.worktree_root.as_deref(), Some(Path::new("rel")));
+        assert_eq!(e.min_free, Some(0));
+        let d = parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).unwrap();
+        assert_eq!((d.worktree_root, d.min_free), (None, None));
+        assert_eq!(d.max_cache_slots, None);
+        let c = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--max-cache-slots",
+            "3",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(c.max_cache_slots, Some(3));
+        let c = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue=q",
+            "--max-cache-slots=0",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(c.max_cache_slots, Some(0));
+        assert!(parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--max-cache-slots",
+            "-1",
+            "--",
+            "true"
+        ]))
+        .is_err());
+        assert!(parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--min-free",
+            "lots",
+            "--",
+            "true"
+        ]))
+        .is_err());
+        assert!(parse_args(&argv(&["hp", "worker", "--queue", "q", "--worktree-root"])).is_err());
+    }
+
     #[test]
     fn worktree_forks_from_explicit_base_not_cwd_head() {
         let repo = scratch_repo("fork");
@@ -1636,17 +2014,18 @@ mod tests {
         );
 
         // Explicit --base main forks from main even though the checkout's HEAD is elsewhere.
-        let wt = Worktree::create_in(&repo, "q", "aaaa0000", "main").unwrap();
+        let wt = Worktree::create_in(&repo, &kd(&repo), "q", "aaaa0000", "main").unwrap();
         assert_eq!(git(&wt.path, &["rev-parse", "HEAD"]), main);
         wt.remove();
 
         // A dependent wave forks its integration branch the same way.
         let int = git(&repo, &["rev-parse", "int"]);
-        let wt = Worktree::create_in(&repo, "q", "bbbb0000", "int").unwrap();
+        let wt = Worktree::create_in(&repo, &kd(&repo), "q", "bbbb0000", "int").unwrap();
         assert_eq!(git(&wt.path, &["rev-parse", "HEAD"]), int);
         wt.remove();
 
         let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(kd(&repo));
     }
 
     #[test]
@@ -1655,7 +2034,7 @@ mod tests {
 
         // Stale branch AT the base (no uncollected work) → reset with -B and fork the base.
         git(&repo, &["branch", "worker/q/cccc0000", "main"]);
-        let wt = Worktree::create_in(&repo, "q", "cccc0000", "main").unwrap();
+        let wt = Worktree::create_in(&repo, &kd(&repo), "q", "cccc0000", "main").unwrap();
         assert_eq!(
             git(&wt.path, &["rev-parse", "HEAD"]),
             git(&repo, &["rev-parse", "main"])
@@ -1665,12 +2044,13 @@ mod tests {
         // Stale branch AHEAD of the base (uncollected commits; here it sits on `wrong`) → refuse
         // even though HEAD == `wrong` would have made the old HEAD-relative check wave it through.
         git(&repo, &["branch", "worker/q/dddd0000", "wrong"]);
-        let err = match Worktree::create_in(&repo, "q", "dddd0000", "main") {
+        let err = match Worktree::create_in(&repo, &kd(&repo), "q", "dddd0000", "main") {
             Err(e) => e.to_string(),
             Ok(_) => panic!("stale branch ahead of base must be refused"),
         };
         assert!(err.contains("already exists"), "unexpected error: {err}");
 
         let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(kd(&repo));
     }
 }

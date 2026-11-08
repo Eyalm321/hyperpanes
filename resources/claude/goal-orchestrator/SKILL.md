@@ -160,7 +160,10 @@ goal's subtasks are isolated and you can `list_tasks`/`purge_queue` per goal. Im
 the runner (`spawn_workers` with `base:"<committish>"` / `hyperpanes worker --queue <g> --count N
 --worktree --base <committish>`); subtasks carry
 a `dependsOn` DAG so the queue gates claim order. The worktree fork point is always explicit —
-`--worktree` refuses to run without `--base` (see `docs/worker-worktree-base.md`). The queue is durable and self-recovering (see the
+`--worktree` refuses to run without `--base` (see `docs/worker-worktree-base.md`). Worktrees live on
+disk under the hyperpanes cache dir (not `/tmp`). The runner sweeps crashed runners' orphans at
+start, gives each task a warm build-cache slot (`HP_WORKTREE_CACHE_DIR`), and nacks a claim when
+the root is low on disk (see `docs/worker-worktree-disk.md`). The queue is durable and self-recovering (see the
 plan doc), so you don't babysit individual tasks — you watch goals and health.
 
 **Impl-agent pane budget:** fan-out is soft-capped at **16 worker panes** — the spec agent sets
@@ -183,7 +186,9 @@ the whole repo **per agent** because every agent sits in its own worktree, so a 
 repo cost tens of GB. Goal agents run on hyperpanes tools + the built-ins only. The app already
 appends both flags on your own spawn; pass them down the same way when you spawn a spec agent,
 and tell the spec agent to do the same in its `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
+`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
+(worker panes are spawned by the app and don't inherit the spec agent's env, hence the `env` map;
+the `CARGO_TARGET_DIR` prefix points cargo at the per-task warm cache slot the runner exports)
 
 ### If the `mcp__hyperpanes__*` tools won't load — drop to the Control API, don't reverse-engineer
 

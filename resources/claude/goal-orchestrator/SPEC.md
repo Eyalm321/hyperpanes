@@ -55,7 +55,9 @@ prompt wedges the pane).
   (see IMPL.md "Consult your advisor").
 - `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
   project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
-  split on newlines>, command:"sh -c 'claude --dangerously-skip-permissions --mcp-config
+  split on newlines>, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <your
+  values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"}
+  claude --dangerously-skip-permissions --mcp-config
   <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
   --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings
   $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
@@ -87,6 +89,18 @@ prompt wedges the pane).
   explicit, never the shared checkout's HEAD (`--worktree` refuses to run without `--base`):
   `main` for a first wave, the goal's integration branch for a dependent wave (resolved per task
   claim, so a branch that advances mid-run is picked up). See `docs/worker-worktree-base.md`.
+  - **Worker panes don't inherit your env.** The app spawns them, not you, so `$HP_GOAL_PERSONA_DIR`
+    and friends in the command are empty unless you pass them in `env` as above (or inline the
+    literal values). A missing persona dir fails every claim (`Append system prompt file not
+    found: /IMPL.md`) and burns the task's attempts.
+  - **Disk and build cache.** Task worktrees live on disk under the hyperpanes cache dir
+    (`~/.cache/hyperpanes/worktrees/<repo>-<hash>/` on Linux), never `/tmp`. Override with
+    `env:{HYPERPANES_WORKTREE_ROOT:…}`. Each task also gets `HP_WORKTREE_CACHE_DIR`, a warm build
+    cache slot that no concurrent worker shares. The `env ${HP_WORKTREE_CACHE_DIR:+…}` prefix
+    above points cargo at it. Keep it, and say in Rust payloads that binaries land in
+    `$CARGO_TARGET_DIR/debug/`. A claim on a low-disk root (`HYPERPANES_WORKTREE_MIN_FREE`,
+    default 10G) is nacked `insufficient disk space …` and that worker exits; free space before
+    respawning. See `docs/worker-worktree-disk.md`.
   - **Pane budget — cap 16, multiplex overflow.** Never run more than **16** impl-agent worker
     panes at once: set `count = min(<# ready subtasks>, 16)`. If the goal has more subtasks than
     16, do **not** raise `count` — the queue's competing-consumers model multiplexes for you: the

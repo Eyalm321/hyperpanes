@@ -142,6 +142,12 @@ fn run_worker(repo: &Path, control: &Path, extra: &[&str], child: &[&str]) -> st
     Command::new(env!("CARGO_BIN_EXE_hyperpanes"))
         .current_dir(repo)
         .env("HYPERPANES_CONTROL_FILE", control)
+        // Never pollute ~/.cache; CI runners may have <10G free.
+        .env(
+            "HYPERPANES_WORKTREE_ROOT",
+            repo.parent().unwrap().join("wtroot"),
+        )
+        .env("HYPERPANES_WORKTREE_MIN_FREE", "0")
         .args([
             "worker",
             "--queue",
