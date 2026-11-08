@@ -626,6 +626,7 @@ dependencies = [
  "axum",
  "directories",
  "futures-util",
+ "libc",
  "portable-pty",
  "rand 0.8.6",
  "reqwest",

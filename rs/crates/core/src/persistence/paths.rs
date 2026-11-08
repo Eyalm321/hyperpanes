@@ -138,6 +138,33 @@ pub fn state_dir() -> PathBuf {
     }
 }
 
+/// Where regenerable caches live (never user data): Windows `%LOCALAPPDATA%\hyperpanes`,
+/// macOS `~/Library/Caches/hyperpanes`, Linux `$XDG_CACHE_HOME/hyperpanes` (default
+/// `~/.cache/hyperpanes`). Disk-backed on every platform, unlike `std::env::temp_dir()`
+/// (RAM-backed tmpfs on many Linux hosts).
+pub fn cache_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(v) = std::env::var_os("LOCALAPPDATA") {
+            if !v.is_empty() {
+                return PathBuf::from(v).join(PRODUCT_NAME);
+            }
+        }
+        if let Some(dirs) = directories::BaseDirs::new() {
+            return dirs.cache_dir().join(PRODUCT_NAME);
+        }
+        PathBuf::from(".").join(PRODUCT_NAME)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().join("Library").join("Caches").join(PRODUCT_NAME)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        xdg_dir("XDG_CACHE_HOME", ".cache").join(PRODUCT_NAME)
+    }
+}
+
 /// Discovery file the control server writes (port/token/pid/version/events URL).
 /// Runtime state → [`state_dir`].
 pub fn control_json() -> PathBuf {
