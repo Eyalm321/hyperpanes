@@ -1,15 +1,121 @@
-//! D-Bus connection probe, and the regression tests for zbus's executor contract.
+//! D-Bus session-bus health, and the guards that stop a missing or misbehaving bus from crashing
+//! the app.
 //!
-//! hyperpanes has no D-Bus code of its own; its dependencies do (accesskit_unix's AT-SPI bridge,
-//! slint's xdg-settings watcher, ashpd under rfd, ksni). zbus is compiled once for all of them,
-//! and with its `tokio` feature on, its executor is bare `tokio::spawn`/`spawn_blocking`, which
-//! panics on any thread outside a Tokio runtime. accesskit_unix connects from its own plain
-//! thread, so that is fatal for it. [`probe`] connects exactly the way accesskit does; the tests
-//! below run it on a runtime-less thread.
-#![cfg_attr(not(test), allow(dead_code))]
+//! hyperpanes has no D-Bus code of its own. Its dependencies use D-Bus through `zbus`, on Linux
+//! only:
+//!
+//! | zbus user | What it does | Where it drives zbus |
+//! |---|---|---|
+//! | `accesskit_unix` + `atspi` (slint `accessibility`) | AT-SPI bridge: exposes the UI and the terminal text to screen readers | its own `std::thread`, `futures_lite::block_on` + `async_executor` |
+//! | i-slint-backend-winit `xdg_desktop_settings` | color scheme, accent, cursor blink and font size from the Settings portal | `spawn_local` on the UI thread |
+//! | `ashpd` (rfd `xdg-portal`) | Open/Save dialogs through the FileChooser portal (falls back to `zenity` on error) | `pollster::block_on` on the calling (UI) thread |
+//! | `ksni` (i-slint-core) | `SystemTrayIcon` | its own thread. hyperpanes has no tray, so this never runs |
+//!
+//! **Executor contract.** zbus is compiled once for the whole dependency graph, with the union of
+//! every user's features. With zbus's `tokio` feature on, its executor becomes bare
+//! `tokio::spawn`/`spawn_blocking`, which panic on any thread that is not inside a Tokio runtime.
+//! Every user in the table except ashpd is written for zbus's `async-io` backend and calls zbus
+//! from a thread or executor it owns, so we cannot enter a runtime for them. Only rfd's `tokio`
+//! feature turned zbus/tokio on, and that panicked the AT-SPI thread on every Linux GUI launch,
+//! with or without a session bus. So the app builds rfd with its `async-std` portal transport
+//! (ashpd over `zbus/async-io`), and zbus is executor-agnostic on every thread. The
+//! `connect_*_without_a_tokio_runtime` tests below fail if anything turns zbus/tokio back on.
+//!
+//! **Graceful degradation.** [`start_probe`] connects to the session bus once, off the UI thread,
+//! the same way `accesskit_unix` does. If that fails it records the bus as unavailable and prints
+//! a single warning naming the features that are off for this run. The AT-SPI terminal text
+//! (`paneview::a11y_wanted`) is then not extracted. The features themselves already fail soft
+//! without a bus: accesskit's thread exits, slint keeps its default theme and rfd falls back to
+//! zenity. [`is_contained_dbus_panic`] lets the panic hook downgrade a panic on a D-Bus client
+//! thread (a misbehaving bus, or a future regression of the executor contract) from a crash
+//! report to that same single warning. Such a thread dies alone: the process keeps running, so
+//! a crash dialog would only scare the user.
 
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
+
+/// How long [`start_probe`] waits for the session bus to answer `Hello` before calling it
+/// unavailable. A missing socket fails in microseconds; this bounds a bus that accepts the
+/// connection and then never answers.
+#[cfg(target_os = "linux")]
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+const UNKNOWN: u8 = 0;
+const AVAILABLE: u8 = 1;
+const UNAVAILABLE: u8 = 2;
+
+static STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
+static WARNED: AtomicBool = AtomicBool::new(false);
+
+/// The session bus's state as far as this process knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionBus {
+    /// Not probed yet (or not Linux). Treated as available: nothing waits on the probe.
+    Unknown,
+    Available,
+    Unavailable,
+}
+
+pub fn session_bus() -> SessionBus {
+    match STATE.load(Ordering::Acquire) {
+        AVAILABLE => SessionBus::Available,
+        UNAVAILABLE => SessionBus::Unavailable,
+        _ => SessionBus::Unknown,
+    }
+}
+
+/// True once the session bus is known to be unusable. D-Bus-backed features check this to switch
+/// themselves off rather than doing work no D-Bus peer will ever read.
+pub fn session_bus_unavailable() -> bool {
+    session_bus() == SessionBus::Unavailable
+}
+
+/// The one warning printed when the session bus is unusable.
+pub fn warning_text(reason: &str) -> String {
+    format!(
+        "D-Bus session bus unavailable ({reason}). Running without it: accessibility (AT-SPI) \
+         and desktop theme/portal settings are off for this run, and file dialogs use zenity \
+         instead of the desktop portal."
+    )
+}
+
+/// Mark the session bus unusable and print the warning, once per process. Later calls (another
+/// failure, a contained panic after a failed probe) stay silent.
+pub fn mark_unavailable(reason: &str) {
+    STATE.store(UNAVAILABLE, Ordering::Release);
+    if !WARNED.swap(true, Ordering::AcqRel) {
+        let msg = warning_text(reason);
+        eprintln!("[hyperpanes] {msg}");
+        crate::dbg_log(&format!("dbus: {msg}"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mark_available() {
+    // A contained panic or an earlier failure wins: never flip back to available.
+    let _ = STATE.compare_exchange(UNKNOWN, AVAILABLE, Ordering::AcqRel, Ordering::Acquire);
+}
+
+/// Probe the session bus once on a background thread. Never blocks the caller, never panics.
+/// No-op off Linux, where the dependencies above don't use D-Bus.
+pub fn start_probe() {
+    #[cfg(target_os = "linux")]
+    {
+        let spawned = std::thread::Builder::new()
+            .name("hp-dbus-probe".into())
+            .spawn(|| match probe_timed(None, PROBE_TIMEOUT) {
+                Ok(()) => {
+                    mark_available();
+                    crate::dbg_log("dbus: session bus reachable");
+                }
+                Err(reason) => mark_unavailable(&reason),
+            });
+        if let Err(e) = spawned {
+            crate::dbg_log(&format!("dbus: could not start the probe thread: {e}"));
+        }
+    }
+}
 
 /// Connect to `address` (the session bus when `None`) the way `accesskit_unix` does: a plain
 /// thread, a non-Tokio executor, `internal_executor(false)`. Returns why it failed.
@@ -89,9 +195,117 @@ pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Crates whose code runs only on D-Bus client threads. A panic located in one of them, off the
+/// main thread, is a dead D-Bus integration, not a dead app.
+const DBUS_CRATES: &[&str] = &[
+    "zbus",
+    "zbus_names",
+    "zvariant",
+    "accesskit_unix",
+    "accesskit_atspi_common",
+    "atspi",
+    "atspi-common",
+    "atspi-proxies",
+    "atspi-connection",
+    "ksni",
+    "ashpd",
+];
+
+/// Should the panic hook contain this panic instead of raising the crash reporter?
+///
+/// `location_file` is `PanicHookInfo::location().file()`. It is contained when it lies in a
+/// D-Bus crate (a registry path like `.../zbus-5.16.0/src/...`, or a vendored `.../zbus/src/...`)
+/// or in slint's `xdg_desktop_settings.rs`, and the panic is off the main thread. A main-thread
+/// panic unwinds the UI and ends the process, so it always goes to the crash reporter.
+pub fn is_contained_dbus_panic(location_file: &str, on_main_thread: bool) -> bool {
+    if on_main_thread {
+        return false;
+    }
+    let mut components = location_file.split(['/', '\\']).peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            // The file name itself.
+            return component == "xdg_desktop_settings.rs";
+        }
+        let base = match component.rsplit_once('-') {
+            Some((name, ver)) if ver.starts_with(|c: char| c.is_ascii_digit()) => name,
+            _ => component,
+        };
+        if DBUS_CRATES.contains(&base) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Called by the panic hook for a contained D-Bus panic: the features behind the bus are gone
+/// for this run, so say so once, the same way a failed probe does.
+pub fn contain_panic(location: &str, message: &str) {
+    mark_unavailable(&format!(
+        "a D-Bus client thread panicked at {location}: {message}"
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Panic-hook classifier: the real locations from the original crash, plus vendored and
+    /// Windows-style paths, are contained off the main thread and never on it.
+    #[test]
+    fn dbus_panics_off_the_main_thread_are_contained() {
+        let reg = "/home/u/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
+        for file in [
+            format!("{reg}/zbus-5.16.0/src/abstractions/executor.rs"),
+            format!("{reg}/accesskit_unix-0.22.1/src/context.rs"),
+            format!("{reg}/atspi-common-0.13.0/src/lib.rs"),
+            format!("{reg}/ksni-0.3.4/src/lib.rs"),
+            format!("{reg}/ashpd-0.11.1/src/desktop/file_chooser.rs"),
+            "/build/vendor/zbus/src/connection/mod.rs".to_string(),
+            r"C:\Users\u\.cargo\registry\src\x\zvariant-5.8.0\src\lib.rs".to_string(),
+            "/home/u/.cargo/git/checkouts/slint-774a/9463a10/internal/backends/winit/xdg_desktop_settings.rs"
+                .to_string(),
+        ] {
+            assert!(is_contained_dbus_panic(&file, false), "{file}");
+            assert!(!is_contained_dbus_panic(&file, true), "{file} on main");
+        }
+    }
+
+    /// Everything else still raises the crash reporter, including tokio itself and crates whose
+    /// names merely start like a D-Bus crate.
+    #[test]
+    fn other_panics_are_not_contained() {
+        let reg = "/home/u/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
+        for file in [
+            "src/state.rs".to_string(),
+            "rs/crates/app/src/main.rs".to_string(),
+            format!("{reg}/tokio-1.52.3/src/runtime/scheduler/mod.rs"),
+            format!("{reg}/zbusy-1.0.0/src/lib.rs"),
+            format!("{reg}/accesskit-0.24.1/src/lib.rs"),
+            format!("{reg}/slint-1.17.0/src/lib.rs"),
+            "/x/zbus.rs".to_string(),
+        ] {
+            assert!(!is_contained_dbus_panic(&file, false), "{file}");
+        }
+    }
+
+    #[test]
+    fn warning_names_the_reason_and_the_degraded_features() {
+        let w = warning_text("No such file or directory (os error 2)");
+        assert!(w.contains("D-Bus session bus unavailable (No such file or directory"));
+        assert!(w.contains("accessibility (AT-SPI)"));
+        assert!(w.contains("zenity"));
+    }
+
+    #[test]
+    fn panic_message_reads_str_and_string_payloads() {
+        let a: Box<dyn std::any::Any + Send> = Box::new("lit");
+        let b: Box<dyn std::any::Any + Send> = Box::new(String::from("fmt 1"));
+        let c: Box<dyn std::any::Any + Send> = Box::new(7u8);
+        assert_eq!(panic_message(a.as_ref()), "lit");
+        assert_eq!(panic_message(b.as_ref()), "fmt 1");
+        assert_eq!(panic_message(c.as_ref()), "non-string panic payload");
+    }
 
     /// Run `f` on a fresh plain thread: no Tokio runtime is entered there, exactly like the
     /// threads `accesskit_unix` and `ksni` spawn. Returns the panic message if `f` panicked, and

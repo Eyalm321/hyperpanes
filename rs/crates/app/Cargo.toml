@@ -77,8 +77,9 @@ qrcode = { version = "0.14", default-features = false }
 # otherwise) expose its text to screen readers and assistive automation on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 slint = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae", default-features = false, features = ["accessibility"] }
-# Already in the graph via accesskit/ashpd; named here so `crate::dbus` can connect the way the
-# AT-SPI bridge does (and test that it never needs a Tokio runtime).
+# Already in the graph via accesskit/ashpd; named here so `crate::dbus` can probe the session bus
+# exactly the way the AT-SPI bridge connects (and test that it never needs a Tokio runtime).
+# Keep `tokio` OFF: see the rfd note below.
 zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -114,9 +115,16 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # would put "tomorrow 9am" off by the timezone offset.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-# rfd requires picking a backend off-Windows: xdg-portal (no GTK dev-dep) + tokio (its
-# portal transport needs an async runtime, and tokio is already in the tree).
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+# rfd requires picking a backend off-Windows: xdg-portal (no GTK dev-dep) plus a portal
+# transport. That transport MUST be `async-std`, never `tokio`. The name is historical: the
+# feature only selects ashpd's `zbus/async-io` backend and does not pull in the async-std crate.
+# zbus is compiled once for the whole graph, and its `tokio` feature replaces zbus's executor
+# with bare `tokio::spawn`/`spawn_blocking`, which panic on any thread without a Tokio runtime.
+# The other zbus users here (accesskit_unix for AT-SPI, slint's xdg-settings watcher, ksni)
+# drive zbus from their own executors on threads we don't own, so `tokio` here panicked the
+# AT-SPI thread on every Linux launch ("there is no reactor running"). See `crate::dbus`, whose
+# tests fail if anything turns zbus/tokio back on.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
 [build-dependencies]
 slint-build = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae" }
