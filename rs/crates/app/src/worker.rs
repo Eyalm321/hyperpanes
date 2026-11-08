@@ -561,10 +561,10 @@ fn drain(
         // backoff and STOP this worker rather than churning through the queue burning attempts.
         if let Some(st) = store {
             if st.min_free > 0 {
-                let short =
+                let low_disk =
                     |r: &Path| worktree_store::available_bytes(r).is_ok_and(|a| a < st.min_free);
-                if short(&st.root) {
-                    for p in worktree_store::evict_idle_slots(&st.root, || !short(&st.root)) {
+                if low_disk(&st.root) {
+                    for p in worktree_store::evict_idle_slots(&st.root, || !low_disk(&st.root)) {
                         eprintln!(
                             "[{worker}] disk guard: evicted idle cache slot {}",
                             p.display()
