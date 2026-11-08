@@ -77,6 +77,9 @@ qrcode = { version = "0.14", default-features = false }
 # otherwise) expose its text to screen readers and assistive automation on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 slint = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae", default-features = false, features = ["accessibility"] }
+# Already in the graph via accesskit/ashpd; named here so `crate::dbus` can connect the way the
+# AT-SPI bridge does (and test that it never needs a Tokio runtime).
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [target.'cfg(windows)'.dependencies]
 # Native Open/Save dialogs via the COM IFileDialog (`windows-sys`, separate from the

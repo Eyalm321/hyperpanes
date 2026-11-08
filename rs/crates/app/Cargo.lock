@@ -2306,6 +2306,7 @@ dependencies = [
  "tokio",
  "windows",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

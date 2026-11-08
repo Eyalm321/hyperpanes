@@ -26,6 +26,7 @@ mod contextmenu;
 mod control_cli;
 mod control_host;
 mod crash;
+mod dbus;
 mod devices;
 mod drag;
 mod glow;
