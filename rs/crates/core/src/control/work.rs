@@ -376,6 +376,9 @@ pub struct WorkQueue {
     conn: Connection,
     seq: u64,
     fence: u64,
+    /// Queues whose task states changed since the last [`take_changed`](Self::take_changed).
+    /// Feeds the coalesced queue-changed signal (`Shared::flush_queue_changes`).
+    changed: std::collections::BTreeSet<String>,
 }
 
 impl WorkQueue {
@@ -453,6 +456,7 @@ impl WorkQueue {
             conn,
             seq: seq as u64,
             fence: fence as u64,
+            changed: std::collections::BTreeSet::new(),
         })
     }
 
@@ -501,6 +505,7 @@ impl WorkQueue {
                 ],
             )
             .expect("enqueue insert");
+        self.changed.insert(queue.to_string());
         Self::fetch(&self.conn, &id)
             .ok()
             .flatten()
@@ -583,6 +588,7 @@ impl WorkQueue {
         let task = Self::fetch(&tx, &id).ok().flatten()?;
         tx.commit().ok()?;
         self.fence = next_fence;
+        self.changed.insert(queue.to_string());
         Some(Claim {
             task,
             fencing_token: next_fence,
@@ -617,6 +623,7 @@ impl WorkQueue {
              WHERE id=?1",
             params![id, result, now],
         );
+        self.changed.insert(task.queue.clone());
         LeaseOutcome::Ok(
             Self::fetch(&self.conn, id)
                 .ok()
@@ -656,6 +663,7 @@ impl WorkQueue {
                 params![id, next, opts.error, now],
             );
         }
+        self.changed.insert(task.queue.clone());
         LeaseOutcome::Ok(
             Self::fetch(&self.conn, id)
                 .ok()
@@ -842,6 +850,7 @@ impl WorkQueue {
                 );
                 Disposition::Requeued
             };
+            self.changed.insert(task.queue.clone());
             if let Some(updated) = Self::fetch(&self.conn, &id).ok().flatten() {
                 out.push(Reaped {
                     task: updated,
@@ -927,13 +936,23 @@ impl WorkQueue {
     /// Retention: delete terminal (`done`/`failed`/`dead`) tasks in `queue` last touched at
     /// or before `older_than` (ms epoch). Returns the number removed.
     pub fn purge(&mut self, queue: &str, older_than: i64) -> usize {
-        self.conn
+        let removed = self
+            .conn
             .execute(
                 "DELETE FROM tasks WHERE queue = ?1
                  AND state IN ('done','failed','dead') AND updated_at <= ?2",
                 params![queue, older_than],
             )
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if removed > 0 {
+            self.changed.insert(queue.to_string());
+        }
+        removed
+    }
+
+    /// Drain the set of queues whose task states changed since the last call (sorted).
+    pub fn take_changed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.changed).into_iter().collect()
     }
 
     // --- helpers ----------------------------------------------------------
