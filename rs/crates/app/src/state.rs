@@ -122,6 +122,8 @@ pub enum Setting {
     ClickablePaths(bool),
     /// Toggle copy-on-select (finishing a drag copies it; right-click then always pastes).
     CopyOnSelect(bool),
+    /// Allow programs in panes to set the system clipboard via OSC 52 (write-only).
+    Osc52Clipboard(bool),
     /// Set the editor-command template used to open clicked paths ("" = auto).
     EditorCommand(String),
     /// Toggle the idle-glow (AI-pane quiescence glow).
@@ -2906,6 +2908,7 @@ impl State {
             Setting::DefaultShell(_)
             | Setting::ClickablePaths(_)
             | Setting::CopyOnSelect(_)
+            | Setting::Osc52Clipboard(_)
             | Setting::EditorCommand(_)
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
@@ -3028,6 +3031,7 @@ impl State {
             Setting::ShowDot(on) => self.settings.show_dot = on,
             Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
             Setting::CopyOnSelect(on) => self.settings.copy_on_select = on,
+            Setting::Osc52Clipboard(on) => self.settings.osc52_clipboard = on,
             Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
             Setting::IdleAlert(on) => self.settings.idle_alert = on,
             Setting::IdleEffect(idx) => {
