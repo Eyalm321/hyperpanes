@@ -22,8 +22,8 @@
 //! **Wording follows what the pane can actually do.** Panes opted in by org role are launched
 //! with the hyperpanes MCP server, so their nudge names the `read_messages` tool. A pane that
 //! opted in only through an explicit `hp.nudge=on` may have no MCP at all, so its nudge names the
-//! control-API read instead (`GET /panes/<id>/messages?after=<seq>`, with the base URL and token
-//! in the `control.json` discovery file). A pane can pick its form explicitly:
+//! control-API read instead (`GET http://127.0.0.1:<port>/panes/<id>/messages?after=<seq>`, with the
+//! port and bearer token from the discovery file at `$HYPERPANES_CONTROL_FILE`). A pane can pick its form explicitly:
 //! `hp.nudge=mcp` (MCP wording) or `hp.nudge=http` (control-API wording); `on` keeps its
 //! meaning "nudge me" and uses the role default (MCP for org roles, control-API otherwise).
 //!
@@ -106,8 +106,8 @@ pub fn nudge_text(pane_id: &str, pending: usize, first_seq: u64, form: NudgeForm
     let how = match form {
         NudgeForm::Mcp => format!("read_messages {{paneId:\"{pane_id}\", after:{after}}}"),
         NudgeForm::Http => format!(
-            "GET /panes/{pane_id}/messages?after={after} on the hyperpanes control API \
-             (base URL and bearer token are in the control.json discovery file)"
+            "GET http://127.0.0.1:<port>/panes/{pane_id}/messages?after={after} \
+             (port and bearer token are in the JSON file at $HYPERPANES_CONTROL_FILE)"
         ),
     };
     format!(
@@ -255,8 +255,8 @@ mod tests {
         assert!(m.contains("act on it"), "{m}");
         let h = nudge_text("p1", 3, 10, NudgeForm::Http);
         assert!(h.contains("3 new messages."), "{h}");
-        assert!(h.contains("GET /panes/p1/messages?after=9"), "{h}");
-        assert!(h.contains("control.json"), "{h}");
+        assert!(h.contains("/panes/p1/messages?after=9"), "{h}");
+        assert!(h.contains("$HYPERPANES_CONTROL_FILE"), "{h}");
         assert!(!h.contains("read_messages"), "{h}");
         assert!(h.contains("act on them"), "{h}");
         assert!(nudge_text("p1", 1, 0, NudgeForm::Http).contains("after=0"));
