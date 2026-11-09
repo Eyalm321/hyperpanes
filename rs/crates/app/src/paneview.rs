@@ -864,6 +864,7 @@ pub fn resync(
     app.set_prefs_confirm(state.prefs_confirm);
     app.set_pref_clickable(state.settings.clickable_paths);
     app.set_pref_copy_on_select(state.settings.copy_on_select);
+    app.set_pref_osc52_clipboard(state.settings.osc52_clipboard);
     app.set_pref_editor(state.settings.editor_command.clone().into());
 
     // sidebar / projects: the rail gating + flyout state + rows
