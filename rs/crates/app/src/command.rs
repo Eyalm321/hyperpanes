@@ -165,7 +165,7 @@ pub enum Command {
     /// can come up empty/stale right after an external copy (#9). Unbinding `pane.paste`
     /// in Preferences restores the literal-0x16 passthrough for shells that want it.
     PasteFocused,
-    /// Forward a literal Ctrl+V (0x16) to the focused pane (the Alt+V keybinding) so an in-pane
+    /// Forward the platform image-paste key (Ctrl+V 0x16; Alt+V on Windows) to the focused pane (the Alt+V keybinding) so an in-pane
     /// TUI that reads the OS clipboard itself — e.g. Claude Code's image paste — can pull a
     /// clipboard IMAGE. hyperpanes' text paste can't carry image bytes through the pty; this
     /// hands the clipboard read to the focused program. Matches the shortcut Claude Code

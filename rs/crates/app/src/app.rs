@@ -474,13 +474,27 @@ impl App {
                     std::thread::sleep(Duration::from_millis(600));
                     crate::remote::write(&mgr, &g.uid, "\r");
                     std::thread::sleep(Duration::from_millis(400));
-                    // Best-effort image re-paste: set the OS clipboard to each image, then Ctrl+V.
-                    // The paths are already in the text above, so this is additive — if Claude's
-                    // clipboard-image paste isn't available the goal still carries the paths.
-                    for img in &g.images {
+                    // Best-effort image re-paste: set the OS clipboard to each image, then send
+                    // Claude Code's image-paste key (Ctrl+V; Alt+V on Windows). The paths are
+                    // already in the text above, so this is additive — if Claude's clipboard-image
+                    // paste isn't available the goal still carries the paths.
+                    // Never into a remote pane: Claude there reads the HOST's clipboard.
+                    let remote = crate::remote::is_remote_uid(&g.uid);
+                    let images: &[_] = if crate::image_paste::image_key_action(remote)
+                        == crate::image_paste::NoTextPaste::ForwardImageKey
+                    {
+                        &g.images
+                    } else {
+                        &[]
+                    };
+                    for img in images {
                         if set_clipboard_image_from_file(img) {
                             std::thread::sleep(Duration::from_millis(150));
-                            crate::remote::write(&mgr, &g.uid, "\u{16}"); // Ctrl+V
+                            crate::remote::write(
+                                &mgr,
+                                &g.uid,
+                                crate::image_paste::image_paste_sequence_native(),
+                            );
                             std::thread::sleep(Duration::from_millis(700));
                             crate::remote::write(&mgr, &g.uid, "\r");
                             std::thread::sleep(Duration::from_millis(400));
