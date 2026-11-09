@@ -841,7 +841,8 @@ impl ControlHost {
                 let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) else {
                     continue;
                 };
-                if let Some(idx) = parse_tab_index(&ch.tab_id) {
+                let idx = resolve_tab_index(&w.state.borrow().tabs, &ch.tab_id);
+                if let Some(idx) = idx {
                     if apply_tab_change(&mut w.state.borrow_mut(), idx, &ch) {
                         structural = true;
                     }
@@ -867,7 +868,10 @@ impl ControlHost {
                 .get(wid)
                 .and_then(|u| u.as_ref())
                 .and_then(|u| w.state.borrow_mut().find_pane(u).map(|(ti, _)| ti));
-            let idx = by_uid.or_else(|| act.as_deref().and_then(parse_tab_index));
+            let idx = by_uid.or_else(|| {
+                act.as_deref()
+                    .and_then(|a| resolve_tab_index(&w.state.borrow().tabs, a))
+            });
             if let Some(idx) = idx {
                 w.state.borrow_mut().switch_tab(idx);
             }
@@ -941,7 +945,10 @@ impl ControlHost {
             let wid = w.id as i64;
             new_windows.push(wid);
             let st = w.state.borrow();
-            let active_tab_id = Some(format!("{wid}:{}", st.active));
+            let active_tab_id = st
+                .tabs
+                .get(st.active)
+                .map(|t| tab_model_id(wid, st.active, t));
             new_active.insert(wid, active_tab_id.clone());
             let mut tabs = Vec::new();
             for (ti, tab) in st.tabs.iter().enumerate() {
@@ -951,7 +958,7 @@ impl ControlHost {
                 if tab.remote.is_some() {
                     continue;
                 }
-                let tab_id = format!("{wid}:{ti}");
+                let tab_id = tab_model_id(wid, ti, tab);
                 let mut panes = Vec::new();
                 for p in &tab.panes {
                     let uid = p.uid.clone();
@@ -1094,6 +1101,12 @@ impl ControlHost {
                 let layout = snap.and_then(|s| crate::state::parse_layout(&s.layout));
                 st.adopt_pane_as_tab(mgr, det, title, layout);
                 let new_ti = st.tabs.len().saturating_sub(1);
+                // A control-created tab keeps the id `attach` returned for its whole life.
+                if parse_tab_index(&c.tab_id).is_none() {
+                    if let Some(t) = st.tabs.get_mut(new_ti) {
+                        t.ctl_id = Some(c.tab_id.clone());
+                    }
+                }
                 st.switch_tab(saved);
                 created_tabs.insert(c.tab_id.clone(), (c.window_id, new_ti));
             }
@@ -1131,11 +1144,9 @@ impl ControlHost {
                 return Some(*ti);
             }
         }
-        // 3. A positional "{window_id}:{index}" model tab id that maps to a live GUI tab.
-        if let Some(idx) = parse_tab_index(&c.tab_id) {
-            if idx < w.state.borrow().tabs.len() {
-                return Some(idx);
-            }
+        // 3. A control tab id or positional "{window_id}:{index}" id that maps to a live GUI tab.
+        if let Some(idx) = resolve_tab_index(&w.state.borrow().tabs, &c.tab_id) {
+            return Some(idx);
         }
         // 4. Otherwise the model put it in a brand-new tab → signal "make one".
         None
@@ -1280,6 +1291,20 @@ fn remove_from_gui(windows: &[Rc<Window>], uid: &str) {
     }
 }
 
+/// The id the read model publishes for GUI tab `ti` of window `wid`: the control id the tab was
+/// created with (`open_tab`), else the positional `"{wid}:{ti}"`.
+fn tab_model_id(wid: i64, ti: usize, tab: &crate::state::Tab) -> String {
+    tab.ctl_id.clone().unwrap_or_else(|| format!("{wid}:{ti}"))
+}
+
+/// Map a model tab id (control id or positional) to a GUI tab index within one window.
+fn resolve_tab_index(tabs: &[crate::state::Tab], id: &str) -> Option<usize> {
+    if let Some(i) = tabs.iter().position(|t| t.ctl_id.as_deref() == Some(id)) {
+        return Some(i);
+    }
+    parse_tab_index(id).filter(|&i| i < tabs.len())
+}
+
 /// Parse the tab index out of a `"{window_id}:{tab_index}"` id.
 fn parse_tab_index(tab_id: &str) -> Option<usize> {
     tab_id.rsplit(':').next()?.parse().ok()
@@ -1390,6 +1415,48 @@ mod tests {
         assert_eq!(st.tabs[0].title.as_str(), "renamed");
         assert_eq!(st.tabs[1].layout, Layout::Auto);
         assert!(!apply_tab_change(&mut st, 9, &ch));
+    }
+
+    #[test]
+    fn control_tab_id_survives_republish_and_set_layout_applies() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        let mut t = crate::state::Tab::new_for_test("term 2".into());
+        t.ctl_id = Some("3f2a9c1e-uuid".into());
+        st.tabs.push(t);
+        // Republish: control tab keeps its id, native tab stays positional.
+        let ids = |st: &crate::state::State| -> Vec<String> {
+            st.tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| tab_model_id(0, i, t))
+                .collect()
+        };
+        assert_eq!(ids(&st), vec!["0:0", "3f2a9c1e-uuid"]);
+        // Reordering the tabs doesn't change the control id.
+        st.tabs.swap(0, 1);
+        assert_eq!(ids(&st), vec!["3f2a9c1e-uuid", "0:1"]);
+        // setLayout with the id attach returned still resolves and applies.
+        let idx = resolve_tab_index(&st.tabs, "3f2a9c1e-uuid").unwrap();
+        let ch = TabChange {
+            tab_id: "3f2a9c1e-uuid".into(),
+            title: None,
+            layout: Some("grid".into()),
+        };
+        assert!(apply_tab_change(&mut st, idx, &ch));
+        assert_eq!(st.tabs[0].layout, Layout::Grid);
+    }
+
+    #[test]
+    fn resolve_tab_index_uuid_positional_and_unknown() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        let mut t = crate::state::Tab::new_for_test("b".into());
+        t.ctl_id = Some("abc-123".into());
+        st.tabs.push(t);
+        assert_eq!(resolve_tab_index(&st.tabs, "abc-123"), Some(1));
+        assert_eq!(resolve_tab_index(&st.tabs, "0:0"), Some(0));
+        assert_eq!(resolve_tab_index(&st.tabs, "0:1"), Some(1));
+        assert_eq!(resolve_tab_index(&st.tabs, "0:7"), None);
+        assert_eq!(resolve_tab_index(&st.tabs, "nope-uuid"), None);
     }
 
     #[test]

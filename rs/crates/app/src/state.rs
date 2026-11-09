@@ -99,6 +99,8 @@ pub struct DetachedTab {
     /// The zoomed (maximised-in-tab) pane, carried so a reopened/moved tab keeps its
     /// maximized pane instead of dropping the zoom.
     pub zoomed: Option<usize>,
+    /// Control-plane tab id, carried so a moved/reopened tab keeps its id.
+    pub ctl_id: Option<String>,
     pub panes: Vec<DetachedPane>,
 }
 
@@ -939,6 +941,10 @@ pub struct Tab {
     /// [`crate::remote`]). Remote tabs are never persisted and never reach the local control
     /// read model.
     pub remote: Option<crate::remote::RemoteTabInfo>,
+    /// Stable control-plane id of a tab created by a control `attach` (`open_tab`). Published
+    /// as the tab's id in place of the positional `window:index` one, so the id `attach`
+    /// returned keeps resolving. `None` for GUI-native tabs. Not persisted across restarts.
+    pub ctl_id: Option<String>,
 }
 
 impl Tab {
@@ -957,6 +963,7 @@ impl Tab {
             main_fraction: 0.6,
             focused: 0,
             zoomed: None,
+            ctl_id: None,
         }
     }
 
@@ -4716,6 +4723,7 @@ impl State {
         self.dirty = true;
         let focused = tab.focused;
         let zoomed = tab.zoomed;
+        let ctl_id = tab.ctl_id;
         let panes = tab
             .panes
             .into_iter()
@@ -4740,6 +4748,7 @@ impl State {
                 main_fraction: tab.main_fraction,
                 focused,
                 zoomed,
+                ctl_id,
                 panes,
             },
             true,
@@ -4793,6 +4802,7 @@ impl State {
         };
         let mut tab = Tab::empty(det.title.clone());
         tab.layout = det.layout;
+        tab.ctl_id = det.ctl_id.clone();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
@@ -4821,6 +4831,7 @@ impl State {
         let ti = self.active;
         self.tabs[ti].title = det.title;
         self.tabs[ti].layout = det.layout;
+        self.tabs[ti].ctl_id = det.ctl_id;
         for dp in det.panes {
             self.adopt_into_tab(mgr, dp, ti);
         }
