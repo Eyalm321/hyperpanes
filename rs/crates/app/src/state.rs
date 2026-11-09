@@ -942,6 +942,11 @@ pub struct Tab {
 }
 
 impl Tab {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(title: SharedString) -> Self {
+        Self::empty(title)
+    }
+
     pub(crate) fn empty(title: SharedString) -> Self {
         Tab {
             remote: None,
@@ -2099,6 +2104,16 @@ impl State {
     }
 
     // ---- layout / zoom ----
+
+    /// Rename tab `idx` (any tab) without switching tabs.
+    pub fn set_tab_title(&mut self, idx: usize, title: &str) {
+        if let Some(t) = self.tabs.get_mut(idx) {
+            if t.title.as_str() != title {
+                t.title = title.to_string().into();
+                self.dirty = true;
+            }
+        }
+    }
 
     pub fn set_layout(&mut self, layout: Layout) {
         let t = self.active_tab_mut();
@@ -5549,6 +5564,19 @@ fn due_for(since_mid: u64, offset: ReminderOffset) -> (u64, String) {
 /// Format a Slint [`Color`] as `#rrggbb` (the workspace-file pane color format).
 fn color_hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
+}
+
+/// Strictly parse a layout name (exactly the names `theme::layout_name` emits).
+pub(crate) fn parse_layout(name: &str) -> Option<Layout> {
+    match name {
+        "auto" => Some(Layout::Auto),
+        "single" => Some(Layout::Single),
+        "columns" => Some(Layout::Columns),
+        "rows" => Some(Layout::Rows),
+        "grid" => Some(Layout::Grid),
+        "main-stack" => Some(Layout::MainStack),
+        _ => None,
+    }
 }
 
 /// Parse a workspace-file layout token (`"single"`/`"columns"`/… / `"main-stack"`) back to a

@@ -77,6 +77,59 @@ struct PaneSnap {
     talk: bool,
 }
 
+/// A tab's model-visible chrome (title + layout name), the unit the tab reconcile diffs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TabSnap {
+    title: String,
+    layout: String,
+}
+
+/// One tab-level change a control command made to the model since the last publish.
+#[derive(Debug, PartialEq, Eq)]
+struct TabChange {
+    tab_id: String,
+    title: Option<String>,
+    layout: Option<String>,
+}
+
+/// Pure diff: tabs present in both baselines whose title/layout differ. A tab absent from
+/// `prev` is new (materialized by the adopt path, not here); absent from `cur` is gone.
+fn diff_tabs(prev: &HashMap<String, TabSnap>, cur: &HashMap<String, TabSnap>) -> Vec<TabChange> {
+    let mut out: Vec<TabChange> = cur
+        .iter()
+        .filter_map(|(id, c)| {
+            let p = prev.get(id)?;
+            let title = (c.title != p.title).then(|| c.title.clone());
+            let layout = (c.layout != p.layout).then(|| c.layout.clone());
+            (title.is_some() || layout.is_some()).then(|| TabChange {
+                tab_id: id.clone(),
+                title,
+                layout,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.tab_id.cmp(&b.tab_id));
+    out
+}
+
+/// Apply one [`TabChange`] to a window's state without moving its active tab. Returns whether
+/// anything was applied (false for an out-of-range tab or an unknown layout name).
+fn apply_tab_change(st: &mut crate::state::State, idx: usize, ch: &TabChange) -> bool {
+    if idx >= st.tabs.len() {
+        return false;
+    }
+    let mut applied = false;
+    if let Some(l) = ch.layout.as_deref().and_then(crate::state::parse_layout) {
+        st.set_tab_layout(idx, l);
+        applied = true;
+    }
+    if let Some(t) = &ch.title {
+        st.set_tab_title(idx, t);
+        applied = true;
+    }
+    applied
+}
+
 /// Hosts the embedded control server beside the GUI. UI-thread-owned (all interior mutability
 /// is single-threaded `Cell`/`RefCell`); only the `Arc<Shared>` it hands to the tokio task is
 /// shared across threads.
@@ -113,6 +166,8 @@ pub struct ControlHost {
     pending_meta: RefCell<Vec<PendingMeta>>,
     /// The read-model panes as last published (baseline for the next reconcile diff).
     prev: RefCell<HashMap<String, PaneSnap>>,
+    /// Tab title/layout as last published, keyed by model tab id (baseline for tab reconcile).
+    prev_tabs: RefCell<HashMap<String, TabSnap>>,
     /// The active tab id per window as last published (baseline for focus reconcile).
     prev_active: RefCell<HashMap<i64, Option<String>>>,
     /// The window ids present in the read-model (so a rebuild can drop them all first).
@@ -157,6 +212,7 @@ impl ControlHost {
             ctl: RefCell::new(HashMap::new()),
             pending_meta: RefCell::new(Vec::new()),
             prev: RefCell::new(HashMap::new()),
+            prev_tabs: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
             prev_windows: RefCell::new(Vec::new()),
             talk_notice_shown: RefCell::new(HashSet::new()),
@@ -292,6 +348,7 @@ impl ControlHost {
         self.pane_ids.borrow_mut().clear();
         self.ctl.borrow_mut().clear();
         self.prev.borrow_mut().clear();
+        self.prev_tabs.borrow_mut().clear();
         self.prev_active.borrow_mut().clear();
         self.prev_windows.borrow_mut().clear();
         self.heal_pending.borrow_mut().clear();
@@ -497,8 +554,10 @@ impl ControlHost {
             // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
             let (cur, cur_active, focus_uid) = self.snapshot_model(&model, windows);
 
+            let cur_tabs = snapshot_tabs(&model);
+
             // 2. Reconcile the model→GUI deltas (what the control plane changed) on the UI thread.
-            let reconciled = self.reconcile(windows, mgr, &cur, &cur_active, &focus_uid);
+            let reconciled = self.reconcile(windows, mgr, &cur, &cur_tabs, &cur_active, &focus_uid);
 
             // 3. Republish the (now-updated) live GUI tree into the read-model.
             let republished = self.publish(&mut model, windows);
@@ -672,6 +731,7 @@ impl ControlHost {
         windows: &[Rc<Window>],
         mgr: &Arc<SessionManager>,
         cur: &HashMap<String, ModelPane>,
+        cur_tabs: &HashMap<String, (i64, TabSnap)>,
         cur_active: &HashMap<i64, Option<String>>,
         focus_uid: &HashMap<i64, Option<String>>,
     ) -> bool {
@@ -755,6 +815,26 @@ impl ControlHost {
             if state_uids.contains(uid) && !cur.contains_key(uid) {
                 remove_from_gui(windows, uid);
                 structural = true;
+            }
+        }
+
+        // Control tab-level changes (`setLayout`, tab rename) the model took since the last
+        // publish. Applied per tab by index without touching the window's active tab.
+        {
+            let cur_snaps: HashMap<String, TabSnap> = cur_tabs
+                .iter()
+                .map(|(id, (_, s))| (id.clone(), s.clone()))
+                .collect();
+            for ch in diff_tabs(&self.prev_tabs.borrow(), &cur_snaps) {
+                let (wid, _) = &cur_tabs[&ch.tab_id];
+                let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) else {
+                    continue;
+                };
+                if let Some(idx) = parse_tab_index(&ch.tab_id) {
+                    if apply_tab_change(&mut w.state.borrow_mut(), idx, &ch) {
+                        structural = true;
+                    }
+                }
             }
         }
 
@@ -843,6 +923,7 @@ impl ControlHost {
 
         let mut new_windows = Vec::new();
         let mut new_prev = HashMap::new();
+        let mut new_prev_tabs = HashMap::new();
         let mut new_active = HashMap::new();
         let mut tree = Vec::new();
         for w in windows {
@@ -894,10 +975,19 @@ impl ControlHost {
                         meta: c.meta,
                     });
                 }
+                let title = tab.title.to_string();
+                let layout = crate::theme::layout_name(tab.layout).to_string();
+                new_prev_tabs.insert(
+                    tab_id.clone(),
+                    TabSnap {
+                        title: title.clone(),
+                        layout: layout.clone(),
+                    },
+                );
                 tabs.push(TabInfo {
                     id: tab_id,
-                    title: tab.title.to_string(),
-                    layout: crate::theme::layout_name(tab.layout).to_string(),
+                    title,
+                    layout,
                     panes,
                 });
             }
@@ -929,6 +1019,7 @@ impl ControlHost {
 
         *self.prev_windows.borrow_mut() = new_windows;
         *self.prev.borrow_mut() = new_prev;
+        *self.prev_tabs.borrow_mut() = new_prev_tabs;
         *self.prev_active.borrow_mut() = new_active;
         structural
     }
@@ -1033,6 +1124,25 @@ impl ControlHost {
         // 4. Otherwise the model put it in a brand-new tab → signal "make one".
         None
     }
+}
+
+/// Every model tab's title/layout keyed by tab id, with its window id.
+fn snapshot_tabs(model: &ReadModel) -> HashMap<String, (i64, TabSnap)> {
+    model
+        .tabs()
+        .map(|(wid, t)| {
+            (
+                t.id.clone(),
+                (
+                    wid,
+                    TabSnap {
+                        title: t.title.clone(),
+                        layout: t.layout.clone(),
+                    },
+                ),
+            )
+        })
+        .collect()
 }
 
 /// A pane as read from the control read-model.
@@ -1174,6 +1284,7 @@ fn env_truthy(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperpanes_core::layout::presets::Layout;
 
     fn pane(id: &str, uid: &str) -> PaneInfo {
         PaneInfo {
@@ -1206,6 +1317,63 @@ mod tests {
             }],
         });
         m
+    }
+
+    fn snap(title: &str, layout: &str) -> TabSnap {
+        TabSnap {
+            title: title.into(),
+            layout: layout.into(),
+        }
+    }
+
+    #[test]
+    fn diff_tabs_reports_layout_and_title_changes_on_any_tab() {
+        let prev: HashMap<_, _> = [
+            ("0:0".to_string(), snap("term 1", "auto")),
+            ("0:1".to_string(), snap("term 2", "single")),
+        ]
+        .into();
+        let mut cur = prev.clone();
+        cur.insert("0:0".into(), snap("term 1", "single"));
+        cur.insert("0:1".into(), snap("renamed", "single"));
+        cur.insert("0:2".into(), snap("brand new", "grid")); // new tab: not a delta
+        let d = diff_tabs(&prev, &cur);
+        assert_eq!(
+            d,
+            vec![
+                TabChange {
+                    tab_id: "0:0".into(),
+                    title: None,
+                    layout: Some("single".into())
+                },
+                TabChange {
+                    tab_id: "0:1".into(),
+                    title: Some("renamed".into()),
+                    layout: None
+                },
+            ]
+        );
+        assert!(diff_tabs(&prev, &prev).is_empty());
+    }
+
+    #[test]
+    fn apply_tab_change_targets_background_tab_and_keeps_active() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        st.tabs
+            .push(crate::state::Tab::new_for_test("term 2".into()));
+        assert_eq!(st.tabs.len(), 2);
+        st.switch_tab(1);
+        let ch = TabChange {
+            tab_id: "0:0".into(),
+            title: Some("renamed".into()),
+            layout: Some("grid".into()),
+        };
+        assert!(apply_tab_change(&mut st, 0, &ch));
+        assert_eq!(st.active, 1);
+        assert_eq!(st.tabs[0].layout, Layout::Grid);
+        assert_eq!(st.tabs[0].title.as_str(), "renamed");
+        assert_eq!(st.tabs[1].layout, Layout::Auto);
+        assert!(!apply_tab_change(&mut st, 9, &ch));
     }
 
     #[test]

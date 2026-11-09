@@ -396,6 +396,13 @@ impl ReadModel {
         Some(uid)
     }
 
+    /// Every tab in the model, paired with its window id.
+    pub fn tabs(&self) -> impl Iterator<Item = (i64, &TabInfo)> {
+        self.windows
+            .iter()
+            .flat_map(|w| w.tabs.iter().map(move |t| (w.window_id, t)))
+    }
+
     /// Set a tab's tiling layout. Returns false if the tab is unknown.
     pub fn set_layout(&mut self, tab_id: &str, layout: &str) -> bool {
         for w in &mut self.windows {
