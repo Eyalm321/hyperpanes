@@ -19,6 +19,14 @@
 //!   • **Opt-out** — `hp.nudge=off` meta on the pane, or `HYPERPANES_MSG_NUDGE=0` in the app's
 //!     environment, disables it everywhere.
 //!
+//! **Wording follows what the pane can actually do.** Panes opted in by org role are launched
+//! with the hyperpanes MCP server, so their nudge names the `read_messages` tool. A pane that
+//! opted in only through an explicit `hp.nudge=on` may have no MCP at all, so its nudge names the
+//! control-API read instead (`GET /panes/<id>/messages?after=<seq>`, with the base URL and token
+//! in the `control.json` discovery file). A pane can pick its form explicitly:
+//! `hp.nudge=mcp` (MCP wording) or `hp.nudge=http` (control-API wording); `on` keeps its
+//! meaning "nudge me" and uses the role default (MCP for org roles, control-API otherwise).
+//!
 //! This module is pure + in-memory so the policy is unit-testable without a server; the routes
 //! layer owns the timer and the pty write.
 
@@ -45,13 +53,44 @@ pub const SETTLE_MS: u64 = 3_000;
 /// How often a waiter re-checks whether the pane went quiet.
 pub const POLL_MS: u64 = 2_000;
 
+/// How a nudge tells the pane to read its mail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeForm {
+    /// Name the `read_messages` MCP tool (the pane has the hyperpanes MCP server).
+    Mcp,
+    /// Name the control-API HTTP read (works without MCP).
+    Http,
+}
+
+/// Which wording a pane gets. `hp.nudge=mcp` / `http` choose explicitly; org roles default to
+/// MCP (they are launched with the MCP server); any other pane (opted in via `hp.nudge=on`)
+/// defaults to the control-API wording since MCP can't be assumed.
+pub fn nudge_form(meta: Option<&BTreeMap<String, String>>) -> NudgeForm {
+    let Some(meta) = meta else {
+        return NudgeForm::Http;
+    };
+    match meta.get(NUDGE_META_KEY).map(String::as_str) {
+        Some("mcp") => return NudgeForm::Mcp,
+        Some("http") => return NudgeForm::Http,
+        _ => {}
+    }
+    if meta
+        .get("role")
+        .is_some_and(|r| NUDGED_ROLES.contains(&r.as_str()))
+    {
+        NudgeForm::Mcp
+    } else {
+        NudgeForm::Http
+    }
+}
+
 /// Whether a pane with this meta wants inbox nudges. Explicit `hp.nudge` wins; otherwise the
 /// org roles in [`NUDGED_ROLES`] opt in and everything else stays pull-only (frozen behaviour).
 pub fn wants_nudge(meta: Option<&BTreeMap<String, String>>) -> bool {
     let Some(meta) = meta else { return false };
     match meta.get(NUDGE_META_KEY).map(String::as_str) {
         Some("off") | Some("0") | Some("false") => return false,
-        Some("on") | Some("1") | Some("true") => return true,
+        Some("on") | Some("1") | Some("true") | Some("mcp") | Some("http") => return true,
         _ => {}
     }
     meta.get("role")
@@ -60,14 +99,20 @@ pub fn wants_nudge(meta: Option<&BTreeMap<String, String>>) -> bool {
 
 /// The line typed into a nudged pane. One line, no shell metacharacters, and it names the exact
 /// cursor to read from so the agent doesn't re-ingest its whole backlog.
-pub fn nudge_text(pane_id: &str, pending: usize, first_seq: u64) -> String {
+pub fn nudge_text(pane_id: &str, pending: usize, first_seq: u64, form: NudgeForm) -> String {
     let plural = if pending == 1 { "" } else { "s" };
+    let after = first_seq.saturating_sub(1);
+    let them = if pending == 1 { "it" } else { "them" };
+    let how = match form {
+        NudgeForm::Mcp => format!("read_messages {{paneId:\"{pane_id}\", after:{after}}}"),
+        NudgeForm::Http => format!(
+            "GET /panes/{pane_id}/messages?after={after} on the hyperpanes control API \
+             (base URL and bearer token are in the control.json discovery file)"
+        ),
+    };
     format!(
-        "[hyperpanes] inbox: {pending} new message{plural}. Read with read_messages \
-         {{paneId:\"{pane_id}\", after:{}}}, act on {} (report/consult/decision), then continue \
-         your loop.",
-        first_seq.saturating_sub(1),
-        if pending == 1 { "it" } else { "them" }
+        "[hyperpanes] inbox: {pending} new message{plural}. Read with {how}, act on {them} \
+         (report/consult/decision), then continue your loop."
     )
 }
 
@@ -126,8 +171,8 @@ impl NudgeLedger {
     }
 
     /// One waiter poll. `busy` is the pane's live activity (true ⇒ mid-turn, never type).
-    /// On [`Step::Send`] the pending batch is consumed and the waiter retires.
-    pub fn poll(&mut self, pane_id: &str, busy: bool, now_ms: i64) -> Step {
+    /// `form` picks the wording. On [`Step::Send`] the pending batch is consumed and the waiter retires.
+    pub fn poll(&mut self, pane_id: &str, busy: bool, now_ms: i64, form: NudgeForm) -> Step {
         let Some(e) = self.panes.get_mut(pane_id) else {
             return Step::Stop;
         };
@@ -144,7 +189,7 @@ impl NudgeLedger {
             }
             return Step::Wait;
         }
-        let text = nudge_text(pane_id, e.pending, e.first_seq);
+        let text = nudge_text(pane_id, e.pending, e.first_seq, form);
         e.pending = 0;
         e.first_seq = 0;
         e.waiting = false;
@@ -186,12 +231,44 @@ mod tests {
     }
 
     #[test]
+    fn explicit_on_gets_non_mcp_wording_and_role_default_keeps_mcp() {
+        let on = meta(&[(NUDGE_META_KEY, "on")]);
+        assert_eq!(nudge_form(Some(&on)), NudgeForm::Http);
+        let role = meta(&[("role", "spec")]);
+        assert_eq!(nudge_form(Some(&role)), NudgeForm::Mcp);
+        // Role + explicit on: still an org pane with MCP.
+        let both = meta(&[("role", "goals-orch"), (NUDGE_META_KEY, "on")]);
+        assert_eq!(nudge_form(Some(&both)), NudgeForm::Mcp);
+        // Explicit forms win and imply opt-in.
+        let http = meta(&[("role", "spec"), (NUDGE_META_KEY, "http")]);
+        assert_eq!(nudge_form(Some(&http)), NudgeForm::Http);
+        let mcp = meta(&[(NUDGE_META_KEY, "mcp")]);
+        assert_eq!(nudge_form(Some(&mcp)), NudgeForm::Mcp);
+        assert!(wants_nudge(Some(&http)) && wants_nudge(Some(&mcp)));
+    }
+
+    #[test]
+    fn text_matches_form_cursor_and_plurality() {
+        let m = nudge_text("p1", 1, 5, NudgeForm::Mcp);
+        assert!(m.contains("1 new message."), "{m}");
+        assert!(m.contains("read_messages {paneId:\"p1\", after:4}"), "{m}");
+        assert!(m.contains("act on it"), "{m}");
+        let h = nudge_text("p1", 3, 10, NudgeForm::Http);
+        assert!(h.contains("3 new messages."), "{h}");
+        assert!(h.contains("GET /panes/p1/messages?after=9"), "{h}");
+        assert!(h.contains("control.json"), "{h}");
+        assert!(!h.contains("read_messages"), "{h}");
+        assert!(h.contains("act on them"), "{h}");
+        assert!(nudge_text("p1", 1, 0, NudgeForm::Http).contains("after=0"));
+    }
+
+    #[test]
     fn a_burst_arms_one_waiter_and_coalesces_into_one_nudge() {
         let mut l = NudgeLedger::new();
         assert!(l.arm("p1", 10, 0)); // first message spawns the waiter
         assert!(!l.arm("p1", 11, 100)); // burst rides along
         assert!(!l.arm("p1", 12, 200));
-        let text = match l.poll("p1", false, 5_000) {
+        let text = match l.poll("p1", false, 5_000, NudgeForm::Mcp) {
             Step::Send(t) => t,
             other => panic!("expected Send, got {other:?}"),
         };
@@ -199,18 +276,18 @@ mod tests {
         // Cursor is first_seq - 1, so read_messages returns exactly the batch.
         assert!(text.contains("after:9"), "{text}");
         // Batch consumed; the waiter retires.
-        assert_eq!(l.poll("p1", false, 6_000), Step::Stop);
+        assert_eq!(l.poll("p1", false, 6_000, NudgeForm::Mcp), Step::Stop);
     }
 
     #[test]
     fn never_types_into_a_busy_pane_and_gives_up_after_the_max_wait() {
         let mut l = NudgeLedger::new();
         l.arm("p1", 1, 0);
-        assert_eq!(l.poll("p1", true, 1_000), Step::Wait);
-        assert_eq!(l.poll("p1", true, MAX_WAIT_MS), Step::Stop);
+        assert_eq!(l.poll("p1", true, 1_000, NudgeForm::Mcp), Step::Wait);
+        assert_eq!(l.poll("p1", true, MAX_WAIT_MS, NudgeForm::Mcp), Step::Stop);
         // The message is still pending — a later arrival re-arms a fresh waiter.
         assert!(l.arm("p1", 2, MAX_WAIT_MS + 1));
-        match l.poll("p1", false, MAX_WAIT_MS + 2) {
+        match l.poll("p1", false, MAX_WAIT_MS + 2, NudgeForm::Mcp) {
             Step::Send(t) => assert!(t.contains("2 new messages"), "{t}"),
             other => panic!("expected Send, got {other:?}"),
         }
@@ -220,11 +297,14 @@ mod tests {
     fn rate_limits_a_chatty_wave_to_one_nudge_per_interval() {
         let mut l = NudgeLedger::new();
         l.arm("p1", 1, 0);
-        assert!(matches!(l.poll("p1", false, 0), Step::Send(_)));
-        l.arm("p1", 2, 10);
-        assert_eq!(l.poll("p1", false, 10), Step::Wait); // too soon
         assert!(matches!(
-            l.poll("p1", false, MIN_INTERVAL_MS + 10),
+            l.poll("p1", false, 0, NudgeForm::Mcp),
+            Step::Send(_)
+        ));
+        l.arm("p1", 2, 10);
+        assert_eq!(l.poll("p1", false, 10, NudgeForm::Mcp), Step::Wait); // too soon
+        assert!(matches!(
+            l.poll("p1", false, MIN_INTERVAL_MS + 10, NudgeForm::Mcp),
             Step::Send(_)
         ));
     }
@@ -234,6 +314,6 @@ mod tests {
         let mut l = NudgeLedger::new();
         l.arm("p1", 1, 0);
         l.drop_pane("p1");
-        assert_eq!(l.poll("p1", false, 0), Step::Stop);
+        assert_eq!(l.poll("p1", false, 0, NudgeForm::Mcp), Step::Stop);
     }
 }
