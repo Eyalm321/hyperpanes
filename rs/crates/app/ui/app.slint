@@ -123,6 +123,8 @@ export component AppWindow inherits Window {
     in property <[PrefOption]> np-shells;
     // ---- Add Project dialog (overlay kind 4) ----
     in property <string> ap-error: "";   // inline validation error ("" = none)
+    // ---- Connect-to-host dialog (overlay kind 6) ----
+    in property <string> ch-error: "";   // inline (token-redacted) parse error ("" = none)
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
@@ -236,6 +238,7 @@ export component AppWindow inherits Window {
     callback resume-session(int, string); // resume Claude session <id> for project <idx> in a new pane
     callback open-add-project();          // the ＋ on the PROJECTS header → open the dialog
     callback submit-add-project(string);  // Add-Project dialog submit (directory path)
+    callback submit-connect-host(string, string, bool, bool); // url · label · remember · autoconnect
     // New-goal box (controller-owned mirrors — the Rust key router drives the keyboard;
     // these callbacks are the mouse affordances)
     callback goal-field-click(int);        // chip click: focus field i + toggle its options
@@ -552,6 +555,8 @@ export component AppWindow inherits Window {
             }
             ap-error: root.ap-error;
             add-project-submit(p) => { root.submit-add-project(p); }
+            ch-error: root.ch-error;
+            connect-host-submit(u, l, r, a) => { root.submit-connect-host(u, l, r, a); }
             goal-images: root.goal-images;
             goal-text: root.goal-text;
             goal-field: root.goal-field;

@@ -20,6 +20,7 @@ pub mod layout;
 pub mod listen;
 pub mod paths;
 pub mod persistence;
+pub mod remote;
 pub mod resume_queue;
 pub mod session;
 pub mod session_manager;

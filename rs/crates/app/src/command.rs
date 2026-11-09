@@ -266,6 +266,23 @@ pub enum Command {
     /// Submit the Add-Project dialog with the typed directory path (validated in state;
     /// a bad path keeps the dialog open with an inline error).
     SubmitAddProject(String),
+    /// Open the "Connect to host…" dialog (remote attach).
+    OpenConnectHost,
+    /// Submit the Connect-to-host dialog (handled at App level: needs the remote hub).
+    SubmitConnectHost {
+        url: String,
+        label: String,
+        remember: bool,
+        autoconnect: bool,
+    },
+    /// Connect a saved host by label (palette "Connect to <label>").
+    RemoteConnectSaved(String),
+    /// Reconnect remote host `0` now (palette / remote tab context menu).
+    RemoteReconnect(u32),
+    /// Drop remote host `0` and close its remote tabs (detach only).
+    RemoteDisconnect(u32),
+    /// Remove the saved host with this label from `remote-hosts.json`.
+    RemoteForget(String),
 }
 
 /// A side effect the controller must apply outside the state (UI/window layer). The
@@ -530,6 +547,13 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::RemoveProject(i) => state.remove_project(i),
         Command::OpenAddProject => state.open_add_project(),
         Command::SubmitAddProject(path) => state.submit_add_project(&path),
+        Command::OpenConnectHost => state.open_connect_host(),
+        // Applied by `App::run_command` (they need the remote hub); nothing to do on State.
+        Command::SubmitConnectHost { .. }
+        | Command::RemoteConnectSaved(_)
+        | Command::RemoteReconnect(_)
+        | Command::RemoteDisconnect(_)
+        | Command::RemoteForget(_) => {}
     }
     Effect::None
 }

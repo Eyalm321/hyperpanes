@@ -35,6 +35,10 @@ rand = "0.8"      # 32-random-byte hex master token
 # amalgamation so the queue ships inside the single native binary (no libsqlite3
 # system dep) — consistent with the single-binary goal of the native rewrite.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# --- Remote-attach client (remote/): plain-ws /events client. `connect` = handshake + tokio
+# TcpStream, NO tls feature (no native-tls/openssl; wss is intentionally unsupported — the
+# transport security story is the network layer, see docs/mobile-client-plan.md).
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

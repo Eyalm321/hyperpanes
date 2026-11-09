@@ -406,6 +406,21 @@ impl ControlHost {
 
     // ---- per-tick reconcile + publish ----
 
+    /// Drain `connectRemote` requests queued by the control API (UI thread, once per tick).
+    pub fn take_remote_connects(&self) -> Vec<hyperpanes_core::remote::ConnectRequest> {
+        match self.shared.borrow().as_ref() {
+            Some(s) => s.take_remote_connects(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Publish the attached-remote-pane snapshot served by the `remoteScreen` command.
+    pub fn publish_remote_screens(&self, v: serde_json::Value) {
+        if let Some(s) = self.shared.borrow().as_ref() {
+            s.set_remote_screens(v);
+        }
+    }
+
     /// Queue control-plane meta for pane `uid`, applied once the pane is in the read model.
     ///
     /// The GUI's restore path uses this to give a restored goal orchestrator back its
@@ -516,7 +531,10 @@ impl ControlHost {
         let focused_uid = windows.first().and_then(|w| {
             let st = w.state.borrow();
             let t = st.active_tab();
-            t.panes.get(t.focused).map(|p| p.uid.clone())
+            t.panes
+                .get(t.focused)
+                .filter(|p| p.remote.is_none())
+                .map(|p| p.uid.clone())
         });
         let focused_pane_id = focused_uid.map(|uid| self.pane_id_for_uid(&uid).unwrap_or(uid));
         shared
@@ -835,6 +853,12 @@ impl ControlHost {
             new_active.insert(wid, active_tab_id.clone());
             let mut tabs = Vec::new();
             for (ti, tab) in st.tabs.iter().enumerate() {
+                // Remote tabs (another host's panes) never enter the local read model: they
+                // must not appear in this instance's `/state`, nor be healed/adopted. The
+                // positional tab ids of the local tabs are unchanged (`ti` keeps counting).
+                if tab.remote.is_some() {
+                    continue;
+                }
                 let tab_id = format!("{wid}:{ti}");
                 let mut panes = Vec::new();
                 for p in &tab.panes {
@@ -1092,7 +1116,7 @@ fn gui_uids_with_parked(windows: &[Rc<Window>]) -> HashSet<String> {
 fn gui_uids(windows: &[Rc<Window>]) -> HashSet<String> {
     let mut set = HashSet::new();
     for w in windows {
-        for t in &w.state.borrow().tabs {
+        for t in w.state.borrow().tabs.iter().filter(|t| t.remote.is_none()) {
             for p in &t.panes {
                 set.insert(p.uid.clone());
             }

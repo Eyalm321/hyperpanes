@@ -363,6 +363,8 @@ bus**, advisory **write locks**, **clean‑output** mode (ANSI stripped), and st
 See [`docs/cli-multiwindow-mcp-plan.md`](docs/cli-multiwindow-mcp-plan.md) and
 [`docs/agent-orchestration-plan.md`](docs/agent-orchestration-plan.md) for the design and status.
 
+To drive another machine's panes from the desktop app over a VPN, see [`docs/remote-attach.md`](docs/remote-attach.md).
+
 ## Architecture
 
 Three Rust crates under `rs/crates/`:

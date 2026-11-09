@@ -36,6 +36,7 @@ use crate::{AppWindow, PaneItem};
 const OVERLAY_NEW_PANE: i32 = 3;
 const OVERLAY_ADD_PROJECT: i32 = 4;
 const OVERLAY_NEW_GOAL: i32 = 5;
+const OVERLAY_CONNECT_HOST: i32 = 6;
 
 struct A11yTrapWindow {
     window: slint::Window,
@@ -255,6 +256,7 @@ fn dialog_mount_focus_happens_outside_accessibility_build() {
     for (kind, what) in [
         (OVERLAY_ADD_PROJECT, "Add project dialog mount"),
         (OVERLAY_NEW_PANE, "New pane dialog mount"),
+        (OVERLAY_CONNECT_HOST, "Connect-to-host dialog mount"),
     ] {
         let before = h.trap.focus_changes.get();
         h.win.set_overlay_kind(kind);

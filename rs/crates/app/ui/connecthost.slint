@@ -1,0 +1,211 @@
+// The "Connect to host…" dialog — remote attach (docs/remote-attach.md).
+//
+// A centred modal card (the same overlay-panel pattern as addproject.slint, mounted by
+// overlays.slint when `kind == 6`): the pairing URL, an optional label and two checkboxes
+// ("Remember this host" default ON, "Connect automatically at startup" default OFF).
+// Validation happens Rust-side (`RemoteTarget::parse`); a bad string keeps the dialog open and
+// shows the redacted parse error inline. Enter submits, Esc closes. The form is local state,
+// reset every open via re-instantiation.
+//
+// Focus pitfall (known AccessKit re-entrancy panic): NEVER call focus() in `init`/`changed` —
+// the URL field focuses itself from a single-shot zero-length Timer one turn after mount.
+
+import { Theme } from "theme.slint";
+
+component ChCheck inherits Path {
+    in property <color> ink: Theme.accent;
+    width: 12px;
+    height: 10px;
+    viewbox-width: 12;
+    viewbox-height: 10;
+    stroke: root.ink;
+    stroke-width: 1.6px;
+    fill: transparent;
+    commands: "M 1 5.5 L 4.5 9 L 11 1";
+}
+
+component ChInput inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> autofocus: false;
+    out property <string> text <=> ti.text;
+    callback submit();
+    callback escape();
+    height: 34px;
+    border-radius: 7px;
+    background: Theme.bg;
+    border-width: 1px;
+    border-color: ti.has-focus ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        ti := TextInput {
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            single-line: true;
+            Timer {
+                interval: 0ms;
+                triggered => {
+                    self.running = false;
+                    if (root.autofocus) { ti.focus(); }
+                }
+            }
+            key-pressed(e) => {
+                if (e.text == Key.Return) { root.submit(); return EventResult.accept; }
+                if (e.text == Key.Escape) { root.escape(); return EventResult.accept; }
+                return EventResult.reject;
+            }
+        }
+    }
+    Text {
+        x: 10px;
+        text: root.placeholder;
+        color: Theme.faint;
+        font-size: 13px;
+        vertical-alignment: center;
+        visible: ti.text == "";
+    }
+}
+
+component ChToggle inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> on;
+    height: 26px;
+    border-radius: 6px;
+    background: ta.has-hover ? Theme.surface2 : transparent;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 15px;
+                height: 15px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.on ? Theme.accent : Theme.border;
+                background: root.on ? Theme.accent : transparent;
+                if root.on : ChCheck { ink: #11111b; }
+            }
+        }
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.on = !root.on; } }
+}
+
+component ChButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+    height: 32px;
+    min-width: 84px;
+    border-radius: 7px;
+    background: root.primary ? Theme.accent : (ta.has-hover ? Theme.surface2 : Theme.surface);
+    border-width: 1px;
+    border-color: root.primary ? Theme.accent : Theme.border;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.label;
+            color: root.primary ? #11111b : Theme.text;
+            font-size: 13px;
+            font-weight: root.primary ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component ConnectHostDialog inherits Rectangle {
+    // The Rust-side parse error (`""` = none; never contains the token).
+    in property <string> error: "";
+    callback submit(string, string, bool, bool);   // url · label · remember · autoconnect
+    callback cancel();
+
+    // eat scrim clicks behind the card
+    TouchArea {}
+
+    card := Rectangle {
+        width: 500px;
+        x: (parent.width - self.width) / 2;
+        y: max(60px, (parent.height - self.height) / 2);
+        height: body.preferred-height;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        TouchArea {} // keep clicks on the card from dismissing
+
+        body := VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: "Connect to host";
+                color: Theme.text;
+                font-size: 15px;
+                font-weight: 700;
+            }
+
+            VerticalLayout {
+                spacing: 5px;
+                Text { text: "Pairing URL"; color: Theme.faint; font-size: 11px; }
+                url-input := ChInput {
+                    placeholder: "hp://host:port/?token=…";
+                    autofocus: true;
+                    submit => { root.submit(url-input.text, label-input.text, remember.on, auto.on); }
+                    escape => { root.cancel(); }
+                }
+                Text {
+                    text: "from `hyperpanes pair` on the host — treat it like a password; use a VPN";
+                    color: Theme.faint;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 5px;
+                Text { text: "Label (optional)"; color: Theme.faint; font-size: 11px; }
+                label-input := ChInput {
+                    placeholder: "e.g. workstation";
+                    submit => { root.submit(url-input.text, label-input.text, remember.on, auto.on); }
+                    escape => { root.cancel(); }
+                }
+            }
+
+            remember := ChToggle { label: "Remember this host"; on: true; }
+            auto := ChToggle { label: "Connect automatically at startup"; on: false; }
+
+            if root.error != "" : Text {
+                text: root.error;
+                color: Theme.danger;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                ChButton { label: "Cancel"; clicked => { root.cancel(); } }
+                ChButton {
+                    label: "Connect";
+                    primary: true;
+                    clicked => { root.submit(url-input.text, label-input.text, remember.on, auto.on); }
+                }
+            }
+        }
+    }
+}

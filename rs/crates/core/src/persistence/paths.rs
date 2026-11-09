@@ -235,6 +235,12 @@ pub fn device_tokens_json() -> PathBuf {
     state_dir().join("device-tokens.json")
 }
 
+/// Saved remote-attach hosts (`remote-hosts.json`; holds device tokens, so written 0600). User
+/// setting → [`config_dir`].
+pub fn remote_hosts_json() -> PathBuf {
+    config_dir().join("remote-hosts.json")
+}
+
 /// The last saved session (restored on launch). Session state → [`state_dir`].
 pub fn last_workspace_json() -> PathBuf {
     state_dir().join("last-workspace.json")
