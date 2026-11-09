@@ -10,7 +10,7 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, LaneItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, LaneItem, TaskPanelItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
@@ -131,6 +131,8 @@ export component AppWindow inherits Window {
     // "Other queues" task-count badge ("" = hidden): queues that map to no project (#6).
     in property <string> other-queue-badge;
     in property <[LaneItem]> other-lanes;
+    in property <TaskPanelItem> other-panel;
+    callback task-action(int, int, string);   // per-project task list intents (#8)
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
     in property <bool> sidebar-open: false;  // projects flyout expanded
     // ---- context menus (pane header / tab strip) ----
@@ -388,6 +390,8 @@ export component AppWindow inherits Window {
                 projects: root.projects;
                 other-queue-badge: root.other-queue-badge;
                 other-lanes: root.other-lanes;
+                other-panel: root.other-panel;
+                task-action(s, k, a) => { root.task-action(s, k, a); }
                 projects-open: root.sidebar-open;
                 new-pane => { root.new-pane(); }
                 open-new-pane => { root.open-new-pane(); }

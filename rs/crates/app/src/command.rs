@@ -261,6 +261,8 @@ pub enum Command {
     RenameProject(usize, String),
     /// Forget flyout row `0`.
     RemoveProject(usize),
+    /// Task-list intent from the sidebar (#8): (project row or -1 = Other, kind, arg).
+    TaskPanel(i32, i32, String),
     /// Open the "Add project" dialog (the ＋ on the sidebar's PROJECTS header).
     OpenAddProject,
     /// Submit the Add-Project dialog with the typed directory path (validated in state;
@@ -545,6 +547,7 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SetProjectColor(i, swatch) => state.set_project_color(i, swatch),
         Command::RenameProject(i, name) => state.rename_project(i, &name),
         Command::RemoveProject(i) => state.remove_project(i),
+        Command::TaskPanel(scope, kind, arg) => state.task_panel_command(scope, kind, &arg),
         Command::OpenAddProject => state.open_add_project(),
         Command::SubmitAddProject(path) => state.submit_add_project(&path),
         Command::OpenConnectHost => state.open_connect_host(),

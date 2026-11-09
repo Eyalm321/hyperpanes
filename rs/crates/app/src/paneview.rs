@@ -23,7 +23,7 @@ use crate::theme;
 use crate::{
     AppWindow, ClaudeSessionItem, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem,
     LaneItem, LayoutOption, MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
-    WorktreeRow,
+    TaskPanelItem, TaskRowItem, WorktreeRow,
 };
 
 /// Thickness (logical px) of the draggable divider hit-area.
@@ -877,83 +877,87 @@ pub fn resync(
     // flyout row index `i` indexes both the model and `state.projects` (used by delete).
     let sidebar_open = state.sidebar_open;
     crate::sidebar::note_flyout_open(sidebar_open);
-    let projects: Vec<ProjectItem> = state
-        .project_rows()
-        .into_iter()
-        .zip(state.projects.iter())
-        .map(|((name, color), proj)| {
-            let rows: Vec<WorktreeRow> = if sidebar_open {
-                crate::sidebar::worktrees_for(&proj.path)
-                    .into_iter()
-                    .map(|w| WorktreeRow {
-                        path: w.path.into(),
-                        branch: w.branch.into(),
-                        is_main: w.is_main,
-                        locked: w.locked,
-                        prunable: w.prunable,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            // This project's recent agent sessions — read (cached) only while the flyout is
-            // open, mirroring the worktree gate (no point scanning ~/.claude for a hidden
-            // panel). Filtered Rust-side by the project's history search query (#25); the
-            // segment/query pair itself lives in the sidebar's per-project map, fed by the
-            // pump's `HistoryUi` poll (see `pump`).
-            let (segment, query) = crate::sidebar::history_ui_for(&proj.path);
-            let (sessions, has_history): (Vec<ClaudeSessionItem>, bool) = if sidebar_open {
-                let rows = crate::sidebar::claude_sessions_for(&proj.path, &query)
-                    .into_iter()
-                    .map(|s| ClaudeSessionItem {
-                        id: s.id.into(),
-                        source: s.source.into(),
-                        summary: s.summary.into(),
-                        when: s.when.into(),
-                        count: s.count,
-                    })
-                    .collect();
-                (rows, crate::sidebar::claude_has_history(&proj.path))
-            } else {
-                (Vec::new(), false)
-            };
-            // Reuse this project's worktree model (stable identity) and update its contents
-            // in place, so the inner repeater isn't rebuilt every frame (see `wt_models`).
-            let model = ui
-                .wt_models
-                .borrow_mut()
-                .entry(proj.path.clone())
-                .or_insert_with(|| Rc::new(VecModel::default()))
-                .clone();
-            sync_model(&model, rows);
-            // Same stable-identity reuse for the session rows (see `claude_models`).
-            let cmodel = ui
-                .claude_models
-                .borrow_mut()
-                .entry(proj.path.clone())
-                .or_insert_with(|| Rc::new(VecModel::default()))
-                .clone();
-            sync_model(&cmodel, sessions);
-            ProjectItem {
-                name,
-                color,
-                worktrees: ModelRc::from(model),
-                sessions: ModelRc::from(cmodel),
-                has_history,
-                segment,
-                query: query.into(),
-                lanes: lane_model(state.project_lane_counts.get(&proj.id)),
-                queue_badge: crate::project_queue::badge_text(
-                    state
-                        .project_queue_counts
-                        .get(&proj.id)
-                        .copied()
-                        .unwrap_or(0),
-                )
-                .into(),
-            }
-        })
-        .collect();
+    let projects: Vec<ProjectItem> =
+        state
+            .project_rows()
+            .into_iter()
+            .zip(state.projects.iter())
+            .map(|((name, color), proj)| {
+                let rows: Vec<WorktreeRow> = if sidebar_open {
+                    crate::sidebar::worktrees_for(&proj.path)
+                        .into_iter()
+                        .map(|w| WorktreeRow {
+                            path: w.path.into(),
+                            branch: w.branch.into(),
+                            is_main: w.is_main,
+                            locked: w.locked,
+                            prunable: w.prunable,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                // This project's recent agent sessions — read (cached) only while the flyout is
+                // open, mirroring the worktree gate (no point scanning ~/.claude for a hidden
+                // panel). Filtered Rust-side by the project's history search query (#25); the
+                // segment/query pair itself lives in the sidebar's per-project map, fed by the
+                // pump's `HistoryUi` poll (see `pump`).
+                let (segment, query) = crate::sidebar::history_ui_for(&proj.path);
+                let (sessions, has_history): (Vec<ClaudeSessionItem>, bool) = if sidebar_open {
+                    let rows = crate::sidebar::claude_sessions_for(&proj.path, &query)
+                        .into_iter()
+                        .map(|s| ClaudeSessionItem {
+                            id: s.id.into(),
+                            source: s.source.into(),
+                            summary: s.summary.into(),
+                            when: s.when.into(),
+                            count: s.count,
+                        })
+                        .collect();
+                    (rows, crate::sidebar::claude_has_history(&proj.path))
+                } else {
+                    (Vec::new(), false)
+                };
+                // Reuse this project's worktree model (stable identity) and update its contents
+                // in place, so the inner repeater isn't rebuilt every frame (see `wt_models`).
+                let model = ui
+                    .wt_models
+                    .borrow_mut()
+                    .entry(proj.path.clone())
+                    .or_insert_with(|| Rc::new(VecModel::default()))
+                    .clone();
+                sync_model(&model, rows);
+                // Same stable-identity reuse for the session rows (see `claude_models`).
+                let cmodel = ui
+                    .claude_models
+                    .borrow_mut()
+                    .entry(proj.path.clone())
+                    .or_insert_with(|| Rc::new(VecModel::default()))
+                    .clone();
+                sync_model(&cmodel, sessions);
+                ProjectItem {
+                    name,
+                    color,
+                    worktrees: ModelRc::from(model),
+                    sessions: ModelRc::from(cmodel),
+                    has_history,
+                    segment,
+                    query: query.into(),
+                    lanes: lane_model(state.project_lane_counts.get(&proj.id)),
+                    panel: panel_item(state.task_panel.as_ref().filter(|p| {
+                        p.scope == crate::task_list::TaskScope::Project(proj.id.clone())
+                    })),
+                    queue_badge: crate::project_queue::badge_text(
+                        state
+                            .project_queue_counts
+                            .get(&proj.id)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                    .into(),
+                }
+            })
+            .collect();
     // Drop cached worktree + session models for projects no longer present.
     {
         let live: std::collections::HashSet<&str> =
@@ -966,6 +970,12 @@ pub fn resync(
             .retain(|k, _| live.contains(k.as_str()));
     }
     sync_model(&ui.projects, projects);
+    app.set_other_panel(panel_item(
+        state
+            .task_panel
+            .as_ref()
+            .filter(|p| p.scope == crate::task_list::TaskScope::Other),
+    ));
     app.set_other_lanes(lane_model(state.other_lane_counts.as_ref()));
     app.set_other_queue_badge(crate::project_queue::badge_text(state.other_queue_count).into());
 
@@ -1404,4 +1414,37 @@ fn lane_model(counts: Option<&hyperpanes_core::control::work::Counts>) -> ModelR
         })
         .collect();
     ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Slint model for an open task list (#8); `lane: -1` = closed.
+fn panel_item(panel: Option<&crate::task_list::TaskPanel>) -> TaskPanelItem {
+    let Some(p) = panel else {
+        return TaskPanelItem {
+            lane: -1,
+            rows: ModelRc::default(),
+            more: false,
+            status: "".into(),
+            status_ok: true,
+        };
+    };
+    let rows: Vec<TaskRowItem> = p
+        .rows
+        .iter()
+        .map(|r| TaskRowItem {
+            id: r.id.as_str().into(),
+            id8: r.id8.as_str().into(),
+            title: r.title.as_str().into(),
+            state: r.state.into(),
+            attempts: r.attempts.as_str().into(),
+            can_cancel: r.can_cancel,
+            cancel_hint: r.cancel_hint.as_str().into(),
+        })
+        .collect();
+    TaskPanelItem {
+        lane: p.lane as i32,
+        rows: ModelRc::from(Rc::new(VecModel::from(rows))),
+        more: p.more,
+        status: p.status.as_str().into(),
+        status_ok: p.status_ok,
+    }
 }

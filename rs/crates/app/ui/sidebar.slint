@@ -20,7 +20,7 @@
 // self-contained — no new app-level wiring.
 
 import { Theme } from "theme.slint";
-import { ProjectItem, LaneItem, WorktreeRow, ClaudeSessionItem, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
+import { ProjectItem, LaneItem, TaskPanelItem, WorktreeRow, ClaudeSessionItem, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 
 // "+" quick-pane glyph (two crossed bars — font-independent). `bar` sets the cross size
 // (13px rail default; smaller for inline/submenu buttons like the PROJECTS-header ＋).
@@ -428,6 +428,99 @@ component ClaudeSessionRowView inherits Rectangle {
 // One project node in the tree: a collapsible header (chevron + dot + name) plus, when
 // expanded, its worktree rows. Left-click the name opens the repo; the chevron toggles;
 // right-click pops the recolor/rename/remove menu.
+// The task list under a project / "Other queues" lane block (#8): rows (id8, title, state,
+// attempts, Cancel), a status line (the action toast), Purge terminal, Show more, Close.
+component TaskPanelView inherits VerticalLayout {
+    in property <TaskPanelItem> panel;
+    in property <int> indent: 26;
+    callback purge();
+    callback cancel(string);
+    callback more();
+    callback close();
+
+    spacing: 1px;
+    padding-left: root.indent * 1px;
+    padding-right: 8px;
+    padding-top: 2px;
+    padding-bottom: 2px;
+
+    HorizontalLayout {
+        height: 20px;
+        spacing: 8px;
+        Rectangle {
+            horizontal-stretch: 1;
+            Text {
+                x: 0;
+                text: root.panel.status;
+                color: root.panel.status-ok ? Theme.subtext : #e5484d;
+                font-size: 10px;
+                vertical-alignment: center;
+                overflow: elide;
+                width: parent.width;
+            }
+        }
+        Rectangle {
+            width: pt.preferred-width + 10px;
+            border-radius: 4px;
+            background: pta.has-hover ? Theme.surface2 : transparent;
+            pt := Text { text: "Purge terminal"; color: Theme.text; font-size: 10px; vertical-alignment: center; horizontal-alignment: center; }
+            pta := TouchArea { mouse-cursor: pointer; clicked => { root.purge(); } }
+        }
+        Rectangle {
+            width: ct.preferred-width + 10px;
+            border-radius: 4px;
+            background: cta.has-hover ? Theme.surface2 : transparent;
+            ct := Text { text: "Close"; color: Theme.subtext; font-size: 10px; vertical-alignment: center; horizontal-alignment: center; }
+            cta := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+        }
+    }
+    if root.panel.rows.length == 0 : Text {
+        text: "No tasks";
+        color: Theme.subtext.with-alpha(0.5);
+        font-size: 10px;
+        height: 16px;
+    }
+    for t in root.panel.rows : HorizontalLayout {
+        height: 18px;
+        spacing: 6px;
+        Text { text: t.id8; color: Theme.subtext; font-size: 10px; vertical-alignment: center; }
+        Text { text: t.title; color: Theme.text; font-size: 10px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+        Text { text: t.state; color: Theme.subtext; font-size: 10px; vertical-alignment: center; }
+        Text { text: t.attempts; color: Theme.subtext; font-size: 10px; vertical-alignment: center; }
+        Rectangle {
+            width: 44px;
+            border-radius: 4px;
+            background: (t.can-cancel && xta.has-hover) ? Theme.surface2 : transparent;
+            Text {
+                text: "Cancel";
+                color: t.can-cancel ? Theme.text : Theme.subtext.with-alpha(0.4);
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            xta := TouchArea {
+                mouse-cursor: t.can-cancel ? pointer : default;
+                clicked => { if (t.can-cancel) { root.cancel(t.id); } }
+            }
+            // tooltip explaining a disabled Cancel (queued tasks have no cancel verb)
+            if !t.can-cancel && xta.has-hover : Rectangle {
+                x: -200px;
+                y: -22px;
+                width: 240px;
+                height: 20px;
+                background: Theme.surface2;
+                border-radius: 4px;
+                Text { text: t.cancel-hint; color: Theme.text; font-size: 9px; vertical-alignment: center; horizontal-alignment: center; overflow: elide; width: parent.width; }
+            }
+        }
+    }
+    if root.panel.more : Rectangle {
+        height: 18px;
+        Text { text: "Show more"; color: Theme.subtext; font-size: 10px; vertical-alignment: center; }
+        TouchArea { mouse-cursor: pointer; clicked => { root.more(); } }
+    }
+}
+
 component ProjectRow inherits Rectangle {
     in property <ProjectItem> proj;
     // This project's recent Claude Code sessions (newest-first), rendered as a collapsible
@@ -441,6 +534,7 @@ component ProjectRow inherits Rectangle {
     callback resume-session(string);         // resume Claude session <id> in a new pane
     callback segment-changed(int);           // Worktrees|History segment picked (0 / 1)
     callback query-edited(string);           // history search text edited
+    callback task-action(int, string);       // (kind, arg): lane click / purge / cancel / more / close (#8)
 
     property <bool> expanded: false;
 
@@ -568,23 +662,34 @@ component ProjectRow inherits Rectangle {
             // ---- task lanes by state (#7): one dim-when-zero row per state ----
             if root.proj.lanes.length > 0 : VerticalLayout {
                 spacing: 1px;
-                for l in root.proj.lanes : HorizontalLayout {
-                    padding-left: 26px;
-                    padding-right: 8px;
+                for l[li] in root.proj.lanes : Rectangle {
                     height: 18px;
-                    Text {
-                        text: l.label;
-                        color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.subtext;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+                    background: root.proj.panel.lane == li ? Theme.surface2 : (lta.has-hover ? Theme.surface2.with-alpha(0.5) : transparent);
+                    lta := TouchArea { mouse-cursor: pointer; clicked => { root.task-action(0, li); } }
+                    HorizontalLayout {
+                        padding-left: 26px;
+                        padding-right: 8px;
+                        Text {
+                            text: l.label;
+                            color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.subtext;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: l.count;
+                            color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.text;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
                     }
-                    Text {
-                        text: l.count;
-                        color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.text;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
+                }
+                if root.proj.panel.lane >= 0 : TaskPanelView {
+                    panel: root.proj.panel;
+                    purge => { root.task-action(1, ""); }
+                    cancel(id) => { root.task-action(2, id); }
+                    more => { root.task-action(3, ""); }
+                    close => { root.task-action(4, ""); }
                 }
             }
 
@@ -763,6 +868,8 @@ export component SidebarRail inherits Rectangle {
     // Task count of the work queues that map to no project ("" = hidden; see project_queue.rs).
     in property <string> other-queue-badge;
     in property <[LaneItem]> other-lanes;
+    in property <TaskPanelItem> other-panel;
+    callback task-action(int, int, string);   // (project row / -1 = Other, kind, arg) (#8)
     in property <bool> projects-open: false;
     callback new-pane();
     callback open-new-pane();   // Shift+click → open the New Pane options dialog
@@ -1077,6 +1184,7 @@ export component SidebarRail inherits Rectangle {
                         recolor(s) => { root.recolor-project(i, s); }
                         rename(t) => { root.rename-project(i, t); }
                         remove => { root.remove-project(i); }
+                        task-action(k, a) => { root.task-action(i, k, a); }
                         resume-session(id) => { root.resume-session(i, id); }
                         // History-UI edits go through the polled `HistoryUi` global (the
                         // controller folds them into its per-project map keyed by path) —
@@ -1140,23 +1248,35 @@ export component SidebarRail inherits Rectangle {
                         }
                         if root.other-lanes.length > 0 : VerticalLayout {
                             spacing: 1px;
-                            for l in root.other-lanes : HorizontalLayout {
-                                padding-left: 18px;
-                                padding-right: 8px;
+                            for l[li] in root.other-lanes : Rectangle {
                                 height: 18px;
-                                Text {
-                                    text: l.label;
-                                    color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.subtext;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
+                                background: root.other-panel.lane == li ? Theme.surface2 : (olta.has-hover ? Theme.surface2.with-alpha(0.5) : transparent);
+                                olta := TouchArea { mouse-cursor: pointer; clicked => { root.task-action(-1, 0, li); } }
+                                HorizontalLayout {
+                                    padding-left: 18px;
+                                    padding-right: 8px;
+                                    Text {
+                                        text: l.label;
+                                        color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.subtext;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: l.count;
+                                        color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.text;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
                                 }
-                                Text {
-                                    text: l.count;
-                                    color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.text;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
+                            }
+                            if root.other-panel.lane >= 0 : TaskPanelView {
+                                indent: 18;
+                                panel: root.other-panel;
+                                purge => { root.task-action(-1, 1, ""); }
+                                cancel(id) => { root.task-action(-1, 2, id); }
+                                more => { root.task-action(-1, 3, ""); }
+                                close => { root.task-action(-1, 4, ""); }
                             }
                         }
                     }

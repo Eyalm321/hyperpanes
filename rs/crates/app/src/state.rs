@@ -1078,6 +1078,9 @@ pub struct State {
         std::collections::HashMap<String, hyperpanes_core::control::work::Counts>,
     /// Per-state counts of the unmapped queues; `None` = there are none.
     pub other_lane_counts: Option<hyperpanes_core::control::work::Counts>,
+    /// The open per-project task list (#8), if a lane was clicked. Refreshed by the control
+    /// host from the in-process work queue.
+    pub task_panel: Option<crate::task_list::TaskPanel>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
     /// itself is gated by `settings.show_sidebar`; this is just the flyout panel state.
     pub sidebar_open: bool,
@@ -1281,6 +1284,7 @@ impl State {
             other_queue_count: 0,
             project_lane_counts: std::collections::HashMap::new(),
             other_lane_counts: None,
+            task_panel: None,
             goal_orchestrators: std::collections::HashMap::new(),
             goal_orch_models: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
@@ -3327,6 +3331,46 @@ impl State {
             self.other_lane_counts = other;
             self.dirty = true;
         }
+    }
+
+    /// Handle a task-panel intent from the sidebar (#8). `scope_idx` is the project row (-1 =
+    /// "Other queues"); `kind` 0 = lane click (`arg` = lane index; same lane again closes),
+    /// 1 = purge terminal, 2 = cancel task `arg`, 3 = show more, 4 = close. Only records the
+    /// intent: the control host runs it against the in-process queue on its next tick.
+    pub fn task_panel_command(&mut self, scope_idx: i32, kind: i32, arg: &str) {
+        use crate::task_list::{PendingAction, TaskPanel, TaskScope};
+        let scope = if scope_idx < 0 {
+            TaskScope::Other
+        } else if let Some(p) = self.projects.get(scope_idx as usize) {
+            TaskScope::Project(p.id.clone())
+        } else {
+            return;
+        };
+        match kind {
+            0 => {
+                let lane = arg.parse::<usize>().unwrap_or(0);
+                let same = self
+                    .task_panel
+                    .as_ref()
+                    .is_some_and(|p| p.scope == scope && p.lane == lane);
+                self.task_panel = if same {
+                    None
+                } else {
+                    Some(TaskPanel::open(scope, lane))
+                };
+            }
+            1..=3 => {
+                if let Some(p) = self.task_panel.as_mut().filter(|p| p.scope == scope) {
+                    match kind {
+                        1 => p.pending = Some(PendingAction::Purge),
+                        2 => p.pending = Some(PendingAction::Cancel(arg.to_string())),
+                        _ => p.show_more(),
+                    }
+                }
+            }
+            _ => self.task_panel = None,
+        }
+        self.dirty = true;
     }
 
     /// The cached project rows as `(name, color)` for the flyout.
