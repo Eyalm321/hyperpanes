@@ -16,6 +16,7 @@ fn pane(id: &str, uid: &str) -> PaneInfo {
         label: "shell".to_string(),
         subtitle: None,
         talk: false,
+        env: None,
         color: "#888888".to_string(),
         command: None,
         args: None,
