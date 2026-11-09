@@ -39,6 +39,7 @@ mod pair;
 mod palette;
 mod paneview;
 mod prefs;
+mod project_queue;
 mod remote;
 mod remote_hosts;
 mod sidebar;

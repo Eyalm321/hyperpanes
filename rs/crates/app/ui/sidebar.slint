@@ -516,6 +516,29 @@ component ProjectRow inherits Rectangle {
                     overflow: elide;
                 }
 
+                // task-count chip (queued + claimed work-queue tasks of this project)
+                if root.proj.queue-badge != "" : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        min-width: 18px;
+                        height: 15px;
+                        border-radius: 7px;
+                        background: Theme.accent;
+                        HorizontalLayout {
+                            padding-left: 5px;
+                            padding-right: 5px;
+                            Text {
+                                text: root.proj.queue-badge;
+                                color: Theme.bg;
+                                font-size: 9px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
                 // worktree count chip
                 if root.proj.worktrees.length > 1 : VerticalLayout {
                     alignment: center;

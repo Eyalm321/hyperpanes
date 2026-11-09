@@ -191,6 +191,8 @@ export struct ProjectItem {
     // The current history search query (persisted alongside `segment`); restores the search
     // box text when the row is recreated.
     query: string,
+    // Non-terminal work-queue task count badge text ("" = hidden), see project_queue.rs.
+    queue-badge: string,
 }
 
 // ===== reminder panes (Track F) =====

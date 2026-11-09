@@ -62,7 +62,17 @@ plus the lease fields (`claimedBy, fencingToken, visibilityDeadline, result, err
   cover the queue. The project-registry side already has the analogue — a write flips the GUI
   host's dirty flag via `mark_projects_dirty()` — so #9 follows that pattern for queue mutations.
 
-## How queues map to projects today
+## How queues map to projects
+
+A queue belongs to a registered project when its name **equals the project's `id`** or
+starts with **`<project id>:`** (a sub-queue, e.g. `<id>:g1`). If several ids match, the
+longest wins. Queues that map to no project are not shown. Implemented once, as the pure
+`project_for_queue` in `rs/crates/app/src/project_queue.rs`, which #6–#9 all reuse.
+`hyperpanes worker` defaults `--queue` to the id of the project whose git root contains
+the cwd. The sidebar badge (#6) is the sum of queued + claimed tasks across a project's
+queues, polled in-process from the work queue at ~1 Hz (#9 replaces polling with events).
+
+## How queues map to projects (background)
 
 There is **no hard link** in the schema. A `Task` owns an opaque `queue` namespace string and
 an opaque `payload`; a `Project` owns `{ id, path, name, color, lastOpenedAt }`. The queue core

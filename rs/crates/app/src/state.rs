@@ -1068,6 +1068,9 @@ pub struct State {
     pub preview_tetris_last: Instant,
     /// Cached, newest-first git-project list for the sidebar rail.
     pub projects: Vec<Project>,
+    /// Non-terminal (queued + claimed) work-queue task count per project id, polled from the
+    /// in-process queue by the control host (#6). Missing = 0 = no badge.
+    pub project_queue_counts: std::collections::HashMap<String, usize>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
     /// itself is gated by `settings.show_sidebar`; this is just the flyout panel state.
     pub sidebar_open: bool,
@@ -1267,6 +1270,7 @@ impl State {
             // Seed the rail's badge with the remembered projects up front (so the count
             // is right before any pane reports a cwd).
             projects: sidebar::list(),
+            project_queue_counts: std::collections::HashMap::new(),
             goal_orchestrators: std::collections::HashMap::new(),
             goal_orch_models: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
@@ -3286,6 +3290,14 @@ impl State {
     pub fn refresh_projects(&mut self) {
         self.projects = sidebar::list();
         self.dirty = true;
+    }
+
+    /// Store freshly polled per-project queue counts; dirties the UI only on a change.
+    pub fn set_project_queue_counts(&mut self, counts: std::collections::HashMap<String, usize>) {
+        if self.project_queue_counts != counts {
+            self.project_queue_counts = counts;
+            self.dirty = true;
+        }
     }
 
     /// The cached project rows as `(name, color)` for the flyout.

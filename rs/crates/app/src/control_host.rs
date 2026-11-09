@@ -166,6 +166,8 @@ pub struct ControlHost {
     runtime: Handle,
     /// The running server's shared state (`None` when stopped).
     shared: RefCell<Option<Arc<Shared>>>,
+    /// When the work queue was last polled for the sidebar badge (#6).
+    queue_polled: std::cell::Cell<Option<std::time::Instant>>,
     /// The serve task handle (aborted on stop).
     task: RefCell<Option<JoinHandle<std::io::Result<()>>>>,
     /// The activity-ticker task handle (aborted on stop — it would otherwise loop forever holding
@@ -224,6 +226,7 @@ impl ControlHost {
             // handle is always available here.
             runtime: Handle::current(),
             shared: RefCell::new(None),
+            queue_polled: std::cell::Cell::new(None),
             task: RefCell::new(None),
             ticker: RefCell::new(None),
             reaper: RefCell::new(None),
@@ -599,6 +602,24 @@ impl ControlHost {
         if shared.take_projects_dirty() {
             for w in windows {
                 w.state.borrow_mut().refresh_projects();
+            }
+        }
+
+        // 5b. Per-project task-count badge (#6): poll the in-process work queue at ~1 Hz (cheap
+        //     SQLite count query; no HTTP hop) and push the mapped counts into every window.
+        {
+            let due = self
+                .queue_polled
+                .get()
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
+            if due {
+                self.queue_polled.set(Some(std::time::Instant::now()));
+                let queues = shared.work.lock().map(|w| w.queues()).unwrap_or_default();
+                for w in windows {
+                    let mut st = w.state.borrow_mut();
+                    let counts = crate::project_queue::project_open_counts(&queues, &st.projects);
+                    st.set_project_queue_counts(counts);
+                }
             }
         }
 

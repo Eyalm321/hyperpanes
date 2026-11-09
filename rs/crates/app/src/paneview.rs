@@ -941,6 +941,14 @@ pub fn resync(
                 has_history,
                 segment,
                 query: query.into(),
+                queue_badge: crate::project_queue::badge_text(
+                    state
+                        .project_queue_counts
+                        .get(&proj.id)
+                        .copied()
+                        .unwrap_or(0),
+                )
+                .into(),
             }
         })
         .collect();
