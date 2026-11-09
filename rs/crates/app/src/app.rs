@@ -478,7 +478,16 @@ impl App {
                     // Claude Code's image-paste key (Ctrl+V; Alt+V on Windows). The paths are
                     // already in the text above, so this is additive — if Claude's clipboard-image
                     // paste isn't available the goal still carries the paths.
-                    for img in &g.images {
+                    // Never into a remote pane: Claude there reads the HOST's clipboard.
+                    let remote = crate::remote::is_remote_uid(&g.uid);
+                    let images: &[_] = if crate::image_paste::image_key_action(remote)
+                        == crate::image_paste::NoTextPaste::ForwardImageKey
+                    {
+                        &g.images
+                    } else {
+                        &[]
+                    };
+                    for img in images {
                         if set_clipboard_image_from_file(img) {
                             std::thread::sleep(Duration::from_millis(150));
                             crate::remote::write(

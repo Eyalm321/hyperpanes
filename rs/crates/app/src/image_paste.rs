@@ -5,13 +5,17 @@
 
 use hyperpanes_terminal_widget::clipboard::ImageProbe;
 
-/// What Ctrl+V does when the clipboard holds no TEXT.
+/// What an image-paste gesture does for a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoTextPaste {
     /// Swallow the key (nothing useful to paste).
     Nothing,
     /// Send the platform's image-paste key to the pane.
     ForwardImageKey,
+    /// The pane is REMOTE: tell the user image paste isn't supported there and send nothing.
+    /// Claude Code reads the image from the clipboard of the machine it runs on (the host), and
+    /// this client's OS would pick the key (ESC v from Windows to a Linux host expecting 0x16).
+    RemoteUnsupported,
 }
 
 /// The bytes that trigger "paste image from clipboard" in the in-pane TUI for `target_os`
@@ -31,8 +35,16 @@ pub fn image_paste_sequence_native() -> &'static str {
     image_paste_sequence(std::env::consts::OS)
 }
 
-/// Decide what Ctrl+V does when the clipboard has no text.
-pub fn no_text_paste_action(target_os: &str, probe: ImageProbe) -> NoTextPaste {
+/// Decide what Ctrl+V does when the clipboard has no text. A remote pane never gets the
+/// image-paste key: an image (or an undecidable probe) there is reported as unsupported, an
+/// empty clipboard stays silent.
+pub fn no_text_paste_action(target_os: &str, probe: ImageProbe, is_remote: bool) -> NoTextPaste {
+    if is_remote {
+        return match probe {
+            ImageProbe::Absent => NoTextPaste::Nothing,
+            ImageProbe::Image | ImageProbe::Unknown => NoTextPaste::RemoteUnsupported,
+        };
+    }
     match probe {
         ImageProbe::Image => NoTextPaste::ForwardImageKey,
         ImageProbe::Absent => NoTextPaste::Nothing,
@@ -41,6 +53,16 @@ pub fn no_text_paste_action(target_os: &str, probe: ImageProbe) -> NoTextPaste {
         // quoted-insert in bash, so stay silent.
         ImageProbe::Unknown if target_os == "windows" => NoTextPaste::ForwardImageKey,
         ImageProbe::Unknown => NoTextPaste::Nothing,
+    }
+}
+
+/// The explicit image-paste gestures (the Alt+V binding, the goal-start image re-paste): forward
+/// the image-paste key to a local pane; a remote pane gets the unsupported toast instead.
+pub fn image_key_action(is_remote: bool) -> NoTextPaste {
+    if is_remote {
+        NoTextPaste::RemoteUnsupported
+    } else {
+        NoTextPaste::ForwardImageKey
     }
 }
 
@@ -60,12 +82,42 @@ mod tests {
         use ImageProbe::*;
         use NoTextPaste::*;
         for os in ["linux", "macos", "windows"] {
-            assert_eq!(no_text_paste_action(os, Image), ForwardImageKey, "{os}");
-            assert_eq!(no_text_paste_action(os, Absent), Nothing, "{os}");
+            assert_eq!(
+                no_text_paste_action(os, Image, false),
+                ForwardImageKey,
+                "{os}"
+            );
+            assert_eq!(no_text_paste_action(os, Absent, false), Nothing, "{os}");
         }
         // Unknown (probe failed, e.g. an undecodable Windows DIB): only Windows forwards.
-        assert_eq!(no_text_paste_action("windows", Unknown), ForwardImageKey);
-        assert_eq!(no_text_paste_action("linux", Unknown), Nothing);
-        assert_eq!(no_text_paste_action("macos", Unknown), Nothing);
+        assert_eq!(
+            no_text_paste_action("windows", Unknown, false),
+            ForwardImageKey
+        );
+        assert_eq!(no_text_paste_action("linux", Unknown, false), Nothing);
+        assert_eq!(no_text_paste_action("macos", Unknown, false), Nothing);
+    }
+
+    #[test]
+    fn a_remote_pane_never_gets_the_image_paste_key() {
+        use ImageProbe::*;
+        use NoTextPaste::*;
+        // The image lives on THIS machine's clipboard; Claude reads the host's. And the key
+        // would be chosen by this client's OS, not the host's.
+        for os in ["linux", "macos", "windows"] {
+            assert_eq!(
+                no_text_paste_action(os, Image, true),
+                RemoteUnsupported,
+                "{os}"
+            );
+            assert_eq!(
+                no_text_paste_action(os, Unknown, true),
+                RemoteUnsupported,
+                "{os}"
+            );
+            assert_eq!(no_text_paste_action(os, Absent, true), Nothing, "{os}");
+        }
+        assert_eq!(image_key_action(true), RemoteUnsupported);
+        assert_eq!(image_key_action(false), ForwardImageKey);
     }
 }

@@ -4195,19 +4195,24 @@ impl State {
         // send the platform's image-paste key so an in-pane TUI that reads the OS clipboard
         // itself (e.g. Claude Code) can pull the image; the pty can't carry image bytes.
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
+            let uid = p.uid.clone();
             let probe = p.pane.clipboard_image_probe();
-            if crate::image_paste::no_text_paste_action(std::env::consts::OS, probe)
-                == crate::image_paste::NoTextPaste::ForwardImageKey
-            {
-                let uid = p.uid.clone();
-                if crate::remote::is_remote_uid(&uid) {
+            let remote = crate::remote::is_remote_uid(&uid);
+            match crate::image_paste::no_text_paste_action(std::env::consts::OS, probe, remote) {
+                crate::image_paste::NoTextPaste::Nothing => {}
+                crate::image_paste::NoTextPaste::RemoteUnsupported => {
                     p.pane.set_toast(crate::remote::IMAGE_PASTE_UNSUPPORTED);
                     self.dirty = true;
-                    return;
                 }
-                p.pane.set_toast("Pasting image…");
-                crate::remote::write(mgr, &uid, crate::image_paste::image_paste_sequence_native());
-                self.dirty = true;
+                crate::image_paste::NoTextPaste::ForwardImageKey => {
+                    p.pane.set_toast("Pasting image…");
+                    crate::remote::write(
+                        mgr,
+                        &uid,
+                        crate::image_paste::image_paste_sequence_native(),
+                    );
+                    self.dirty = true;
+                }
             }
         }
     }
@@ -4267,12 +4272,16 @@ impl State {
     /// Forward the platform's image-paste key (Ctrl+V 0x16, or Alt+V on Windows) to pane `idx` so an in-pane TUI that reads the
     /// OS clipboard itself (e.g. Claude Code) can paste a clipboard IMAGE — which hyperpanes'
     /// own text paste can't deliver through the pty. Bound to Alt+V, the shortcut Claude Code
-    /// documents for "your terminal intercepts Ctrl+V". Unconditional (the user knows there's an
-    /// image): the app simply lets the focused program resolve the clipboard.
+    /// documents for "your terminal intercepts Ctrl+V". Unconditional for a local pane (the user
+    /// knows there's an image): the app lets the focused program resolve the clipboard. A remote
+    /// pane gets a toast instead (see [`crate::image_paste::image_key_action`]).
     pub fn paste_image_focused(&mut self, idx: usize, mgr: &SessionManager) {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             let uid = p.uid.clone();
-            if crate::remote::is_remote_uid(&uid) {
+            let remote = crate::remote::is_remote_uid(&uid);
+            if crate::image_paste::image_key_action(remote)
+                == crate::image_paste::NoTextPaste::RemoteUnsupported
+            {
                 p.pane.set_toast(crate::remote::IMAGE_PASTE_UNSUPPORTED);
                 self.dirty = true;
                 return;
