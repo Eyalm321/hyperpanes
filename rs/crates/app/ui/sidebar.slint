@@ -154,7 +154,15 @@ component ProjectMenu inherits PopupWindow {
                         font-size: 12px;
                         vertical-alignment: center;
                         single-line: true;
-                        init => { ri.select-all(); ri.focus(); }
+                        // Mount focus, one turn late: never focus() in `init` (trcrash; see widget.slint).
+                        Timer {
+                            interval: 0ms;
+                            triggered => {
+                                self.running = false;
+                                ri.select-all();
+                                ri.focus();
+                            }
+                        }
                         accepted => { root.rename(self.text); root.close(); }
                     }
                 }
@@ -1168,9 +1176,16 @@ export component SidebarRail inherits Rectangle {
             }
 
             // key handling: grabs focus when the popup appears (the `if` recreates this on
-            // each show, so `init` re-fires), traps Esc → cancel / Enter → confirm.
+            // each show, so the mount Timer re-fires), traps Esc → cancel / Enter → confirm.
             fs := FocusScope {
-                init => { fs.focus(); }
+                // Mount focus, one turn late: never focus() in `init` (trcrash; see widget.slint).
+                Timer {
+                    interval: 0ms;
+                    triggered => {
+                        self.running = false;
+                        fs.focus();
+                    }
+                }
                 key-pressed(e) => {
                     if (e.text == Key.Escape) {
                         root.wt-del-visible = false;

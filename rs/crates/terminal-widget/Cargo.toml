@@ -62,6 +62,10 @@ png = "0.17"
 # Headless Slint platform for pointer-dispatch regression tests (tests/pointer_press.rs):
 # pins that the pane's FocusScope can't swallow the first press. Same upstream rev as `slint`.
 i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae" }
+# Internal Slint core API (`WindowAdapterInternal`, `WindowInner::ensure_tree_instantiated`) for
+# tests/focus_reentrancy.rs, which stands in for the winit backend's AccessKit adapter to pin
+# that no focus change runs inside an accessibility tree build. Same upstream rev as `slint`.
+i-slint-core = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae" }
 
 [build-dependencies]
 slint-build = { git = "https://github.com/slint-ui/slint", rev = "9463a107aeb5f5021c162e82c55977c5333229ae" }

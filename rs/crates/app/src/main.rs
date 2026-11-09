@@ -29,6 +29,8 @@ mod crash;
 mod dbus;
 mod devices;
 mod drag;
+#[cfg(test)]
+mod focus_reentrancy_tests;
 mod glow;
 mod history_scan;
 mod keybindings;

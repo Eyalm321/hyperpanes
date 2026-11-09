@@ -231,14 +231,45 @@ export component TerminalPane inherits Rectangle {
     // created element, which doesn't reliably land in Slint): opening focuses the query, closing
     // hands focus back to the terminal, and a re-invoke (`search-focus-tick`) re-focuses it even
     // when the box was already open.
-    changed search-open => {
-        if (root.search-open) { query.focus(); } else { fs.focus(); }
+    //
+    // NEVER call `focus()` synchronously in a `changed` handler (or an `init`). Slint runs
+    // pending change handlers from INSIDE AccessKit's accessibility-tree build (`build_new_tree`
+    // → `ensure_tree_instantiated`) while the winit adapter holds its AccessKit `RefCell`; a
+    // focus change there re-borrows it → `RefCell already borrowed` panic whenever an AT-SPI
+    // client is listening (goal trcrash: cancelling the New goal box). Each handler only ARMS a
+    // 0 ms single-fire Timer; its `triggered` moves focus on the next event-loop turn, outside
+    // any borrow. Pinned by tests/focus_reentrancy.rs + the app's tests/slint_focus_guard.rs.
+    changed search-open => { search-open-focus.running = true; }
+    search-open-focus := Timer {
+        interval: 0ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.search-open) { query.focus(); } else { fs.focus(); }
+        }
     }
-    changed search-focus-tick => { if (root.search-open) { query.focus(); } }
-    // Bumped when a keyboard-driven overlay (the New-goal box) opens: re-focus the terminal
-    // FocusScope so its `key-pressed` routes keys to `on_key` (and thence to the overlay's
-    // controller-owned-mirror handler). Skipped while the in-pane search box owns the keyboard.
-    changed refocus-tick => { if (!root.search-open) { fs.focus(); } }
+    changed search-focus-tick => { search-query-focus.running = true; }
+    search-query-focus := Timer {
+        interval: 0ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.search-open) { query.focus(); }
+        }
+    }
+    // Bumped when a keyboard-driven overlay (the New-goal box) opens or closes: re-focus the
+    // terminal FocusScope so its `key-pressed` routes keys to `on_key` (and thence to the
+    // overlay's controller-owned-mirror handler). Skipped while the in-pane search box owns the
+    // keyboard. Deferred like the two above — this is the handler the trcrash panic ran.
+    changed refocus-tick => { terminal-refocus.running = true; }
+    terminal-refocus := Timer {
+        interval: 0ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (!root.search-open) { fs.focus(); }
+        }
+    }
 
     // The terminal surface (texture or pixel buffer), clipped to the rounded rect.
     //
@@ -692,6 +723,10 @@ export struct PaneVisual {
     search-rects: [HiRect],
     search-active-on: bool,
     search-active-rect: HiRect,
+    // focus ticks (bump to re-focus the query / the terminal scope), mirroring the app's
+    // per-pane `search-focus-seq` / `refocus-seq` (tests/focus_reentrancy.rs drives these).
+    search-focus-tick: int,
+    refocus-tick: int,
 }
 
 export component DemoWindow inherits Window {
@@ -755,6 +790,8 @@ export component DemoWindow inherits Window {
             search-rects: pane.search-rects;
             search-active-on: pane.search-active-on;
             search-active-rect: pane.search-active-rect;
+            search-focus-tick: pane.search-focus-tick;
+            refocus-tick: pane.refocus-tick;
             focus-requested => { root.focus-requested(idx); }
             key(m) => { root.key(idx, m); }
             geometry-changed(w, h) => { root.geometry-changed(idx, w, h); }

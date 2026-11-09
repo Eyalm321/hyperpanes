@@ -507,7 +507,14 @@ export component ContextMenu inherits Rectangle {
                                         font-size: 12px;
                                         vertical-alignment: center;
                                         single-line: true;
-                                        init => { self.focus(); }
+                                        // Mount focus, one turn late: never focus() in `init` (trcrash; see widget.slint).
+                                        Timer {
+                                            interval: 0ms;
+                                            triggered => {
+                                                self.running = false;
+                                                ci.focus();
+                                            }
+                                        }
                                         edited => { crow.parsed = ReminderCustom.parse-minutes(self.text); }
                                         accepted => {
                                             if (crow.parsed > 0) {

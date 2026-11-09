@@ -85,7 +85,17 @@ export component NewGoalDialog inherits Rectangle {
     // `key-pressed` forwards only the nav/options/submit/dismiss keys to `goal_key`. Focus is
     // grabbed on mount, on `focus-tick`, and on every click (the reliable path in Slint).
     forward-focus: gi;
-    changed focus-tick => { gi.focus(); }
+    // Deferred a turn: never focus() synchronously in a change handler — it can run inside
+    // AccessKit's tree build and panic (see widget.slint, goal trcrash).
+    changed focus-tick => { gi-focus.running = true; }
+    gi-focus := Timer {
+        interval: 0ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            gi.focus();
+        }
+    }
     changed settext-tick => { gi.text = root.settext-value; }
 
     // Click outside the card dismisses (the card is a later sibling, so its area hit-tests first).

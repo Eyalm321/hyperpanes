@@ -2312,6 +2312,7 @@ dependencies = [
  "arboard",
  "hyperpanes-core",
  "hyperpanes-terminal-widget",
+ "i-slint-core",
  "image",
  "libc",
  "objc2 0.6.4",

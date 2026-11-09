@@ -28,7 +28,14 @@ component ApInput inherits Rectangle {
             font-size: 13px;
             vertical-alignment: center;
             single-line: true;
-            init => { ti.focus(); }
+            // Mount focus, one turn late: never focus() in `init` (trcrash; see widget.slint).
+            Timer {
+                interval: 0ms;
+                triggered => {
+                    self.running = false;
+                    ti.focus();
+                }
+            }
             key-pressed(e) => {
                 if (e.text == Key.Return) { root.submit(); return EventResult.accept; }
                 if (e.text == Key.Escape) { root.escape(); return EventResult.accept; }

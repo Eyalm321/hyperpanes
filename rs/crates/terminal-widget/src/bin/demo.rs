@@ -123,6 +123,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             search_rects: ModelRc::new(VecModel::default()),
             search_active_on: false,
             search_active_rect: HiRect::default(),
+            search_focus_tick: 0,
+            refocus_tick: 0,
         });
     }
     app.set_panes(ModelRc::from(model.clone()));
