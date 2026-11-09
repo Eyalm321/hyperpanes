@@ -267,6 +267,7 @@ fn spawn_seed_pane(
         status: PaneStatus::Running,
         exit_code: None,
         meta: ps.meta.clone().filter(|m| !m.is_empty()),
+        env: None,
         talk: false,
     }
 }
