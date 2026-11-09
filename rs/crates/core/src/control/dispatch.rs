@@ -737,33 +737,18 @@ fn respawn_resuming(
     // The account-rotation path uses this to respawn a pane under a different
     // `CLAUDE_CONFIG_DIR` when its Claude account hits a limit, while still resuming the
     // conversation (transcripts are on a shared store).
-    let mut env_override = env_field.and_then(Value::as_object).map(|o| {
+    let explicit_env = env_field.and_then(Value::as_object).map(|o| {
         o.iter()
             .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
             .collect::<EnvMap>()
     });
     // Restore the account (CLAUDE_CONFIG_DIR) the conversation was saved/found under, so
-    // `claude --resume` finds it in the right per-account transcript store. An explicit
-    // `env` override wins (the account-rotation path deliberately moves the pane to a
-    // DIFFERENT account with the same shared-store transcript), so only fill it in when the
-    // caller didn't set it and the target recorded a valid dir.
+    // `claude --resume` finds it in the right per-account transcript store.
     let resume_config_dir = target
         .config_dir
         .as_deref()
         .filter(|d| crate::claude_panes::valid_config_dir(d));
-    if let Some(dir) = resume_config_dir {
-        let already_set = env_override
-            .as_ref()
-            .is_some_and(|e| e.contains_key("CLAUDE_CONFIG_DIR"));
-        if !already_set {
-            env_override
-                .get_or_insert_with(EnvMap::default)
-                .insert("CLAUDE_CONFIG_DIR".to_string(), dir.to_string());
-        }
-    }
-    // Layer under the env the pane was spawned with (stored ⊕ override; override keys win, so
-    // precedence is explicit env > resume target's config dir > stored spawn env).
-    let env_override = merge_env(pane.env.as_ref(), env_override);
+    let env_override = resume_env(pane.env.as_ref(), explicit_env, resume_config_dir);
     // The account the effective env resolved to (explicit `env` override wins over the
     // target's) — captured before `env_override` moves into `SpawnOptions`, for the typed
     // shell-pane resume line below. Empty ⇒ the default account.
@@ -825,6 +810,29 @@ fn respawn_resuming(
         crate::resume_queue::enqueue(&target.session_id, p)?;
     }
     Ok(())
+}
+
+/// The env a resumed pane spawns with. Precedence, highest first: the caller's explicit `env`
+/// (the account-rotation path deliberately moves the pane to a DIFFERENT account whose
+/// shared-store transcript it can still resume), then the resume target's recorded
+/// `CLAUDE_CONFIG_DIR` (only when the caller set none), then the env the pane was spawned with.
+/// Every stored key the higher layers don't name survives.
+fn resume_env(
+    stored: Option<&EnvMap>,
+    explicit: Option<EnvMap>,
+    target_config_dir: Option<&str>,
+) -> Option<EnvMap> {
+    let mut over = explicit;
+    if let Some(dir) = target_config_dir {
+        let already_set = over
+            .as_ref()
+            .is_some_and(|e| e.contains_key("CLAUDE_CONFIG_DIR"));
+        if !already_set {
+            over.get_or_insert_with(EnvMap::default)
+                .insert("CLAUDE_CONFIG_DIR".to_string(), dir.to_string());
+        }
+    }
+    merge_env(stored, over)
 }
 
 /// Layer a restart's `env` over the env the pane was spawned with (restart keys win). `None`
@@ -1131,6 +1139,31 @@ mod tests {
         assert_eq!(m["C"], "3");
         assert!(merge_env(None, None).is_none());
         assert_eq!(merge_env(Some(&stored), None).unwrap(), stored);
+    }
+
+    #[test]
+    fn resume_env_rotates_the_account_and_keeps_every_other_stored_key() {
+        let env = |pairs: &[(&str, &str)]| -> EnvMap {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let stored = env(&[("CLAUDE_CONFIG_DIR", "/acct-a"), ("PERSONA_DIR", "/p")]);
+        // Plain resume: the target's recorded account beats the stored one.
+        let e = resume_env(Some(&stored), None, Some("/acct-b")).unwrap();
+        assert_eq!(e["CLAUDE_CONFIG_DIR"], "/acct-b");
+        assert_eq!(e["PERSONA_DIR"], "/p");
+        // Rotation: an explicit env beats both, and the other stored keys survive.
+        let rot = env(&[("CLAUDE_CONFIG_DIR", "/acct-c")]);
+        let e = resume_env(Some(&stored), Some(rot), Some("/acct-b")).unwrap();
+        assert_eq!(e["CLAUDE_CONFIG_DIR"], "/acct-c");
+        assert_eq!(e["PERSONA_DIR"], "/p");
+        // No target dir, no explicit env: the stored env is reused as-is.
+        assert_eq!(resume_env(Some(&stored), None, None).unwrap(), stored);
+        // Nothing stored (a GUI-native pane): only the target's account is set.
+        let e = resume_env(None, None, Some("/acct-b")).unwrap();
+        assert_eq!(e, env(&[("CLAUDE_CONFIG_DIR", "/acct-b")]));
     }
 
     async fn wait_for_output(s: &SessionManager, uid: &str, needle: &str) -> String {
