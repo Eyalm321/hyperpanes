@@ -35,8 +35,9 @@ use crate::remote_hosts::{self, SavedHost};
 use crate::state::{parse_hex, PaneState, State, Tab};
 use crate::theme;
 
-/// Toast for an image paste into a remote pane (requires local files / clipboard on the host).
-pub const IMAGE_PASTE_UNSUPPORTED: &str = "not supported on remote panes";
+/// Toast for an image paste into a remote pane. Claude Code reads the image from the clipboard
+/// of the machine it runs on (the HOST), so this client's clipboard can't reach it.
+pub const IMAGE_PASTE_UNSUPPORTED: &str = "Image paste isn't supported in remote panes yet";
 /// Visible marker prefixed to every remote tab title.
 pub const REMOTE_MARK: &str = "⇄ ";
 

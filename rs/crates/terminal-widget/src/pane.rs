@@ -999,6 +999,11 @@ impl TerminalPane {
         self.clipboard.has_image()
     }
 
+    /// Three-way clipboard image probe (image / definitely none / could not tell).
+    pub fn clipboard_image_probe(&mut self) -> crate::clipboard::ImageProbe {
+        self.clipboard.image_probe()
+    }
+
     /// Pin the viewport back to the live edge (display offset 0) so the cursor is visible at the
     /// end of whatever was just written — e.g. after a paste, regardless of scrollback position.
     pub fn scroll_to_bottom(&mut self) {
