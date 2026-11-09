@@ -4191,13 +4191,14 @@ impl State {
             self.dirty = true;
             return;
         }
-        // No clipboard TEXT: if the clipboard holds an IMAGE, forward a literal Ctrl+V (0x16)
-        // so an in-pane TUI that reads the OS clipboard itself (e.g. Claude Code's image paste)
-        // can pull the image — the pty can't carry image bytes and the widget clipboard wrapper
-        // is text-only. Mirrors the explicit Alt+V gesture (`paste_image_focused`). Today a
-        // Ctrl+V on an image-only clipboard was a silent no-op, so this only adds behavior.
+        // No clipboard TEXT: if the clipboard holds an IMAGE (or we cannot tell, on Windows),
+        // send the platform's image-paste key so an in-pane TUI that reads the OS clipboard
+        // itself (e.g. Claude Code) can pull the image; the pty can't carry image bytes.
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
-            if p.pane.clipboard_has_image() {
+            let probe = p.pane.clipboard_image_probe();
+            if crate::image_paste::no_text_paste_action(std::env::consts::OS, probe)
+                == crate::image_paste::NoTextPaste::ForwardImageKey
+            {
                 let uid = p.uid.clone();
                 if crate::remote::is_remote_uid(&uid) {
                     p.pane.set_toast(crate::remote::IMAGE_PASTE_UNSUPPORTED);
@@ -4205,7 +4206,7 @@ impl State {
                     return;
                 }
                 p.pane.set_toast("Pasting image…");
-                crate::remote::write(mgr, &uid, "\u{16}");
+                crate::remote::write(mgr, &uid, crate::image_paste::image_paste_sequence_native());
                 self.dirty = true;
             }
         }
@@ -4263,7 +4264,7 @@ impl State {
         }
     }
 
-    /// Forward a literal Ctrl+V (0x16) to pane `idx`'s session so an in-pane TUI that reads the
+    /// Forward the platform's image-paste key (Ctrl+V 0x16, or Alt+V on Windows) to pane `idx` so an in-pane TUI that reads the
     /// OS clipboard itself (e.g. Claude Code) can paste a clipboard IMAGE — which hyperpanes'
     /// own text paste can't deliver through the pty. Bound to Alt+V, the shortcut Claude Code
     /// documents for "your terminal intercepts Ctrl+V". Unconditional (the user knows there's an
@@ -4277,7 +4278,7 @@ impl State {
                 return;
             }
             p.pane.set_toast("Pasting image…");
-            crate::remote::write(mgr, &uid, "\u{16}");
+            crate::remote::write(mgr, &uid, crate::image_paste::image_paste_sequence_native());
             self.dirty = true;
         }
     }

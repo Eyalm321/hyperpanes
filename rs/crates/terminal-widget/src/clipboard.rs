@@ -50,12 +50,63 @@ impl Clipboard {
     /// in-pane TUI (e.g. Claude Code) that reads the OS clipboard image itself, since the pty
     /// can't carry image bytes and this wrapper is text-only.
     pub fn has_image(&mut self) -> bool {
-        self.inner.as_mut().is_some_and(|c| c.get_image().is_ok())
+        self.image_probe() == ImageProbe::Image
+    }
+
+    /// Three-way image probe: [`ImageProbe::Image`] (decoded fine), [`ImageProbe::Absent`] (the
+    /// clipboard definitively has no image) or [`ImageProbe::Unknown`] (the read failed for
+    /// another reason: an unavailable handle, a busy clipboard, or an image format that would
+    /// not decode, as happens with some Windows screenshot/snip DIB variants).
+    pub fn image_probe(&mut self) -> ImageProbe {
+        match self.inner.as_mut() {
+            Some(c) => classify_image_read(c.get_image().map(|_| ())),
+            None => ImageProbe::Unknown,
+        }
+    }
+}
+
+/// Outcome of probing the clipboard for an image. See [`Clipboard::image_probe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageProbe {
+    Image,
+    Absent,
+    Unknown,
+}
+
+/// Map an `arboard` image read to an [`ImageProbe`]. Only `ContentNotAvailable` is a definite
+/// "no image"; every other failure leaves the question open.
+pub fn classify_image_read(r: Result<(), arboard::Error>) -> ImageProbe {
+    match r {
+        Ok(()) => ImageProbe::Image,
+        Err(arboard::Error::ContentNotAvailable) => ImageProbe::Absent,
+        Err(_) => ImageProbe::Unknown,
     }
 }
 
 impl Default for Clipboard {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_read_classification() {
+        assert_eq!(classify_image_read(Ok(())), ImageProbe::Image);
+        assert_eq!(
+            classify_image_read(Err(arboard::Error::ContentNotAvailable)),
+            ImageProbe::Absent
+        );
+        assert_eq!(
+            classify_image_read(Err(arboard::Error::ConversionFailure)),
+            ImageProbe::Unknown
+        );
+        assert_eq!(
+            classify_image_read(Err(arboard::Error::ClipboardOccupied)),
+            ImageProbe::Unknown
+        );
     }
 }

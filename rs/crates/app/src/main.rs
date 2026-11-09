@@ -33,6 +33,7 @@ mod drag;
 mod focus_reentrancy_tests;
 mod glow;
 mod history_scan;
+mod image_paste;
 mod keybindings;
 mod pair;
 mod palette;
@@ -1173,6 +1174,27 @@ mod tests {
         assert!(matches!(
             palette_key("", &msg(esc.as_str(), false, false, false)),
             Some(Command::CloseOverlay)
+        ));
+    }
+
+    #[test]
+    fn alt_v_routes_to_paste_image_in_every_text_form() {
+        // Alt+V must resolve whether the platform reports the letter lower- or upper-case.
+        // (U+0016 is Slint's right-Ctrl key code, not a letter, and must never match.)
+        for text in ["v", "V"] {
+            assert!(
+                matches!(
+                    route_chord(&keymap(), &msg(text, false, true, false)),
+                    Some(Command::PasteImageFocused)
+                ),
+                "text {text:?}"
+            );
+        }
+        assert!(route_chord(&keymap(), &msg("\u{16}", false, true, false)).is_none());
+        // Ctrl+V stays the normal paste.
+        assert!(matches!(
+            route_chord(&keymap(), &msg("v", true, false, false)),
+            Some(Command::PasteFocused)
         ));
     }
 
