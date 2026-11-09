@@ -54,6 +54,22 @@ struct CtlFields {
     args: Option<Vec<String>>,
     shell: Option<String>,
     meta: Option<BTreeMap<String, String>>,
+    /// Spawn env (in-memory only; never serialized) so a restart can reuse it.
+    env: Option<hyperpanes_core::session::spawn::EnvMap>,
+}
+
+impl CtlFields {
+    /// The control-owned fields of a model pane, carried across the GUI republish. Includes the
+    /// spawn `env` so a later `restartPane` can reuse it (it is never serialized to clients).
+    fn from_model(c: &ModelPane) -> Self {
+        CtlFields {
+            command: c.command.clone(),
+            args: c.args.clone(),
+            shell: c.shell.clone(),
+            meta: c.meta.clone(),
+            env: c.env.clone(),
+        }
+    }
 }
 
 /// Meta queued for a pane that may not be in the read model yet (see `ControlHost::queue_meta`).
@@ -584,6 +600,7 @@ impl ControlHost {
                     status: PaneStatus::Running,
                     exit_code: None,
                     meta: Some(meta),
+                    env: None,
                 },
             );
             if inserted {
@@ -627,6 +644,7 @@ impl ControlHost {
                         shell: p.shell.clone(),
                         cwd: p.cwd.clone(),
                         meta: p.meta.clone(),
+                        env: p.env.clone(),
                     },
                 );
             }
@@ -679,15 +697,7 @@ impl ControlHost {
 
         // Refresh control-owned fields (command/args/shell/meta) for every model pane.
         for (uid, c) in cur {
-            ctl.insert(
-                uid.clone(),
-                CtlFields {
-                    command: c.command.clone(),
-                    args: c.args.clone(),
-                    shell: c.shell.clone(),
-                    meta: c.meta.clone(),
-                },
-            );
+            ctl.insert(uid.clone(), CtlFields::from_model(c));
         }
 
         for (uid, c) in cur {
@@ -868,6 +878,7 @@ impl ControlHost {
                         status: PaneStatus::Running,
                         exit_code: None,
                         meta: c.meta,
+                        env: c.env,
                     });
                 }
                 tabs.push(TabInfo {
@@ -1025,6 +1036,7 @@ struct ModelPane {
     shell: Option<String>,
     cwd: Option<String>,
     meta: Option<BTreeMap<String, String>>,
+    env: Option<hyperpanes_core::session::spawn::EnvMap>,
 }
 
 /// The GUI session uid currently mapped to control `pane_id`, if any. A GUI pane's effective
@@ -1158,6 +1170,7 @@ mod tests {
             label: "shell".to_string(),
             subtitle: None,
             talk: false,
+            env: None,
             color: "#888888".to_string(),
             command: None,
             args: None,
@@ -1182,6 +1195,30 @@ mod tests {
             }],
         });
         m
+    }
+
+    #[test]
+    fn ctl_fields_carry_spawn_env_across_republish() {
+        let mut env = hyperpanes_core::session::spawn::EnvMap::new();
+        env.insert("MY_VAR".to_string(), "x".to_string());
+        let mp = ModelPane {
+            pane_id: "ctl-1".to_string(),
+            window_id: 1,
+            tab_id: "1:0".to_string(),
+            label: "shell".to_string(),
+            color: "#888888".to_string(),
+            subtitle: None,
+            talk: false,
+            command: Some("tool".to_string()),
+            args: None,
+            shell: None,
+            cwd: None,
+            meta: None,
+            env: Some(env.clone()),
+        };
+        // reconcile stores it in the side store; publish re-stamps it onto the rebuilt pane.
+        let c = CtlFields::from_model(&mp);
+        assert_eq!(c.env.as_ref(), Some(&env));
     }
 
     #[test]

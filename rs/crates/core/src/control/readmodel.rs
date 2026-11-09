@@ -91,6 +91,9 @@ pub struct PaneInfo {
     /// Per-pane "talk": speak new Claude assistant replies aloud via local TTS.
     /// Default-off; omitted from `/state` when `false` (see [`PaneOut::talk`]).
     pub talk: bool,
+    /// The env this pane was spawned with (control-supplied `env`, merged across restarts).
+    /// In-memory only; deliberately NOT serialized into `/state` or events (may hold tokens).
+    pub env: Option<crate::session::spawn::EnvMap>,
 }
 
 /// One tab (group): a layout + its panes.
@@ -557,6 +560,13 @@ impl ReadModel {
         }
     }
 
+    /// Replace a pane's stored spawn env (kept in memory so restarts can reuse it).
+    pub fn set_pane_env(&mut self, pane_id: &str, env: Option<crate::session::spawn::EnvMap>) {
+        if let Some(p) = self.pane_mut(pane_id) {
+            p.env = env;
+        }
+    }
+
     // ---- serialization (`GET /state`) -----------------------------------------------------
 
     /// Serialize `/state` filtered to `scope` (None = master = everything verbatim). `activity`
@@ -740,6 +750,7 @@ mod tests {
             exit_code: None,
             meta: None,
             talk: false,
+            env: None,
         }
     }
 

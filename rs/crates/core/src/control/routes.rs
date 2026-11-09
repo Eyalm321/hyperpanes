@@ -1824,6 +1824,7 @@ mod golden {
             exit_code: None,
             meta: None,
             talk: false,
+            env: None,
         }
     }
 

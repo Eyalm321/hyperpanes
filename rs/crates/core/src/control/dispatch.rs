@@ -297,13 +297,15 @@ fn exec(
                         .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect::<EnvMap>()
                 });
+                // Keep the env the pane was opened with; the restart env layers on top.
+                let merged_env = merge_env(pane.env.as_ref(), env_override);
                 let opts = SpawnOptions {
                     uid: new_uid.clone(),
                     shell: pane.shell.clone(),
                     args: pane.args.clone(),
                     command: pane.command.clone(),
                     cwd: pane.cwd.clone(),
-                    env: env_override,
+                    env: merged_env.clone(),
                     cols: None,
                     rows: None,
                     pane_id: Some(pane_id.clone()),
@@ -313,6 +315,7 @@ fn exec(
                 sessions.kill(&old_uid);
                 sessions.create(opts).map_err(|e| e.to_string())?;
                 model.respawn_pane(&pane_id, &new_uid);
+                model.set_pane_env(&pane_id, merged_env);
                 return Ok((None, true));
             }
             let marker = crate::claude_panes::read_pane_session(&pane_id).ok_or_else(|| {
@@ -758,6 +761,9 @@ fn respawn_resuming(
                 .insert("CLAUDE_CONFIG_DIR".to_string(), dir.to_string());
         }
     }
+    // Layer under the env the pane was spawned with (stored ⊕ override; override keys win, so
+    // precedence is explicit env > resume target's config dir > stored spawn env).
+    let env_override = merge_env(pane.env.as_ref(), env_override);
     // The account the effective env resolved to (explicit `env` override wins over the
     // target's) — captured before `env_override` moves into `SpawnOptions`, for the typed
     // shell-pane resume line below. Empty ⇒ the default account.
@@ -786,7 +792,7 @@ fn respawn_resuming(
         } else {
             pane.cwd.clone()
         },
-        env: env_override,
+        env: env_override.clone(),
         cols: None,
         rows: None,
         pane_id: Some(pane_id.to_string()),
@@ -796,6 +802,7 @@ fn respawn_resuming(
     sessions.kill(&old_uid);
     sessions.create(opts).map_err(|e| e.to_string())?;
     model.respawn_pane(pane_id, &new_uid);
+    model.set_pane_env(pane_id, env_override);
 
     // Shell-hosted pane (no direct claude command to rebuild): fall back to typing the
     // resume line into the fresh shell. Direct claude panes already relaunched with
@@ -818,6 +825,20 @@ fn respawn_resuming(
         crate::resume_queue::enqueue(&target.session_id, p)?;
     }
     Ok(())
+}
+
+/// Layer a restart's `env` over the env the pane was spawned with (restart keys win). `None`
+/// only when neither side has any env.
+fn merge_env(stored: Option<&EnvMap>, over: Option<EnvMap>) -> Option<EnvMap> {
+    match (stored, over) {
+        (None, o) => o,
+        (Some(s), None) => Some(s.clone()),
+        (Some(s), Some(o)) => {
+            let mut m = s.clone();
+            m.extend(o);
+            Some(m)
+        }
+    }
 }
 
 /// Build + spawn a pane session from a `{ label?, command?, args?, cwd?, shell?, color?, meta?,
@@ -911,7 +932,7 @@ fn spawn_pane(
         args: args.clone(),
         command: command.clone(),
         cwd: cwd.clone(),
-        env,
+        env: env.clone(),
         cols: None,
         rows: None,
         pane_id: Some(pane_id.clone()),
@@ -934,6 +955,7 @@ fn spawn_pane(
         exit_code: None,
         meta: meta.filter(|m| !m.is_empty()),
         talk: false,
+        env,
     })
 }
 
@@ -1056,7 +1078,7 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::readmodel::{TabInfo, WindowInfo};
+    use crate::control::readmodel::{Activity, TabInfo, WindowInfo};
     use tokio::sync::mpsc::unbounded_channel;
 
     fn model_one_window() -> ReadModel {
@@ -1091,6 +1113,85 @@ mod tests {
     }
 
     // newPane needs a tokio runtime (SessionManager::create spawns a driver task).
+    // ---- restart keeps the pane's spawn env (hyperpanes#43) ----
+
+    #[test]
+    fn merge_env_layers_override_over_stored() {
+        let stored: EnvMap = [("A", "1"), ("B", "2")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let over: EnvMap = [("B", "9"), ("C", "3")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let m = merge_env(Some(&stored), Some(over)).unwrap();
+        assert_eq!(m["A"], "1");
+        assert_eq!(m["B"], "9");
+        assert_eq!(m["C"], "3");
+        assert!(merge_env(None, None).is_none());
+        assert_eq!(merge_env(Some(&stored), None).unwrap(), stored);
+    }
+
+    async fn wait_for_output(s: &SessionManager, uid: &str, needle: &str) -> String {
+        for _ in 0..100 {
+            let t = pane_tail(s, uid);
+            if t.contains(needle) {
+                return t;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        pane_tail(s, uid)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_pane_keeps_original_env_and_layers_restart_env() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "newPane", "windowId": 1, "pane": {
+            "command": "echo \"mark:$MY_VAR:$OTHER:\"; sleep 30",
+            "env": { "MY_VAR": "x" } } });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        let id = r.body["result"].as_str().unwrap().to_string();
+
+        let r = handle_command(
+            &mut m,
+            &s,
+            None,
+            None,
+            &json!({ "type": "restartPane", "paneId": id, "env": { "OTHER": "y" } }),
+            &speech(),
+        );
+        assert_eq!(r.status, 200);
+        let uid = m.pane(&id).unwrap().session_uid.clone();
+        let out = wait_for_output(&s, &uid, "mark:").await;
+        assert!(
+            out.contains("mark:x:y:"),
+            "restart env lost MY_VAR: {out:?}"
+        );
+
+        // The stored env is now the merged env: a second restart that overrides OTHER again
+        // still keeps MY_VAR.
+        handle_command(
+            &mut m,
+            &s,
+            None,
+            None,
+            &json!({ "type": "restartPane", "paneId": id, "env": { "OTHER": "z" } }),
+            &speech(),
+        );
+        let uid = m.pane(&id).unwrap().session_uid.clone();
+        let out = wait_for_output(&s, &uid, "mark:").await;
+        assert!(out.contains("mark:x:z:"), "second restart: {out:?}");
+        // The env must never leak through the serialized state.
+        let state = serde_json::to_string(&m.state_for_scope(None, &|_| Activity::Idle)).unwrap();
+        assert!(
+            !state.contains("\"env\"") && !state.contains("\"MY_VAR\""),
+            "{state}"
+        );
+    }
+
     #[tokio::test]
     async fn new_pane_spawns_inserts_and_returns_the_pane_id() {
         let mut m = model_one_window();
