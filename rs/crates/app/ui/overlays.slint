@@ -453,7 +453,6 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> show-dot: true;
     in property <bool> clickable-paths: true;
     in property <bool> copy-on-select: false;
-    in property <bool> osc52-clipboard: true;
     in property <string> editor-command: "";
     in property <bool> prefs-confirm: false;  // showing the unsaved-changes prompt
     // ---- New Pane dialog (kind 3) ----
@@ -810,19 +809,6 @@ export component OverlayLayer inherits Rectangle {
                     : "Selecting only highlights · right-click copies a selection, else pastes";
                 color: Theme.faint;
                 font-size: 10px;
-            }
-
-            // ---- OSC 52: let programs in a pane set the clipboard (write-only) ----
-            PrefToggle {
-                label: "Allow programs to set the clipboard";
-                on: root.osc52-clipboard;
-                toggled(v) => { root.pref-action(22, v ? 1 : 0); }
-            }
-            Text {
-                text: "OSC 52 copy (e.g. a TUI's copy shortcut, also over ssh) · programs can never read it";
-                color: Theme.faint;
-                font-size: 10px;
-                wrap: word-wrap;
             }
 
             // ---- clickable file paths (click opens · Ctrl+click copies) ----

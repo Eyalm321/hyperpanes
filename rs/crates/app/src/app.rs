@@ -1253,7 +1253,6 @@ impl App {
                 };
                 let mut st = w.state.borrow_mut();
                 let mut fed = 0;
-                let osc52_clipboard = st.settings.osc52_clipboard;
                 if let Some((ti, pi)) = st.find_pane(&uid) {
                     let pc = &mut st.tabs[ti].panes[pi];
                     // Sniff the shell's OSC window title so the idle glow can tell an agent
@@ -1263,10 +1262,6 @@ impl App {
                     }
                     pc.pane.feed(&data);
                     fed = data.len();
-                    // OSC 52 clipboard writes (e.g. a TUI's "copy" shortcut) -> system clipboard,
-                    // gated by the "Allow programs to set the clipboard" setting. Reads are
-                    // never honoured (see terminal-widget `TermGrid`).
-                    let _ = pc.pane.apply_osc52_stores(osc52_clipboard);
                     let replies = pc.pane.take_replies();
                     if !replies.is_empty() {
                         crate::remote::write(&self.mgr, &uid, &String::from_utf8_lossy(&replies));
@@ -2253,9 +2248,7 @@ impl App {
                                 None => {
                                     let det = src.state.borrow_mut().detach_uid(uid);
                                     if let Some((det, _alive)) = det {
-                                        src.state
-                                            .borrow_mut()
-                                            .adopt_pane_as_tab(&self.mgr, det, None, None);
+                                        src.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det);
                                     }
                                 }
                             }
@@ -2298,10 +2291,9 @@ impl App {
                                             tgt.state.borrow_mut().switch_tab(ti);
                                             tgt.state.borrow_mut().adopt_pane(&self.mgr, det);
                                         }
-                                        None => tgt
-                                            .state
-                                            .borrow_mut()
-                                            .adopt_pane_as_tab(&self.mgr, det, None, None),
+                                        None => {
+                                            tgt.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det)
+                                        }
                                     }
                                 } else {
                                     tgt.state.borrow_mut().adopt_pane_at(
@@ -3303,7 +3295,6 @@ impl App {
                     ),
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
                     21 => crate::state::Setting::CopyOnSelect(arg != 0),
-                    22 => crate::state::Setting::Osc52Clipboard(arg != 0),
                     // idle-glow settings — apply immediately (not drafted).
                     10 => crate::state::Setting::IdleAlert(arg != 0),
                     11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),

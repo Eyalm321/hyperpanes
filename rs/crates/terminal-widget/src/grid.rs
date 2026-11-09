@@ -18,7 +18,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{ClipboardType, Config, Term};
+use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -92,28 +92,13 @@ impl alacritty_terminal::grid::Dimensions for TermSize {
 /// Captures terminal-originated writes (DSR/DA query replies, etc.) so the controller can
 /// forward them back to the session's pty. Without this, conpty's startup `ESC[6n` blocks
 /// the whole shell. Replies are queued and drained by [`TermGrid::take_replies`].
-///
-/// OSC 52 *writes* (`Event::ClipboardStore`, system clipboard only) are queued separately and
-/// drained by [`TermGrid::take_clipboard_stores`]. OSC 52 *reads* (`Event::ClipboardLoad`) are
-/// deliberately dropped: answering one would hand the system clipboard to whatever program (or
-/// remote host) is writing to the pane — an exfiltration vector. Nothing is ever written back
-/// to the pty for them and the clipboard is never read.
 struct ProxyListener {
     tx: Sender<Vec<u8>>,
-    clip_tx: Sender<String>,
 }
 impl EventListener for ProxyListener {
     fn send_event(&self, event: Event) {
-        match event {
-            Event::PtyWrite(text) => {
-                let _ = self.tx.send(text.into_bytes());
-            }
-            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
-                let _ = self.clip_tx.send(text);
-            }
-            // Primary-selection stores have no counterpart on Windows/macOS; ignore them.
-            // `ClipboardLoad` is never honoured (see above).
-            _ => {}
+        if let Event::PtyWrite(text) = event {
+            let _ = self.tx.send(text.into_bytes());
         }
     }
 }
@@ -124,7 +109,6 @@ pub struct TermGrid {
     term: Term<ProxyListener>,
     parser: Processor,
     resp_rx: Receiver<Vec<u8>>,
-    clip_rx: Receiver<String>,
     palette: [Rgb; 256],
     size: TermSize,
     dirty: bool,
@@ -138,22 +122,11 @@ impl TermGrid {
             rows: rows.max(1),
         };
         let (resp_tx, resp_rx) = channel::<Vec<u8>>();
-        let (clip_tx, clip_rx) = channel::<String>();
-        // `Config::default()` has `osc52 = OnlyCopy`: stores are emitted, loads are denied by
-        // the terminal itself (belt and braces with the listener above).
-        let term = Term::new(
-            Config::default(),
-            &size,
-            ProxyListener {
-                tx: resp_tx,
-                clip_tx,
-            },
-        );
+        let term = Term::new(Config::default(), &size, ProxyListener { tx: resp_tx });
         TermGrid {
             term,
             parser: Processor::new(),
             resp_rx,
-            clip_rx,
             palette: default_palette(),
             size,
             dirty: true,
@@ -193,41 +166,6 @@ impl TermGrid {
             out.extend_from_slice(&chunk);
         }
         out
-    }
-
-    /// Drain the texts the application asked to put on the system clipboard via OSC 52
-    /// (`ESC ] 52 ; c ; <base64> BEL`) while processing the last [`feed`](Self::feed), oldest
-    /// first. The caller decides (per the user's setting) whether to honour them.
-    pub fn take_clipboard_stores(&mut self) -> Vec<String> {
-        let mut out = Vec::new();
-        while let Ok(t) = self.clip_rx.try_recv() {
-            out.push(t);
-        }
-        out
-    }
-
-    /// The OSC 8 hyperlink on viewport cell (`row`, `col`), if any: its URI plus the column range
-    /// `[start, end)` that the SAME link occupies on that row (for the underline). Cells of one
-    /// link are matched by alacritty's (id, uri) identity, so a link wrapped over several rows
-    /// resolves to the same URI from any of them.
-    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<(String, usize, usize)> {
-        if row >= self.size.rows || col >= self.size.cols {
-            return None;
-        }
-        let grid = self.term.grid();
-        let line = Line(row as i32 - grid.display_offset() as i32);
-        let cells = &grid[line];
-        let link = cells[Column(col)].hyperlink()?;
-        let same = |c: usize| cells[Column(c)].hyperlink().is_some_and(|h| h == link);
-        let mut start = col;
-        while start > 0 && same(start - 1) {
-            start -= 1;
-        }
-        let mut end = col + 1;
-        while end < self.size.cols && same(end) {
-            end += 1;
-        }
-        Some((link.uri().to_owned(), start, end))
     }
 
     /// Reflow the grid to `cols`×`rows`. Returns `true` if the size actually changed (the
@@ -1006,63 +944,6 @@ mod tests {
             dim_blend(gray, snap.default_bg),
             "dim applied on top of the 256-colour gray"
         );
-    }
-
-    fn b64(s: &str) -> String {
-        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for ch in s.as_bytes().chunks(3) {
-            let n = (ch[0] as u32) << 16
-                | (*ch.get(1).unwrap_or(&0) as u32) << 8
-                | *ch.get(2).unwrap_or(&0) as u32;
-            for i in 0..4 {
-                if i <= ch.len() {
-                    out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn osc52_write_is_surfaced_for_the_clipboard() {
-        let mut g = TermGrid::new(20, 3);
-        let url = "https://example.com/some/long/path?x=1";
-        g.feed(format!("\x1b]52;c;{}\x07", b64(url)).as_bytes());
-        assert_eq!(g.take_clipboard_stores(), vec![url.to_string()]);
-        assert!(g.take_clipboard_stores().is_empty(), "drained once");
-        assert!(
-            g.take_replies().is_empty(),
-            "a write sends nothing to the pty"
-        );
-    }
-
-    #[test]
-    fn osc52_read_query_is_ignored() {
-        let mut g = TermGrid::new(20, 3);
-        g.feed(b"\x1b]52;c;?\x07");
-        g.feed(b"\x1b]52;c;?\x1b\\");
-        assert!(
-            g.take_replies().is_empty(),
-            "no reply bytes (no clipboard exfiltration)"
-        );
-        assert!(g.take_clipboard_stores().is_empty());
-    }
-
-    #[test]
-    fn osc8_hyperlink_resolves_across_wrapped_rows() {
-        let mut g = TermGrid::new(10, 4);
-        // 14 visible chars wrap over two rows; the URI differs from the visible text.
-        g.feed(b"\x1b]8;id=a;https://example.com/real\x1b\\0123456789ABCD\x1b]8;;\x1b\\ tail");
-        let top = g.hyperlink_at(0, 3).expect("row 0 carries the link");
-        assert_eq!(top, ("https://example.com/real".to_string(), 0, 10));
-        let cont = g
-            .hyperlink_at(1, 1)
-            .expect("wrapped row carries the same link");
-        assert_eq!(cont, ("https://example.com/real".to_string(), 0, 4));
-        assert!(g.hyperlink_at(1, 6).is_none(), "plain text after the link");
     }
 
     #[test]

@@ -10,7 +10,7 @@
 // dispatched against the central `State` (see ARCHITECTURE.md).
 
 import { Theme } from "theme.slint";
-import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
+import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, LaneItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 import { TopBar } from "topbar.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
@@ -111,7 +111,6 @@ export component AppWindow inherits Window {
     in property <string> pref-kb-conflict: "";
     in property <bool> pref-clickable: true;
     in property <bool> pref-copy-on-select: false;
-    in property <bool> pref-osc52-clipboard: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
     // appearance DRAFT mirrors (dialog shows these; the panes use show-frame/show-dot)
@@ -130,6 +129,7 @@ export component AppWindow inherits Window {
     in property <[ProjectItem]> projects;
     // "Other queues" task-count badge ("" = hidden): queues that map to no project (#6).
     in property <string> other-queue-badge;
+    in property <[LaneItem]> other-lanes;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
     in property <bool> sidebar-open: false;  // projects flyout expanded
     // ---- context menus (pane header / tab strip) ----
@@ -386,6 +386,7 @@ export component AppWindow inherits Window {
                 width: (root.sidebar-open || RemindersAdapter.open) ? 280px : 44px;
                 projects: root.projects;
                 other-queue-badge: root.other-queue-badge;
+                other-lanes: root.other-lanes;
                 projects-open: root.sidebar-open;
                 new-pane => { root.new-pane(); }
                 open-new-pane => { root.open-new-pane(); }
@@ -549,7 +550,6 @@ export component AppWindow inherits Window {
             show-dot: root.pref-dot;
             clickable-paths: root.pref-clickable;
             copy-on-select: root.pref-copy-on-select;
-            osc52-clipboard: root.pref-osc52-clipboard;
             editor-command: root.pref-editor;
             prefs-confirm: root.prefs-confirm;
             np-default-idx: root.np-default-idx;
