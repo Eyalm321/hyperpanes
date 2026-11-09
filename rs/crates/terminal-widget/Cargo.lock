@@ -2301,6 +2301,7 @@ dependencies = [
  "etagere",
  "hyperpanes-core",
  "i-slint-backend-testing",
+ "i-slint-core",
  "png 0.17.16",
  "slint",
  "slint-build",

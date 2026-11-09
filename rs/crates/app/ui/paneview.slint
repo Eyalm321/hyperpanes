@@ -499,7 +499,15 @@ export component PaneView inherits Rectangle {
                                     font-weight: 600;
                                     vertical-alignment: center;
                                     single-line: true;
-                                    init => { lti.select-all(); lti.focus(); }
+                                    // Mount focus, one turn late: never focus() in `init` (trcrash; see widget.slint).
+                                    Timer {
+                                        interval: 0ms;
+                                        triggered => {
+                                            self.running = false;
+                                            lti.select-all();
+                                            lti.focus();
+                                        }
+                                    }
                                     accepted => { root.rename-pane(idx, self.text); }
                                 }
                             }

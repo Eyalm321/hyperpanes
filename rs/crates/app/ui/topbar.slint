@@ -191,7 +191,15 @@ component TabChip inherits Rectangle {
             font-size: 12px;
             vertical-alignment: center;
             single-line: true;
-            init => { ti.select-all(); ti.focus(); }
+            // Mount focus, one turn late: never focus() in `init` (trcrash; see widget.slint).
+            Timer {
+                interval: 0ms;
+                triggered => {
+                    self.running = false;
+                    ti.select-all();
+                    ti.focus();
+                }
+            }
             accepted => { root.commit-rename(self.text); }
         }
     }
