@@ -84,6 +84,9 @@ struct TabSnap {
     layout: String,
 }
 
+/// Model tab id → (window id, title/layout snapshot).
+type TabSnaps = HashMap<String, (i64, TabSnap)>;
+
 /// One tab-level change a control command made to the model since the last publish.
 #[derive(Debug, PartialEq, Eq)]
 struct TabChange {
@@ -731,7 +734,7 @@ impl ControlHost {
         windows: &[Rc<Window>],
         mgr: &Arc<SessionManager>,
         cur: &HashMap<String, ModelPane>,
-        cur_tabs: &HashMap<String, (i64, TabSnap)>,
+        cur_tabs: &TabSnaps,
         cur_active: &HashMap<i64, Option<String>>,
         focus_uid: &HashMap<i64, Option<String>>,
     ) -> bool {
@@ -790,7 +793,15 @@ impl ControlHost {
                     _ => {
                         // Adopt the already-live session into the tab the MODEL placed it in
                         // (replay-primed, no PTY restart).
-                        self.adopt_control_pane(windows, mgr, uid, c, cur, &mut created_tabs);
+                        self.adopt_control_pane(
+                            windows,
+                            mgr,
+                            uid,
+                            c,
+                            cur,
+                            cur_tabs,
+                            &mut created_tabs,
+                        );
                         self.pane_ids
                             .borrow_mut()
                             .insert(uid.clone(), c.pane_id.clone());
@@ -1029,6 +1040,7 @@ impl ControlHost {
     /// resolved (in order): a sibling pane already in the GUI for the same model tab → a tab made
     /// this tick for that model tab → the positional model tab id → otherwise a brand-new GUI tab
     /// (an `attach as:tab` group). Adopting into a background tab does NOT steal the user's focus.
+    #[allow(clippy::too_many_arguments)]
     fn adopt_control_pane(
         &self,
         windows: &[Rc<Window>],
@@ -1036,6 +1048,7 @@ impl ControlHost {
         uid: &str,
         c: &ModelPane,
         cur: &HashMap<String, ModelPane>,
+        cur_tabs: &TabSnaps,
         created_tabs: &mut HashMap<String, (i64, usize)>,
     ) {
         let target = windows
@@ -1076,7 +1089,10 @@ impl ControlHost {
             None => {
                 let mut st = w.state.borrow_mut();
                 let saved = st.active;
-                st.adopt_pane_as_tab(mgr, det);
+                let snap = cur_tabs.get(&c.tab_id).map(|(_, s)| s);
+                let title = snap.map(|s| s.title.as_str());
+                let layout = snap.and_then(|s| crate::state::parse_layout(&s.layout));
+                st.adopt_pane_as_tab(mgr, det, title, layout);
                 let new_ti = st.tabs.len().saturating_sub(1);
                 st.switch_tab(saved);
                 created_tabs.insert(c.tab_id.clone(), (c.window_id, new_ti));
@@ -1127,7 +1143,7 @@ impl ControlHost {
 }
 
 /// Every model tab's title/layout keyed by tab id, with its window id.
-fn snapshot_tabs(model: &ReadModel) -> HashMap<String, (i64, TabSnap)> {
+fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
     model
         .tabs()
         .map(|(wid, t)| {

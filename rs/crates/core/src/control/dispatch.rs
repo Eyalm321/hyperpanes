@@ -254,7 +254,7 @@ fn exec(
                     let title = g
                         .get("title")
                         .and_then(Value::as_str)
-                        .unwrap_or("Tab")
+                        .unwrap_or("")
                         .to_string();
                     let layout = g
                         .get("layout")

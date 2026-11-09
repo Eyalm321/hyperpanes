@@ -1411,8 +1411,10 @@ impl State {
     }
 
     fn fresh_tab(&mut self) -> Tab {
-        self.tab_seq += 1;
-        Tab::empty(format!("term {}", self.tab_seq).into())
+        let (title, seq) =
+            next_term_title(self.tabs.iter().map(|t| t.title.as_str()), self.tab_seq);
+        self.tab_seq = seq;
+        Tab::empty(title.into())
     }
 
     pub fn active_tab(&self) -> &Tab {
@@ -1913,8 +1915,23 @@ impl State {
 
     /// Re-host a detached session as a **brand-new tab** (dock-as-tab on a tear-off drop):
     /// append a fresh tab, switch to it, and adopt the pane into it.
-    pub fn adopt_pane_as_tab(&mut self, mgr: &SessionManager, det: DetachedPane) {
-        let tab = self.fresh_tab();
+    ///
+    /// `title` / `layout` (control-created tabs) override the auto "term N" name and the
+    /// default layout; an absent or blank title falls back to the auto name.
+    pub fn adopt_pane_as_tab(
+        &mut self,
+        mgr: &SessionManager,
+        det: DetachedPane,
+        title: Option<&str>,
+        layout: Option<Layout>,
+    ) {
+        let mut tab = self.fresh_tab();
+        if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+            tab.title = t.to_string().into();
+        }
+        if let Some(l) = layout {
+            tab.layout = l;
+        }
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
@@ -5085,8 +5102,10 @@ impl State {
         let title: SharedString = match g.title {
             Some(t) if !t.is_empty() => t.into(),
             _ => {
-                self.tab_seq += 1;
-                format!("term {}", self.tab_seq).into()
+                let (title, seq) =
+                    next_term_title(self.tabs.iter().map(|t| t.title.as_str()), self.tab_seq);
+                self.tab_seq = seq;
+                title.into()
             }
         };
         let layout = g
@@ -5566,6 +5585,22 @@ fn color_hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
 }
 
+/// Pick the next auto tab name "term N": bump `seq` until the name collides with no existing
+/// tab title (a restored or renamed tab may already hold "term 2"). Returns the title and the
+/// new sequence value.
+pub(crate) fn next_term_title<'a>(
+    existing: impl Iterator<Item = &'a str> + Clone,
+    mut seq: usize,
+) -> (String, usize) {
+    loop {
+        seq += 1;
+        let title = format!("term {seq}");
+        if !existing.clone().any(|t| t == title) {
+            return (title, seq);
+        }
+    }
+}
+
 /// Strictly parse a layout name (exactly the names `theme::layout_name` emits).
 pub(crate) fn parse_layout(name: &str) -> Option<Layout> {
     match name {
@@ -5931,6 +5966,16 @@ mod spawn_cells_tests {
     //! grid — and only falls back to 80×24 when no layout exists yet (eager first-pane
     //! seed, workspace restore into a fresh window).
     use super::*;
+
+    #[test]
+    fn next_term_title_skips_existing_titles() {
+        // Restored tabs hold "term 1"/"term 2" while the counter restarts at 0.
+        let existing = ["term 1", "term 2"];
+        let (t, seq) = next_term_title(existing.iter().copied(), 0);
+        assert_eq!((t.as_str(), seq), ("term 3", 3));
+        let (t, _) = next_term_title(["a", "b"].iter().copied(), 0);
+        assert_eq!(t, "term 1");
+    }
 
     fn fresh() -> State {
         State::new(theme::load_font(1.0))
@@ -6377,6 +6422,23 @@ mod reminder_tests {
     fn mgr() -> SessionManager {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         SessionManager::new(tx)
+    }
+
+    #[test]
+    fn adopt_pane_as_tab_applies_title_and_layout() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane_as_tab(&m, det("a"), Some("my tab"), Some(Layout::Single));
+        let t = st.tabs.last().unwrap();
+        assert_eq!(t.title.as_str(), "my tab");
+        assert_eq!(t.layout, Layout::Single);
+        // No title given: an auto name that collides with no existing tab.
+        st.adopt_pane_as_tab(&m, det("b"), None, None);
+        let titles: Vec<_> = st.tabs.iter().map(|t| t.title.to_string()).collect();
+        let mut u = titles.clone();
+        u.sort();
+        u.dedup();
+        assert_eq!(u.len(), titles.len(), "{titles:?}");
     }
 
     #[test]
