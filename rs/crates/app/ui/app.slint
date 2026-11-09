@@ -111,6 +111,7 @@ export component AppWindow inherits Window {
     in property <string> pref-kb-conflict: "";
     in property <bool> pref-clickable: true;
     in property <bool> pref-copy-on-select: false;
+    in property <bool> pref-osc52-clipboard: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
     // appearance DRAFT mirrors (dialog shows these; the panes use show-frame/show-dot)
@@ -545,6 +546,7 @@ export component AppWindow inherits Window {
             show-dot: root.pref-dot;
             clickable-paths: root.pref-clickable;
             copy-on-select: root.pref-copy-on-select;
+            osc52-clipboard: root.pref-osc52-clipboard;
             editor-command: root.pref-editor;
             prefs-confirm: root.prefs-confirm;
             np-default-idx: root.np-default-idx;
