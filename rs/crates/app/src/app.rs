@@ -2253,7 +2253,9 @@ impl App {
                                 None => {
                                     let det = src.state.borrow_mut().detach_uid(uid);
                                     if let Some((det, _alive)) = det {
-                                        src.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det);
+                                        src.state
+                                            .borrow_mut()
+                                            .adopt_pane_as_tab(&self.mgr, det, None, None);
                                     }
                                 }
                             }
@@ -2296,9 +2298,10 @@ impl App {
                                             tgt.state.borrow_mut().switch_tab(ti);
                                             tgt.state.borrow_mut().adopt_pane(&self.mgr, det);
                                         }
-                                        None => {
-                                            tgt.state.borrow_mut().adopt_pane_as_tab(&self.mgr, det)
-                                        }
+                                        None => tgt
+                                            .state
+                                            .borrow_mut()
+                                            .adopt_pane_as_tab(&self.mgr, det, None, None),
                                     }
                                 } else {
                                     tgt.state.borrow_mut().adopt_pane_at(
