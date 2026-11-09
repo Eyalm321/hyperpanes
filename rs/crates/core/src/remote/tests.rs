@@ -209,6 +209,7 @@ impl Host {
                 exit_code: None,
                 meta: None,
                 talk: false,
+                env: None,
             },
         );
         notify_state(&self.shared);

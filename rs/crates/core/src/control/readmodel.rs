@@ -74,7 +74,8 @@ impl Activity {
 
 /// One pane in the read-model. Mirrors `ControlPaneInfo`; optional fields are `None` when
 /// unset and OMITTED from `/state`.
-#[derive(Debug, Clone)]
+/// `Debug` is hand-written (below) so a stray `{:?}` never prints the spawn env's values.
+#[derive(Clone)]
 pub struct PaneInfo {
     pub id: String,
     pub session_uid: String,
@@ -91,6 +92,32 @@ pub struct PaneInfo {
     /// Per-pane "talk": speak new Claude assistant replies aloud via local TTS.
     /// Default-off; omitted from `/state` when `false` (see [`PaneOut::talk`]).
     pub talk: bool,
+    /// The env this pane was spawned with (control-supplied `env`, merged across restarts).
+    /// In-memory only; deliberately NOT serialized into `/state` or events (may hold tokens).
+    pub env: Option<crate::session::spawn::EnvMap>,
+}
+
+impl std::fmt::Debug for PaneInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The env may hold tokens: show only its keys.
+        let env_keys: Option<Vec<&String>> = self.env.as_ref().map(|e| e.keys().collect());
+        f.debug_struct("PaneInfo")
+            .field("id", &self.id)
+            .field("session_uid", &self.session_uid)
+            .field("label", &self.label)
+            .field("subtitle", &self.subtitle)
+            .field("color", &self.color)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("shell", &self.shell)
+            .field("status", &self.status)
+            .field("exit_code", &self.exit_code)
+            .field("meta", &self.meta)
+            .field("talk", &self.talk)
+            .field("env_keys", &env_keys)
+            .finish()
+    }
 }
 
 /// One tab (group): a layout + its panes.
@@ -564,6 +591,13 @@ impl ReadModel {
         }
     }
 
+    /// Replace a pane's stored spawn env (kept in memory so restarts can reuse it).
+    pub fn set_pane_env(&mut self, pane_id: &str, env: Option<crate::session::spawn::EnvMap>) {
+        if let Some(p) = self.pane_mut(pane_id) {
+            p.env = env;
+        }
+    }
+
     // ---- serialization (`GET /state`) -----------------------------------------------------
 
     /// Serialize `/state` filtered to `scope` (None = master = everything verbatim). `activity`
@@ -747,7 +781,29 @@ mod tests {
             exit_code: None,
             meta: None,
             talk: false,
+            env: None,
         }
+    }
+
+    #[test]
+    fn pane_debug_never_prints_env_values() {
+        let mut p = pane("p1", "u1");
+        p.env = Some(
+            [("API_TOKEN".to_string(), "s3cret-value".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("API_TOKEN"), "{dbg}");
+        assert!(!dbg.contains("s3cret-value"), "{dbg}");
+        // TabInfo / WindowInfo derive Debug through PaneInfo's impl.
+        let tab = TabInfo {
+            id: "1:0".into(),
+            title: "t".into(),
+            layout: "auto".into(),
+            panes: vec![p],
+        };
+        assert!(!format!("{tab:?}").contains("s3cret-value"));
     }
 
     fn seeded() -> ReadModel {
