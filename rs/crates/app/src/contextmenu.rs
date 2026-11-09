@@ -409,18 +409,40 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
         Some(Command::NewTab),
     );
     b.item("Rename…", Command::BeginRename(idx as i32));
-    b.item("Duplicate Tab", Command::DuplicateTab(idx));
+    let remote_key = state
+        .tabs
+        .get(idx)
+        .and_then(|t| t.remote.as_ref())
+        .map(|r| r.host_key);
+    b.row(
+        "Duplicate Tab",
+        "",
+        0,
+        false,
+        false,
+        remote_key.is_some(),
+        false,
+        sub::NONE,
+        Some(Command::DuplicateTab(idx)),
+    );
     b.row(
         "Move to New Window",
         "",
         0,
         false,
         false,
-        only,
+        only || remote_key.is_some(),
         false,
         sub::NONE,
         Some(Command::MoveTabToNewWindow(idx)),
     );
+    if let Some(key) = remote_key {
+        b.sep();
+        b.item("Reconnect Remote Host", Command::RemoteReconnect(key));
+        b.item("Disconnect Remote Host", Command::RemoteDisconnect(key));
+    }
+    b.sep();
+    b.item("Connect to Host…", Command::OpenConnectHost);
     b.sep();
     b.item("Close Tab", Command::CloseTab(idx));
     b.row(
@@ -505,6 +527,7 @@ pub fn app_menu(state: &State, x: f32, y: f32) -> CtxMenu {
         sub::NONE,
         Some(Command::PaletteOpen),
     );
+    b.item("Connect to host…", Command::OpenConnectHost);
     b.sep();
     // Layout submenu header: drawn icon + label of the CURRENT layout (the submenu lists
     // Automatic + the 5 presets with the radio ✓ on the current). The current label sits in

@@ -51,6 +51,9 @@ pub enum Overlay {
     /// The "New goal" dialog (command palette → "New goal…"): pick a project + type a goal;
     /// submitting routes through [`State::submit_new_goal`].
     NewGoal,
+    /// The "Connect to host…" dialog (remote attach): pairing URL + label + remember /
+    /// autoconnect checkboxes; submitting routes through [`crate::remote`] (App level).
+    ConnectHost,
 }
 
 // Pane/session uid minting moved to the backend: `SessionManager::fresh_uid` picks the
@@ -833,6 +836,10 @@ pub struct PaneState {
     pub spawn_command: Option<String>,
     pub spawn_args: Option<Vec<String>>,
     pub spawn_shell: Option<String>,
+    /// `Some` for a remote pane (uid `remote:<hostKey>:<hostPaneId>`): its grid is pinned to
+    /// the host's cols×rows and its I/O goes through [`crate::remote`], never the local
+    /// SessionManager.
+    pub remote: Option<crate::remote::RemotePaneInfo>,
 }
 
 impl PaneState {
@@ -928,11 +935,16 @@ pub struct Tab {
     pub focused: usize,
     /// Index of the zoomed (maximised-in-tab) pane, if any.
     pub zoomed: Option<usize>,
+    /// `Some` for a REMOTE tab (a host tab mirrored from another hyperpanes; see
+    /// [`crate::remote`]). Remote tabs are never persisted and never reach the local control
+    /// read model.
+    pub remote: Option<crate::remote::RemoteTabInfo>,
 }
 
 impl Tab {
-    fn empty(title: SharedString) -> Self {
+    pub(crate) fn empty(title: SharedString) -> Self {
         Tab {
+            remote: None,
             title,
             panes: Vec::new(),
             layout: Layout::Auto,
@@ -997,6 +1009,8 @@ pub struct State {
     /// Inline validation error shown in the Add-Project dialog (`""` = none). Set when a
     /// submitted path doesn't exist / isn't a directory; cleared on open and on close.
     pub add_project_error: String,
+    /// Inline (token-redacted) parse error shown in the Connect-to-host dialog.
+    pub connect_host_error: String,
     /// Persisted appearance preferences (font, frame/dot).
     pub settings: Settings,
     /// The user's keybinding overrides — consulted (override-first) by the key router. Edited
@@ -1215,6 +1229,7 @@ impl State {
             dictate_phase: 0,
             overlay: Overlay::None,
             add_project_error: String::new(),
+            connect_host_error: String::new(),
             settings: prefs::load(),
             keymap: crate::keybindings::Keymap::load(),
             capturing_binding: None,
@@ -1593,7 +1608,66 @@ impl State {
             spawn_command: command,
             spawn_args: None,
             spawn_shell: shell,
+            remote: None,
         })
+    }
+
+    /// Build a REMOTE pane: a normal [`PaneState`] (so rendering / selection / scroll / search /
+    /// copy are reused) whose grid is pinned to the host's `cols`×`rows`, with no local
+    /// session behind it. See [`crate::remote`].
+    pub fn new_remote_pane(
+        &self,
+        uid: String,
+        info: crate::remote::RemotePaneInfo,
+        label: &str,
+        idx: usize,
+        accent: Option<Color>,
+    ) -> PaneState {
+        let (cols, rows) = (info.cols as usize, info.rows as usize);
+        let mut pane = TerminalPane::new(cols, rows, Box::new(SoftwareRenderer::new()));
+        pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        let glow = Glow::new(crate::glow::seed_from(&uid));
+        let font_px = self.settings.font_px;
+        let font = theme::load_font_at(&self.settings.font_path(), font_px, self.last_scale);
+        PaneState {
+            title: label.to_string().into(),
+            subtitle: None,
+            show_frame: Some(accent.is_some()),
+            show_dot: Some(accent.is_some()),
+            accent: accent.unwrap_or_else(|| theme::accent_for(idx, self.settings.frame_palette)),
+            pane,
+            applied: (cols, rows),
+            surface: Image::default(),
+            rect: (0.0, 0.0, 0.0, 0.0),
+            visible: true,
+            // Never write a startup command to a remote pane.
+            started: true,
+            startup: None,
+            pinned_accent: accent,
+            surf: (0.0, 0.0),
+            link: None,
+            link_cursor: (0.0, 0.0),
+            glow,
+            shell_title: String::new(),
+            ai_muted: true,
+            talk: false,
+            ai: AiLine::default(),
+            last_toast: String::new(),
+            scrollbar_on: false,
+            search_focus_seq: 0,
+            refocus_seq: 0,
+            font_px,
+            font,
+            font_dirty: false,
+            cwd: None,
+            env: None,
+            shell_label: String::new(),
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            remote: Some(info),
+            uid,
+        }
     }
 
     // ---- pane mutations (act on the active tab) ----
@@ -1708,7 +1782,7 @@ impl State {
     pub fn close_pane_in(&mut self, ti: usize, idx: usize, mgr: &SessionManager) -> bool {
         match self.take_pane_in(ti, idx) {
             Some((ps, alive)) => {
-                mgr.kill(&ps.uid);
+                crate::remote::kill(mgr, &ps.uid);
                 alive
             }
             None => true,
@@ -1723,6 +1797,13 @@ impl State {
         let _ = mgr; // sessions are NOT touched here — that's the whole point of detach.
         let ti = self.active;
         let idx = self.tabs.get(ti)?.focused;
+        if self.tabs[ti]
+            .panes
+            .get(idx)
+            .is_some_and(|p| p.remote.is_some())
+        {
+            return None;
+        }
         let (ps, alive) = self.take_pane_in(ti, idx)?;
         Some((
             DetachedPane {
@@ -1808,6 +1889,7 @@ impl State {
             spawn_command: det.spawn_command,
             spawn_args: det.spawn_args,
             spawn_shell: det.spawn_shell,
+            remote: None,
         };
         let auto = self.active_tab().layout == Layout::Auto;
         let t = self.active_tab_mut();
@@ -1933,6 +2015,8 @@ impl State {
         self.tabs
             .iter()
             .flat_map(|t| t.panes.iter().map(|p| p.uid.clone()))
+            // Remote panes have no local session (closing the window just detaches them).
+            .filter(|u| !crate::remote::is_remote_uid(u))
             // Tabs parked on the closed-tab stack keep their sessions alive (for reopen), so
             // they must be killed when the window closes too — else they'd leak.
             .chain(
@@ -2107,13 +2191,13 @@ impl State {
         if self.tabs.len() <= 1 {
             // Last tab: kill its sessions and signal quit.
             for p in &self.tabs[idx].panes {
-                mgr.kill(&p.uid);
+                crate::remote::kill(mgr, &p.uid);
             }
             return false;
         }
         let tab = self.tabs.remove(idx);
         for p in &tab.panes {
-            mgr.kill(&p.uid);
+            crate::remote::kill(mgr, &p.uid);
         }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
@@ -2274,7 +2358,7 @@ impl State {
     pub fn ai_pane_publish(&self) -> Vec<hyperpanes_core::ai::service::AiPanePublish> {
         let mut out = Vec::new();
         for tab in &self.tabs {
-            for p in &tab.panes {
+            for p in tab.panes.iter().filter(|p| p.remote.is_none()) {
                 out.push(hyperpanes_core::ai::service::AiPanePublish {
                     pane_id: p.uid.clone(),
                     session_uid: p.uid.clone(),
@@ -2297,7 +2381,7 @@ impl State {
             }
         };
         for tab in &self.tabs {
-            for p in &tab.panes {
+            for p in tab.panes.iter().filter(|p| p.remote.is_none()) {
                 mix(p.uid.as_bytes());
                 mix(b"\x1f");
                 mix(p.title.as_bytes());
@@ -2345,6 +2429,7 @@ impl State {
             self.capturing_binding = None;
             self.capture_conflict = None;
             self.add_project_error.clear();
+            self.connect_host_error.clear();
             if was_goal {
                 self.refocus_active_pane_scope();
             }
@@ -3244,6 +3329,70 @@ impl State {
     }
 
     /// Open the "Add project" dialog (the ＋ on the sidebar's PROJECTS header).
+    pub fn open_connect_host(&mut self) {
+        self.connect_host_error.clear();
+        self.overlay = Overlay::ConnectHost;
+        self.dirty = true;
+    }
+
+    /// Append a remote tab (never changes the active tab).
+    pub(crate) fn push_remote_tab(&mut self, mut tab: Tab, layout_name: &str) -> usize {
+        tab.layout = layout_from_name(layout_name);
+        tab.sizes = equal_sizes(tab.panes.len());
+        self.tabs.push(tab);
+        self.dirty = true;
+        self.tabs.len() - 1
+    }
+
+    /// Append a remote pane to tab `ti` (never steals focus).
+    pub(crate) fn push_remote_pane(&mut self, ti: usize, ps: PaneState) {
+        let auto = self.tabs[ti].layout == Layout::Auto;
+        let t = &mut self.tabs[ti];
+        let idx = t.panes.len();
+        t.sizes = if auto {
+            equal_sizes(idx + 1)
+        } else {
+            insert_size(&t.sizes, idx)
+        };
+        t.panes.push(ps);
+        self.dirty = true;
+    }
+
+    /// Drop every remote tab of `host_key` (detach only; nothing is killed anywhere).
+    pub(crate) fn remove_remote_tabs(&mut self, host_key: u32) {
+        let active_remote = self
+            .tabs
+            .get(self.active)
+            .map(|t| t.remote.as_ref().is_some_and(|r| r.host_key == host_key))
+            .unwrap_or(false);
+        let mut i = 0;
+        while i < self.tabs.len() {
+            let hit = self.tabs[i]
+                .remote
+                .as_ref()
+                .is_some_and(|r| r.host_key == host_key);
+            // Never remove the last tab (a window always keeps one).
+            if hit && self.tabs.len() > 1 {
+                self.tabs.remove(i);
+                if i < self.active {
+                    self.active -= 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if self.active >= self.tabs.len() || active_remote {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|t| t.remote.is_none())
+                .unwrap_or(0)
+                .min(self.tabs.len().saturating_sub(1));
+        }
+        self.editing_tab = -1;
+        self.dirty = true;
+    }
+
     pub fn open_add_project(&mut self) {
         self.add_project_error.clear();
         self.overlay = Overlay::AddProject;
@@ -4036,9 +4185,9 @@ impl State {
         });
         if let Some((uid, erase, text)) = payload {
             if let Some(erase) = erase {
-                mgr.write(&uid, &String::from_utf8_lossy(&erase));
+                crate::remote::write(mgr, &uid, &String::from_utf8_lossy(&erase));
             }
-            mgr.write(&uid, &text);
+            crate::remote::write(mgr, &uid, &text);
             self.dirty = true;
             return;
         }
@@ -4050,8 +4199,13 @@ impl State {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             if p.pane.clipboard_has_image() {
                 let uid = p.uid.clone();
+                if crate::remote::is_remote_uid(&uid) {
+                    p.pane.set_toast(crate::remote::IMAGE_PASTE_UNSUPPORTED);
+                    self.dirty = true;
+                    return;
+                }
                 p.pane.set_toast("Pasting image…");
-                mgr.write(&uid, "\u{16}");
+                crate::remote::write(mgr, &uid, "\u{16}");
                 self.dirty = true;
             }
         }
@@ -4087,9 +4241,9 @@ impl State {
         // Land the caret at the live edge, as a paste does, so the typed text is on screen.
         p.pane.selection_clear();
         p.pane.scroll_to_bottom();
-        mgr.write(&uid, text);
+        crate::remote::write(mgr, &uid, text);
         if submit {
-            mgr.write(&uid, "\r");
+            crate::remote::write(mgr, &uid, "\r");
         }
         true
     }
@@ -4117,8 +4271,13 @@ impl State {
     pub fn paste_image_focused(&mut self, idx: usize, mgr: &SessionManager) {
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             let uid = p.uid.clone();
+            if crate::remote::is_remote_uid(&uid) {
+                p.pane.set_toast(crate::remote::IMAGE_PASTE_UNSUPPORTED);
+                self.dirty = true;
+                return;
+            }
             p.pane.set_toast("Pasting image…");
-            mgr.write(&uid, "\u{16}");
+            crate::remote::write(mgr, &uid, "\u{16}");
             self.dirty = true;
         }
     }
@@ -4259,7 +4418,7 @@ impl State {
         newgrid.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             let old = std::mem::replace(&mut p.uid, uid);
-            mgr.kill(&old);
+            crate::remote::kill(mgr, &old);
             p.pane = newgrid;
             p.applied = (cols as usize, rows as usize);
             p.started = false;
@@ -4286,6 +4445,14 @@ impl State {
     /// session stays alive centrally for replay-primed re-host). An emptied tab is dropped by
     /// [`Self::take_pane_in`], which also fixes the active index.
     fn detach_pane_idx(&mut self, idx: usize) -> Option<DetachedPane> {
+        // Remote panes can't be re-hosted (no local session to replay) — detach = close only.
+        if self.tabs[self.active]
+            .panes
+            .get(idx)
+            .is_some_and(|p| p.remote.is_some())
+        {
+            return None;
+        }
         let (ps, _alive) = self.take_pane_in(self.active, idx)?;
         Some(DetachedPane {
             uid: ps.uid,
@@ -4365,6 +4532,7 @@ impl State {
             spawn_command: det.spawn_command,
             spawn_args: det.spawn_args,
             spawn_shell: det.spawn_shell,
+            remote: None,
         };
         let auto = self.tabs[ti].layout == Layout::Auto;
         let t = &mut self.tabs[ti];
@@ -4423,7 +4591,7 @@ impl State {
     /// (fresh-shell) panes, switched to. (Sessions aren't cloned — the renderer spawns new
     /// shells too.)
     pub fn duplicate_tab(&mut self, idx: usize, mgr: &SessionManager) {
-        let Some(src) = self.tabs.get(idx) else {
+        let Some(src) = self.tabs.get(idx).filter(|t| t.remote.is_none()) else {
             return;
         };
         let layout = src.layout;
@@ -4494,7 +4662,7 @@ impl State {
         while self.closed_tabs.len() > CLOSED_STACK_CAP {
             let evicted = self.closed_tabs.remove(0);
             for p in &evicted.panes {
-                mgr.kill(&p.uid);
+                crate::remote::kill(mgr, &p.uid);
             }
         }
     }
@@ -4503,7 +4671,7 @@ impl State {
     /// sizes) for re-hosting or parking. Requires ≥2 tabs; fixes the active index. Returns the
     /// detached tab + `source_alive` (always `true` here — other tabs remain).
     pub fn detach_tab(&mut self, idx: usize) -> Option<(DetachedTab, bool)> {
-        if idx >= self.tabs.len() || self.tabs.len() < 2 {
+        if idx >= self.tabs.len() || self.tabs.len() < 2 || self.tabs[idx].remote.is_some() {
             return None;
         }
         let tab = self.tabs.remove(idx);
@@ -4549,6 +4717,10 @@ impl State {
     /// Close tab `idx` reopenably: with ≥2 tabs it's parked (sessions alive) on the closed stack;
     /// the last tab is killed for real (returns `false` → the window quits).
     pub fn close_tab_menu(&mut self, idx: usize, mgr: &SessionManager) -> bool {
+        // A remote tab just detaches (never parked for reopen: there's no local session).
+        if self.tabs.get(idx).is_some_and(|t| t.remote.is_some()) && self.tabs.len() >= 2 {
+            return self.close_tab(idx, mgr);
+        }
         if self.tabs.len() >= 2 {
             if let Some((det, _)) = self.detach_tab(idx) {
                 self.push_closed(det, mgr);
@@ -4724,7 +4896,7 @@ impl State {
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, t)| !t.panes.is_empty())
+            .filter(|(_, t)| !t.panes.is_empty() && t.remote.is_none())
             .enumerate()
             .map(|(out_i, (i, t))| {
                 if i == self.active {
@@ -5182,6 +5354,7 @@ impl State {
             spawn_command: spec.command.clone(),
             spawn_args: spec.args.clone(),
             spawn_shell: shell,
+            remote: None,
         })
     }
 }
@@ -5380,7 +5553,7 @@ fn color_hex(c: Color) -> String {
 
 /// Parse a workspace-file layout token (`"single"`/`"columns"`/… / `"main-stack"`) back to a
 /// [`Layout`], defaulting to `Auto` for an unknown/absent token.
-fn layout_from_name(name: &str) -> Layout {
+pub(crate) fn layout_from_name(name: &str) -> Layout {
     match name {
         "single" => Layout::Single,
         "columns" => Layout::Columns,

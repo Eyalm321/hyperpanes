@@ -17,6 +17,7 @@ import { PaletteItem, PrefOption, FramePaletteOption, KeybindingItem } from "typ
 import { KeyMsg } from "@widgets";
 import { NewPaneDialog } from "newpane.slint";
 import { AddProjectDialog } from "addproject.slint";
+import { ConnectHostDialog } from "connecthost.slint";
 import { NewGoalDialog } from "newgoal.slint";
 
 // A drawn checkmark (vector, so it renders regardless of the UI font's glyph coverage),
@@ -463,6 +464,9 @@ export component OverlayLayer inherits Rectangle {
     // ---- Add Project dialog (kind 4) ----
     in property <string> ap-error: "";       // inline validation error ("" = none)
     callback add-project-submit(string);     // the typed directory path
+    // ---- Connect-to-host dialog (kind 6) ----
+    in property <string> ch-error: "";       // inline (redacted) parse error ("" = none)
+    callback connect-host-submit(string, string, bool, bool); // url · label · remember · autoconnect
     callback pref-action(int, int);  // (kind, arg) — see state::Setting mapping
     callback pref-text(int, string); // (kind, value) — string-valued settings
     callback pref-done();            // commit the appearance draft + close (Done / Save)
@@ -1455,6 +1459,15 @@ export component OverlayLayer inherits Rectangle {
         height: 100%;
         error: root.ap-error;
         submit(p) => { root.add-project-submit(p); }
+        cancel => { root.dismiss(); }
+    }
+
+    // ===== Connect to host dialog (remote attach) =====
+    if root.kind == 6 : ConnectHostDialog {
+        width: 100%;
+        height: 100%;
+        error: root.ch-error;
+        submit(u, l, r, a) => { root.connect-host-submit(u, l, r, a); }
         cancel => { root.dismiss(); }
     }
 

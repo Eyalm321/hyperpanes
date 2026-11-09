@@ -38,6 +38,8 @@ mod pair;
 mod palette;
 mod paneview;
 mod prefs;
+mod remote;
+mod remote_hosts;
 mod sidebar;
 mod state;
 mod tetris;
