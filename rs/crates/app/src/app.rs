@@ -221,6 +221,8 @@ pub struct App {
     /// The dictation settings behind that engine — re-read only at startup; `auto_submit` is
     /// consulted on every delivery.
     listen_settings: RefCell<hyperpanes_core::listen::ListenSettings>,
+    /// Remote-attach connections (other machines' panes as remote tabs); drained from the pump.
+    remote: crate::remote::Hub,
 }
 
 /// How often (at most) a pane's rendered screen is re-fed to the ambient-AI engine. The
@@ -265,6 +267,7 @@ impl App {
             last_prompt_delivery: Cell::new(None),
             listen,
             listen_settings: RefCell::new(listen_settings),
+            remote: crate::remote::Hub::new(),
         })
     }
 
@@ -388,11 +391,11 @@ impl App {
             let uid_for_thread = uid.clone();
             std::thread::spawn(move || {
                 for p in pending {
-                    mgr.write(&uid_for_thread, &p.text);
+                    crate::remote::write(&mgr, &uid_for_thread, &p.text);
                     std::thread::sleep(Duration::from_millis(250));
-                    mgr.write(&uid_for_thread, "\r");
+                    crate::remote::write(&mgr, &uid_for_thread, "\r");
                     std::thread::sleep(Duration::from_millis(600));
-                    mgr.write(&uid_for_thread, "\r");
+                    crate::remote::write(&mgr, &uid_for_thread, "\r");
                     std::thread::sleep(Duration::from_millis(400));
                 }
             });
@@ -465,11 +468,11 @@ impl App {
                 std::thread::spawn(move || {
                     // Text via the proven resume-queue cadence (bracketed-paste TUIs need the gap
                     // + an insurance CR — the now-submitted line makes the second CR a no-op).
-                    mgr.write(&g.uid, &g.text);
+                    crate::remote::write(&mgr, &g.uid, &g.text);
                     std::thread::sleep(Duration::from_millis(250));
-                    mgr.write(&g.uid, "\r");
+                    crate::remote::write(&mgr, &g.uid, "\r");
                     std::thread::sleep(Duration::from_millis(600));
-                    mgr.write(&g.uid, "\r");
+                    crate::remote::write(&mgr, &g.uid, "\r");
                     std::thread::sleep(Duration::from_millis(400));
                     // Best-effort image re-paste: set the OS clipboard to each image, then Ctrl+V.
                     // The paths are already in the text above, so this is additive — if Claude's
@@ -477,9 +480,9 @@ impl App {
                     for img in &g.images {
                         if set_clipboard_image_from_file(img) {
                             std::thread::sleep(Duration::from_millis(150));
-                            mgr.write(&g.uid, "\u{16}"); // Ctrl+V
+                            crate::remote::write(&mgr, &g.uid, "\u{16}"); // Ctrl+V
                             std::thread::sleep(Duration::from_millis(700));
-                            mgr.write(&g.uid, "\r");
+                            crate::remote::write(&mgr, &g.uid, "\r");
                             std::thread::sleep(Duration::from_millis(400));
                         }
                     }
@@ -727,7 +730,15 @@ impl App {
         // Any command is user activity — snap the pump back to the fast cadence (#3) so the
         // result renders immediately even if we'd dropped to the idle cadence.
         self.wake();
-        crate::dbg_log(&format!("cmd[{}] {cmd:?}", win.id));
+        // Never log the pairing URL (it carries the token): log only the command kind.
+        if matches!(cmd, Command::SubmitConnectHost { .. }) {
+            crate::dbg_log(&format!("cmd[{}] SubmitConnectHost", win.id));
+        } else {
+            crate::dbg_log(&format!("cmd[{}] {cmd:?}", win.id));
+        }
+        if self.run_remote_command(win, &cmd) {
+            return;
+        }
         let eff = {
             let mut st = win.state.borrow_mut();
             dispatch(&mut st, cmd, &self.mgr)
@@ -921,7 +932,7 @@ impl App {
                 }
             }
             if !found {
-                self.mgr.kill(&uid);
+                crate::remote::kill(&self.mgr, &uid);
             }
         }
 
@@ -957,6 +968,9 @@ impl App {
             }
         }
         self.control.sync(&windows, &self.mgr);
+        // 2c'. Remote attach: apply queued `connectRemote`s, drain every host's event channel
+        //      (try_recv only — no I/O on this thread) and publish the `remoteScreen` snapshot.
+        events += self.pump_remote(&windows) as u64;
         // Mirror the control-server status into every window's Preferences props.
         {
             let (enabled, allow_input, port) = self.control.status();
@@ -1068,7 +1082,7 @@ impl App {
                     self.ai_ctx_sig.borrow_mut().remove(&w.id);
                     for uid in w.state.borrow().session_uids() {
                         self.ai_feed.borrow_mut().remove(&uid);
-                        self.mgr.kill(&uid);
+                        crate::remote::kill(&self.mgr, &uid);
                     }
                     let _ = w.app.window().hide();
                 } else {
@@ -1124,6 +1138,92 @@ impl App {
         }
     }
 
+    /// Remote-attach pump (UI thread): autoconnect saved hosts once, start any `connectRemote`
+    /// the control API queued, apply host events to the remote tabs. Returns events applied.
+    fn pump_remote(&self, windows: &[Rc<Window>]) -> usize {
+        self.remote.autoconnect_once(windows);
+        for req in self.control.take_remote_connects() {
+            if let Some(w) = windows.first() {
+                self.remote.connect_request(w.id, req, false);
+            }
+        }
+        let n = self.remote.pump(windows);
+        if let Some(v) = self.remote.screens(windows) {
+            self.control.publish_remote_screens(v);
+        }
+        n
+    }
+
+    /// App-level handling of the remote-attach commands (they need the hub + the window list).
+    /// Returns `true` when `cmd` was one of them (and so must not reach `dispatch`).
+    fn run_remote_command(self: &Rc<Self>, win: &Rc<Window>, cmd: &Command) -> bool {
+        use hyperpanes_core::remote::{next_host_id, ConnectRequest, RemoteTarget};
+        match cmd {
+            Command::SubmitConnectHost {
+                url,
+                label,
+                remember,
+                autoconnect,
+            } => {
+                match RemoteTarget::parse(url) {
+                    Ok(target) => {
+                        {
+                            let mut st = win.state.borrow_mut();
+                            st.connect_host_error.clear();
+                            st.overlay = crate::state::Overlay::None;
+                            st.dirty = true;
+                        }
+                        let label = label.trim();
+                        self.remote.connect_request(
+                            win.id,
+                            ConnectRequest {
+                                host_id: next_host_id(),
+                                target,
+                                label: (!label.is_empty()).then(|| label.to_string()),
+                                remember: *remember,
+                            },
+                            *autoconnect,
+                        );
+                    }
+                    Err(e) => {
+                        // PairingError messages never include the input (it holds a token).
+                        let mut st = win.state.borrow_mut();
+                        st.connect_host_error = e.to_string();
+                        st.dirty = true;
+                    }
+                }
+                true
+            }
+            Command::RemoteConnectSaved(label) => {
+                if let Some(h) = crate::remote_hosts::load()
+                    .into_iter()
+                    .find(|h| &h.label == label)
+                {
+                    if let Ok(t) = h.target() {
+                        self.remote
+                            .disconnect_label(&self.windows.borrow(), &h.label);
+                        self.remote
+                            .connect(win.id, next_host_id(), t, &h.label, true);
+                    }
+                }
+                true
+            }
+            Command::RemoteReconnect(key) => {
+                self.remote.reconnect(*key);
+                true
+            }
+            Command::RemoteDisconnect(key) => {
+                self.remote.disconnect(&self.windows.borrow(), *key);
+                true
+            }
+            Command::RemoteForget(label) => {
+                let _ = crate::remote_hosts::forget(label);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Route one session event to the window hosting its `uid`. Returns the number of output
     /// bytes fed into a pane (0 for non-`Data` events / no owning pane) so the pump can report
     /// feed throughput in the perf log (#1).
@@ -1150,12 +1250,12 @@ impl App {
                     fed = data.len();
                     let replies = pc.pane.take_replies();
                     if !replies.is_empty() {
-                        self.mgr.write(&uid, &String::from_utf8_lossy(&replies));
+                        crate::remote::write(&self.mgr, &uid, &String::from_utf8_lossy(&replies));
                     }
                     if !pc.started {
                         pc.started = true;
                         if let Some(cmd) = pc.startup.take() {
-                            self.mgr.write(&uid, &cmd);
+                            crate::remote::write(&self.mgr, &uid, &cmd);
                         }
                     }
                 }
@@ -1249,7 +1349,8 @@ impl App {
                 let st = w.state.borrow();
                 for tab in &st.tabs {
                     for p in &tab.panes {
-                        if p.ai_muted {
+                        // Remote panes' screen text is never shipped to the local AI.
+                        if p.ai_muted || p.remote.is_some() {
                             continue;
                         }
                         let prev = feed.get(&p.uid).copied();
@@ -1708,7 +1809,11 @@ impl App {
                             || crate::is_key(&msg.text, Key::Delete));
                     if keys::is_printable(&msg.text, msg.control, msg.alt) || line_delete {
                         if let Some(erase) = ps.pane.type_over_selection() {
-                            self.mgr.write(&ps.uid, &String::from_utf8_lossy(&erase));
+                            crate::remote::write(
+                                &self.mgr,
+                                &ps.uid,
+                                &String::from_utf8_lossy(&erase),
+                            );
                             if line_delete {
                                 ps.pane.scroll_to_bottom();
                                 return;
@@ -1721,7 +1826,7 @@ impl App {
                 // user sees their input echoed at the prompt even after scrolling up to read
                 // history (a no-op when already at the bottom).
                 ps.pane.scroll_to_bottom();
-                self.mgr.write(&ps.uid, &String::from_utf8_lossy(&bytes));
+                crate::remote::write(&self.mgr, &ps.uid, &String::from_utf8_lossy(&bytes));
             }
         }
     }
@@ -2453,7 +2558,7 @@ impl App {
                         })
                     };
                     if let Some((uid, bytes)) = forward {
-                        app.mgr.write(&uid, &String::from_utf8_lossy(&bytes));
+                        crate::remote::write(&app.mgr, &uid, &String::from_utf8_lossy(&bytes));
                     }
                 }
             });
@@ -2478,7 +2583,7 @@ impl App {
                             })
                         };
                         if let Some((uid, bytes)) = forward {
-                            app.mgr.write(&uid, &String::from_utf8_lossy(&bytes));
+                            crate::remote::write(&app.mgr, &uid, &String::from_utf8_lossy(&bytes));
                         }
                     }
                 });
@@ -3000,6 +3105,24 @@ impl App {
                     app.run_command(&w, Command::SubmitAddProject(path.to_string()));
                 }
             });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app
+                .on_submit_connect_host(move |url, label, remember, autoconnect| {
+                    if let Some(w) = app.window_by_id(id) {
+                        app.run_command(
+                            &w,
+                            Command::SubmitConnectHost {
+                                url: url.to_string(),
+                                label: label.to_string(),
+                                remember,
+                                autoconnect,
+                            },
+                        );
+                    }
+                });
         }
         {
             let app = app.clone();

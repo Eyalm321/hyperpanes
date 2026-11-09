@@ -390,6 +390,17 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
         // uses its OWN font cell metrics (per-pane zoom), so panes can differ in cols/rows.
         let tw = (gw - PANE_CHROME_W).max(1.0);
         let th = (gh - PANE_CHROME_H).max(1.0);
+        if p.remote.is_some() {
+            // Remote pane (D2): the grid stays pinned to the HOST's cols×rows — never resize the
+            // host pty. The surface is drawn 1:1 from the top-left, clipped / padded by the
+            // frame, so the hit-test surface is the grid's natural logical size.
+            let (c, r) = p.pane.grid_size();
+            p.surf = (
+                (c as f32 * p.font.cell_w as f32 / scale).max(1.0),
+                (r as f32 * p.font.cell_h as f32 / scale).max(1.0),
+            );
+            return;
+        }
         let (cols, rows) = cells_for_px(tw * scale, th * scale, p.font.cell_w, p.font.cell_h);
         if (cols, rows) != p.applied {
             if p.pane.resize(cols, rows) {
@@ -615,6 +626,7 @@ pub fn resync(
         Overlay::NewPane => 3,
         Overlay::AddProject => 4,
         Overlay::NewGoal => 5,
+        Overlay::ConnectHost => 6,
     };
     app.set_overlay_kind(kind);
 
@@ -622,6 +634,7 @@ pub fn resync(
     // re-instantiated each time `kind` becomes 4, but the error must update live while it
     // stays open (a failed submit keeps the overlay mounted).
     app.set_ap_error(state.add_project_error.as_str().into());
+    app.set_ch_error(state.connect_host_error.as_str().into());
 
     // New Pane dialog seeds: the default swatch index (next palette-rotation slot), the
     // palette swatches, and the shell-picker options (id 0 = "Use default shell"). The dialog

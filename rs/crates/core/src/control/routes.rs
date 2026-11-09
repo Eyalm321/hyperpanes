@@ -1528,6 +1528,17 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
             serde_json::json!({"ok": true, "scope": if scope == 1 {"gui"} else {"full"}}),
         );
     }
+    // `connectRemote` / `remoteScreen` are local (client-side) GUI commands: the work happens on
+    // the GUI thread via queues on `Shared`. Root token only; the token/url is never echoed.
+    if let Some(t @ ("connectRemote" | "remoteScreen")) = cmd.get("type").and_then(Value::as_str) {
+        if info.scope.is_some() {
+            return jstatus(
+                403,
+                serde_json::json!({"error": format!("{t} needs a root token")}),
+            );
+        }
+        return remote_command(&shared, t, &cmd);
+    }
     let control_file = shared.control_file.to_str().map(str::to_string);
     let result = {
         let mut m = shared.model.lock().unwrap();
@@ -1551,6 +1562,45 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
         shared.mark_projects_dirty();
     }
     jstatus(result.status, result.body)
+}
+
+/// `connectRemote {url, label?, remember?}` → queue a GUI-side attach, answer `{hostId}`;
+/// `remoteScreen` → the GUI's published snapshot. Errors never include the url (it holds a token).
+fn remote_command(shared: &Arc<Shared>, kind: &str, cmd: &Value) -> Response {
+    if kind == "remoteScreen" {
+        return jstatus(
+            200,
+            serde_json::json!({"ok": true, "result": shared.remote_screens()}),
+        );
+    }
+    let Some(url) = cmd.get("url").and_then(Value::as_str) else {
+        return jstatus(
+            400,
+            serde_json::json!({"error": "connectRemote needs a url"}),
+        );
+    };
+    let target = match crate::remote::RemoteTarget::parse(url) {
+        Ok(t) => t,
+        Err(e) => return jstatus(400, serde_json::json!({"error": format!("bad url: {e}")})),
+    };
+    let host_id = crate::remote::next_host_id();
+    shared.queue_remote_connect(crate::remote::ConnectRequest {
+        host_id,
+        target,
+        label: cmd
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|l| !l.trim().is_empty()),
+        remember: cmd
+            .get("remember")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    });
+    jstatus(
+        200,
+        serde_json::json!({"ok": true, "result": {"hostId": host_id}}),
+    )
 }
 
 // ---- /projects ----------------------------------------------------------------------------
@@ -1899,6 +1949,88 @@ mod golden {
             .unwrap();
         assert_eq!(r.status().as_u16(), 403);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn connect_remote_and_remote_screen_commands() {
+        let s = boot(true).await;
+        let secret = "SUPERSECRETTOKEN123";
+        let url = format!("hp://127.0.0.1:9/?token={secret}&v=1");
+        let post = |tok: String, body: Value| {
+            let base = s.base.clone();
+            async move {
+                let r = client()
+                    .post(format!("{base}/command"))
+                    .header("authorization", format!("Bearer {tok}"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                let st = r.status().as_u16();
+                (st, r.text().await.unwrap())
+            }
+        };
+
+        // Master: accepted, hostId returned, the token/url is never echoed.
+        let (st, body) = post(
+            s.token.clone(),
+            json!({"type": "connectRemote", "url": url, "label": "x"}),
+        )
+        .await;
+        assert_eq!(st, 200);
+        assert!(!body.contains(secret), "token echoed: {body}");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], json!(true));
+        let id = v["result"]["hostId"].as_u64().unwrap() as u32;
+        let q = s.shared.take_remote_connects();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].host_id, id);
+        assert_eq!(q[0].label.as_deref(), Some("x"));
+        assert!(!q[0].remember);
+        assert_eq!(q[0].target.token(), secret);
+        assert!(!format!("{:?}", q[0]).contains(secret));
+
+        // A malformed url is a 400 whose error does not echo the input.
+        let (st, body) = post(
+            s.token.clone(),
+            json!({"type": "connectRemote", "url": format!("ftp://h/?token={secret}")}),
+        )
+        .await;
+        assert_eq!(st, 400);
+        assert!(!body.contains(secret));
+        assert!(s.shared.take_remote_connects().is_empty());
+
+        // remoteScreen serves the GUI's published snapshot.
+        s.shared
+            .set_remote_screens(json!([{"hostId": 1, "screenText": "hello"}]));
+        let (st, body) = post(s.token.clone(), json!({"type": "remoteScreen"})).await;
+        assert_eq!(st, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["result"][0]["screenText"], json!("hello"));
+
+        // A scoped token is refused for both.
+        let scoped = client()
+            .post(format!("{}/tokens", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .json(&json!({ "scope": { "tabIds": ["t1"] } }))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for cmd in [
+            json!({"type": "connectRemote", "url": url}),
+            json!({"type": "remoteScreen"}),
+        ] {
+            let (st, body) = post(scoped.clone(), cmd).await;
+            assert_eq!(st, 403, "{body}");
+            assert!(!body.contains(secret));
+        }
+        assert!(s.shared.take_remote_connects().is_empty());
     }
 
     #[tokio::test]

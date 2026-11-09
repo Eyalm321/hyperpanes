@@ -104,6 +104,12 @@ pub struct Shared {
     /// Per-pane "talk" (local TTS): persisted settings + lazily-spawned engine + transcript
     /// tails. Default-off; costs nothing until a pane's talk is switched on.
     pub speech: SpeechService,
+    /// `connectRemote` requests queued off the UI thread; the GUI host drains them each tick
+    /// ([`Self::take_remote_connects`]). Unread in the headless bin.
+    remote_connects: Mutex<Vec<crate::remote::ConnectRequest>>,
+    /// The GUI's latest `remoteScreen` snapshot (array of attached remote panes), republished
+    /// by the GUI host; served verbatim by the `remoteScreen` command.
+    remote_screens: Mutex<serde_json::Value>,
 }
 
 /// Which work queue an instance runs — `/health`'s stable `workQueue` field.
@@ -179,7 +185,29 @@ impl Shared {
             bind: Mutex::new(("127.0.0.1".to_string(), 0)),
             runtime: OnceLock::new(),
             speech: SpeechService::new(speech_settings_path),
+            remote_connects: Mutex::new(Vec::new()),
+            remote_screens: Mutex::new(serde_json::Value::Array(Vec::new())),
         })
+    }
+
+    /// Queue a `connectRemote` request for the GUI host.
+    pub fn queue_remote_connect(&self, req: crate::remote::ConnectRequest) {
+        self.remote_connects.lock().unwrap().push(req);
+    }
+
+    /// Drain queued `connectRemote` requests (GUI host, once per tick).
+    pub fn take_remote_connects(&self) -> Vec<crate::remote::ConnectRequest> {
+        std::mem::take(&mut *self.remote_connects.lock().unwrap())
+    }
+
+    /// Publish the GUI's current attached-remote-pane snapshot (see `remoteScreen`).
+    pub fn set_remote_screens(&self, v: serde_json::Value) {
+        *self.remote_screens.lock().unwrap() = v;
+    }
+
+    /// The last published `remoteScreen` snapshot.
+    pub fn remote_screens(&self) -> serde_json::Value {
+        self.remote_screens.lock().unwrap().clone()
     }
 
     /// Set the requested bind address/port (from `control_settings`) BEFORE `run_server`.

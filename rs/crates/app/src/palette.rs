@@ -126,6 +126,42 @@ pub fn build(state: &State) -> Vec<Entry> {
         Command::NewWindow,
     ));
 
+    // ---- remote attach ----
+    cmds.push(Entry::new(
+        "Connect to host…",
+        "Attach another machine's hyperpanes panes as remote tabs (paste a pairing URL)",
+        "remote attach pair vpn laptop ssh",
+        Command::OpenConnectHost,
+    ));
+    for h in crate::remote_hosts::load() {
+        cmds.push(Entry::new(
+            &format!("Connect to {}", h.label),
+            "Saved remote host",
+            "remote attach saved host",
+            Command::RemoteConnectSaved(h.label.clone()),
+        ));
+        cmds.push(Entry::new(
+            &format!("Forget saved host {}", h.label),
+            "Remove it (and its token) from remote-hosts.json",
+            "remote forget remove delete saved host",
+            Command::RemoteForget(h.label),
+        ));
+    }
+    for (key, label) in crate::remote::live_hosts() {
+        cmds.push(Entry::new(
+            &format!("Reconnect remote host {label}"),
+            "Skip the backoff and reconnect now",
+            "remote reconnect retry",
+            Command::RemoteReconnect(key),
+        ));
+        cmds.push(Entry::new(
+            &format!("Disconnect remote host {label}"),
+            "Drop the connection and close its remote tabs (nothing on the host is killed)",
+            "remote disconnect detach",
+            Command::RemoteDisconnect(key),
+        ));
+    }
+
     let t = state.active_tab();
     if !t.panes.is_empty() {
         let focused = t.focused;
