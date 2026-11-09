@@ -158,31 +158,6 @@ pub enum LinkAction {
 /// `core::paths`' `os_open` (`cmd /C start "" <target>` on Windows, `open`/`xdg-open` elsewhere),
 /// but the URL is passed pre-quoted via `raw_arg` so cmd metacharacters in query strings
 /// (`?a=1&b=2`) can't split the command — the extractor guarantees a URL never contains `"`.
-/// Which OSC 52 write (if any) to apply: nothing when the setting is off or nothing was
-/// written, else the NEWEST write (a later write supersedes an earlier one, like a real
-/// clipboard). Pure, so the gate is unit-tested without a GUI or a clipboard.
-pub fn osc52_text_to_copy(enabled: bool, mut stores: Vec<String>) -> Option<String> {
-    if !enabled {
-        return None;
-    }
-    stores.pop().filter(|t| !t.is_empty())
-}
-
-/// Whether an OSC 8 hyperlink target may be opened/copied as a link: `http(s)` only, with no
-/// whitespace, control characters or quotes. Anything else (`file:`, `ms-…:`, `javascript:`)
-/// is attacker-controlled terminal output reaching a shell `start`/`xdg-open`, so it is
-/// refused. Regex detection of the visible text stays the fallback for those cells.
-pub fn osc8_uri_is_openable(uri: &str) -> bool {
-    let lower = uri.to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"));
-    rest.is_some_and(|r| !r.is_empty())
-        && !uri
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || c == '"' || c == '\'' || c == '`')
-}
-
 fn open_url(url: &str) -> OpenResult {
     use std::process::{Command, Stdio};
     #[cfg(windows)]
@@ -267,26 +242,6 @@ impl TerminalPane {
     /// real conpty blocks at startup (see [`TermGrid::take_replies`]).
     pub fn take_replies(&mut self) -> Vec<u8> {
         self.grid.take_replies()
-    }
-
-    /// Drain OSC 52 clipboard writes the application emitted since the last call and, when
-    /// `enabled` (the user's "Allow programs to set the clipboard" setting), put the newest one
-    /// on the system clipboard with a "Copied …" toast. Always drains, so a disabled setting
-    /// can't leave a backlog that a later enable would suddenly flush. Returns the number of
-    /// characters copied. Reads (OSC 52 `?`) never reach here — see [`TermGrid`].
-    pub fn apply_osc52_stores(&mut self, enabled: bool) -> Option<usize> {
-        let text = osc52_text_to_copy(enabled, self.grid.take_clipboard_stores())?;
-        let n = text.chars().count();
-        if self.clipboard.copy(&text) {
-            self.set_toast(format!(
-                "Copied {} char{} to clipboard",
-                n,
-                if n == 1 { "" } else { "s" }
-            ));
-            Some(n)
-        } else {
-            None
-        }
     }
 
     /// Resize the pane's grid. Returns `true` if the cell dimensions changed — in which
@@ -511,18 +466,6 @@ impl TerminalPane {
         let row = (y / cell_h) as usize;
         if col >= cols || row >= rows {
             return None;
-        }
-        // An OSC 8 hyperlink under the pointer wins over regex detection of the visible text:
-        // its URI is authoritative (visible text may differ, or be wrapped/truncated).
-        if let Some((uri, start, end)) = self.grid.hyperlink_at(row, col) {
-            if osc8_uri_is_openable(&uri) {
-                let cand = UrlCandidate {
-                    url: uri,
-                    start,
-                    end,
-                };
-                return Some((cand, start, end, row, cell_w, cell_h));
-            }
         }
         let snap = self.grid.snapshot();
         let (text, idx, first) = self.logical_line(&snap, row, col)?;
@@ -904,9 +847,7 @@ impl TerminalPane {
         let last_col = cols - 1;
         // Read straight from the grid by ABSOLUTE line, so a selection anchored in scrollback (or
         // straddling the history/viewport boundary) reconstructs correctly regardless of scroll.
-        let mut text = String::new();
-        let mut first_line = true;
-        let mut joined_next = false;
+        let mut lines = Vec::new();
         for line_i in start.line..=end.line {
             let row_text = match self.grid.line_text(line_i) {
                 Some(t) => t,
@@ -924,21 +865,9 @@ impl TerminalPane {
                 let ch = chars.get(col).copied().unwrap_or(' ');
                 line.push(if ch == '\0' { ' ' } else { ch });
             }
-            if !first_line && !joined_next {
-                text.push('\n');
-            }
-            // A soft-wrapped row continues onto the next: keep its full width and join without a
-            // newline, so a wrapped URL/path copies as the single token it is.
-            let wrapped = line_i < end.line && self.grid.line_wraps(line_i);
-            if wrapped && col_end >= last_col {
-                text.push_str(&line);
-                joined_next = true;
-            } else {
-                text.push_str(line.trim_end());
-                joined_next = false;
-            }
-            first_line = false;
+            lines.push(line.trim_end().to_string());
         }
+        let text = lines.join("\n");
         if text.is_empty() {
             None
         } else {
@@ -1529,62 +1458,6 @@ mod tests {
             Some(LinkAction::Copy(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn osc52_gate_honours_the_setting_and_takes_the_newest_write() {
-        let w = || vec!["old".to_string(), "new".to_string()];
-        assert_eq!(osc52_text_to_copy(true, w()), Some("new".to_string()));
-        assert_eq!(osc52_text_to_copy(false, w()), None);
-        assert_eq!(osc52_text_to_copy(true, vec![]), None);
-        assert_eq!(osc52_text_to_copy(true, vec![String::new()]), None);
-    }
-
-    #[test]
-    fn osc52_apply_always_drains_even_when_disabled() {
-        let mut p = unit_pane(20, 2);
-        p.feed("\x1b]52;c;aGk=\x07"); // "hi"
-        assert_eq!(p.apply_osc52_stores(false), None);
-        // Drained: enabling later must not flush the stale write.
-        assert_eq!(p.apply_osc52_stores(true), None);
-    }
-
-    #[test]
-    fn osc8_uri_gate_allows_only_plain_http_links() {
-        assert!(osc8_uri_is_openable("https://example.com/a?b=1"));
-        assert!(osc8_uri_is_openable("HTTP://example.com"));
-        assert!(!osc8_uri_is_openable("file:///etc/passwd"));
-        assert!(!osc8_uri_is_openable("javascript:alert(1)"));
-        assert!(!osc8_uri_is_openable("https://a.com/\" & calc"));
-        assert!(!osc8_uri_is_openable("https://"));
-    }
-
-    #[test]
-    fn link_at_resolves_an_osc8_uri_that_differs_from_the_visible_text() {
-        let mut p = unit_pane(10, 4);
-        // 14 visible chars soft-wrap over two rows; neither half looks like a URL.
-        p.feed("\x1b]8;id=a;https://example.com/real\x1b\\0123456789ABCD\x1b]8;;\x1b\\");
-        let (w, h) = (10.0, 4.0);
-        let top = p.link_at(3.5, 0.5, w, h).expect("row 0 hits");
-        assert_eq!(top.abs_path, "https://example.com/real");
-        assert!(top.is_url);
-        let cont = p.link_at(1.5, 1.5, w, h).expect("wrapped row hits");
-        assert_eq!(cont.abs_path, "https://example.com/real");
-        assert_eq!((cont.x, cont.w), (0.0, 4.0));
-        // Ctrl+click copies the whole URI.
-        match p.activate_link(3.5, 0.5, w, h, true, "") {
-            Some(LinkAction::Copy(u)) => assert_eq!(u, "https://example.com/real"),
-            other => panic!("expected Copy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn selection_across_a_soft_wrap_copies_without_a_newline() {
-        let mut p = unit_pane(10, 3);
-        p.feed("https://a.com/abcdefghij"); // 24 chars: wraps over 3 rows of 10
-        p.selection_begin(0.5, 0.5, 10.0, 3.0);
-        p.selection_update(9.5, 2.5, 10.0, 3.0);
-        assert_eq!(p.selection_text().unwrap(), "https://a.com/abcdefghij");
     }
 
     #[test]

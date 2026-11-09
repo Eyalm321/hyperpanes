@@ -99,8 +99,6 @@ pub struct DetachedTab {
     /// The zoomed (maximised-in-tab) pane, carried so a reopened/moved tab keeps its
     /// maximized pane instead of dropping the zoom.
     pub zoomed: Option<usize>,
-    /// Control-plane tab id, carried so a moved/reopened tab keeps its id.
-    pub ctl_id: Option<String>,
     pub panes: Vec<DetachedPane>,
 }
 
@@ -124,8 +122,6 @@ pub enum Setting {
     ClickablePaths(bool),
     /// Toggle copy-on-select (finishing a drag copies it; right-click then always pastes).
     CopyOnSelect(bool),
-    /// Allow programs in panes to set the system clipboard via OSC 52 (write-only).
-    Osc52Clipboard(bool),
     /// Set the editor-command template used to open clicked paths ("" = auto).
     EditorCommand(String),
     /// Toggle the idle-glow (AI-pane quiescence glow).
@@ -943,18 +939,9 @@ pub struct Tab {
     /// [`crate::remote`]). Remote tabs are never persisted and never reach the local control
     /// read model.
     pub remote: Option<crate::remote::RemoteTabInfo>,
-    /// Stable control-plane id of a tab created by a control `attach` (`open_tab`). Published
-    /// as the tab's id in place of the positional `window:index` one, so the id `attach`
-    /// returned keeps resolving. `None` for GUI-native tabs. Not persisted across restarts.
-    pub ctl_id: Option<String>,
 }
 
 impl Tab {
-    #[cfg(test)]
-    pub(crate) fn new_for_test(title: SharedString) -> Self {
-        Self::empty(title)
-    }
-
     pub(crate) fn empty(title: SharedString) -> Self {
         Tab {
             remote: None,
@@ -965,7 +952,6 @@ impl Tab {
             main_fraction: 0.6,
             focused: 0,
             zoomed: None,
-            ctl_id: None,
         }
     }
 
@@ -1073,6 +1059,11 @@ pub struct State {
     pub project_queue_counts: std::collections::HashMap<String, usize>,
     /// Non-terminal task count of the queues that map to no project ("Other queues").
     pub other_queue_count: usize,
+    /// Per-state task counts per project id (lanes, #7); absent = project has no queues.
+    pub project_lane_counts:
+        std::collections::HashMap<String, hyperpanes_core::control::work::Counts>,
+    /// Per-state counts of the unmapped queues; `None` = there are none.
+    pub other_lane_counts: Option<hyperpanes_core::control::work::Counts>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
     /// itself is gated by `settings.show_sidebar`; this is just the flyout panel state.
     pub sidebar_open: bool,
@@ -1274,6 +1265,8 @@ impl State {
             projects: sidebar::list(),
             project_queue_counts: std::collections::HashMap::new(),
             other_queue_count: 0,
+            project_lane_counts: std::collections::HashMap::new(),
+            other_lane_counts: None,
             goal_orchestrators: std::collections::HashMap::new(),
             goal_orch_models: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
@@ -1427,10 +1420,8 @@ impl State {
     }
 
     fn fresh_tab(&mut self) -> Tab {
-        let (title, seq) =
-            next_term_title(self.tabs.iter().map(|t| t.title.as_str()), self.tab_seq);
-        self.tab_seq = seq;
-        Tab::empty(title.into())
+        self.tab_seq += 1;
+        Tab::empty(format!("term {}", self.tab_seq).into())
     }
 
     pub fn active_tab(&self) -> &Tab {
@@ -1931,23 +1922,8 @@ impl State {
 
     /// Re-host a detached session as a **brand-new tab** (dock-as-tab on a tear-off drop):
     /// append a fresh tab, switch to it, and adopt the pane into it.
-    ///
-    /// `title` / `layout` (control-created tabs) override the auto "term N" name and the
-    /// default layout; an absent or blank title falls back to the auto name.
-    pub fn adopt_pane_as_tab(
-        &mut self,
-        mgr: &SessionManager,
-        det: DetachedPane,
-        title: Option<&str>,
-        layout: Option<Layout>,
-    ) {
-        let mut tab = self.fresh_tab();
-        if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
-            tab.title = t.to_string().into();
-        }
-        if let Some(l) = layout {
-            tab.layout = l;
-        }
+    pub fn adopt_pane_as_tab(&mut self, mgr: &SessionManager, det: DetachedPane) {
+        let tab = self.fresh_tab();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
@@ -2137,16 +2113,6 @@ impl State {
     }
 
     // ---- layout / zoom ----
-
-    /// Rename tab `idx` (any tab) without switching tabs.
-    pub fn set_tab_title(&mut self, idx: usize, title: &str) {
-        if let Some(t) = self.tabs.get_mut(idx) {
-            if t.title.as_str() != title {
-                t.title = title.to_string().into();
-                self.dirty = true;
-            }
-        }
-    }
 
     pub fn set_layout(&mut self, layout: Layout) {
         let t = self.active_tab_mut();
@@ -2954,7 +2920,6 @@ impl State {
             Setting::DefaultShell(_)
             | Setting::ClickablePaths(_)
             | Setting::CopyOnSelect(_)
-            | Setting::Osc52Clipboard(_)
             | Setting::EditorCommand(_)
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
@@ -3077,7 +3042,6 @@ impl State {
             Setting::ShowDot(on) => self.settings.show_dot = on,
             Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
             Setting::CopyOnSelect(on) => self.settings.copy_on_select = on,
-            Setting::Osc52Clipboard(on) => self.settings.osc52_clipboard = on,
             Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
             Setting::IdleAlert(on) => self.settings.idle_alert = on,
             Setting::IdleEffect(idx) => {
@@ -3305,6 +3269,19 @@ impl State {
         if self.project_queue_counts != counts || self.other_queue_count != other {
             self.project_queue_counts = counts;
             self.other_queue_count = other;
+            self.dirty = true;
+        }
+    }
+
+    /// Store freshly polled lane counts (#7); dirties the UI only on a change.
+    pub fn set_lane_counts(
+        &mut self,
+        lanes: std::collections::HashMap<String, hyperpanes_core::control::work::Counts>,
+        other: Option<hyperpanes_core::control::work::Counts>,
+    ) {
+        if self.project_lane_counts != lanes || self.other_lane_counts != other {
+            self.project_lane_counts = lanes;
+            self.other_lane_counts = other;
             self.dirty = true;
         }
     }
@@ -4758,7 +4735,6 @@ impl State {
         self.dirty = true;
         let focused = tab.focused;
         let zoomed = tab.zoomed;
-        let ctl_id = tab.ctl_id;
         let panes = tab
             .panes
             .into_iter()
@@ -4783,7 +4759,6 @@ impl State {
                 main_fraction: tab.main_fraction,
                 focused,
                 zoomed,
-                ctl_id,
                 panes,
             },
             true,
@@ -4837,7 +4812,6 @@ impl State {
         };
         let mut tab = Tab::empty(det.title.clone());
         tab.layout = det.layout;
-        tab.ctl_id = det.ctl_id.clone();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
@@ -4866,7 +4840,6 @@ impl State {
         let ti = self.active;
         self.tabs[ti].title = det.title;
         self.tabs[ti].layout = det.layout;
-        self.tabs[ti].ctl_id = det.ctl_id;
         for dp in det.panes {
             self.adopt_into_tab(mgr, dp, ti);
         }
@@ -5148,10 +5121,8 @@ impl State {
         let title: SharedString = match g.title {
             Some(t) if !t.is_empty() => t.into(),
             _ => {
-                let (title, seq) =
-                    next_term_title(self.tabs.iter().map(|t| t.title.as_str()), self.tab_seq);
-                self.tab_seq = seq;
-                title.into()
+                self.tab_seq += 1;
+                format!("term {}", self.tab_seq).into()
             }
         };
         let layout = g
@@ -5631,35 +5602,6 @@ fn color_hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
 }
 
-/// Pick the next auto tab name "term N": bump `seq` until the name collides with no existing
-/// tab title (a restored or renamed tab may already hold "term 2"). Returns the title and the
-/// new sequence value.
-pub(crate) fn next_term_title<'a>(
-    existing: impl Iterator<Item = &'a str> + Clone,
-    mut seq: usize,
-) -> (String, usize) {
-    loop {
-        seq += 1;
-        let title = format!("term {seq}");
-        if !existing.clone().any(|t| t == title) {
-            return (title, seq);
-        }
-    }
-}
-
-/// Strictly parse a layout name (exactly the names `theme::layout_name` emits).
-pub(crate) fn parse_layout(name: &str) -> Option<Layout> {
-    match name {
-        "auto" => Some(Layout::Auto),
-        "single" => Some(Layout::Single),
-        "columns" => Some(Layout::Columns),
-        "rows" => Some(Layout::Rows),
-        "grid" => Some(Layout::Grid),
-        "main-stack" => Some(Layout::MainStack),
-        _ => None,
-    }
-}
-
 /// Parse a workspace-file layout token (`"single"`/`"columns"`/… / `"main-stack"`) back to a
 /// [`Layout`], defaulting to `Auto` for an unknown/absent token.
 pub(crate) fn layout_from_name(name: &str) -> Layout {
@@ -6012,16 +5954,6 @@ mod spawn_cells_tests {
     //! grid — and only falls back to 80×24 when no layout exists yet (eager first-pane
     //! seed, workspace restore into a fresh window).
     use super::*;
-
-    #[test]
-    fn next_term_title_skips_existing_titles() {
-        // Restored tabs hold "term 1"/"term 2" while the counter restarts at 0.
-        let existing = ["term 1", "term 2"];
-        let (t, seq) = next_term_title(existing.iter().copied(), 0);
-        assert_eq!((t.as_str(), seq), ("term 3", 3));
-        let (t, _) = next_term_title(["a", "b"].iter().copied(), 0);
-        assert_eq!(t, "term 1");
-    }
 
     fn fresh() -> State {
         State::new(theme::load_font(1.0))
@@ -6468,23 +6400,6 @@ mod reminder_tests {
     fn mgr() -> SessionManager {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         SessionManager::new(tx)
-    }
-
-    #[test]
-    fn adopt_pane_as_tab_applies_title_and_layout() {
-        let mut st = fresh();
-        let m = mgr();
-        st.adopt_pane_as_tab(&m, det("a"), Some("my tab"), Some(Layout::Single));
-        let t = st.tabs.last().unwrap();
-        assert_eq!(t.title.as_str(), "my tab");
-        assert_eq!(t.layout, Layout::Single);
-        // No title given: an auto name that collides with no existing tab.
-        st.adopt_pane_as_tab(&m, det("b"), None, None);
-        let titles: Vec<_> = st.tabs.iter().map(|t| t.title.to_string()).collect();
-        let mut u = titles.clone();
-        u.sort();
-        u.dedup();
-        assert_eq!(u.len(), titles.len(), "{titles:?}");
     }
 
     #[test]
