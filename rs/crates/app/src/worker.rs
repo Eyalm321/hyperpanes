@@ -148,7 +148,17 @@ pub fn wants_worker(argv: &[String]) -> bool {
 
 /// Parse `worker --queue <q> [--worker <id>] -- <cmd...>`.
 /// `argv[0]` is the program, `argv[1]` is `worker`; parsing starts at index 2.
+#[cfg(test)]
 pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
+    parse_args_with(argv, &|| None)
+}
+
+/// [`parse_args`] with a fallback queue for when `--queue` is omitted (the registered
+/// project that owns the cwd, see `project_queue::default_queue_for`).
+pub fn parse_args_with(
+    argv: &[String],
+    default_queue: &dyn Fn() -> Option<String>,
+) -> Result<WorkerArgs, String> {
     let mut queue: Option<String> = None;
     let mut worker: Option<String> = None;
     let mut count_arg: Option<String> = None;
@@ -265,7 +275,9 @@ pub fn parse_args(argv: &[String]) -> Result<WorkerArgs, String> {
             }
         }
     }
-    let queue = queue.ok_or("missing --queue <name>")?;
+    let queue = queue.or_else(default_queue).ok_or(
+        "missing --queue <name> (and the current directory is not inside a registered project)",
+    )?;
     if worktree && base.is_none() {
         return Err(
             "--worktree now requires --base <committish>: the fork point for task worktrees must \
@@ -386,7 +398,17 @@ fn control_base(disco: &Discovery) -> String {
 
 /// Entry point from `main`. Drains `--queue` until empty, then returns `Ok(())`.
 pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
-    let args = match parse_args(argv) {
+    let from_project = std::cell::Cell::new(false);
+    let args = match parse_args_with(argv, &|| {
+        let cwd = std::env::current_dir().ok()?;
+        let root = crate::sidebar::git_root_of(&cwd.to_string_lossy())?;
+        let q = crate::project_queue::default_queue_for(
+            Some(&root.to_string_lossy()),
+            &crate::sidebar::list(),
+        )?;
+        from_project.set(true);
+        Some(q)
+    }) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("hyperpanes worker: {e}");
@@ -395,6 +417,12 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         }
     };
 
+    if from_project.get() {
+        eprintln!(
+            "hyperpanes worker: no --queue given; using project queue '{}'",
+            args.queue
+        );
+    }
     let control_file = control_file_path();
     let disco = load_discovery_from(&control_file)?;
     let base = control_base(&disco);
@@ -1613,6 +1641,20 @@ mod tests {
     #[test]
     fn missing_queue_is_error() {
         assert!(parse_args(&argv(&["hp", "worker", "--", "true"])).is_err());
+    }
+
+    #[test]
+    fn queue_defaults_from_project_resolver() {
+        let a = argv(&["hp", "worker", "--", "true"]);
+        let got = parse_args_with(&a, &|| Some("proj-1".to_string())).unwrap();
+        assert_eq!(got.queue, "proj-1");
+        // An explicit --queue wins over the resolver.
+        let b = argv(&["hp", "worker", "--queue", "x", "--", "true"]);
+        let got = parse_args_with(&b, &|| Some("proj-1".to_string())).unwrap();
+        assert_eq!(got.queue, "x");
+        // No match: a clear error naming --queue.
+        let err = parse_args_with(&a, &|| None).unwrap_err();
+        assert!(err.contains("--queue"));
     }
 
     #[test]

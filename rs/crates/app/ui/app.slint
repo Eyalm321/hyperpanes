@@ -128,6 +128,8 @@ export component AppWindow inherits Window {
     in property <string> ch-error: "";   // inline (token-redacted) parse error ("" = none)
     // ---- right-edge sidebar rail ----
     in property <[ProjectItem]> projects;
+    // "Other queues" task-count badge ("" = hidden): queues that map to no project (#6).
+    in property <string> other-queue-badge;
     in property <bool> show-sidebar: true;   // rail visible (gated; hidden in fullscreen)
     in property <bool> sidebar-open: false;  // projects flyout expanded
     // ---- context menus (pane header / tab strip) ----
@@ -383,6 +385,7 @@ export component AppWindow inherits Window {
                 // match; the two sections are mutually exclusive — see sidebar.slint).
                 width: (root.sidebar-open || RemindersAdapter.open) ? 280px : 44px;
                 projects: root.projects;
+                other-queue-badge: root.other-queue-badge;
                 projects-open: root.sidebar-open;
                 new-pane => { root.new-pane(); }
                 open-new-pane => { root.open-new-pane(); }
