@@ -618,7 +618,8 @@ impl ControlHost {
                 for w in windows {
                     let mut st = w.state.borrow_mut();
                     let counts = crate::project_queue::project_open_counts(&queues, &st.projects);
-                    st.set_project_queue_counts(counts);
+                    let other = crate::project_queue::other_open_count(&queues, &st.projects);
+                    st.set_project_queue_counts(counts, other);
                 }
             }
         }

@@ -64,13 +64,26 @@ plus the lease fields (`claimedBy, fencingToken, visibilityDeadline, result, err
 
 ## How queues map to projects
 
-A queue belongs to a registered project when its name **equals the project's `id`** or
-starts with **`<project id>:`** (a sub-queue, e.g. `<id>:g1`). If several ids match, the
-longest wins. Queues that map to no project are not shown. Implemented once, as the pure
-`project_for_queue` in `rs/crates/app/src/project_queue.rs`, which #6–#9 all reuse.
+A queue belongs to a registered project when, for one of the project's **keys** (its `id`,
+or its `name` compared case-insensitively), the queue name **equals the key** or starts with
+**`<key>:`** or **`<key>-`**. Registry ids are UUIDs, so in practice goal queues match by name
+(`hyperpanes-1a2b3c-t3`, `myapp-g1`), and a sub-queue can also hang off the id
+(`<id>:g1`).
+
+- **Longest key wins** across all projects, so `hyperpanes-mcp-g1` belongs to
+  `hyperpanes-mcp`, not `hyperpanes`, and `hyper` never takes `hyperpanes-…`.
+- A prefix must end at a separator: `hyperpanesx` matches nothing.
+- An equal-length tie between two **different** projects (two registered repos with the same
+  name) is ambiguous and is never guessed.
+- Unmatched and ambiguous queues go to an **"Other queues"** row in the sidebar. They are
+  never dropped.
+
+Implemented once, as the pure `project_for_queue` / `other_open_count` in
+`rs/crates/app/src/project_queue.rs` (table-tested), which #6–#9 all reuse.
 `hyperpanes worker` defaults `--queue` to the id of the project whose git root contains
 the cwd. The sidebar badge (#6) is the sum of queued + claimed tasks across a project's
-queues, polled in-process from the work queue at ~1 Hz (#9 replaces polling with events).
+queues, and the "Other queues" row the same sum over the unmapped ones, both polled in-process
+from the work queue at ~1 Hz (#9 replaces polling with events).
 
 ## How queues map to projects (background)
 

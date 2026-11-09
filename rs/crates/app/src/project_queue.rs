@@ -1,9 +1,12 @@
 //! Queue → project mapping and per-project task-count aggregation (hyperpanes#6).
 //!
-//! A work queue belongs to a registered project when its name EQUALS the project's `id`
-//! or starts with `<project id>:` (a sub-queue such as `<id>:g1`). Queues matching no
-//! project are not shown. See `docs/queue-gui-roadmap.md` ("How queues map to projects").
-//! Everything here is pure so the GUI only renders the result.
+//! A work queue belongs to a registered project when, for one of the project's KEYS (its `id`
+//! or its `name`, compared case-insensitively), the queue name equals the key or starts with
+//! `<key>:` or `<key>-` (goal queues look like `<project>-g1` or `<project>-1a2b3c-t3`). When
+//! several projects match, the LONGEST key wins (so `hyper` never takes `hyperpanes-…`); an
+//! equal-length tie between two different projects is ambiguous. Unmatched and ambiguous queues
+//! go to the "Other queues" bucket and are never dropped. See `docs/queue-gui-roadmap.md`
+//! ("How queues map to projects"). Everything here is pure so the GUI only renders the result.
 
 use std::collections::HashMap;
 
@@ -11,19 +14,53 @@ use hyperpanes_core::control::work::QueueSummary;
 
 use crate::sidebar::Project;
 
-/// The id of the project `queue` belongs to, if any. When several project ids match
-/// (one id being a `:`-prefix of another), the longest id wins.
+/// Whether `queue` is addressed by `key`: equal, or `<key>:…` / `<key>-…`, ignoring ASCII case.
+fn key_matches(queue: &str, key: &str) -> bool {
+    // `is_char_boundary` is false past the end, so a shorter queue (or a split inside a
+    // multi-byte char) never reaches `split_at`.
+    if key.is_empty() || !queue.is_char_boundary(key.len()) {
+        return false;
+    }
+    let (head, rest) = queue.split_at(key.len());
+    head.eq_ignore_ascii_case(key)
+        && (rest.is_empty() || rest.starts_with(':') || rest.starts_with('-'))
+}
+
+/// The id of the project `queue` belongs to, or `None` for the "Other queues" bucket (no
+/// project matches, or the longest match is an equal-length tie between two projects).
 pub fn project_for_queue<'a>(queue: &str, projects: &'a [Project]) -> Option<&'a str> {
-    projects
+    let mut best: Option<(usize, &'a str)> = None;
+    let mut tied = false;
+    for p in projects {
+        for key in [p.id.as_str(), p.name.as_str()] {
+            if !key_matches(queue, key) {
+                continue;
+            }
+            match best {
+                Some((len, id)) if key.len() < len || (key.len() == len && id == p.id) => {}
+                Some((len, _)) if key.len() == len => tied = true,
+                _ => {
+                    best = Some((key.len(), p.id.as_str()));
+                    tied = false;
+                }
+            }
+        }
+    }
+    if tied {
+        None
+    } else {
+        best.map(|(_, id)| id)
+    }
+}
+
+/// Non-terminal task count (queued + claimed) of the queues that map to NO project (the
+/// "Other queues" bucket). Never dropped: the sidebar shows it as its own row.
+pub fn other_open_count(queues: &[QueueSummary], projects: &[Project]) -> usize {
+    queues
         .iter()
-        .filter(|p| {
-            queue == p.id
-                || queue
-                    .strip_prefix(p.id.as_str())
-                    .is_some_and(|rest| rest.starts_with(':'))
-        })
-        .max_by_key(|p| p.id.len())
-        .map(|p| p.id.as_str())
+        .filter(|q| project_for_queue(&q.queue, projects).is_none())
+        .map(|q| q.counts.queued + q.counts.claimed)
+        .sum()
 }
 
 /// Non-terminal task count (queued + claimed) per project id, summed over every mapped
@@ -69,13 +106,77 @@ mod tests {
     use hyperpanes_core::control::work::Counts;
 
     fn proj(id: &str, path: &str) -> Project {
+        named(id, id, path)
+    }
+
+    fn named(id: &str, name: &str, path: &str) -> Project {
         Project {
             id: id.into(),
             path: path.into(),
-            name: id.into(),
+            name: name.into(),
             color: "#fff".into(),
             last_opened_at: None,
         }
+    }
+
+    /// The real-world table: registry ids are UUIDs, goal queues are prefixed with the NAME.
+    #[test]
+    fn queue_to_project_table() {
+        let ps = vec![
+            named("11111111-uuid", "hyperpanes", "/d/hyperpanes"),
+            named("22222222-uuid", "hyperpanes-mcp", "/d/hyperpanes-mcp"),
+            named("aaaa-uuid", "hyper", "/d/hyper"),
+            named("bbbb-uuid", "WebApp", "/d/WebApp"),
+            named("cccc-uuid", "myapp", "/d/myapp"),
+            named("dddd-uuid", "twin", "/d/a/twin"),
+            named("eeee-uuid", "twin", "/d/b/twin"),
+        ];
+        let cases: &[(&str, Option<&str>)] = &[
+            // name prefix with `-`: goal queues
+            ("hyperpanes-1a2b3c-t3", Some("11111111-uuid")),
+            ("myapp-g1", Some("cccc-uuid")),
+            // longest key wins: hyperpanes-mcp, not hyperpanes; hyperpanes, not hyper
+            ("hyperpanes-mcp-g1", Some("22222222-uuid")),
+            ("hyperpanes", Some("11111111-uuid")),
+            ("hyper-x", Some("aaaa-uuid")),
+            // id exact / id with `:` / id with `-`
+            ("11111111-uuid", Some("11111111-uuid")),
+            ("11111111-uuid:g1", Some("11111111-uuid")),
+            ("cccc-uuid-g9", Some("cccc-uuid")),
+            // case-insensitive name
+            ("webapp-g2", Some("bbbb-uuid")),
+            // a prefix that runs into letters is not a match
+            ("hyperpanesx", None),
+            ("myappg1", None),
+            // two registered repos with the same name: ambiguous, never guessed
+            ("twin-g1", None),
+            // unrelated / legacy bare names go to Other
+            ("g12", None),
+            ("tools", None),
+            ("", None),
+            ("hyp", None),
+            ("hyperpanés-g1", None),
+        ];
+        for (q, want) in cases {
+            assert_eq!(project_for_queue(q, &ps), *want, "queue {q:?}");
+        }
+    }
+
+    #[test]
+    fn unmatched_and_ambiguous_queues_count_as_other() {
+        let ps = vec![
+            named("p1", "alpha", "/r/a"),
+            named("p2", "twin", "/r/t1"),
+            named("p3", "twin", "/r/t2"),
+        ];
+        let q = vec![
+            qs("alpha-g1", 2, 1, 0),
+            qs("g1", 1, 1, 4),
+            qs("twin-g2", 3, 0, 0),
+            qs("zzz", 0, 0, 7),
+        ];
+        assert_eq!(other_open_count(&q, &ps), 5);
+        assert_eq!(project_open_counts(&q, &ps).get("p1"), Some(&3));
     }
 
     fn qs(queue: &str, queued: usize, claimed: usize, done: usize) -> QueueSummary {

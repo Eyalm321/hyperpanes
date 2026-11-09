@@ -964,6 +964,7 @@ pub fn resync(
             .retain(|k, _| live.contains(k.as_str()));
     }
     sync_model(&ui.projects, projects);
+    app.set_other_queue_badge(crate::project_queue::badge_text(state.other_queue_count).into());
 
     // ---- new-goal dialog: attached-image filenames ----
     let goal_image_names: Vec<slint::SharedString> = state
