@@ -583,15 +583,40 @@ fn transcribe(shared: &Arc<Shared>, raw: &PathBuf) {
 mod tests {
     use super::*;
 
-    fn wait_for(mut pred: impl FnMut() -> bool, what: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+    /// Poll until `pred` holds. The ceiling is generous (returns as soon as the
+    /// condition is true) so a loaded host does not flake; override with
+    /// `HP_TEST_WAIT_SECS`.
+    fn wait_for(pred: impl FnMut() -> bool, what: &str) {
+        wait_for_with(pred, || what.to_string());
+    }
+
+    fn wait_for_with(mut pred: impl FnMut() -> bool, what: impl FnOnce() -> String) {
+        let secs = std::env::var("HP_TEST_WAIT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        let deadline = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < deadline {
             if pred() {
                 return;
             }
             thread::sleep(Duration::from_millis(20));
         }
-        panic!("timed out waiting for {what}");
+        panic!("timed out waiting for {}", what());
+    }
+
+    /// Wait until the stub recorder has written at least `bytes` to the raw capture.
+    /// `phase() == Recording` only means the child was spawned, not that it has run.
+    fn wait_for_capture(handle: &ListenHandle, bytes: u64) {
+        let raw = capture_path(handle.shared.id, "raw");
+        wait_for(
+            || {
+                std::fs::metadata(&raw)
+                    .map(|m| m.len() >= bytes)
+                    .unwrap_or(false)
+            },
+            "the recorder to write its audio",
+        );
     }
 
     #[test]
@@ -711,10 +736,17 @@ mod tests {
         assert!(handle.ready());
         handle.start();
         wait_for(|| handle.phase() == Phase::Recording, "recording to start");
+        wait_for_capture(&handle, 32000);
         handle.stop();
-        wait_for(
-            || handle.take_transcript().as_deref() == Some("hello from the mic"),
-            "the transcript",
+        let err = std::cell::RefCell::new(None);
+        wait_for_with(
+            || {
+                if let Some(e) = handle.take_error() {
+                    *err.borrow_mut() = Some(e);
+                }
+                handle.take_transcript().as_deref() == Some("hello from the mic")
+            },
+            || format!("the transcript (engine error: {:?})", err.borrow()),
         );
         wait_for(|| handle.phase() == Phase::Idle, "the engine to go idle");
     }
@@ -734,6 +766,7 @@ mod tests {
         let handle = spawn_with(recorder, transcriber, 60);
         handle.start();
         wait_for(|| handle.phase() == Phase::Recording, "recording to start");
+        wait_for_capture(&handle, 32000);
         handle.cancel();
         wait_for(|| handle.phase() == Phase::Idle, "the engine to go idle");
         assert_eq!(
@@ -762,6 +795,7 @@ mod tests {
         let handle = spawn_with(recorder, transcriber, 60);
         handle.start();
         wait_for(|| handle.phase() == Phase::Recording, "recording to start");
+        wait_for_capture(&handle, 1600);
         handle.stop();
         wait_for(|| handle.take_error().is_some(), "the too-short error");
         assert_eq!(handle.take_transcript(), None);
