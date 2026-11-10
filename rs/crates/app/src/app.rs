@@ -1819,8 +1819,14 @@ impl App {
                 return;
             }
         }
-        // Other modifier chords (Alt+… focus, bare F11) — run + swallow.
-        let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
+        // Other modifier chords (Alt+… focus, bare F11) — run + swallow. The selection guard
+        // (Ctrl+G group / Esc clear) is open only while 2+ panes are selected and nothing
+        // above (a context menu or overlay) should take the key first.
+        let cmd = {
+            let st = win.state.borrow();
+            let sel = st.selection_active() && !st.ctx_open() && !st.overlay_open();
+            crate::route_chord_in(&st.keymap, &msg, sel)
+        };
         if let Some(cmd) = cmd {
             self.run_command(win, cmd);
             return;

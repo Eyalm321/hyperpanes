@@ -5133,6 +5133,32 @@ impl State {
         }
     }
 
+    /// Tab menu "Group Color": point group tab `ti` at project `project` (its colour), or — with
+    /// `None` — back at the panes' own project ("Use project colour").
+    pub fn set_group_color(&mut self, ti: usize, project: Option<String>) {
+        let Some(t) = self.tabs.get(ti).filter(|t| t.pane_group.is_some()) else {
+            return;
+        };
+        let id = project.or_else(|| {
+            let members: Vec<Option<String>> = t
+                .panes
+                .iter()
+                .map(|p| self.pane_project_id(&p.uid))
+                .collect();
+            resolve_group_project(&members, t.focused)
+        });
+        let color = id
+            .as_deref()
+            .and_then(|i| self.projects.iter().find(|p| p.id == i))
+            .map(|p| parse_hex(&p.color));
+        let g = self.tabs[ti].pane_group.as_mut().unwrap();
+        g.project = id;
+        if color.is_some() {
+            g.color = color;
+        }
+        self.dirty = true;
+    }
+
     /// Group the active tab's selection (Ctrl+G / menu). `anchor` = the clicked/focused pane
     /// index driving colour resolution. Returns whether a group was made.
     pub fn group_selection(&mut self, anchor: Option<usize>, mgr: &SessionManager) -> bool {

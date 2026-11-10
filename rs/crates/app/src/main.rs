@@ -787,8 +787,19 @@ fn key_tok(msg: &KeyMsg) -> Option<keybindings::KeyTok> {
 /// Resolve a key event to a bound [`Command`] via the user's keymap (overrides win over
 /// defaults — see [`keybindings::Keymap::match_chord`]).
 pub(crate) fn route_chord(keymap: &keybindings::Keymap, msg: &KeyMsg) -> Option<Command> {
+    route_chord_in(keymap, msg, false)
+}
+
+/// [`route_chord`] with the pane-selection guard: Ctrl+G / Esc (group / clear selection) match
+/// ONLY while `selection_active` (2+ panes selected). Otherwise this returns `None` so the key
+/// reaches the pty unchanged (0x07 / 0x1b).
+pub(crate) fn route_chord_in(
+    keymap: &keybindings::Keymap,
+    msg: &KeyMsg,
+    selection_active: bool,
+) -> Option<Command> {
     let tok = key_tok(msg)?;
-    keymap.match_chord(msg.control, msg.alt, msg.shift, tok)
+    keymap.match_chord_in(msg.control, msg.alt, msg.shift, tok, selection_active)
 }
 
 /// Translate a key event into a palette command while the palette overlay is open
@@ -1242,6 +1253,34 @@ mod tests {
             route_chord(&keymap(), &msg("v", true, false, false)),
             Some(Command::PasteFocused)
         ));
+    }
+
+    // ---- t28 (#96): guarded Ctrl+G (group) / Esc (clear) ----
+
+    #[test]
+    fn ctrl_g_and_esc_route_only_with_a_selection() {
+        let esc: slint::SharedString = Key::Escape.into();
+        // Both encodings of Ctrl+G (letter / BEL control char).
+        for text in ["g", "\u{07}"] {
+            assert!(
+                route_chord_in(&keymap(), &msg(text, true, false, false), false).is_none(),
+                "no selection: Ctrl+G ({text:?}) must reach the pty"
+            );
+            assert!(
+                matches!(
+                    route_chord_in(&keymap(), &msg(text, true, false, false), true),
+                    Some(Command::GroupSelection)
+                ),
+                "selection: Ctrl+G ({text:?}) groups"
+            );
+        }
+        assert!(route_chord_in(&keymap(), &msg(&esc, false, false, false), false).is_none());
+        assert!(matches!(
+            route_chord_in(&keymap(), &msg(&esc, false, false, false), true),
+            Some(Command::ClearSelection)
+        ));
+        // The unguarded entry point never matches them either.
+        assert!(route_chord(&keymap(), &msg("g", true, false, false)).is_none());
     }
 
     #[test]
