@@ -1167,22 +1167,8 @@ impl ControlHost {
             .find(|w| w.id as i64 == c.window_id)
             .or_else(|| windows.first());
         let Some(w) = target else { return };
-        let accent = parse_hex(&c.color);
         let font_px = w.state.borrow().settings.font_px;
-        let det = DetachedPane {
-            uid: uid.to_string(),
-            title: c.label.clone().into(),
-            subtitle: c.subtitle.clone().map(Into::into),
-            pinned_accent: Some(accent),
-            show_frame: Some(true),
-            show_dot: Some(true),
-            font_px,
-            // The control model doesn't carry the original spawn spec, so an orphan-adopted
-            // session has no command/args/shell to forward.
-            spawn_command: None,
-            spawn_args: None,
-            spawn_shell: None,
-        };
+        let det = detached_pane_from_model(uid, c, font_px);
 
         // Resolve the GUI tab index this pane belongs in (None ⇒ it needs a brand-new tab).
         let target_ti = self.resolve_adopt_tab(w, c, uid, cur, created_tabs);
@@ -1274,6 +1260,25 @@ fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
             )
         })
         .collect()
+}
+
+/// The [`DetachedPane`] a control-spawned (or orphan-adopted) session is hosted as. The model
+/// pane carries the original command/args/shell, forwarded here so the GUI pane's snapshot
+/// (`to_session_file`) records them and a restore re-runs the original program instead of a
+/// bare shell. (`env` is not forwarded here.)
+fn detached_pane_from_model(uid: &str, c: &ModelPane, font_px: f32) -> DetachedPane {
+    DetachedPane {
+        uid: uid.to_string(),
+        title: c.label.clone().into(),
+        subtitle: c.subtitle.clone().map(Into::into),
+        pinned_accent: Some(parse_hex(&c.color)),
+        show_frame: Some(true),
+        show_dot: Some(true),
+        font_px,
+        spawn_command: c.command.clone(),
+        spawn_args: c.args.clone(),
+        spawn_shell: c.shell.clone(),
+    }
 }
 
 /// A pane as read from the control read-model.
@@ -1431,6 +1436,112 @@ fn env_truthy(name: &str) -> bool {
 mod tests {
     use super::*;
     use hyperpanes_core::layout::presets::Layout;
+
+    fn model_pane(command: Option<&str>, args: Option<Vec<&str>>) -> ModelPane {
+        ModelPane {
+            pane_id: "p1".into(),
+            window_id: 1,
+            tab_id: "1:0".into(),
+            label: "agent".into(),
+            color: "#888888".into(),
+            subtitle: None,
+            talk: false,
+            command: command.map(Into::into),
+            args: args.map(|a| a.into_iter().map(Into::into).collect()),
+            shell: None,
+            cwd: None,
+            meta: None,
+            env: None,
+        }
+    }
+
+    /// Adopt `c` into a fresh GUI state and return the snapshot's spec for it.
+    fn adopted_snapshot_spec(c: &ModelPane) -> hyperpanes_core::workspace::model::PaneSpec {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mgr = SessionManager::new(tx);
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        st.adopt_pane(&mgr, detached_pane_from_model("11111111-uuid", c, 14.0));
+        let file = st.to_session_file();
+        file.groups.unwrap().remove(0).panes.remove(0)
+    }
+
+    /// #65: a control-spawned claude pane keeps its argv across a daemon-replacing restore:
+    /// the snapshot carries command/args, and the resume appends `--resume <id>` to that argv
+    /// instead of typing a bare `claude --resume` into a shell.
+    #[test]
+    fn adopted_control_claude_pane_restores_with_original_argv() {
+        let c = model_pane(
+            Some("claude"),
+            Some(vec!["--permission-mode", "plan", "--model", "opus"]),
+        );
+        let spec = adopted_snapshot_spec(&c);
+        assert_eq!(spec.command.as_deref(), Some("claude"));
+        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "abc-123", None, None);
+        assert_eq!(plan.startup, None, "must not type a bare resume line");
+        assert_eq!(plan.command.as_deref(), Some("claude"));
+        assert_eq!(
+            plan.args.unwrap(),
+            [
+                "--permission-mode",
+                "plan",
+                "--model",
+                "opus",
+                "--resume",
+                "abc-123"
+            ]
+        );
+    }
+
+    /// A pane that already went through a resume (restartPane / recoverPane add
+    /// `--resume <old>`) restores with exactly ONE `--resume <new>`, not two.
+    #[test]
+    fn adopted_resumed_pane_restores_with_a_single_resume() {
+        let c = model_pane(
+            Some("claude"),
+            Some(vec![
+                "--model",
+                "opus",
+                "--resume",
+                "old-id",
+                "--session-id",
+                "x",
+            ]),
+        );
+        let spec = adopted_snapshot_spec(&c);
+        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "new-id", None, None);
+        assert_eq!(plan.startup, None);
+        assert_eq!(plan.command.as_deref(), Some("claude"));
+        assert_eq!(
+            plan.args.unwrap(),
+            ["--model", "opus", "--resume", "new-id"]
+        );
+    }
+
+    /// A command-string claude launch has its earlier session flags (`--continue`) stripped.
+    #[test]
+    fn adopted_string_command_with_continue_is_stripped() {
+        let c = model_pane(Some("claude --continue --model m"), None);
+        let spec = adopted_snapshot_spec(&c);
+        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "new-id", None, None);
+        assert_eq!(plan.startup, None);
+        assert_eq!(
+            plan.command.as_deref(),
+            Some("claude --model m --resume new-id")
+        );
+        assert_eq!(plan.args, None);
+    }
+
+    /// A control pane running a non-claude program round-trips its command; no resume.
+    #[test]
+    fn adopted_control_non_claude_pane_round_trips_command() {
+        let c = model_pane(Some("sh"), Some(vec!["-c", "echo hi"]));
+        let spec = adopted_snapshot_spec(&c);
+        assert_eq!(spec.command.as_deref(), Some("sh"));
+        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "abc-123", None, None);
+        assert_eq!(plan.startup, None);
+        assert_eq!(plan.command.as_deref(), Some("sh"));
+        assert_eq!(plan.args.unwrap(), ["-c", "echo hi"]);
+    }
 
     fn pane(id: &str, uid: &str) -> PaneInfo {
         PaneInfo {
