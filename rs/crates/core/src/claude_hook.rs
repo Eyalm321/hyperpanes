@@ -461,6 +461,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A desktop session that spells a default dir explicitly — trailing slash, or through a
+    /// symlink — is NOT isolated: `ensure_registered` normalizes both sides like the startup
+    /// isolation check before comparing.
+    #[cfg(unix)]
+    #[test]
+    fn explicit_default_dirs_are_not_isolation() {
+        use crate::persistence::isolation::normalize;
+        let root = scratch("explicit");
+        let hook = install_hook(&root, "usr/bin");
+        let home = root.join("home");
+        let default_cfg = home.join(".config").join("hyperpanes");
+        std::fs::create_dir_all(&default_cfg).unwrap();
+        std::os::unix::fs::symlink(home.join(".config"), root.join("cfg-link")).unwrap();
+        let default_n = normalize(&default_cfg);
+        for spelled in [
+            format!("{}/.config/hyperpanes/", home.display()),
+            format!("{}/.config/./hyperpanes", home.display()),
+            format!("{}/cfg-link/hyperpanes", root.display()),
+        ] {
+            let actual = normalize(Path::new(&spelled));
+            assert_eq!(actual, default_n, "{spelled}");
+            let locs: [Location; 1] = [("config dir", &actual, &default_n)];
+            assert_eq!(
+                registration_decision(&hook, None, &locs),
+                Decision::Register
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn cargo_dev_build_skips() {
         let root = scratch("cargo");
