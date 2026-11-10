@@ -13,6 +13,7 @@
 //!   wt/<name>.lock        its owner lock (flock held by the runner / the task's process tree)
 //!   cache/slot-<k>/       build-cache slot k (reused warm across tasks)
 //!   cache/slot-<k>.lock   its lock; mtime = last release (the "last used" stamp)
+//!   cache/slot-<k>.size   last measured on-disk bytes (fresh iff mtime >= the lock's)
 //! ```
 //!
 //! Liveness is decided by `flock`, never by pid: a lock that can be taken means its owner (and
@@ -35,6 +36,23 @@ pub const MIN_FREE_ENV: &str = "HYPERPANES_WORKTREE_MIN_FREE";
 pub const DEFAULT_MIN_FREE: u64 = 10 * 1024 * 1024 * 1024;
 /// Env override for the cache-slot cap (`--max-cache-slots`); `0` = unlimited (the default).
 pub const MAX_SLOTS_ENV: &str = "HYPERPANES_WORKTREE_MAX_SLOTS";
+
+/// Env var for the per-slot size cap (`--slot-max-size`); `0` = off.
+pub const SLOT_MAX_ENV: &str = "HYPERPANES_WORKTREE_SLOT_MAX";
+/// Default per-slot cap: 20 GiB.
+pub const DEFAULT_SLOT_MAX: u64 = 20 * 1024 * 1024 * 1024;
+/// Env var for the root-wide cache budget (`--cache-max-size`); `0` = off.
+pub const CACHE_MAX_ENV: &str = "HYPERPANES_WORKTREE_CACHE_MAX";
+/// Default root-wide cache budget: 100 GiB.
+pub const DEFAULT_CACHE_MAX: u64 = 100 * 1024 * 1024 * 1024;
+/// Env var for the proactive free-space floor (`--soft-free`); `0` = off.
+pub const SOFT_FREE_ENV: &str = "HYPERPANES_WORKTREE_SOFT_FREE";
+/// Upper bound of the default soft free-space floor: 40 GiB. The effective default is
+/// [`default_soft_free`]: the smaller of this and a tenth of the filesystem's total size, so a
+/// small disk (a laptop SSD, a CI runner) doesn't evict every idle warm slot on every claim.
+pub const DEFAULT_SOFT_FREE: u64 = 40 * 1024 * 1024 * 1024;
+/// The default soft floor is at most `1 / SOFT_FREE_FS_DIVISOR` of the filesystem's total size.
+pub const SOFT_FREE_FS_DIVISOR: u64 = 10;
 
 /// A lone `*.lock` (no dir) older than this is debris.
 const LONE_LOCK_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -165,11 +183,33 @@ pub fn available_bytes(path: &Path) -> io::Result<u64> {
             _ => break,
         }
     }
-    available_bytes_existing(p)
+    fs_space_existing(p).map(|(avail, _)| avail)
 }
 
+/// Total size in bytes of the filesystem holding `path` (walks up like [`available_bytes`]).
+pub fn total_bytes(path: &Path) -> io::Result<u64> {
+    let mut p = path;
+    while !p.exists() {
+        match p.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => p = parent,
+            _ => break,
+        }
+    }
+    fs_space_existing(p).map(|(_, total)| total)
+}
+
+/// Pure: the default soft free-space floor for a filesystem of `fs_total` bytes: the smaller of
+/// [`DEFAULT_SOFT_FREE`] and a tenth of the disk. Unknown/zero size falls back to the cap.
+pub fn default_soft_free(fs_total: Option<u64>) -> u64 {
+    match fs_total {
+        Some(t) if t > 0 => DEFAULT_SOFT_FREE.min(t / SOFT_FREE_FS_DIVISOR),
+        _ => DEFAULT_SOFT_FREE,
+    }
+}
+
+/// `(available to this user, total)` bytes of the filesystem holding the existing `path`.
 #[cfg(unix)]
-fn available_bytes_existing(path: &Path) -> io::Result<u64> {
+fn fs_space_existing(path: &Path) -> io::Result<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
@@ -183,20 +223,32 @@ fn available_bytes_existing(path: &Path) -> io::Result<u64> {
     let st = unsafe { st.assume_init() };
     // Field widths differ per platform (u32 on macOS), so the casts are needed there.
     #[allow(clippy::unnecessary_cast)]
-    Ok((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+    let frsize = st.f_frsize as u64;
+    #[allow(clippy::unnecessary_cast)]
+    let (bavail, blocks) = (st.f_bavail as u64, st.f_blocks as u64);
+    Ok((bavail.saturating_mul(frsize), blocks.saturating_mul(frsize)))
 }
 
 #[cfg(windows)]
-fn available_bytes_existing(path: &Path) -> io::Result<u64> {
+fn fs_space_existing(path: &Path) -> io::Result<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut avail: u64 = 0;
-    // SAFETY: `wide` is NUL-terminated and outlives the call; `avail` is a valid out-pointer.
-    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut avail), None, None) }
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(avail)
+    let mut total: u64 = 0;
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `avail`/`total` are valid
+    // out-pointers.
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut avail),
+            Some(&mut total),
+            None,
+        )
+    }
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok((avail, total))
 }
 
 // ───────────────────────── task owner lock ─────────────────────────
@@ -465,6 +517,7 @@ fn sweep_with(
             }
             if let LockState::Free(f) = probe_lock(&p) {
                 if std::fs::remove_dir_all(&slot_dir).is_ok() {
+                    remove_sidecar(&slot_dir);
                     rep.gc_slots.push(slot_dir);
                 }
                 drop(f);
@@ -483,6 +536,10 @@ pub struct CacheSlot {
     pub index: usize,
     pub path: PathBuf,
     lock: File,
+    /// Set by [`CacheSlot::release_with_size`], which already stamped the lock mtime *before*
+    /// writing the size sidecar; `Drop` must not re-stamp it (that would make the sidecar look
+    /// stale).
+    stamped: bool,
 }
 
 /// Take the lowest free `cache/slot-<k>` under `key_dir` (no cap).
@@ -516,6 +573,7 @@ pub fn acquire_slot_capped(key_dir: &Path, max_slots: usize) -> io::Result<Optio
                     index: k,
                     path,
                     lock: f,
+                    stamped: false,
                 }));
             }
             Err(TryLockError::WouldBlock) => k += 1,
@@ -526,9 +584,592 @@ pub fn acquire_slot_capped(key_dir: &Path, max_slots: usize) -> io::Result<Optio
 
 impl Drop for CacheSlot {
     fn drop(&mut self) {
-        let _ = self.lock.set_modified(SystemTime::now());
+        if !self.stamped {
+            let _ = self.lock.set_modified(SystemTime::now());
+        }
         let _ = self.lock.unlock();
     }
+}
+
+impl CacheSlot {
+    /// Ordered release: stamp the lock mtime (last used) FIRST, write the `size` sidecar AFTER,
+    /// then unlock. A sidecar whose mtime is >= the lock's mtime was therefore measured after the
+    /// last release, i.e. it is fresh (see [`read_fresh_sidecar`]).
+    pub fn release_with_size(mut self, size: u64) {
+        let _ = self.lock.set_modified(SystemTime::now());
+        write_sidecar(&self.path, size);
+        self.stamped = true;
+        // Drop unlocks.
+    }
+
+    /// Release path used by the runner after the task's child exits: measure the slot, enforce the
+    /// per-slot cap `cap` (0 = off) while the flock is still held, then [`Self::release_with_size`].
+    pub fn release_enforcing(self, cap: u64, log: &dyn Fn(String)) {
+        self.release_enforcing_with(cap, &slot_usage, log)
+    }
+
+    fn release_enforcing_with(self, cap: u64, walk: &dyn Fn(&Path) -> u64, log: &dyn Fn(String)) {
+        let size = measure_slot(&self.path, walk, log);
+        let out = apply_slot_cap(&self.path, size, cap, false);
+        log_outcome(&self.path, &out, cap, log);
+        let after = out.after;
+        self.release_with_size(after);
+    }
+
+    /// Acquire-time backstop for slots left over by older runners: use the fresh sidecar when
+    /// there is one (no walk), else measure; then enforce the cap. Call with the slot just taken.
+    pub fn enforce_on_acquire(&self, cap: u64, log: &dyn Fn(String)) {
+        self.enforce_on_acquire_with(cap, &slot_usage, log)
+    }
+
+    fn enforce_on_acquire_with(&self, cap: u64, walk: &dyn Fn(&Path) -> u64, log: &dyn Fn(String)) {
+        if cap == 0 {
+            return;
+        }
+        let size = slot_size(&self.path, walk, log);
+        let out = apply_slot_cap(&self.path, size, cap, false);
+        if out.action != SlotPrune::Keep {
+            log_outcome(&self.path, &out, cap, log);
+            write_sidecar(&self.path, out.after);
+        }
+    }
+}
+
+// ───────────────────────── slot size cap ─────────────────────────
+
+/// What to do with an over-cap slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotPrune {
+    /// Within the cap (or the cap is off).
+    Keep,
+    /// Delete the `incremental/` dirs; that alone gets the slot under the cap.
+    Incremental,
+    /// Even without `incremental/` the slot is over: delete the slot's contents.
+    Wipe,
+}
+
+/// Pure decision: `size` is the slot's on-disk bytes, `incremental_bytes` how much of it lives in
+/// `incremental/` dirs, `cap` the per-slot cap (`0` = off).
+pub fn plan_slot_prune(size: u64, incremental_bytes: u64, cap: u64) -> SlotPrune {
+    if cap == 0 || size <= cap {
+        SlotPrune::Keep
+    } else if size.saturating_sub(incremental_bytes) <= cap {
+        SlotPrune::Incremental
+    } else {
+        SlotPrune::Wipe
+    }
+}
+
+/// Result of applying [`plan_slot_prune`] to one slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotPruneOutcome {
+    pub before: u64,
+    pub after: u64,
+    pub action: SlotPrune,
+    pub incremental_bytes: u64,
+}
+
+/// On-disk usage of `path` (like `du`): allocated blocks on unix, apparent length elsewhere.
+/// Uses `symlink_metadata` and never follows symlinks.
+pub fn slot_usage(path: &Path) -> u64 {
+    fn usage(md: &std::fs::Metadata) -> u64 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            md.blocks().saturating_mul(512)
+        }
+        #[cfg(not(unix))]
+        {
+            md.len()
+        }
+    }
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(md) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        total = total.saturating_add(usage(&md));
+        if md.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&p) {
+                stack.extend(rd.flatten().map(|e| e.path()));
+            }
+        }
+    }
+    total
+}
+
+/// Every dir named `incremental` under `<slot>/cargo-target`, at the depths cargo uses
+/// (`<profile>/incremental`, `<triple>/<profile>/incremental`). Symlinks are never followed.
+pub fn incremental_dirs(slot: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            let is_dir = std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir());
+            if !is_dir {
+                continue;
+            }
+            if e.file_name() == "incremental" {
+                out.push(p);
+            } else if depth < 3 {
+                walk(&p, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&slot.join("cargo-target"), 1, &mut out);
+    out
+}
+
+/// `cache/slot-<k>.size`, next to the slot's dir and lock.
+fn sidecar_path(slot_dir: &Path) -> PathBuf {
+    let mut n = slot_dir.as_os_str().to_os_string();
+    n.push(".size");
+    PathBuf::from(n)
+}
+
+fn slot_lock_path(slot_dir: &Path) -> PathBuf {
+    let mut n = slot_dir.as_os_str().to_os_string();
+    n.push(".lock");
+    PathBuf::from(n)
+}
+
+fn mtime_of(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).ok()?.modified().ok()
+}
+
+/// Best-effort sidecar write; call only while holding the slot's flock.
+fn write_sidecar(slot_dir: &Path, size: u64) {
+    let Ok(mut f) = File::create(sidecar_path(slot_dir)) else {
+        return;
+    };
+    let _ = f.write_all(size.to_string().as_bytes());
+    // Stamp with the same clock `set_modified` used for the lock: the kernel's coarse file
+    // clock can lag it, which would make a just-written sidecar look older than the release.
+    let _ = f.set_modified(SystemTime::now());
+}
+
+fn remove_sidecar(slot_dir: &Path) {
+    let _ = std::fs::remove_file(sidecar_path(slot_dir));
+}
+
+fn read_sidecar(slot_dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(sidecar_path(slot_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The sidecar value, only when it was written at or after the last release (sidecar mtime >=
+/// lock mtime): the release path stamps the lock first and writes the sidecar second.
+pub fn read_fresh_sidecar(slot_dir: &Path) -> Option<u64> {
+    let side = mtime_of(&sidecar_path(slot_dir))?;
+    let lock = mtime_of(&slot_lock_path(slot_dir))?;
+    (side >= lock).then(|| read_sidecar(slot_dir))?
+}
+
+fn slot_label(slot_dir: &Path) -> String {
+    slot_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn measure_slot(slot_dir: &Path, walk: &dyn Fn(&Path) -> u64, log: &dyn Fn(String)) -> u64 {
+    let t = std::time::Instant::now();
+    let b = walk(slot_dir);
+    log(format!(
+        "{}: measured {} in {:.1}s",
+        slot_label(slot_dir),
+        fmt_bytes(b),
+        t.elapsed().as_secs_f64()
+    ));
+    b
+}
+
+/// Slot size: the fresh sidecar if there is one, else a (logged) walk whose result is stored.
+/// Caller must hold the slot's flock.
+fn slot_size(slot_dir: &Path, walk: &dyn Fn(&Path) -> u64, log: &dyn Fn(String)) -> u64 {
+    if let Some(v) = read_fresh_sidecar(slot_dir) {
+        return v;
+    }
+    let b = measure_slot(slot_dir, walk, log);
+    write_sidecar(slot_dir, b);
+    b
+}
+
+/// Delete everything inside `dir`, keeping `dir` itself.
+fn wipe_contents(dir: &Path) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
+            let _ = std::fs::remove_dir_all(&p);
+        } else {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// Apply the per-slot cap to `slot_dir` (`size` = its current usage). Caller must hold the slot's
+/// flock. Slot lock files live outside `slot_dir`, so they are never touched. `dry_run` only plans.
+fn apply_slot_cap(slot_dir: &Path, size: u64, cap: u64, dry_run: bool) -> SlotPruneOutcome {
+    let mut out = SlotPruneOutcome {
+        before: size,
+        after: size,
+        action: SlotPrune::Keep,
+        incremental_bytes: 0,
+    };
+    if cap == 0 || size <= cap {
+        return out;
+    }
+    let dirs = incremental_dirs(slot_dir);
+    out.incremental_bytes = dirs.iter().map(|d| slot_usage(d)).sum();
+    out.action = plan_slot_prune(size, out.incremental_bytes, cap);
+    match out.action {
+        SlotPrune::Keep => {}
+        SlotPrune::Incremental => {
+            if !dry_run {
+                for d in &dirs {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            }
+            out.after = size.saturating_sub(out.incremental_bytes);
+        }
+        SlotPrune::Wipe => {
+            if !dry_run {
+                wipe_contents(slot_dir);
+            }
+            out.after = 0;
+        }
+    }
+    out
+}
+
+fn log_outcome(slot_dir: &Path, out: &SlotPruneOutcome, cap: u64, log: &dyn Fn(String)) {
+    let label = slot_label(slot_dir);
+    match out.action {
+        SlotPrune::Keep => {}
+        SlotPrune::Incremental => log(format!(
+            "{label}: pruned incremental {} ({} > cap {})",
+            fmt_bytes(out.incremental_bytes),
+            fmt_bytes(out.before),
+            fmt_bytes(cap)
+        )),
+        SlotPrune::Wipe => log(format!(
+            "{label}: wiped slot contents {} ({} > cap {})",
+            fmt_bytes(out.before),
+            fmt_bytes(out.before),
+            fmt_bytes(cap)
+        )),
+    }
+}
+
+/// Resolve a size setting: flag > env (empty = unset) > default. `0` means off.
+pub fn resolve_size_setting(
+    flag: Option<u64>,
+    env: Option<String>,
+    env_name: &str,
+    default: u64,
+) -> Result<u64, String> {
+    match (flag, env) {
+        (Some(v), _) => Ok(v),
+        (None, Some(v)) if !v.trim().is_empty() => {
+            parse_size(&v).map_err(|e| format!("{env_name}: {e}"))
+        }
+        _ => Ok(default),
+    }
+}
+
+// ───────────────────────── root-wide budget + soft floor ─────────────────────────
+
+/// The three size knobs; `0` disables each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachePolicy {
+    pub slot_max: u64,
+    pub cache_max: u64,
+    pub soft_free: u64,
+}
+
+impl CachePolicy {
+    /// Resolve each knob from its flag, then its real env var, then the default. The soft floor's
+    /// default depends on the size of the filesystem holding `root` ([`default_soft_free`]).
+    pub fn resolve(
+        slot_max: Option<u64>,
+        cache_max: Option<u64>,
+        soft_free: Option<u64>,
+        root: &Path,
+    ) -> Result<Self, String> {
+        let env = |n: &str| std::env::var(n).ok();
+        Ok(Self {
+            slot_max: resolve_size_setting(
+                slot_max,
+                env(SLOT_MAX_ENV),
+                SLOT_MAX_ENV,
+                DEFAULT_SLOT_MAX,
+            )?,
+            cache_max: resolve_size_setting(
+                cache_max,
+                env(CACHE_MAX_ENV),
+                CACHE_MAX_ENV,
+                DEFAULT_CACHE_MAX,
+            )?,
+            soft_free: resolve_size_setting(
+                soft_free,
+                env(SOFT_FREE_ENV),
+                SOFT_FREE_ENV,
+                default_soft_free(total_bytes(root).ok()),
+            )?,
+        })
+    }
+}
+
+/// One slot as seen by the root-wide planner.
+#[derive(Debug, Clone)]
+pub struct SlotInfo {
+    /// `<repo-key>/slot-<k>`, for messages.
+    pub label: String,
+    pub dir: PathBuf,
+    pub size: u64,
+    pub last_used: SystemTime,
+    /// Locked by a running task: counted in the total but never evicted.
+    pub busy: bool,
+}
+
+/// Why a slot is evicted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictReason {
+    Budget { total: u64, budget: u64 },
+    Floor { free: u64, floor: u64 },
+}
+
+/// Pure planner: which idle slots to evict, least recently used first, until both the root-wide
+/// `budget` (0 = off; total = sum of ALL slot sizes) and the free-space `floor` (0 = off; `free`
+/// is the current free bytes) would be satisfied. Busy and empty slots are never picked.
+pub fn plan_evictions(
+    slots: &[SlotInfo],
+    budget: u64,
+    free: Option<u64>,
+    floor: u64,
+) -> Vec<(usize, EvictReason)> {
+    let total: u64 = slots.iter().map(|s| s.size).sum();
+    let need_budget = if budget > 0 && total > budget {
+        total - budget
+    } else {
+        0
+    };
+    let (need_floor, free_now) = match free {
+        Some(f) if floor > 0 && f < floor => (floor - f, f),
+        _ => (0, 0),
+    };
+    let need = need_budget.max(need_floor);
+    if need == 0 {
+        return Vec::new();
+    }
+    let mut idle: Vec<usize> = (0..slots.len())
+        .filter(|&i| !slots[i].busy && slots[i].size > 0)
+        .collect();
+    idle.sort_by_key(|&i| (slots[i].last_used, i));
+    let mut plan = Vec::new();
+    let mut freed = 0u64;
+    for i in idle {
+        if freed >= need {
+            break;
+        }
+        let reason = if freed < need_budget {
+            EvictReason::Budget { total, budget }
+        } else {
+            EvictReason::Floor {
+                free: free_now,
+                floor,
+            }
+        };
+        plan.push((i, reason));
+        freed += slots[i].size;
+    }
+    plan
+}
+
+struct SlotRef {
+    label: String,
+    dir: PathBuf,
+    lock_path: PathBuf,
+}
+
+/// Every `<root>/<key>/cache/slot-<k>` that has both a lock file and a dir, sorted by label.
+fn list_slots(root: &Path) -> Vec<SlotRef> {
+    let mut v = Vec::new();
+    for key in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let key_name = key.file_name().to_string_lossy().into_owned();
+        for p in std::fs::read_dir(key.path().join("cache"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = p.path();
+            let is_slot_lock = p.extension().is_some_and(|e| e == "lock")
+                && p.file_stem()
+                    .is_some_and(|s| s.to_string_lossy().starts_with("slot-"));
+            let dir = p.with_extension("");
+            if is_slot_lock && dir.is_dir() {
+                v.push(SlotRef {
+                    label: format!("{key_name}/{}", slot_label(&dir)),
+                    dir,
+                    lock_path: p,
+                });
+            }
+        }
+    }
+    v.sort_by(|a, b| a.label.cmp(&b.label));
+    v
+}
+
+fn collect_infos(
+    root: &Path,
+    overrides: Option<&std::collections::HashMap<PathBuf, u64>>,
+    walk: &dyn Fn(&Path) -> u64,
+    log: &dyn Fn(String),
+) -> Vec<SlotInfo> {
+    let mut v = Vec::new();
+    for s in list_slots(root) {
+        let last_used = mtime_of(&s.lock_path).unwrap_or(SystemTime::UNIX_EPOCH);
+        let (mut size, busy) = match probe_lock(&s.lock_path) {
+            LockState::Free(f) => {
+                let sz = slot_size(&s.dir, walk, log);
+                drop(f);
+                (sz, false)
+            }
+            LockState::Live | LockState::Unknown => (read_sidecar(&s.dir).unwrap_or(0), true),
+            LockState::Missing => continue,
+        };
+        if let Some(o) = overrides.and_then(|m| m.get(&s.dir)) {
+            size = *o;
+        }
+        v.push(SlotInfo {
+            label: s.label,
+            dir: s.dir,
+            size,
+            last_used,
+            busy,
+        });
+    }
+    v
+}
+
+fn enforce_root_with(
+    root: &Path,
+    policy: CachePolicy,
+    avail: &dyn Fn() -> Option<u64>,
+    dry_run: bool,
+    overrides: Option<&std::collections::HashMap<PathBuf, u64>>,
+    walk: &dyn Fn(&Path) -> u64,
+    log: &dyn Fn(String),
+) -> Vec<PathBuf> {
+    let free = if policy.soft_free > 0 { avail() } else { None };
+    let floor_hit = free.is_some_and(|f| f < policy.soft_free);
+    if policy.cache_max == 0 && !floor_hit {
+        return Vec::new();
+    }
+    let infos = collect_infos(root, overrides, walk, log);
+    let plan = plan_evictions(&infos, policy.cache_max, free, policy.soft_free);
+    let mut evicted = Vec::new();
+    let would = if dry_run { "would evict" } else { "evicted" };
+    for (i, reason) in plan {
+        let s = &infos[i];
+        // Re-probe: the slot may have been taken since it was measured.
+        let LockState::Free(f) = probe_lock(&slot_lock_path(&s.dir)) else {
+            continue;
+        };
+        if !dry_run && std::fs::remove_dir_all(&s.dir).is_err() {
+            continue;
+        }
+        if !dry_run {
+            remove_sidecar(&s.dir);
+        }
+        drop(f);
+        let why = match reason {
+            EvictReason::Budget { total, budget } => {
+                format!("cache {} > budget {}", fmt_bytes(total), fmt_bytes(budget))
+            }
+            EvictReason::Floor { free, floor } => {
+                format!("free {} < soft floor {}", fmt_bytes(free), fmt_bytes(floor))
+            }
+        };
+        let detail = match reason {
+            EvictReason::Budget { .. } => format!("{}; {why}", fmt_bytes(s.size)),
+            EvictReason::Floor { .. } => why,
+        };
+        log(format!("{would} idle {} ({detail})", s.label));
+        evicted.push(s.dir.clone());
+    }
+    evicted
+}
+
+/// Root-wide enforcement of the budget and soft floor over every repo key under `root`:
+/// idle slots are evicted LRU while holding their lock; busy slots count but are skipped.
+/// Returns the evicted slot dirs.
+pub fn enforce_root(
+    root: &Path,
+    policy: CachePolicy,
+    avail: &dyn Fn() -> Option<u64>,
+    log: &dyn Fn(String),
+) -> Vec<PathBuf> {
+    enforce_root_with(root, policy, avail, false, None, &slot_usage, log)
+}
+
+/// `hyperpanes worker --prune-cache [--dry-run]`: for every idle slot apply the per-slot cap,
+/// then the root-wide eviction; busy slots are reported and skipped. One `log` line per slot.
+pub fn prune_cache(
+    root: &Path,
+    policy: CachePolicy,
+    avail: &dyn Fn() -> Option<u64>,
+    dry_run: bool,
+    log: &dyn Fn(String),
+) {
+    prune_cache_with(root, policy, avail, dry_run, &slot_usage, log)
+}
+
+fn prune_cache_with(
+    root: &Path,
+    policy: CachePolicy,
+    avail: &dyn Fn() -> Option<u64>,
+    dry_run: bool,
+    walk: &dyn Fn(&Path) -> u64,
+    log: &dyn Fn(String),
+) {
+    let mut after_sizes = std::collections::HashMap::new();
+    for s in list_slots(root) {
+        let LockState::Free(f) = probe_lock(&s.lock_path) else {
+            log(format!("{}: busy, skipped", s.label));
+            continue;
+        };
+        let size = slot_size(&s.dir, walk, &|_| {});
+        let out = apply_slot_cap(&s.dir, size, policy.slot_max, dry_run);
+        if !dry_run && out.action != SlotPrune::Keep {
+            write_sidecar(&s.dir, out.after);
+        }
+        let what = match out.action {
+            SlotPrune::Keep => "kept".to_string(),
+            SlotPrune::Incremental if dry_run => "would prune incremental".to_string(),
+            SlotPrune::Incremental => "pruned incremental".to_string(),
+            SlotPrune::Wipe if dry_run => "would wipe contents".to_string(),
+            SlotPrune::Wipe => "wiped contents".to_string(),
+        };
+        log(format!(
+            "{}: {what} ({} -> {}, cap {})",
+            s.label,
+            fmt_bytes(out.before),
+            fmt_bytes(out.after),
+            if policy.slot_max == 0 {
+                "off".to_string()
+            } else {
+                fmt_bytes(policy.slot_max)
+            }
+        ));
+        after_sizes.insert(s.dir.clone(), out.after);
+        drop(f);
+    }
+    enforce_root_with(root, policy, avail, dry_run, Some(&after_sizes), walk, log);
 }
 
 /// Disk-pressure eviction: delete idle cache slots under `root` (every repo key, since they all
@@ -564,6 +1205,7 @@ pub fn evict_idle_slots(root: &Path, mut enough: impl FnMut() -> bool) -> Vec<Pa
         if let LockState::Free(f) = probe_lock(&lock_path) {
             let dir = lock_path.with_extension("");
             if std::fs::remove_dir_all(&dir).is_ok() {
+                remove_sidecar(&dir);
                 evicted.push(dir);
             }
             drop(f);
@@ -1006,5 +1648,492 @@ mod tests {
         drop(live);
         let _ = std::fs::remove_dir_all(&r);
         let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    // ───────────── slot size cap / budget / soft floor ─────────────
+
+    use std::cell::{Cell, RefCell};
+
+    fn fill(path: &Path, bytes: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![7u8; bytes]).unwrap();
+    }
+
+    /// A slot with incremental + deps data, as cargo would lay it out. Returns the slot.
+    fn build_slot(key_dir: &Path, incr: usize, deps: usize) -> CacheSlot {
+        let slot = acquire_slot(key_dir).unwrap();
+        fill(
+            &slot.path.join("cargo-target/debug/incremental/a/blob"),
+            incr,
+        );
+        fill(&slot.path.join("cargo-target/debug/deps/lib.rlib"), deps);
+        slot
+    }
+
+    fn no_log(_: String) {}
+
+    /// A sibling test spawning `git` can briefly leak a lock fd into its child (until exec), making
+    /// an idle slot read busy. Retry an eviction call a few times until it evicts something.
+    fn retry_nonempty(mut f: impl FnMut() -> Vec<PathBuf>) -> Vec<PathBuf> {
+        for _ in 0..50 {
+            let v = f();
+            if !v.is_empty() {
+                return v;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn default_soft_free_is_a_tenth_of_the_disk_capped_at_40g() {
+        const G: u64 = 1024 * 1024 * 1024;
+        // A small disk (laptop SSD / CI runner) gets a tenth of its size, not a flat 40G.
+        assert_eq!(default_soft_free(Some(100 * G)), 10 * G);
+        assert_eq!(default_soft_free(Some(256 * G)), 25 * G + 6 * G / 10);
+        // A big disk hits the 40G cap.
+        assert_eq!(default_soft_free(Some(2048 * G)), 40 * G);
+        assert_eq!(default_soft_free(Some(400 * G)), 40 * G);
+        // Unknown or zero size falls back to the cap.
+        assert_eq!(default_soft_free(None), 40 * G);
+        assert_eq!(default_soft_free(Some(0)), 40 * G);
+    }
+
+    #[test]
+    fn soft_free_explicit_setting_beats_the_disk_default() {
+        // flag > env > default; `0` stays "off".
+        let d = default_soft_free(Some(100 * 1024 * 1024 * 1024));
+        assert_eq!(resolve_size_setting(Some(0), None, SOFT_FREE_ENV, d), Ok(0));
+        assert_eq!(
+            resolve_size_setting(None, Some("5G".into()), SOFT_FREE_ENV, d),
+            Ok(5 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(resolve_size_setting(None, None, SOFT_FREE_ENV, d), Ok(d));
+    }
+
+    #[test]
+    fn total_bytes_is_at_least_available_bytes() {
+        let t = std::env::temp_dir();
+        let total = total_bytes(&t).unwrap();
+        assert!(total > 0);
+        assert!(total >= available_bytes(&t).unwrap());
+    }
+
+    #[test]
+    fn plan_slot_prune_table() {
+        use SlotPrune::*;
+        // (size, incremental, cap, expected)
+        let cases = [
+            (10, 5, 0, Keep),
+            (10, 5, 10, Keep),
+            (10, 0, 20, Keep),
+            (11, 5, 10, Incremental),
+            (11, 1, 10, Incremental),
+            (11, 0, 10, Wipe),
+            (30, 5, 10, Wipe),
+            (30, 20, 10, Incremental),
+            (30, 99, 10, Incremental),
+        ];
+        for (size, inc, cap, want) in cases {
+            assert_eq!(plan_slot_prune(size, inc, cap), want, "{size}/{inc}/{cap}");
+        }
+    }
+
+    #[test]
+    fn usage_counts_nested_files_and_does_not_follow_symlinks() {
+        let d = scratch("usage");
+        let outside = scratch("usage-out");
+        fill(&outside.join("big"), 1 << 20);
+        fill(&d.join("a/b/c/f1"), 64 * 1024);
+        fill(&d.join("a/f2"), 64 * 1024);
+        let base = slot_usage(&d);
+        assert!(base >= 128 * 1024, "nested files counted, got {base}");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, d.join("link")).unwrap();
+            let with_link = slot_usage(&d);
+            assert!(
+                with_link < base + 64 * 1024,
+                "symlink target must not be followed ({base} -> {with_link})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn incremental_dirs_found_at_profile_and_triple_depth_only_under_cargo_target() {
+        let d = scratch("incdirs");
+        fill(&d.join("cargo-target/debug/incremental/x"), 1);
+        fill(
+            &d.join("cargo-target/x86_64-unknown-linux-gnu/release/incremental/y"),
+            1,
+        );
+        fill(&d.join("other/debug/incremental/z"), 1);
+        fill(&d.join("cargo-target/debug/deps/w"), 1);
+        let mut got = incremental_dirs(&d);
+        got.sort();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().all(|p| p.starts_with(d.join("cargo-target"))));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn release_prunes_incremental_first_and_keeps_deps() {
+        let kd = scratch("rel-inc");
+        let slot = build_slot(&kd, 64 * 1024, 64 * 1024);
+        let dir = slot.path.clone();
+        let total = slot_usage(&dir);
+        let incr = slot_usage(&dir.join("cargo-target/debug/incremental"));
+        let cap = total - incr / 2; // over cap, but dropping incremental/ is enough
+        slot.release_enforcing_with(cap, &slot_usage, &no_log);
+        assert!(!dir.join("cargo-target/debug/incremental").exists());
+        assert!(dir.join("cargo-target/debug/deps/lib.rlib").exists());
+        assert!(kd.join("cache/slot-0.lock").exists(), "lock file survives");
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn release_wipes_contents_when_still_over_cap_and_keeps_lock() {
+        let kd = scratch("rel-wipe");
+        let slot = build_slot(&kd, 64 * 1024, 64 * 1024);
+        let dir = slot.path.clone();
+        slot.release_enforcing_with(1024, &slot_usage, &no_log);
+        assert!(dir.is_dir(), "slot dir itself kept");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "contents wiped"
+        );
+        assert!(kd.join("cache/slot-0.lock").exists(), "lock file survives");
+        assert_eq!(read_sidecar(&dir), Some(0));
+        // The slot is immediately reusable.
+        assert!(acquire_slot(&kd).is_ok());
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn release_with_cap_off_never_prunes() {
+        let kd = scratch("rel-off");
+        let slot = build_slot(&kd, 64 * 1024, 64 * 1024);
+        let dir = slot.path.clone();
+        slot.release_enforcing_with(0, &slot_usage, &no_log);
+        assert!(dir.join("cargo-target/debug/incremental").exists());
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn sidecar_is_fresh_after_ordered_release_and_stale_after_plain_drop() {
+        let kd = scratch("side");
+        let slot = acquire_slot(&kd).unwrap();
+        let dir = slot.path.clone();
+        slot.release_with_size(1234);
+        assert_eq!(read_fresh_sidecar(&dir), Some(1234));
+        assert!(
+            mtime_of(&sidecar_path(&dir)).unwrap() >= mtime_of(&slot_lock_path(&dir)).unwrap(),
+            "lock stamped first, sidecar written after"
+        );
+        // A later release through Drop re-stamps the lock after the sidecar: stale.
+        std::thread::sleep(Duration::from_millis(30));
+        drop(acquire_slot(&kd).unwrap());
+        assert_eq!(read_fresh_sidecar(&dir), None);
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn acquire_walks_when_sidecar_missing_or_stale_and_skips_when_fresh() {
+        let kd = scratch("acq");
+        let slot = build_slot(&kd, 4 * 1024, 4 * 1024);
+        let dir = slot.path.clone();
+        drop(slot); // plain Drop: no sidecar
+        let walks = Cell::new(0u32);
+        let walker = |p: &Path| {
+            walks.set(walks.get() + 1);
+            slot_usage(p)
+        };
+        let big_cap = 1 << 30;
+        // Missing sidecar -> walk.
+        let s = acquire_slot(&kd).unwrap();
+        s.enforce_on_acquire_with(big_cap, &walker, &no_log);
+        assert_eq!(walks.get(), 1);
+        drop(s); // Drop re-stamps lock: sidecar now stale
+        let s = acquire_slot(&kd).unwrap();
+        s.enforce_on_acquire_with(big_cap, &walker, &no_log);
+        assert_eq!(walks.get(), 2, "stale sidecar walks again");
+        s.release_with_size(slot_usage(&dir));
+        // Fresh sidecar -> no walk.
+        let s = acquire_slot(&kd).unwrap();
+        s.enforce_on_acquire_with(big_cap, &walker, &no_log);
+        assert_eq!(walks.get(), 2, "fresh sidecar skips the walk");
+        drop(s);
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn acquire_backstop_prunes_oversized_slot_left_by_older_runner() {
+        let kd = scratch("acq-prune");
+        drop(build_slot(&kd, 64 * 1024, 64 * 1024));
+        let s = acquire_slot(&kd).unwrap();
+        s.enforce_on_acquire_with(1024, &slot_usage, &no_log);
+        assert_eq!(std::fs::read_dir(&s.path).unwrap().count(), 0);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn walk_is_logged_with_duration() {
+        let kd = scratch("walklog");
+        let slot = build_slot(&kd, 4096, 4096);
+        let lines = RefCell::new(Vec::new());
+        slot.release_enforcing_with(0, &slot_usage, &|m| lines.borrow_mut().push(m));
+        let l = lines.borrow();
+        assert!(
+            l[0].starts_with("slot-0: measured ") && l[0].contains(" in "),
+            "{l:?}"
+        );
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    /// REGRESSION (#74): on the base nothing bounds a slot, so an oversized idle slot survives
+    /// the sweep and a fresh acquire untouched. With the cap enforced at acquire it is pruned.
+    #[test]
+    fn regression_oversized_idle_slot_is_pruned_not_kept() {
+        let r = repo("reg74");
+        let kd = scratch("reg74kd");
+        let slot = build_slot(&kd, 128 * 1024, 128 * 1024);
+        let dir = slot.path.clone();
+        drop(slot);
+        let before = slot_usage(&dir);
+        sweep(&r, &kd); // base behaviour: age GC only, a fresh slot is kept as-is
+        let s = acquire_slot_capped(&kd, 0).unwrap().unwrap();
+        s.enforce_on_acquire(64 * 1024, &no_log);
+        let after = slot_usage(&dir);
+        assert!(
+            after <= 64 * 1024 && after < before,
+            "oversized slot must be bounded by the cap: {before} -> {after}"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&r);
+        let _ = std::fs::remove_dir_all(&kd);
+    }
+
+    #[test]
+    fn locked_slot_is_never_pruned_or_evicted() {
+        let root = scratch("locked");
+        let kd = root.join("myapp-1a2b3c4d");
+        let busy = build_slot(&kd, 64 * 1024, 64 * 1024);
+        let dir = busy.path.clone();
+        let policy = CachePolicy {
+            slot_max: 1024,
+            cache_max: 1,
+            soft_free: 1 << 40,
+        };
+        prune_cache_with(&root, policy, &|| Some(0), false, &slot_usage, &no_log);
+        let evicted = enforce_root(&root, policy, &|| Some(0), &no_log);
+        assert!(evicted.is_empty());
+        assert!(dir.join("cargo-target/debug/deps/lib.rlib").exists());
+        assert!(dir.join("cargo-target/debug/incremental").exists());
+        drop(busy);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn info(label: &str, size: u64, age_secs: u64, busy: bool) -> SlotInfo {
+        SlotInfo {
+            label: label.into(),
+            dir: PathBuf::from(label),
+            size,
+            last_used: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - age_secs),
+            busy,
+        }
+    }
+
+    #[test]
+    fn budget_eviction_is_lru_and_stops_once_under_budget() {
+        let slots = [
+            info("new", 40, 10, false),
+            info("old", 40, 300, false),
+            info("mid", 40, 100, false),
+        ];
+        // total 120 > 100: evicting just the oldest (40) is enough.
+        let plan = plan_evictions(&slots, 100, None, 0);
+        assert_eq!(plan.iter().map(|p| p.0).collect::<Vec<_>>(), vec![1]);
+        // total 120 > 50: need 70 -> oldest then mid.
+        let plan = plan_evictions(&slots, 50, None, 0);
+        assert_eq!(plan.iter().map(|p| p.0).collect::<Vec<_>>(), vec![1, 2]);
+        // Within budget / budget off: nothing.
+        assert!(plan_evictions(&slots, 120, None, 0).is_empty());
+        assert!(plan_evictions(&slots, 0, None, 0).is_empty());
+    }
+
+    #[test]
+    fn busy_slots_count_toward_total_but_are_never_planned() {
+        let slots = [info("busy", 90, 500, true), info("idle", 40, 10, false)];
+        let plan = plan_evictions(&slots, 100, None, 0);
+        assert_eq!(plan.iter().map(|p| p.0).collect::<Vec<_>>(), vec![1]);
+        let all_busy = [info("b", 500, 1, true)];
+        assert!(plan_evictions(&all_busy, 10, None, 0).is_empty());
+    }
+
+    #[test]
+    fn soft_floor_plans_until_projected_free_meets_floor() {
+        let slots = [
+            info("a", 30, 300, false),
+            info("b", 30, 200, false),
+            info("c", 30, 100, false),
+        ];
+        // free 35, floor 100: need 65 -> three? 30+30=60 <65 so all three.
+        let plan = plan_evictions(&slots, 0, Some(35), 100);
+        assert_eq!(plan.len(), 3);
+        // free 50, floor 100: need 50 -> two.
+        let plan = plan_evictions(&slots, 0, Some(50), 100);
+        assert_eq!(plan.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(matches!(
+            plan[0].1,
+            EvictReason::Floor {
+                free: 50,
+                floor: 100
+            }
+        ));
+        // free >= floor or floor off: nothing.
+        assert!(plan_evictions(&slots, 0, Some(100), 100).is_empty());
+        assert!(plan_evictions(&slots, 0, Some(1), 0).is_empty());
+    }
+
+    #[test]
+    fn enforce_root_applies_soft_floor_with_injected_free_bytes() {
+        let root = scratch("floor");
+        let kd = root.join("myapp-1a2b3c4d");
+        let a = build_slot(&kd, 64 * 1024, 64 * 1024);
+        let b = acquire_slot(&kd).unwrap();
+        fill(&b.path.join("cargo-target/debug/deps/lib.rlib"), 64 * 1024);
+        let (da, db) = (a.path.clone(), b.path.clone());
+        a.release_with_size(slot_usage(&da));
+        std::thread::sleep(Duration::from_millis(30));
+        b.release_with_size(slot_usage(&db));
+        let policy = CachePolicy {
+            slot_max: 0,
+            cache_max: 0,
+            soft_free: 1000,
+        };
+        // Plenty of space: nothing happens.
+        assert!(enforce_root(&root, policy, &|| Some(5000), &no_log).is_empty());
+        // Low: the oldest (slot-0) goes first; sizes dwarf the shortfall of 100.
+        let ev = retry_nonempty(|| enforce_root(&root, policy, &|| Some(900), &no_log));
+        assert_eq!(ev, vec![da.clone()]);
+        assert!(!da.exists() && db.exists());
+        assert_eq!(read_sidecar(&da), None, "sidecar removed with the slot");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enforce_root_budget_sums_across_repo_keys() {
+        let root = scratch("budget");
+        let a = build_slot(&root.join("myapp-1a2b3c4d"), 0, 64 * 1024);
+        let da = a.path.clone();
+        a.release_with_size(slot_usage(&da));
+        std::thread::sleep(Duration::from_millis(30));
+        let b = build_slot(&root.join("webapp-5e6f7a8b"), 0, 64 * 1024);
+        let db = b.path.clone();
+        b.release_with_size(slot_usage(&db));
+        let one = slot_usage(&da);
+        let policy = CachePolicy {
+            slot_max: 0,
+            cache_max: one + one / 2,
+            soft_free: 0,
+        };
+        let lines = RefCell::new(Vec::new());
+        let ev = retry_nonempty(|| {
+            enforce_root(&root, policy, &|| None, &|m| lines.borrow_mut().push(m))
+        });
+        assert_eq!(
+            ev,
+            vec![da.clone()],
+            "oldest across keys evicted, then under budget"
+        );
+        assert!(db.exists());
+        assert!(lines.borrow().iter().any(|l| l
+            .starts_with("evicted idle myapp-1a2b3c4d/slot-0 (")
+            && l.contains("> budget")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_cache_dry_run_deletes_nothing_and_lists_actions() {
+        let root = scratch("dry");
+        let kd = root.join("myapp-1a2b3c4d");
+        drop(build_slot(&kd, 64 * 1024, 64 * 1024));
+        let busy_kd = root.join("webapp-5e6f7a8b");
+        let busy = build_slot(&busy_kd, 64 * 1024, 64 * 1024);
+        let policy = CachePolicy {
+            slot_max: 1024,
+            cache_max: 1,
+            soft_free: 0,
+        };
+        let lines = RefCell::new(Vec::new());
+        prune_cache_with(&root, policy, &|| None, true, &slot_usage, &|m| {
+            lines.borrow_mut().push(m)
+        });
+        let l = lines.borrow().join("\n");
+        assert!(
+            l.contains("myapp-1a2b3c4d/slot-0: would wipe contents"),
+            "{l}"
+        );
+        assert!(l.contains("webapp-5e6f7a8b/slot-0: busy, skipped"), "{l}");
+        assert!(kd
+            .join("cache/slot-0/cargo-target/debug/incremental")
+            .exists());
+        assert!(kd
+            .join("cache/slot-0/cargo-target/debug/deps/lib.rlib")
+            .exists());
+        drop(busy);
+        // Real run prunes the idle slot. A concurrently spawned `git` child in a sibling test can
+        // briefly inherit the lock's fd (until its exec), so retry while the slot reads busy.
+        let lines2 = RefCell::new(Vec::new());
+        for _ in 0..50 {
+            lines2.borrow_mut().clear();
+            prune_cache_with(
+                &root,
+                CachePolicy {
+                    cache_max: 0,
+                    ..policy
+                },
+                &|| None,
+                false,
+                &slot_usage,
+                &|m| lines2.borrow_mut().push(m),
+            );
+            if !lines2
+                .borrow()
+                .iter()
+                .any(|l| l.contains("myapp") && l.contains("busy"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left: Vec<_> = std::fs::read_dir(kd.join("cache/slot-0"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(left.is_empty(), "{left:?} {:?}", lines2.borrow());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn size_setting_precedence_and_errors() {
+        assert_eq!(
+            resolve_size_setting(Some(5), Some("9G".into()), "E", 1),
+            Ok(5)
+        );
+        assert_eq!(
+            resolve_size_setting(None, Some("2K".into()), "E", 1),
+            Ok(2048)
+        );
+        assert_eq!(resolve_size_setting(None, Some("0".into()), "E", 1), Ok(0));
+        assert_eq!(resolve_size_setting(None, Some("  ".into()), "E", 7), Ok(7));
+        assert_eq!(resolve_size_setting(None, None, "E", 7), Ok(7));
+        let e = resolve_size_setting(None, Some("lots".into()), "MY_VAR", 1).unwrap_err();
+        assert!(e.starts_with("MY_VAR:"), "{e}");
     }
 }

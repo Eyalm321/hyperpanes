@@ -4,7 +4,8 @@
 //! Drives the real `hyperpanes worker` binary against a minimal mock of the control API's queue
 //! endpoints with a scratch git repo as the runner cwd. EVERY invocation pins the worktree root to
 //! a scratch dir (never `~/.cache`) and sets `HYPERPANES_WORKTREE_MIN_FREE=0` unless it is testing
-//! the guard (CI runners may have <10G free).
+//! the guard (CI runners may have <10G free). The cache knobs (`..._SLOT_MAX`, `..._CACHE_MAX`,
+//! `..._SOFT_FREE`) are pinned to 0 for the same reason.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -160,6 +161,12 @@ fn worker_cmd(e: &Env, root_env: &Path, min_free: &str, extra: &[&str], child: &
         .env("HYPERPANES_CONTROL_FILE", &e.control)
         .env("HYPERPANES_WORKTREE_ROOT", root_env)
         .env("HYPERPANES_WORKTREE_MIN_FREE", min_free)
+        // The #74 cache knobs default on (20G cap / 100G budget / 40G soft floor); a scratch root on
+        // a small disk would trip them and evict the slots these tests inspect. Pin them off; the
+        // knobs themselves are covered by core worktree_store tests and by explicit flags here.
+        .env("HYPERPANES_WORKTREE_SLOT_MAX", "0")
+        .env("HYPERPANES_WORKTREE_CACHE_MAX", "0")
+        .env("HYPERPANES_WORKTREE_SOFT_FREE", "0")
         .args([
             "worker",
             "--queue",

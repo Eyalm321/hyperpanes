@@ -90,6 +90,16 @@ pub struct WorkerArgs {
     pub min_free: Option<u64>,
     /// `--max-cache-slots <n>` (overrides `HYPERPANES_WORKTREE_MAX_SLOTS`); `Some(0)` = no cap.
     pub max_cache_slots: Option<usize>,
+    /// `--slot-max-size <size>` (overrides `HYPERPANES_WORKTREE_SLOT_MAX`); `Some(0)` = off.
+    pub slot_max_size: Option<u64>,
+    /// `--cache-max-size <size>` (overrides `HYPERPANES_WORKTREE_CACHE_MAX`); `Some(0)` = off.
+    pub cache_max_size: Option<u64>,
+    /// `--soft-free <size>` (overrides `HYPERPANES_WORKTREE_SOFT_FREE`); `Some(0)` = off.
+    pub soft_free: Option<u64>,
+    /// `--prune-cache`: one-shot cache prune of the worktree root; needs no queue or control plane.
+    pub prune_cache: bool,
+    /// `--dry-run` (with `--prune-cache`): print the plan, delete nothing.
+    pub dry_run: bool,
     /// Render the child's Claude `--output-format stream-json` lines as readable progress
     /// instead of raw JSON, so a worker pane shows what the agent is doing while it runs.
     pub stream: bool,
@@ -172,6 +182,11 @@ pub fn parse_args_with(
     let mut worktree_root: Option<PathBuf> = None;
     let mut min_free_arg: Option<String> = None;
     let mut max_slots_arg: Option<String> = None;
+    let mut slot_max_arg: Option<String> = None;
+    let mut cache_max_arg: Option<String> = None;
+    let mut soft_free_arg: Option<String> = None;
+    let mut prune_cache = false;
+    let mut dry_run = false;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -227,6 +242,34 @@ pub fn parse_args_with(
                 );
                 i += 2;
             }
+            "--slot-max-size" => {
+                slot_max_arg = Some(
+                    argv.get(i + 1)
+                        .ok_or("--slot-max-size needs a value")?
+                        .clone(),
+                );
+                i += 2;
+            }
+            "--cache-max-size" => {
+                cache_max_arg = Some(
+                    argv.get(i + 1)
+                        .ok_or("--cache-max-size needs a value")?
+                        .clone(),
+                );
+                i += 2;
+            }
+            "--soft-free" => {
+                soft_free_arg = Some(argv.get(i + 1).ok_or("--soft-free needs a value")?.clone());
+                i += 2;
+            }
+            "--prune-cache" => {
+                prune_cache = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
             "--stream" => {
                 stream = true;
                 i += 1;
@@ -264,6 +307,12 @@ pub fn parse_args_with(
                     min_free_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--max-cache-slots=") {
                     max_slots_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--slot-max-size=") {
+                    slot_max_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--cache-max-size=") {
+                    cache_max_arg = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--soft-free=") {
+                    soft_free_arg = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--log-dir=") {
                     log_dir = Some(PathBuf::from(v));
                 } else if let Some(v) = other.strip_prefix("--linger=") {
@@ -275,9 +324,17 @@ pub fn parse_args_with(
             }
         }
     }
-    let queue = queue.or_else(default_queue).ok_or(
-        "missing --queue <name> (and the current directory is not inside a registered project)",
-    )?;
+    if dry_run && !prune_cache {
+        return Err("--dry-run only applies to --prune-cache".to_string());
+    }
+    let queue = if prune_cache {
+        // A one-shot maintenance command: no queue, no child, no control plane.
+        queue.unwrap_or_default()
+    } else {
+        queue.or_else(default_queue).ok_or(
+            "missing --queue <name> (and the current directory is not inside a registered project)",
+        )?
+    };
     if worktree && base.is_none() {
         return Err(
             "--worktree now requires --base <committish>: the fork point for task worktrees must \
@@ -287,7 +344,7 @@ pub fn parse_args_with(
                 .to_string(),
         );
     }
-    if child.is_empty() {
+    if child.is_empty() && !prune_cache {
         return Err("missing child command after `--`".to_string());
     }
     let worker = worker.unwrap_or_else(default_worker_name);
@@ -330,6 +387,13 @@ pub fn parse_args_with(
         Some(s) => Some(parse_max_slots(&s).map_err(|e| format!("--max-cache-slots: {e}"))?),
         None => None,
     };
+    let size_flag = |name: &str, v: Option<String>| -> Result<Option<u64>, String> {
+        v.map(|s| parse_size(&s).map_err(|e| format!("{name}: {e}")))
+            .transpose()
+    };
+    let slot_max_size = size_flag("--slot-max-size", slot_max_arg)?;
+    let cache_max_size = size_flag("--cache-max-size", cache_max_arg)?;
+    let soft_free = size_flag("--soft-free", soft_free_arg)?;
     Ok(WorkerArgs {
         queue,
         worker,
@@ -341,6 +405,11 @@ pub fn parse_args_with(
         worktree_root,
         min_free,
         max_cache_slots,
+        slot_max_size,
+        cache_max_size,
+        soft_free,
+        prune_cache,
+        dry_run,
         stream,
         log_dir,
         linger_secs,
@@ -396,6 +465,43 @@ fn control_base(disco: &Discovery) -> String {
     crate::control_cli::base_url(disco.port, disco.bind_address.as_deref())
 }
 
+/// `hyperpanes worker --prune-cache [--dry-run]`: resolve the root like the worker does, then
+/// prune every idle slot against the caps. Touches no queue and no control plane.
+fn run_prune_cache(args: &WorkerArgs) -> Result<(), Box<dyn Error>> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?;
+    let root = worktree_store::root_from_env(args.worktree_root.as_deref(), &cwd);
+    let policy = worktree_store::CachePolicy::resolve(
+        args.slot_max_size,
+        args.cache_max_size,
+        args.soft_free,
+        &root,
+    )?;
+    println!(
+        "prune-cache{}: root {} (slot cap {}, budget {}, soft floor {})",
+        if args.dry_run { " (dry run)" } else { "" },
+        root.display(),
+        size_or_off(policy.slot_max),
+        size_or_off(policy.cache_max),
+        size_or_off(policy.soft_free)
+    );
+    worktree_store::prune_cache(
+        &root,
+        policy,
+        &|| worktree_store::available_bytes(&root).ok(),
+        args.dry_run,
+        &|l| println!("{l}"),
+    );
+    Ok(())
+}
+
+fn size_or_off(n: u64) -> String {
+    if n == 0 {
+        "off".to_string()
+    } else {
+        fmt_bytes(n)
+    }
+}
+
 /// Entry point from `main`. Drains `--queue` until empty, then returns `Ok(())`.
 pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
     let from_project = std::cell::Cell::new(false);
@@ -412,11 +518,15 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         Ok(a) => a,
         Err(e) => {
             eprintln!("hyperpanes worker: {e}");
-            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>]] -- <cmd> [args...]");
+            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>] [--slot-max-size <size>] [--cache-max-size <size>] [--soft-free <size>]] -- <cmd> [args...]");
+            eprintln!("       hyperpanes worker --prune-cache [--dry-run] [--worktree-root <dir>] [--slot-max-size <size>] [--cache-max-size <size>] [--soft-free <size>]");
             return Err(e.into());
         }
     };
 
+    if args.prune_cache {
+        return run_prune_cache(&args);
+    }
     if from_project.get() {
         eprintln!(
             "hyperpanes worker: no --queue given; using project queue '{}'",
@@ -588,6 +698,7 @@ fn drain(
         // treat it as the machine-wide condition it is: create nothing, nack once with a long
         // backoff and STOP this worker rather than churning through the queue burning attempts.
         if let Some(st) = store {
+            enforce_cache_limits(&st.root, st.policy, worker);
             if st.min_free > 0 {
                 let low_disk =
                     |r: &Path| worktree_store::available_bytes(r).is_ok_and(|a| a < st.min_free);
@@ -664,7 +775,12 @@ fn drain(
         let mut uncached: Option<PathBuf> = None;
         if let (Some(st), Some(w)) = (store, wt.as_ref()) {
             match acquire_slot_capped(&st.key_dir, st.max_slots) {
-                Ok(Some(s)) => slot = Some(s),
+                Ok(Some(s)) => {
+                    s.enforce_on_acquire(st.policy.slot_max, &|l| {
+                        eprintln!("[{worker}] cache: {l}")
+                    });
+                    slot = Some(s);
+                }
                 Ok(None) => {
                     let dir = worktree_store::uncached_dir(&w.lock);
                     match std::fs::create_dir_all(&dir) {
@@ -698,7 +814,11 @@ fn drain(
             worker,
             out,
         );
-        drop(slot);
+        // Measure + enforce the per-slot cap while still holding the slot's flock, then stamp
+        // last-used and write the size sidecar before unlocking.
+        if let (Some(s), Some(st)) = (slot, store) {
+            s.release_enforcing(st.policy.slot_max, &|l| eprintln!("[{worker}] cache: {l}"));
+        }
         if let Some(dir) = uncached {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -1262,6 +1382,8 @@ struct WtStore {
     min_free: u64,
     /// Cache-slot cap; 0 = unlimited.
     max_slots: usize,
+    /// Per-slot size cap, root-wide budget and soft free floor (each 0 = off).
+    policy: worktree_store::CachePolicy,
 }
 
 impl WtStore {
@@ -1303,6 +1425,13 @@ impl WtStore {
         }
         let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
         let root = worktree_store::root_from_env(args.worktree_root.as_deref(), &cwd);
+        // The soft floor's default is sized to the root's filesystem (see `default_soft_free`).
+        let policy = worktree_store::CachePolicy::resolve(
+            args.slot_max_size,
+            args.cache_max_size,
+            args.soft_free,
+            &root,
+        )?;
         let key_dir = root.join(worktree_store::repo_key(&common));
         worktree_store::write_repo_file(&key_dir, &common)
             .map_err(|e| format!("worktree: cannot create {}: {e}", key_dir.display()))?;
@@ -1329,13 +1458,32 @@ impl WtStore {
         for p in &rep.gc_slots {
             eprintln!("worker: reclaimed unused cache slot {}", p.display());
         }
+        eprintln!(
+            "worker: cache limits: slot cap {}, root budget {}, soft free floor {}",
+            size_or_off(policy.slot_max),
+            size_or_off(policy.cache_max),
+            size_or_off(policy.soft_free)
+        );
+        enforce_cache_limits(&root, policy, "worker");
         Ok(Self {
             root,
             key_dir,
             min_free,
             max_slots,
+            policy,
         })
     }
+}
+
+/// Root-wide budget + proactive soft floor, run at startup and between claims. Logs one line per
+/// action.
+fn enforce_cache_limits(root: &Path, policy: worktree_store::CachePolicy, who: &str) {
+    worktree_store::enforce_root(
+        root,
+        policy,
+        &|| worktree_store::available_bytes(root).ok(),
+        &|l| eprintln!("[{who}] cache: {l}"),
+    );
 }
 
 /// A throwaway git worktree for one task (#14). Created off an explicit base committish on a
@@ -1961,6 +2109,72 @@ mod tests {
     /// Scratch key dir (the disk-backed worktree store) beside the scratch repo.
     fn kd(repo: &Path) -> PathBuf {
         PathBuf::from(format!("{}-kd", repo.display()))
+    }
+
+    #[test]
+    fn parses_cache_size_flags_and_errors_on_bad_values() {
+        let a = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--slot-max-size",
+            "20G",
+            "--cache-max-size=100G",
+            "--soft-free",
+            "0",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(a.slot_max_size, Some(20 << 30));
+        assert_eq!(a.cache_max_size, Some(100 << 30));
+        assert_eq!(a.soft_free, Some(0));
+        assert!(!a.prune_cache && !a.dry_run);
+        let d = parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).unwrap();
+        assert_eq!(
+            (d.slot_max_size, d.cache_max_size, d.soft_free),
+            (None, None, None)
+        );
+        for flag in ["--slot-max-size", "--cache-max-size", "--soft-free"] {
+            let e = parse_args(&argv(&[
+                "hp", "worker", "--queue", "q", flag, "lots", "--", "true",
+            ]))
+            .unwrap_err();
+            assert!(e.starts_with(&format!("{flag}:")), "{e}");
+            let e = parse_args(&argv(&["hp", "worker", "--queue", "q", flag])).unwrap_err();
+            assert!(e.contains("needs a value"), "{e}");
+        }
+    }
+
+    #[test]
+    fn prune_cache_needs_no_queue_or_child_and_dry_run_requires_it() {
+        let a = parse_args(&argv(&["hp", "worker", "--prune-cache", "--dry-run"])).unwrap();
+        assert!(a.prune_cache && a.dry_run);
+        let a = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--prune-cache",
+            "--worktree-root",
+            "/data/wt",
+            "--slot-max-size=1K",
+        ]))
+        .unwrap();
+        assert!(a.prune_cache && !a.dry_run);
+        assert_eq!(a.slot_max_size, Some(1024));
+        let e = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--dry-run",
+            "--",
+            "true",
+        ]))
+        .unwrap_err();
+        assert!(e.contains("--prune-cache"), "{e}");
+        // Without --prune-cache the queue and child stay required.
+        assert!(parse_args(&argv(&["hp", "worker", "--", "true"])).is_err());
     }
 
     #[test]
