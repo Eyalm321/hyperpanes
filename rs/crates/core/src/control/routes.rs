@@ -1864,6 +1864,7 @@ mod golden {
                 title: "Tab 1".into(),
                 layout: "auto".into(),
                 panes: vec![],
+                pane_group: None,
             }],
         });
         let token = "tok-master".to_string();

@@ -79,6 +79,7 @@ fn boot() -> u16 {
                 talk: false,
                 env: None,
             }],
+            pane_group: None,
         }],
     });
     port

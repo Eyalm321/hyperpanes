@@ -1169,6 +1169,7 @@ mod tests {
                 title: "Tab".into(),
                 layout: "auto".into(),
                 panes: vec![pane],
+                pane_group: None,
             }],
         });
         (shared, "u1".to_string())

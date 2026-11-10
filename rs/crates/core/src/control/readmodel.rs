@@ -127,6 +127,15 @@ pub struct TabInfo {
     pub title: String,
     pub layout: String,
     pub panes: Vec<PaneInfo>,
+    /// Set when this tab is a pane group (published by the GUI host; `None` for ordinary tabs).
+    pub pane_group: Option<PaneGroupInfo>,
+}
+
+/// Pane-group marker on a tab: project id + `#rrggbb` colour (both optional).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PaneGroupInfo {
+    pub project: Option<String>,
+    pub color: Option<String>,
 }
 
 /// One window: its tabs + the active tab id.
@@ -647,6 +656,7 @@ impl ReadModel {
                     title: t.title.clone(),
                     layout: t.layout.clone(),
                     panes,
+                    pane_group: t.pane_group.clone(),
                 });
             }
             if scope.is_some() && tabs.is_empty() {
@@ -696,6 +706,9 @@ pub struct TabOut {
     pub title: String,
     pub layout: String,
     pub panes: Vec<PaneOut>,
+    /// `{project,color}` for a pane-group tab, else `null` (always present).
+    #[serde(rename = "paneGroup")]
+    pub pane_group: Option<PaneGroupInfo>,
 }
 
 /// The serialized pane shape — field order matches `ControlPaneInfo`/`ControlPane`, optionals
@@ -802,6 +815,7 @@ mod tests {
             title: "t".into(),
             layout: "auto".into(),
             panes: vec![p],
+            pane_group: None,
         };
         assert!(!format!("{tab:?}").contains("s3cret-value"));
     }
@@ -816,6 +830,7 @@ mod tests {
                 title: "Tab 1".to_string(),
                 layout: "auto".to_string(),
                 panes: vec![pane("p1", "u1")],
+                pane_group: None,
             }],
         });
         m
@@ -880,6 +895,7 @@ mod tests {
                 title: "Tab 2".into(),
                 layout: "auto".into(),
                 panes: vec![pane("p3", "u3")],
+                pane_group: None,
             }],
         });
         let scope = Scope {

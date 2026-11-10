@@ -39,6 +39,7 @@ fn gui_window(panes: Vec<PaneInfo>) -> WindowInfo {
             title: "Tab 1".to_string(),
             layout: "auto".to_string(),
             panes,
+            pane_group: None,
         }],
     }
 }
@@ -135,6 +136,7 @@ fn carryover_rehomes_into_active_tab_and_never_duplicates() {
             title: "grp".to_string(),
             layout: "auto".to_string(),
             panes: vec![pane("ctl-a", "u-a")],
+            pane_group: None,
         },
     ));
 
