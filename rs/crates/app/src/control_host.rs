@@ -294,6 +294,12 @@ impl ControlHost {
             .map(|(k, _)| k.clone())
     }
 
+    /// The control meta of the pane hosted by session `uid` (carried in the control side store,
+    /// which mirrors model meta). `None` when it has none.
+    pub fn meta_for_uid(&self, uid: &str) -> Option<BTreeMap<String, String>> {
+        self.ctl.borrow().get(uid).and_then(|c| c.meta.clone())
+    }
+
     /// Take (and clear) a pending `restartApp` request: 0 = none, 1 = gui, 2 = full.
     /// Set by the control route off the UI thread; the App tick executes it.
     pub fn take_restart_request(&self) -> u8 {
@@ -1265,7 +1271,7 @@ fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
 /// The [`DetachedPane`] a control-spawned (or orphan-adopted) session is hosted as. The model
 /// pane carries the original command/args/shell, forwarded here so the GUI pane's snapshot
 /// (`to_session_file`) records them and a restore re-runs the original program instead of a
-/// bare shell. (`env` is not forwarded here.)
+/// bare shell, and its spawn `env` so the snapshot can persist the (filtered) explicit env.
 fn detached_pane_from_model(uid: &str, c: &ModelPane, font_px: f32) -> DetachedPane {
     DetachedPane {
         uid: uid.to_string(),
@@ -1278,6 +1284,7 @@ fn detached_pane_from_model(uid: &str, c: &ModelPane, font_px: f32) -> DetachedP
         spawn_command: c.command.clone(),
         spawn_args: c.args.clone(),
         spawn_shell: c.shell.clone(),
+        spawn_env: c.env.clone(),
     }
 }
 
@@ -1529,6 +1536,49 @@ mod tests {
             Some("claude --model m --resume new-id")
         );
         assert_eq!(plan.args, None);
+    }
+
+    /// #66: a control pane opened with `env` has its explicit spawn env recorded by the relaunch
+    /// snapshot (filtered), and a restore spawns with those keys as the base layer. Secrets,
+    /// runtime-owned keys and PATH are withheld and only their NAMES are recorded.
+    #[test]
+    fn control_pane_env_survives_snapshot_and_restore() {
+        let mut c = model_pane(Some("claude"), Some(vec!["--model", "opus"]));
+        let mut env = hyperpanes_core::session::spawn::EnvMap::new();
+        for (k, v) in [
+            ("CLAUDE_CONFIG_DIR", "/home/user/.claude-a"),
+            ("ENABLE_TOOL_SEARCH", "false"),
+            ("HP_GOAL_ACCOUNTS", "a,b"),
+            ("GH_TOKEN", "x"),
+            ("HYPERPANES_PANE_ID", "p1"),
+            ("PATH", "/usr/bin"),
+        ] {
+            env.insert(k.to_string(), v.to_string());
+        }
+        c.env = Some(env);
+        let spec = adopted_snapshot_spec(&c);
+        let kept = spec.env.as_ref().expect("env persisted");
+        assert_eq!(
+            kept.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "CLAUDE_CONFIG_DIR",
+                "ENABLE_TOOL_SEARCH",
+                "HP_GOAL_ACCOUNTS"
+            ]
+        );
+        assert_eq!(
+            spec.env_dropped.as_deref(),
+            Some(&["GH_TOKEN", "HYPERPANES_PANE_ID", "PATH"].map(String::from)[..])
+        );
+        let spawn = hyperpanes_core::workspace::env_persist::merge_restore_env(
+            spec.env.as_ref(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(spawn["ENABLE_TOOL_SEARCH"], "false");
+        assert_eq!(spawn["HP_GOAL_ACCOUNTS"], "a,b");
+        assert!(!spawn.contains_key("GH_TOKEN"));
     }
 
     /// A control pane running a non-claude program round-trips its command; no resume.

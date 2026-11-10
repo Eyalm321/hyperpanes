@@ -54,6 +54,15 @@ pub struct PaneSpec {
     /// when on (a plain pane omits it). New here (no TS sibling), so it trails the ported fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub talk: Option<bool>,
+    /// The pane's EXPLICIT spawn env (never the inherited process env), already filtered by
+    /// [`crate::workspace::env_persist::persistable_env`]. Recorded only by the relaunch
+    /// snapshot, never by a saved workspace template (templates get shared).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
+    /// Names (never values) of spawn-env keys the persistence policy withheld, so a restore can
+    /// say what the pane lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_dropped: Option<Vec<String>>,
 }
 
 /// One tab (group): a layout plus its panes and per-slot split state.
