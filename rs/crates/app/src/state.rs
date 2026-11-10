@@ -1073,6 +1073,11 @@ pub struct State {
     pub project_queue_counts: std::collections::HashMap<String, usize>,
     /// Non-terminal task count of the queues that map to no project ("Other queues").
     pub other_queue_count: usize,
+    /// Per-state task counts per project id (lanes, #7); absent = project has no queues.
+    pub project_lane_counts:
+        std::collections::HashMap<String, hyperpanes_core::control::work::Counts>,
+    /// Per-state counts of the unmapped queues; `None` = there are none.
+    pub other_lane_counts: Option<hyperpanes_core::control::work::Counts>,
     /// Whether the projects flyout (behind the 📁 icon) is currently expanded. The rail
     /// itself is gated by `settings.show_sidebar`; this is just the flyout panel state.
     pub sidebar_open: bool,
@@ -1274,6 +1279,8 @@ impl State {
             projects: sidebar::list(),
             project_queue_counts: std::collections::HashMap::new(),
             other_queue_count: 0,
+            project_lane_counts: std::collections::HashMap::new(),
+            other_lane_counts: None,
             goal_orchestrators: std::collections::HashMap::new(),
             goal_orch_models: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
@@ -3305,6 +3312,19 @@ impl State {
         if self.project_queue_counts != counts || self.other_queue_count != other {
             self.project_queue_counts = counts;
             self.other_queue_count = other;
+            self.dirty = true;
+        }
+    }
+
+    /// Store freshly polled lane counts (#7); dirties the UI only on a change.
+    pub fn set_lane_counts(
+        &mut self,
+        lanes: std::collections::HashMap<String, hyperpanes_core::control::work::Counts>,
+        other: Option<hyperpanes_core::control::work::Counts>,
+    ) {
+        if self.project_lane_counts != lanes || self.other_lane_counts != other {
+            self.project_lane_counts = lanes;
+            self.other_lane_counts = other;
             self.dirty = true;
         }
     }

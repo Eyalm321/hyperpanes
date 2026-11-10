@@ -650,6 +650,10 @@ impl ControlHost {
                     let counts = crate::project_queue::project_open_counts(&queues, &st.projects);
                     let other = crate::project_queue::other_open_count(&queues, &st.projects);
                     st.set_project_queue_counts(counts, other);
+                    let lanes = crate::project_queue::project_lane_counts(&queues, &st.projects);
+                    let other_lanes =
+                        crate::project_queue::other_lane_counts(&queues, &st.projects);
+                    st.set_lane_counts(lanes, other_lanes);
                 }
             }
         }

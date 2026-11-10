@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use hyperpanes_core::control::work::QueueSummary;
+use hyperpanes_core::control::work::{Counts, QueueSummary};
 
 use crate::sidebar::Project;
 
@@ -79,6 +79,71 @@ pub fn project_open_counts(
         }
     }
     out
+}
+
+/// One task-state lane under an expanded project (hyperpanes#7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneRow {
+    pub label: &'static str,
+    pub count: usize,
+    /// Zero-count lanes render dimmed (never hidden, so the block keeps a stable shape).
+    pub dim: bool,
+}
+
+fn add_counts(into: &mut Counts, c: &Counts) {
+    into.queued += c.queued;
+    into.claimed += c.claimed;
+    into.done += c.done;
+    into.failed += c.failed;
+    into.dead += c.dead;
+}
+
+/// Per-state counts summed over every queue mapped to each project. A project appears iff it
+/// has at least one queue (even an all-zero one), so "no queues" stays distinguishable.
+pub fn project_lane_counts(
+    queues: &[QueueSummary],
+    projects: &[Project],
+) -> HashMap<String, Counts> {
+    let mut out: HashMap<String, Counts> = HashMap::new();
+    for q in queues {
+        if let Some(id) = project_for_queue(&q.queue, projects) {
+            add_counts(out.entry(id.to_string()).or_default(), &q.counts);
+        }
+    }
+    out
+}
+
+/// Per-state counts over the queues that map to no project; `None` when there are none.
+pub fn other_lane_counts(queues: &[QueueSummary], projects: &[Project]) -> Option<Counts> {
+    let mut out: Option<Counts> = None;
+    for q in queues {
+        if project_for_queue(&q.queue, projects).is_none() {
+            add_counts(out.get_or_insert_with(Counts::default), &q.counts);
+        }
+    }
+    out
+}
+
+/// Lane rows (Queued / Running / Done / Failed / Dead) for a project's counts. `None` (no
+/// queues) yields no rows, so no lane block renders; otherwise all five lanes, zeros dimmed.
+pub fn lane_rows(counts: Option<&Counts>) -> Vec<LaneRow> {
+    let Some(c) = counts else {
+        return Vec::new();
+    };
+    [
+        ("Queued", c.queued),
+        ("Running", c.claimed),
+        ("Done", c.done),
+        ("Failed", c.failed),
+        ("Dead", c.dead),
+    ]
+    .into_iter()
+    .map(|(label, count)| LaneRow {
+        label,
+        count,
+        dim: count == 0,
+    })
+    .collect()
 }
 
 /// Badge text for a count: nothing at 0, else the number.
@@ -231,5 +296,61 @@ mod tests {
         assert_eq!(default_queue_for(Some("/r/b"), &ps), Some("p2".into()));
         assert_eq!(default_queue_for(Some("/r/c"), &ps), None);
         assert_eq!(default_queue_for(None, &ps), None);
+    }
+
+    fn lane_q(queue: &str, q: usize, c: usize, d: usize, f: usize, x: usize) -> QueueSummary {
+        QueueSummary {
+            queue: queue.into(),
+            counts: Counts {
+                queued: q,
+                claimed: c,
+                done: d,
+                failed: f,
+                dead: x,
+            },
+        }
+    }
+
+    #[test]
+    fn lane_rows_mixed_counts_sum_across_queues() {
+        let ps = vec![proj("alpha", "/d/alpha")];
+        let queues = vec![
+            lane_q("alpha-g1", 2, 1, 5, 0, 1),
+            lane_q("alpha-g2", 1, 0, 3, 2, 0),
+            lane_q("other", 9, 9, 9, 9, 9),
+        ];
+        let lanes = project_lane_counts(&queues, &ps);
+        let rows = lane_rows(lanes.get("alpha"));
+        let got: Vec<(&str, usize, bool)> =
+            rows.iter().map(|r| (r.label, r.count, r.dim)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Queued", 3, false),
+                ("Running", 1, false),
+                ("Done", 8, false),
+                ("Failed", 2, false),
+                ("Dead", 1, false),
+            ]
+        );
+        assert_eq!(other_lane_counts(&queues, &ps).unwrap().queued, 9);
+    }
+
+    #[test]
+    fn lane_rows_all_zero_are_dimmed() {
+        let ps = vec![proj("alpha", "/d/alpha")];
+        let queues = vec![lane_q("alpha-g1", 0, 0, 0, 0, 0)];
+        let lanes = project_lane_counts(&queues, &ps);
+        let rows = lane_rows(lanes.get("alpha"));
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|r| r.count == 0 && r.dim));
+    }
+
+    #[test]
+    fn lane_rows_no_queues_is_empty() {
+        let ps = vec![proj("alpha", "/d/alpha")];
+        let lanes = project_lane_counts(&[], &ps);
+        assert!(lane_rows(lanes.get("alpha")).is_empty());
+        assert!(other_lane_counts(&[], &ps).is_none());
     }
 }
