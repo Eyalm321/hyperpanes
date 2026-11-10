@@ -321,46 +321,46 @@ export component TopBar inherits Rectangle {
                 // chips + new-tab button live only while top-docked; docked, the strip
                 // is just the empty window-drag area.
                 if root.tab-dock == 0 : HorizontalLayout {
-                accessible-role: tab-list;
-                spacing: 2px;
-                horizontal-stretch: 0;
-                for tab[idx] in root.tabs : TabChip {
-                    title: tab.title;
-                    active: tab.active;
-                    editing: root.editing-tab == idx;
-                    spring-hover: root.drop-tab-idx == idx;
-                    select => { root.select-tab(idx); }
-                    close => { root.close-tab(idx); }
-                    begin-rename => { root.begin-rename(idx); }
-                    commit-rename(t) => { root.rename-tab(idx, t); }
-                    grab => { root.tab-grab(idx); }
-                    context(x, y) => { root.tab-context(idx, x, y); }
-                    report-geom(x, w) => { root.tab-geom(idx, x, w); }
-                    wheel(d, s) => { root.tab-wheel(d, s); }
-                }
+                    accessible-role: tab-list;
+                    spacing: 2px;
+                    horizontal-stretch: 0;
+                    for tab[idx] in root.tabs : TabChip {
+                        title: tab.title;
+                        active: tab.active;
+                        editing: root.editing-tab == idx;
+                        spring-hover: root.drop-tab-idx == idx;
+                        select => { root.select-tab(idx); }
+                        close => { root.close-tab(idx); }
+                        begin-rename => { root.begin-rename(idx); }
+                        commit-rename(t) => { root.rename-tab(idx, t); }
+                        grab => { root.tab-grab(idx); }
+                        context(x, y) => { root.tab-context(idx, x, y); }
+                        report-geom(x, w) => { root.tab-geom(idx, x, w); }
+                        wheel(d, s) => { root.tab-wheel(d, s); }
+                    }
 
-                // new tab
-                VerticalLayout {
-                    alignment: center;
-                    new-btn := Rectangle {
-                        width: 20px;
-                        height: 20px;
-                        border-radius: 5px;
-                        background: nta.has-hover ? Theme.surface2 : transparent;
-                        PlusIcon {
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            ink: nta.has-hover ? Theme.text : Theme.subtext;
-                        }
-                        nta := TouchArea {
-                            clicked => { root.new-tab(); }
-                            scroll-event(e) => {
-                                root.tab-wheel(e.delta-y, e.modifiers.shift);
-                                return accept;
+                    // new tab
+                    VerticalLayout {
+                        alignment: center;
+                        new-btn := Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 5px;
+                            background: nta.has-hover ? Theme.surface2 : transparent;
+                            PlusIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                ink: nta.has-hover ? Theme.text : Theme.subtext;
+                            }
+                            nta := TouchArea {
+                                clicked => { root.new-tab(); }
+                                scroll-event(e) => {
+                                    root.tab-wheel(e.delta-y, e.modifiers.shift);
+                                    return accept;
+                                }
                             }
                         }
                     }
-                }
                 }
 
                 // empty trailing area → drags the window (move only on actual drag)
