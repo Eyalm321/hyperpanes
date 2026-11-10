@@ -98,6 +98,9 @@ impl H {
             .map(|i| TabItem {
                 title: format!("tab {i}").into(),
                 active: i == 0,
+                group: false,
+                group_color: slint::Color::default(),
+                a11y_label: Default::default(),
             })
             .collect();
         win.set_tabs(ModelRc::from(Rc::new(VecModel::from(tabs))));

@@ -1562,6 +1562,9 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
         }
         return remote_command(&shared, t, &cmd);
     }
+    if let Some(t @ ("groupPanes" | "ungroupPanes")) = cmd.get("type").and_then(Value::as_str) {
+        return pane_group_command(&shared, &info, t, &cmd);
+    }
     let control_file = shared.control_file.to_str().map(str::to_string);
     let result = {
         let mut m = shared.model.lock().unwrap();
@@ -1585,6 +1588,102 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
         shared.mark_projects_dirty();
     }
     jstatus(result.status, result.body)
+}
+
+/// `groupPanes {paneIds,title?,project?}` → validate against the read model, queue a GUI-side
+/// group, answer `{tabId}`; `ungroupPanes {tabId}` → queue an ungroup. The GUI host executes
+/// both (`Shared::take_pane_group_requests`); a headless server just leaves them queued.
+fn pane_group_command(shared: &Arc<Shared>, info: &TokenInfo, kind: &str, cmd: &Value) -> Response {
+    use crate::control::scope::tab_in_scope;
+    use crate::control::server::PaneGroupRequest;
+    let bad = |msg: String| jstatus(400, json!({ "error": msg }));
+    let m = shared.model.lock().unwrap();
+    if kind == "ungroupPanes" {
+        let Some(tab_id) = cmd.get("tabId").and_then(Value::as_str) else {
+            return bad("ungroupPanes needs a tabId".into());
+        };
+        let Some(win) = m.tab_window(tab_id) else {
+            return bad(format!("no such tab: {tab_id}"));
+        };
+        if !tab_in_scope(info.scope.as_ref(), tab_id, win) {
+            return jstatus(
+                403,
+                json!({ "error": format!("tabId {tab_id} is out of scope") }),
+            );
+        }
+        let is_group = m
+            .tabs()
+            .any(|(_, t)| t.id == tab_id && t.pane_group.is_some());
+        if !is_group {
+            return bad(format!("tab {tab_id} is not a pane group"));
+        }
+        drop(m);
+        shared.queue_pane_group_request(PaneGroupRequest::Ungroup {
+            tab_id: tab_id.to_string(),
+        });
+        return jstatus(200, json!({ "ok": true }));
+    }
+    // groupPanes
+    let Some(raw) = cmd.get("paneIds").and_then(Value::as_array) else {
+        return bad("groupPanes needs a paneIds array".into());
+    };
+    let mut pane_ids: Vec<String> = Vec::new();
+    let mut window: Option<i64> = None;
+    for v in raw {
+        let Some(id) = v.as_str() else {
+            return bad("paneIds must be strings".into());
+        };
+        // Remote panes are not in the local model, so they are "no such pane" here.
+        let Some(c) = m.coords_of(id) else {
+            return bad(format!("no such pane: {id}"));
+        };
+        if !pane_in_scope(info.scope.as_ref(), &c) {
+            return jstatus(
+                403,
+                json!({ "error": format!("paneId {id} is out of scope") }),
+            );
+        }
+        match window {
+            None => window = Some(c.window_id),
+            Some(w) if w != c.window_id => {
+                return bad("groupPanes panes must all be in one window".into())
+            }
+            _ => {}
+        }
+        if pane_ids.iter().any(|p| p == id) {
+            return bad(format!("duplicate pane in paneIds: {id}"));
+        }
+        pane_ids.push(id.to_string());
+    }
+    let Some(window_id) = window.filter(|_| pane_ids.len() >= 2) else {
+        return bad("groupPanes needs at least 2 distinct panes".into());
+    };
+    drop(m);
+    let project = match cmd.get("project") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(h)) => match projects::resolve(h) {
+            Some(p) => Some(p.id),
+            None => return bad(format!("unknown project: {h}")),
+        },
+        Some(_) => return bad("project must be a string".into()),
+    };
+    let title = cmd
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|t| !t.trim().is_empty());
+    let tab_id = uuid::Uuid::new_v4().to_string();
+    shared.queue_pane_group_request(PaneGroupRequest::Group {
+        tab_id: tab_id.clone(),
+        window_id,
+        pane_ids,
+        title,
+        project,
+    });
+    jstatus(
+        200,
+        json!({ "ok": true, "tabId": tab_id, "result": { "tabId": tab_id } }),
+    )
 }
 
 /// `connectRemote {url, label?, remember?}` → queue a GUI-side attach, answer `{hostId}`;
@@ -1864,6 +1963,7 @@ mod golden {
                 title: "Tab 1".into(),
                 layout: "auto".into(),
                 panes: vec![],
+                pane_group: None,
             }],
         });
         let token = "tok-master".to_string();
@@ -1903,6 +2003,100 @@ mod golden {
 
     fn client() -> reqwest::Client {
         reqwest::Client::new()
+    }
+
+    async fn post_cmd(s: &Server, body: Value) -> (u16, Value) {
+        let r = client()
+            .post(format!("{}/command", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let st = r.status().as_u16();
+        (st, r.json().await.unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn group_and_ungroup_panes_queue_gui_requests() {
+        use crate::control::readmodel::{PaneGroupInfo, WindowInfo};
+        use crate::control::server::PaneGroupRequest;
+        let s = boot(true).await;
+        {
+            let mut m = s.shared.model.lock().unwrap();
+            m.insert_pane(1, pane("p1", "u1"));
+            m.insert_pane(1, pane("p2", "u2"));
+            m.add_window(WindowInfo {
+                window_id: 2,
+                active_tab_id: Some("w2t".into()),
+                tabs: vec![TabInfo {
+                    id: "w2t".into(),
+                    title: "T".into(),
+                    layout: "auto".into(),
+                    panes: vec![],
+                    pane_group: None,
+                }],
+            });
+            m.insert_pane(2, pane("p3", "u3"));
+            m.add_window(WindowInfo {
+                window_id: 3,
+                active_tab_id: Some("g1".into()),
+                tabs: vec![TabInfo {
+                    id: "g1".into(),
+                    title: "Group".into(),
+                    layout: "auto".into(),
+                    panes: vec![],
+                    pane_group: Some(PaneGroupInfo::default()),
+                }],
+            });
+        }
+        // Happy path: exactly one Group request queued, tabId returned.
+        let (st, v) = post_cmd(
+            &s,
+            json!({"type":"groupPanes","paneIds":["p1","p2"],"title":"G"}),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        let tab_id = v["tabId"].as_str().unwrap().to_string();
+        assert_eq!(v["result"]["tabId"], json!(tab_id));
+        let q = s.shared.take_pane_group_requests();
+        assert_eq!(
+            q,
+            vec![PaneGroupRequest::Group {
+                tab_id,
+                window_id: 1,
+                pane_ids: vec!["p1".into(), "p2".into()],
+                title: Some("G".into()),
+                project: None,
+            }]
+        );
+        // Each 400 case queues nothing.
+        for body in [
+            json!({"type":"groupPanes","paneIds":["p1"]}),
+            json!({"type":"groupPanes","paneIds":["p1","p1"]}),
+            json!({"type":"groupPanes","paneIds":[]}),
+            json!({"type":"groupPanes"}),
+            json!({"type":"groupPanes","paneIds":["p1","nope"]}),
+            json!({"type":"groupPanes","paneIds":["p1","p3"]}),
+            json!({"type":"groupPanes","paneIds":["p1","p2"],"project":"no-such-project-xyz"}),
+            json!({"type":"ungroupPanes","tabId":"t1"}),
+            json!({"type":"ungroupPanes","tabId":"nope"}),
+            json!({"type":"ungroupPanes"}),
+        ] {
+            let (st, v) = post_cmd(&s, body.clone()).await;
+            assert_eq!(st, 400, "{body}: {v}");
+            assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
+        }
+        assert!(s.shared.take_pane_group_requests().is_empty());
+        // Ungroup of a real group tab queues one request.
+        let (st, _) = post_cmd(&s, json!({"type":"ungroupPanes","tabId":"g1"})).await;
+        assert_eq!(st, 200);
+        assert_eq!(
+            s.shared.take_pane_group_requests(),
+            vec![PaneGroupRequest::Ungroup {
+                tab_id: "g1".into()
+            }]
+        );
     }
 
     #[tokio::test]
@@ -2205,7 +2399,7 @@ mod golden {
         // so only its shape is asserted, not the exact backend name.
         assert_eq!(
             body["windows"],
-            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[]}]}])
+            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[],"paneGroup":null}]}])
         );
         assert_eq!(body["speech"]["muted"], json!(false));
         assert_eq!(body["speech"]["focusedOnly"], json!(false));

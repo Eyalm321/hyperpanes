@@ -180,6 +180,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
                 title: "Tab 1".into(),
                 layout: "auto".into(),
                 panes: vec![],
+                pane_group: None,
             }],
         });
         return;
@@ -210,6 +211,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
                 title,
                 layout,
                 panes,
+                pane_group: None,
             });
         }
         if active_tab_id.is_none() {

@@ -82,7 +82,7 @@ impl Layout {
     }
 
     /// The default discovery file: `control.json` in the default state dir.
-    fn default_control_file(&self) -> PathBuf {
+    pub(crate) fn default_control_file(&self) -> PathBuf {
         self.default_state_dir.join("control.json")
     }
 }
@@ -170,7 +170,7 @@ pub fn allow_shared_data() -> bool {
 /// Canonicalize the longest existing ancestor of `p` and re-append the rest, so a path that
 /// does not exist yet (a fresh scratch dir, a not-yet-written control file) still compares
 /// by its real location.
-fn normalize(p: &Path) -> PathBuf {
+pub(crate) fn normalize(p: &Path) -> PathBuf {
     let mut tail = Vec::new();
     let mut cur = p.to_path_buf();
     loop {

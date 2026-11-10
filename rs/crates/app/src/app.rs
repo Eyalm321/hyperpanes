@@ -1819,8 +1819,14 @@ impl App {
                 return;
             }
         }
-        // Other modifier chords (Alt+… focus, bare F11) — run + swallow.
-        let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
+        // Other modifier chords (Alt+… focus, bare F11) — run + swallow. The selection guard
+        // (Ctrl+G group / Esc clear) is open only while 2+ panes are selected and nothing
+        // above (a context menu or overlay) should take the key first.
+        let cmd = {
+            let st = win.state.borrow();
+            let sel = st.selection_active() && !st.ctx_open() && !st.overlay_open();
+            crate::route_chord_in(&st.keymap, &msg, sel)
+        };
         if let Some(cmd) = cmd {
             self.run_command(win, cmd);
             return;
@@ -1949,6 +1955,8 @@ impl App {
             .get(pane_idx)
             .map(|p| p.uid.clone());
         if let Some(uid) = uid {
+            // Starting a header drag drops any multi-selection (t28).
+            win.state.borrow_mut().clear_selection();
             // No global pointer on this platform → drags can't be tracked; stay a click.
             let Some((pos, down)) = drag::global_pointer().poll() else {
                 return;
@@ -2560,7 +2568,21 @@ impl App {
         }
 
         // panes
-        cb_usize!(on_focus_pane, Command::FocusPane);
+        // A Slint-originated focus is a plain click on a pane (header or body): it drops any
+        // multi-selection first. (Keyboard focus moves go through `Command::FocusPane`
+        // directly and keep the selection.)
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_focus_pane(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::ClearSelection);
+                    app.run_command(&w, Command::FocusPane(i as usize));
+                }
+            });
+        }
+        // Ctrl/Cmd+click on a pane header toggles it in the multi-selection.
+        cb_usize!(on_pane_select_toggle, Command::ToggleSelectPane);
         cb0!(on_new_pane, Command::NewPane);
         cb0!(on_open_new_pane, Command::OpenNewPane);
         // New Pane dialog submit: build the options payload (empty fields are normalized by
@@ -2984,9 +3006,25 @@ impl App {
             let id = win.id;
             win.app.on_ctx_move_tab(move |tab| {
                 if let Some(w) = app.window_by_id(id) {
-                    let target = w.state.borrow().ctx_target();
+                    let (target, kind) = {
+                        let st = w.state.borrow();
+                        (st.ctx_target(), st.ctx.as_ref().map(|c| c.kind))
+                    };
                     if let Some(t) = target {
-                        app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
+                        if kind == Some(crate::contextmenu::CtxKind::Tab) {
+                            // Tab menu's "Group Color ▸": `tab` is a project index (-1 = the
+                            // panes' own project).
+                            let proj = w
+                                .state
+                                .borrow()
+                                .projects
+                                .get(tab.max(0) as usize)
+                                .filter(|_| tab >= 0)
+                                .map(|p| p.id.clone());
+                            app.run_command(&w, Command::SetGroupColor(t, proj));
+                        } else {
+                            app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
+                        }
                     }
                     app.run_command(&w, Command::CloseContext);
                 }

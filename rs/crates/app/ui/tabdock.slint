@@ -2,7 +2,7 @@
 // the shared + / × icons, and the dock-target preview. The controller owns all dock state
 // (see the "tab bar dock" block in app.slint); everything here is presentation + input.
 
-import { Theme } from "theme.slint";
+import { Theme, GroupGlyph, SelectionHint } from "theme.slint";
 import { TabItem } from "types.slint";
 
 export component PlusIcon inherits Rectangle {
@@ -84,6 +84,9 @@ component VTabChip inherits Rectangle {
     in property <bool> active;
     in property <bool> editing;
     in property <bool> spring-hover: false;
+    in property <bool> group: false;         // pane-group tab (t28)
+    in property <color> group-color: Theme.subtext;
+    in property <string> a11y-label: "";
     in property <bool> bar-left: true;       // active bar on the edge facing the panes
     in property <bool> overflowing: false;   // list scrolls → plain wheel scrolls, Shift cycles
     callback select();
@@ -104,7 +107,7 @@ component VTabChip inherits Rectangle {
 
     height: 28px;
     accessible-role: tab;
-    accessible-label: root.title;
+    accessible-label: root.a11y-label != "" ? root.a11y-label : root.title;
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
 
@@ -113,6 +116,17 @@ component VTabChip inherits Rectangle {
               : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
     border-width: root.spring-hover ? 2px : 0px;
     border-color: Theme.brand;
+
+    // pane-group tint + 3px stripe on the leading edge (the side facing away from the panes'
+    // active bar, so both can show): left edge when docked right, right edge docked left.
+    if root.group : Rectangle {
+        background: root.group-color.with-alpha(0.10);
+    }
+    if root.group : Rectangle {
+        x: root.bar-left ? parent.width - 3px : 0px;
+        width: 3px;
+        background: root.group-color;
+    }
 
     ta := TouchArea {
         clicked => { root.select(); }
@@ -146,6 +160,11 @@ component VTabChip inherits Rectangle {
         padding-left: 12px;
         padding-right: 6px;
         spacing: 6px;
+
+        if root.group : VerticalLayout {
+            alignment: center;
+            GroupGlyph { ink: root.group-color; }
+        }
 
         Text {
             text: root.title;
@@ -212,6 +231,7 @@ component VTabChip inherits Rectangle {
 export component TabColumn inherits Rectangle {
     in property <int> tab-dock: 1;
     in property <bool> dock-dragging: false;
+    in property <int> selection-count: 0;   // multi-select hint chip (t28), 0/≥2
     in property <[TabItem]> tabs;
     in property <int> editing-tab: -1;
     in property <bool> drop-strip-active: false;
@@ -306,6 +326,9 @@ export component TabColumn inherits Rectangle {
                 for tab[idx] in root.tabs : VTabChip {
                     title: tab.title;
                     active: tab.active;
+                    group: tab.group;
+                    group-color: tab.group-color;
+                    a11y-label: tab.a11y-label;
                     editing: root.editing-tab == idx;
                     spring-hover: root.drop-tab-idx == idx;
                     bar-left: root.tab-dock == 1;
@@ -335,6 +358,18 @@ export component TabColumn inherits Rectangle {
                             root.tab-wheel(e.delta-y, e.modifiers.shift);
                             return accept;
                         }
+                    }
+                }
+
+                // multi-select hint chip (t28): at the end of the column, only while 2+
+                // panes are selected.
+                if root.selection-count >= 2 : Rectangle {
+                    height: 28px;
+                    SelectionHint {
+                        x: 8px;
+                        y: (parent.height - self.height) / 2;
+                        count: root.selection-count;
+                        width: min(parent.width - 16px, self.min-width);
                     }
                 }
             }

@@ -13,7 +13,7 @@
 
 use hyperpanes_core::workspace::io::{has_panes, read_workspace, windows_of, write_workspace};
 use hyperpanes_core::workspace::model::{
-    GroupSpec, PaneSpec, WindowBounds, WindowSpec, WorkspaceFile,
+    GroupSpec, PaneGroupSpec, PaneSpec, WindowBounds, WindowSpec, WorkspaceFile,
 };
 use std::collections::BTreeMap;
 
@@ -49,6 +49,10 @@ fn kitchen_sink() -> WorkspaceFile {
         main_fraction: Some(0.6),
         focused: Some(1),
         zoomed: Some(0),
+        pane_group: Some(PaneGroupSpec {
+            project: Some("proj-1".into()),
+            color: Some("#aabbcc".into()),
+        }),
     };
     WorkspaceFile {
         name: Some("sink".into()),
@@ -157,6 +161,7 @@ fn group_split_state_survives_disk_round_trip() {
             main_fraction: Some(0.55),
             focused: Some(1),
             zoomed: Some(1),
+            pane_group: None,
         }]),
         active: Some(0),
         ..Default::default()
@@ -210,4 +215,47 @@ fn windows_of_normalises_each_round_tripped_shape_identically() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+#[test]
+fn pane_group_roundtrips_and_is_skipped_when_none() {
+    let g = GroupSpec {
+        title: Some("Group".into()),
+        pane_group: Some(PaneGroupSpec {
+            project: Some("p1".into()),
+            color: Some("#112233".into()),
+        }),
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&g).unwrap();
+    assert_eq!(v["paneGroup"]["project"], "p1");
+    assert_eq!(v["paneGroup"]["color"], "#112233");
+    let back: GroupSpec = serde_json::from_value(v).unwrap();
+    assert_eq!(back, g);
+    let plain = serde_json::to_value(GroupSpec::default()).unwrap();
+    assert!(plain.get("paneGroup").is_none());
+    let empty = serde_json::to_value(PaneGroupSpec::default()).unwrap();
+    assert_eq!(empty, serde_json::json!({}));
+}
+
+#[test]
+fn old_file_without_pane_group_loads() {
+    let g: GroupSpec = serde_json::from_str(r#"{"title":"t","panes":[]}"#).unwrap();
+    assert!(g.pane_group.is_none());
+}
+
+/// An older reader (no `paneGroup` field) must still load a file that has one.
+#[test]
+fn file_with_pane_group_loads_in_struct_without_it() {
+    #[derive(serde::Deserialize, Debug)]
+    #[serde(rename_all = "camelCase")]
+    struct OldGroup {
+        title: Option<String>,
+    }
+    let json = r##"{"title":"t","paneGroup":{"project":"p","color":"#fff000","future":1}}"##;
+    let old: OldGroup = serde_json::from_str(json).unwrap();
+    assert_eq!(old.title.as_deref(), Some("t"));
+    // and the new struct tolerates unknown nested fields too
+    let g: GroupSpec = serde_json::from_str(json).unwrap();
+    assert_eq!(g.pane_group.unwrap().color.as_deref(), Some("#fff000"));
 }

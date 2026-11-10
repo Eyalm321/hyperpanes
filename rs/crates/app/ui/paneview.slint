@@ -270,6 +270,12 @@ export component PaneView inherits Rectangle {
     in property <bool> drop-rect-active: false;
 
     callback pane-grab(int);
+    // Ctrl/Cmd+left-press on a pane HEADER toggles that pane in the multi-selection (t28, #96).
+    // It never arms the drag; terminal-body Ctrl+click (path copy) is unaffected.
+    callback pane-select-toggle(int);
+    // True between a Ctrl+press on a header and its release, so the `clicked` that follows
+    // doesn't also run the plain-click focus (which clears the selection).
+    private property <bool> ctrl-click: false;
     callback pane-context(int, length, length);   // right-click the header → open the pane menu
     callback taskbar-context(int, length, length); // right-click a taskbar button → pane menu (inTaskbar)
     callback key(int, KeyMsg);
@@ -357,11 +363,21 @@ export component PaneView inherits Rectangle {
                 // ---- header (.hp-pane-header) ----
                 Rectangle {
                     height: 26px;
+                    // multi-select a11y (t28): the header is a selectable item.
+                    accessible-role: list-item;
+                    accessible-label: pane.title;
+                    accessible-description: pane.select-desc;
+                    accessible-item-selectable: true;
+                    accessible-item-selected: pane.selected;
                     // Header tint: a faint wash of the pane's accent when its frame is on
                     // (a git-project / manually-coloured pane). A clean pane shows no tint —
                     // matching the Electron `background: frameOn ? ${color}1a` header.
                     Rectangle {
                         background: pane.show-frame ? pane.accent.with-alpha(0.10) : transparent;
+                    }
+                    // selected: 8% selection tint over the header
+                    if pane.selected : Rectangle {
+                        background: Theme.selection.with-alpha(0.08);
                     }
                     // bottom hairline
                     Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
@@ -371,10 +387,19 @@ export component PaneView inherits Rectangle {
                     TouchArea {
                         // The open/closed-hand cursor over this header is driven from Win32
                         // (window.rs) so it can be a real hand + persist across the tear-off.
-                        clicked => { root.focus-pane(idx); tp.focus(); }
+                        clicked => {
+                            if (root.ctrl-click) { root.ctrl-click = false; }
+                            else { root.focus-pane(idx); tp.focus(); }
+                        }
                         pointer-event(ev) => {
                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
-                                root.pane-grab(idx);
+                                if (ev.modifiers.control) {
+                                    root.ctrl-click = true;
+                                    root.pane-select-toggle(idx);
+                                } else {
+                                    root.ctrl-click = false;
+                                    root.pane-grab(idx);
+                                }
                             }
                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
                                 root.pane-context(idx, self.absolute-position.x + self.mouse-x,
@@ -413,6 +438,20 @@ export component PaneView inherits Rectangle {
                                 alignment: start;
                                 spacing: 8px;
                                 visible: !pane.editing;
+                                // ✓ selection badge — drawn geometry (no font glyph)
+                                if pane.selected : VerticalLayout {
+                                    alignment: center;
+                                    Path {
+                                        width: 11px;
+                                        height: 11px;
+                                        viewbox-width: 11;
+                                        viewbox-height: 11;
+                                        stroke: Theme.selection;
+                                        stroke-width: 1.8px;
+                                        fill: transparent;
+                                        commands: "M 1.5 5.8 L 4.3 8.6 L 9.5 2.6";
+                                    }
+                                }
                                 Text {
                                     text: pane.title;
                                     color: pane.focused ? Theme.text : Theme.subtext;
@@ -469,11 +508,20 @@ export component PaneView inherits Rectangle {
                             // still resolve normally.
                             lta := TouchArea {
                                 enabled: !pane.editing;
-                                clicked => { root.focus-pane(idx); tp.focus(); }
-                                double-clicked => { root.begin-rename-pane(idx); }
+                                clicked => {
+                                    if (root.ctrl-click) { root.ctrl-click = false; }
+                                    else { root.focus-pane(idx); tp.focus(); }
+                                }
+                                double-clicked => { if (!root.ctrl-click) { root.begin-rename-pane(idx); } }
                                 pointer-event(ev) => {
                                     if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
-                                        root.pane-grab(idx);
+                                        if (ev.modifiers.control) {
+                                            root.ctrl-click = true;
+                                            root.pane-select-toggle(idx);
+                                        } else {
+                                            root.ctrl-click = false;
+                                            root.pane-grab(idx);
+                                        }
                                     }
                                     if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
                                         root.pane-context(idx, self.absolute-position.x + self.mouse-x,
@@ -675,6 +723,19 @@ export component PaneView inherits Rectangle {
                 border-width: 1px;
                 border-color: pane.accent.with-alpha(pane.glow * 0.45);
             }
+        }
+
+        // multi-select outline (t28): a 2px ring in Theme.selection, distinct from the accent
+        // focus ring and the project frame. Pure decoration — it takes no pointer events.
+        for pane[idx] in root.panes : Rectangle {
+            visible: pane.visible && pane.selected;
+            x: pane.x;
+            y: pane.y;
+            width: pane.w;
+            height: pane.h;
+            border-radius: 7px;
+            border-width: 2px;
+            border-color: Theme.selection;
         }
 
         // resize seams, drawn over the panes
