@@ -5009,6 +5009,18 @@ impl State {
         self.selection.len() >= 2
     }
 
+    /// `0` when `uid` isn't drawn as selected, else the selection size it belongs to (`1` = the
+    /// armed pending pane) — feeds the pane header's "N panes selected" description.
+    pub fn selected_count_for(&self, uid: &str) -> usize {
+        if self.selection.iter().any(|u| u == uid) {
+            self.selection.len()
+        } else if self.pending_select.as_deref() == Some(uid) {
+            1
+        } else {
+            0
+        }
+    }
+
     /// Whether `uid` is drawn as selected (a real selection member, or the armed pending pane).
     pub fn is_selected(&self, uid: &str) -> bool {
         self.selection.iter().any(|u| u == uid) || self.pending_select.as_deref() == Some(uid)

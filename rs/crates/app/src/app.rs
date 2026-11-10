@@ -1955,6 +1955,8 @@ impl App {
             .get(pane_idx)
             .map(|p| p.uid.clone());
         if let Some(uid) = uid {
+            // Starting a header drag drops any multi-selection (t28).
+            win.state.borrow_mut().clear_selection();
             // No global pointer on this platform → drags can't be tracked; stay a click.
             let Some((pos, down)) = drag::global_pointer().poll() else {
                 return;
@@ -2566,7 +2568,21 @@ impl App {
         }
 
         // panes
-        cb_usize!(on_focus_pane, Command::FocusPane);
+        // A Slint-originated focus is a plain click on a pane (header or body): it drops any
+        // multi-selection first. (Keyboard focus moves go through `Command::FocusPane`
+        // directly and keep the selection.)
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_focus_pane(move |i| {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::ClearSelection);
+                    app.run_command(&w, Command::FocusPane(i as usize));
+                }
+            });
+        }
+        // Ctrl/Cmd+click on a pane header toggles it in the multi-selection.
+        cb_usize!(on_pane_select_toggle, Command::ToggleSelectPane);
         cb0!(on_new_pane, Command::NewPane);
         cb0!(on_open_new_pane, Command::OpenNewPane);
         // New Pane dialog submit: build the options payload (empty fields are normalized by
