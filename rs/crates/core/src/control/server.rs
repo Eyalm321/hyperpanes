@@ -84,6 +84,9 @@ pub struct Shared {
     /// `ControlHost::sync`) to reload the sidebar rail live; in the headless bin it is simply
     /// never read. A plain flag, not coalesced — the UI tick polls it cheaply.
     projects_dirty: AtomicBool,
+    /// Set by [`flush_queue_changes`](Self::flush_queue_changes) when task states changed;
+    /// the GUI host clears it each tick to refresh the sidebar queue badge live.
+    queue_dirty: AtomicBool,
     /// App-restart request from the `restartApp` command: 0 = none, 1 = gui (relaunch the GUI,
     /// panes survive via daemon re-attach), 2 = full (also shut the session daemon down —
     /// every pane dies and the restore path resurrects the workspace + Claude conversations
@@ -181,6 +184,7 @@ impl Shared {
             control_file,
             state_scheduled: AtomicBool::new(false),
             projects_dirty: AtomicBool::new(false),
+            queue_dirty: AtomicBool::new(false),
             restart_app: AtomicU8::new(0),
             bind: Mutex::new(("127.0.0.1".to_string(), 0)),
             runtime: OnceLock::new(),
@@ -244,6 +248,24 @@ impl Shared {
     /// once per UI tick; returns `true` exactly once per batch of changes.
     pub fn take_projects_dirty(&self) -> bool {
         self.projects_dirty.swap(false, Ordering::SeqCst)
+    }
+
+    /// Atomically read-and-clear the queue-changed flag (GUI host, once per UI tick).
+    pub fn take_queue_dirty(&self) -> bool {
+        self.queue_dirty.swap(false, Ordering::SeqCst)
+    }
+
+    /// Drain the work queue's changed-queue set; if non-empty, raise the GUI dirty flag and
+    /// broadcast ONE scope-filtered `queue` event naming every changed queue. Called on a
+    /// [`QUEUE_COALESCE_MS`] tick, so any burst of mutations yields at most one event per tick.
+    /// Returns the queues that were flushed.
+    pub fn flush_queue_changes(&self) -> Vec<String> {
+        let changed = self.work.lock().unwrap().take_changed();
+        if !changed.is_empty() {
+            self.queue_dirty.store(true, Ordering::SeqCst);
+            self.events.broadcast_queues(&changed);
+        }
+        changed
     }
 
     /// Bind background-task spawns (the `notify_state` coalescer) to an explicit runtime handle.
@@ -670,6 +692,19 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
             }
         }
         last.retain(|id, _| seen.contains(id));
+    }
+}
+
+/// Coalescing window for `queue` events / the GUI queue-dirty flag.
+pub const QUEUE_COALESCE_MS: u64 = 250;
+
+/// Flushes coalesced queue-changed signals every [`QUEUE_COALESCE_MS`]. Spawned by the
+/// embedder next to [`run_reaper_ticker`]; cheap when idle (a mutex + empty-set check).
+pub async fn run_queue_flusher(shared: Arc<Shared>) {
+    let mut interval = tokio::time::interval(Duration::from_millis(QUEUE_COALESCE_MS));
+    loop {
+        interval.tick().await;
+        shared.flush_queue_changes();
     }
 }
 
@@ -1268,5 +1303,127 @@ mod tests {
             shared.model.lock().unwrap().pane("p1").unwrap().status,
             PaneStatus::Exited
         );
+    }
+
+    // --- queue-changed signal (#9) ---------------------------------------------------
+
+    fn bare_shared() -> Arc<Shared> {
+        let (tx, _rx) = unbounded_channel();
+        Shared::new(
+            Arc::new(SessionManager::new(tx)),
+            true,
+            "0.0.0-test",
+            std::env::temp_dir().join("control-test.json"),
+            std::env::temp_dir().join("control-test-speech.json"),
+        )
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> Vec<String> {
+        let mut v = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            v.push(m);
+        }
+        v
+    }
+
+    #[test]
+    fn queue_burst_coalesces_to_one_event_and_one_dirty_flag() {
+        use crate::control::work::{EnqueueOpts, NackOpts};
+        let shared = bare_shared();
+        let (_id, mut rx) = shared.events.add_client(None);
+        {
+            let mut wq = shared.work.lock().unwrap();
+            for _ in 0..20 {
+                wq.enqueue("a", "{}", EnqueueOpts::default(), 0);
+            }
+            wq.enqueue("b", "{}", EnqueueOpts::default(), 0);
+            let c = wq.claim("a", "w", 1000, 0).unwrap();
+            wq.nack(
+                &c.task.id,
+                c.fencing_token,
+                NackOpts {
+                    requeue: false,
+                    ..Default::default()
+                },
+                1,
+            );
+        }
+        assert_eq!(shared.flush_queue_changes(), vec!["a", "b"]);
+        let frames = drain(&mut rx);
+        assert_eq!(frames, vec![r#"{"type":"queue","queues":["a","b"]}"#]);
+        assert!(shared.take_queue_dirty());
+        assert!(!shared.take_queue_dirty());
+        // Nothing changed since: no further event, flag stays clear.
+        assert!(shared.flush_queue_changes().is_empty());
+        assert!(drain(&mut rx).is_empty());
+        assert!(!shared.take_queue_dirty());
+    }
+
+    #[test]
+    fn every_mutation_kind_marks_its_queue_changed() {
+        use crate::control::work::{EnqueueOpts, NackOpts};
+        let shared = bare_shared();
+        let mut wq = shared.work.lock().unwrap();
+        wq.enqueue("q", "{}", EnqueueOpts::default(), 0);
+        assert_eq!(wq.take_changed(), vec!["q"]); // enqueue
+        let c = wq.claim("q", "w", 10, 0).unwrap();
+        assert_eq!(wq.take_changed(), vec!["q"]); // claim
+        wq.ack(&c.task.id, c.fencing_token, None, 1);
+        assert_eq!(wq.take_changed(), vec!["q"]); // ack
+        assert_eq!(wq.purge("q", 100), 1);
+        assert_eq!(wq.take_changed(), vec!["q"]); // purge
+        wq.enqueue("q", "{}", EnqueueOpts::default(), 0);
+        let c = wq.claim("q", "w", 10, 0).unwrap();
+        wq.take_changed();
+        wq.nack(
+            &c.task.id,
+            c.fencing_token,
+            NackOpts {
+                requeue: true,
+                ..Default::default()
+            },
+            1,
+        );
+        assert_eq!(wq.take_changed(), vec!["q"]); // nack
+        let _ = wq.claim("q", "w", 10, 1_000_000_000);
+        wq.take_changed();
+        assert_eq!(wq.reap_expired(2_000_000_000).len(), 1);
+        assert_eq!(wq.take_changed(), vec!["q"]); // reap
+        assert!(wq.reap_expired(3_000_000_000).is_empty());
+        assert!(wq.take_changed().is_empty()); // no-op sweep stays quiet
+    }
+
+    #[test]
+    fn queue_event_is_scope_filtered_per_client() {
+        use crate::control::scope::Scope;
+        use crate::control::work::EnqueueOpts;
+        let shared = bare_shared();
+        let scoped = |ids: &[&str]| Scope {
+            queue_ids: Some(ids.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+        let (_m, mut master) = shared.events.add_client(None);
+        let (_a, mut only_a) = shared.events.add_client(Some(scoped(&["a"])));
+        let (_c, mut only_c) = shared.events.add_client(Some(scoped(&["c"])));
+        let (_p, mut pane_only) = shared.events.add_client(Some(Scope {
+            pane_ids: Some(vec!["p1".into()]),
+            ..Default::default()
+        }));
+        {
+            let mut wq = shared.work.lock().unwrap();
+            wq.enqueue("a", "{}", EnqueueOpts::default(), 0);
+            wq.enqueue("b", "{}", EnqueueOpts::default(), 0);
+        }
+        shared.flush_queue_changes();
+        assert_eq!(
+            drain(&mut master),
+            vec![r#"{"type":"queue","queues":["a","b"]}"#]
+        );
+        assert_eq!(
+            drain(&mut only_a),
+            vec![r#"{"type":"queue","queues":["a"]}"#]
+        );
+        assert!(drain(&mut only_c).is_empty());
+        assert!(drain(&mut pane_only).is_empty());
     }
 }

@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::control::scope::{pane_in_scope, PaneCoords, Scope};
+use crate::control::scope::{pane_in_scope, queue_in_scope, PaneCoords, Scope};
 
 /// Server→client frames on `/events`. Pane-addressed frames (output/exit/activity/message)
 /// are scope-filtered per client by [`EventHub::broadcast_for_pane`]; `state` is a bare ping.
@@ -90,6 +90,12 @@ pub enum ControlEvent {
         delay_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<i32>,
+    },
+    /// Coalesced work-queue change: the (scope-filtered) names of queues whose task states
+    /// changed. A bare "re-fetch `/queues`" hint, like `state`; additive — legacy clients
+    /// ignore the unknown `type`.
+    Queue {
+        queues: Vec<String>,
     },
     State,
 }
@@ -165,6 +171,23 @@ impl EventHub {
         let inner = self.inner.lock().unwrap();
         for c in &inner.clients {
             let _ = c.tx.send(json.clone());
+        }
+    }
+
+    /// Send a `queue` frame to each client carrying only the queues its scope allows
+    /// ([`queue_in_scope`]); a client with none of them gets nothing.
+    pub fn broadcast_queues(&self, queues: &[String]) {
+        let inner = self.inner.lock().unwrap();
+        for c in &inner.clients {
+            let visible: Vec<String> = queues
+                .iter()
+                .filter(|q| queue_in_scope(c.scope.as_ref(), q))
+                .cloned()
+                .collect();
+            if visible.is_empty() {
+                continue;
+            }
+            let _ = c.tx.send(ControlEvent::Queue { queues: visible }.to_json());
         }
     }
 
@@ -395,5 +418,16 @@ mod tests {
             rb.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn queue_event_shape() {
+        assert_eq!(
+            ControlEvent::Queue {
+                queues: vec!["a".into(), "b:c".into()]
+            }
+            .to_json(),
+            r#"{"type":"queue","queues":["a","b:c"]}"#
+        );
     }
 }

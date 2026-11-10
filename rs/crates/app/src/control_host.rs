@@ -370,9 +370,16 @@ impl ControlHost {
         let ticker = self
             .runtime
             .spawn(server::run_activity_ticker(Arc::clone(&shared)));
-        let reaper = self
-            .runtime
-            .spawn(server::run_reaper_ticker(Arc::clone(&shared)));
+        // The reaper sweep and the coalesced queue-changed flusher share one task handle.
+        let reaper = self.runtime.spawn({
+            let shared = Arc::clone(&shared);
+            async move {
+                tokio::join!(
+                    server::run_reaper_ticker(Arc::clone(&shared)),
+                    server::run_queue_flusher(shared)
+                );
+            }
+        });
         *self.shared.borrow_mut() = Some(shared);
         *self.task.borrow_mut() = Some(task);
         *self.ticker.borrow_mut() = Some(ticker);
@@ -635,14 +642,13 @@ impl ControlHost {
             }
         }
 
-        // 5b. Per-project task-count badge (#6): poll the in-process work queue at ~1 Hz (cheap
-        //     SQLite count query; no HTTP hop) and push the mapped counts into every window.
+        // 5b. Per-project task-count badge (#6/#9): refresh from the coalesced queue-changed
+        //     flag (push), with a slow fallback sweep so a missed signal self-heals. Reads the
+        //     in-process work queue (cheap SQLite count query; no HTTP hop).
         {
-            let due = self
-                .queue_polled
-                .get()
-                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
-            if due {
+            let dirty = shared.take_queue_dirty();
+            let since = self.queue_polled.get().map(|t| t.elapsed());
+            if crate::project_queue::queue_refresh_due(dirty, since) {
                 self.queue_polled.set(Some(std::time::Instant::now()));
                 let queues = shared.work.lock().map(|w| w.queues()).unwrap_or_default();
                 for w in windows {

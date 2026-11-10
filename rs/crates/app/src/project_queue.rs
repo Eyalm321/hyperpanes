@@ -165,6 +165,17 @@ pub fn default_queue_for(git_root: Option<&str>, projects: &[Project]) -> Option
         .map(|p| p.id.clone())
 }
 
+/// Fallback sweep period for the sidebar queue badge: a missed queue-changed signal (or a
+/// dropped stream) self-heals within this.
+pub const QUEUE_FALLBACK_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether the sidebar queue badge should re-read the queue this tick: when the coalesced
+/// queue-changed flag fired, on the very first tick (`since_last == None`), or once the slow
+/// fallback period has elapsed since the last read.
+pub fn queue_refresh_due(dirty: bool, since_last: Option<std::time::Duration>) -> bool {
+    dirty || since_last.is_none_or(|d| d >= QUEUE_FALLBACK_REFRESH)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +363,14 @@ mod tests {
         let lanes = project_lane_counts(&[], &ps);
         assert!(lane_rows(lanes.get("alpha")).is_empty());
         assert!(other_lane_counts(&[], &ps).is_none());
+    }
+
+    #[test]
+    fn refresh_due_on_dirty_first_tick_or_fallback_only() {
+        use std::time::Duration;
+        assert!(queue_refresh_due(true, Some(Duration::from_millis(5))));
+        assert!(queue_refresh_due(false, None));
+        assert!(!queue_refresh_due(false, Some(Duration::from_secs(2))));
+        assert!(queue_refresh_due(false, Some(QUEUE_FALLBACK_REFRESH)));
     }
 }
