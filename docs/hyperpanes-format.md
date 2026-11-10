@@ -302,3 +302,9 @@ Closing the LAST window with the daemon backend and keep-alive on behaves like Q
 sessions are left running (not killed), the snapshot of all windows is saved, and the daemon
 stays up so a relaunch re-attaches. With other windows open, keep-alive off, or the
 in-process backend, a closing window's sessions are killed as before.
+
+"Quit Hyperpanes" (palette, `Ctrl/Cmd+Shift+Q`, `Cmd+Q` on macOS) closes every window at once:
+with the daemon backend and keep-alive on it keeps every session and saves every window;
+otherwise it ends the sessions like a close does. Closing a NON-last window ends its panes;
+with the daemon backend and keep-alive on, the app first asks (Cancel / Close window / Quit)
+when any of its panes runs a process.

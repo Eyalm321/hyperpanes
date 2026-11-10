@@ -14,7 +14,7 @@ import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem,
 import { TopBar } from "topbar.slint";
 import { TabColumn, DockPreview } from "tabdock.slint";
 import { PaneView } from "paneview.slint";
-import { OverlayLayer } from "overlays.slint";
+import { OverlayLayer, CloseConfirm } from "overlays.slint";
 import { SidebarRail } from "sidebar.slint";
 import { ContextMenu, ReminderCustom } from "contextmenu.slint";
 import { KeyMsg, HiRect } from "@widgets";
@@ -57,6 +57,9 @@ export component AppWindow inherits Window {
     in property <bool> fullscreen-hint: false;
     // True while Esc is held → keeps the hint up and fills its progress bar.
     in property <bool> esc-holding: false;
+    // Running-process count for the close-window confirm (0 = hidden).
+    in property <int> close-confirm: 0;
+    callback close-confirm-resolve(int);
     // Terminal font zoom factor (current font px / 14px base; 1.0 at default zoom). The
     // transient app indicators (the fullscreen hint, the zoom hud) scale by it so they
     // grow/shrink with the terminal font, just like the in-pane toast.
@@ -823,5 +826,12 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    if root.close-confirm > 0 : CloseConfirm {
+        width: 100%;
+        height: 100%;
+        count: root.close-confirm;
+        resolve(a) => { root.close-confirm-resolve(a); }
     }
 }

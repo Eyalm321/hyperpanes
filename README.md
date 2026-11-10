@@ -309,6 +309,7 @@ means Ctrl on Windows/Linux and Cmd on macOS.
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl/Cmd+Shift+P` | Command palette |
+| `Ctrl/Cmd+Shift+Q` (also `Cmd+Q` on macOS) | Quit Hyperpanes (closes every window; with keep-alive, terminals keep running) |
 | `Ctrl+T` | New tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+Shift+T` | Reopen closed tab |

@@ -296,6 +296,53 @@ component Pill inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// Confirm shown when closing a window that still runs processes while other windows stay open
+// (daemon + keep-alive). Enter = Quit (keeps everything), Esc = Cancel — both handled by the
+// Rust key router, which owns the keyboard.
+export component CloseConfirm inherits Rectangle {
+    in property <int> count: 0;
+    callback resolve(int);  // 0 cancel · 1 close this window · 2 quit
+    background: #00000099;
+    TouchArea {} // eat clicks behind the modal
+    Rectangle {
+        width: 460px;
+        height: body.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.mantle;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.border;
+        drop-shadow-blur: 48px;
+        drop-shadow-color: Theme.scrim;
+        drop-shadow-offset-y: 18px;
+        body := VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+            Text {
+                text: root.count == 1 ? "This window has 1 running process." : "This window has " + root.count + " running processes.";
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Closing it ends them. Quitting keeps everything running in the background.";
+                color: Theme.subtext;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Pill { label: "Cancel"; clicked => { root.resolve(0); } }
+                Pill { label: root.count == 1 ? "Close window — end 1 process" : "Close window — end " + root.count + " processes"; clicked => { root.resolve(1); } }
+                Pill { label: "Quit Hyperpanes — keep everything running"; active: true; clicked => { root.resolve(2); } }
+            }
+        }
+    }
+}
+
 // A single keycap chip in the keybindings editor (the native port of the renderer's `<kbd>`).
 // `accent` tints it when the chord has been overridden by the user.
 component Kbd inherits Rectangle {
