@@ -20,6 +20,9 @@
 //! Gated by `core::persistence::control_settings` (default OFF). Toggling Enabled starts/stops
 //! the server live; toggling Allow-Input flips `allow_input` on the running server.
 //!
+//! Control `renameTab` / `recolorTab` land in the read model and reach the GUI through the tab
+//! reconcile (`diff_tabs` / `apply_tab_change`), alongside `setLayout`.
+//!
 //! Env overrides (parity with the headless bin / Electron, for the MCP acceptance gate):
 //!   * `HYPERPANES_CONTROL_FILE` — discovery file path (also injected into spawned panes).
 //!   * `HYPERPANES_ALLOW_INPUT`  — `1`/`true`/`yes` forces `allowInput` on (else from settings).
@@ -128,6 +131,8 @@ struct PaneSnap {
 struct TabSnap {
     title: String,
     layout: String,
+    /// Manual tab colour, `#rrggbb`.
+    color: Option<String>,
 }
 
 /// Model tab id → (window id, title/layout snapshot).
@@ -139,6 +144,8 @@ struct TabChange {
     tab_id: String,
     title: Option<String>,
     layout: Option<String>,
+    /// `Some(new)` when the colour changed; the inner `None` means cleared.
+    color: Option<Option<String>>,
 }
 
 /// Pure diff: tabs present in both baselines whose title/layout differ. A tab absent from
@@ -150,10 +157,12 @@ fn diff_tabs(prev: &HashMap<String, TabSnap>, cur: &HashMap<String, TabSnap>) ->
             let p = prev.get(id)?;
             let title = (c.title != p.title).then(|| c.title.clone());
             let layout = (c.layout != p.layout).then(|| c.layout.clone());
-            (title.is_some() || layout.is_some()).then(|| TabChange {
+            let color = (c.color != p.color).then(|| c.color.clone());
+            (title.is_some() || layout.is_some() || color.is_some()).then(|| TabChange {
                 tab_id: id.clone(),
                 title,
                 layout,
+                color,
             })
         })
         .collect();
@@ -174,6 +183,10 @@ fn apply_tab_change(st: &mut crate::state::State, idx: usize, ch: &TabChange) ->
     }
     if let Some(t) = &ch.title {
         st.set_tab_title(idx, t);
+        applied = true;
+    }
+    if let Some(c) = &ch.color {
+        st.set_tab_color(idx, c.as_deref().and_then(crate::state::parse_hex_strict));
         applied = true;
     }
     applied
@@ -1105,17 +1118,19 @@ impl ControlHost {
                 }
                 let title = tab.title.to_string();
                 let layout = crate::theme::layout_name(tab.layout).to_string();
+                let color = tab.color.map(color_hex);
                 new_prev_tabs.insert(
                     tab_id.clone(),
                     TabSnap {
                         title: title.clone(),
                         layout: layout.clone(),
+                        color: color.clone(),
                     },
                 );
                 tabs.push(TabInfo {
                     id: tab_id,
                     title,
-                    color: None,
+                    color,
                     layout,
                     panes,
                 });
@@ -1262,6 +1277,7 @@ fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
                     TabSnap {
                         title: t.title.clone(),
                         layout: t.layout.clone(),
+                        color: t.color.clone(),
                     },
                 ),
             )
@@ -1770,6 +1786,7 @@ mod tests {
         TabSnap {
             title: title.into(),
             layout: layout.into(),
+            color: None,
         }
     }
 
@@ -1791,16 +1808,70 @@ mod tests {
                 TabChange {
                     tab_id: "0:0".into(),
                     title: None,
-                    layout: Some("single".into())
+                    layout: Some("single".into()),
+                    color: None
                 },
                 TabChange {
                     tab_id: "0:1".into(),
                     title: Some("renamed".into()),
-                    layout: None
+                    layout: None,
+                    color: None
                 },
             ]
         );
         assert!(diff_tabs(&prev, &prev).is_empty());
+    }
+
+    #[test]
+    fn diff_tabs_reports_colour_set_and_clear() {
+        let prev: HashMap<_, _> = [
+            ("0:0".to_string(), snap("a", "auto")),
+            ("0:1".to_string(), snap("b", "auto")),
+        ]
+        .into();
+        let mut p2 = prev.clone();
+        p2.get_mut("0:1").unwrap().color = Some("#aabbcc".into());
+        let mut cur = p2.clone();
+        cur.get_mut("0:0").unwrap().color = Some("#112233".into());
+        cur.get_mut("0:1").unwrap().color = None;
+        let d = diff_tabs(&p2, &cur);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].color, Some(Some("#112233".to_string())));
+        assert_eq!(d[1].color, Some(None));
+        assert!(d.iter().all(|c| c.title.is_none() && c.layout.is_none()));
+        assert!(diff_tabs(&prev, &prev).is_empty());
+    }
+
+    #[test]
+    fn apply_tab_change_sets_and_clears_colour() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        let mk = |c: Option<&str>| TabChange {
+            tab_id: "0:0".into(),
+            title: None,
+            layout: None,
+            color: Some(c.map(str::to_string)),
+        };
+        assert!(apply_tab_change(&mut st, 0, &mk(Some("#aabbcc"))));
+        assert_eq!(st.tabs[0].color, Some(Color::from_rgb_u8(0xaa, 0xbb, 0xcc)));
+        assert!(apply_tab_change(&mut st, 0, &mk(None)));
+        assert_eq!(st.tabs[0].color, None);
+    }
+
+    #[test]
+    fn control_title_change_leaves_other_tabs_inline_edit_alone() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        st.tabs
+            .push(crate::state::Tab::new_for_test("term 2".into()));
+        st.editing_tab = 1;
+        let ch = TabChange {
+            tab_id: "0:0".into(),
+            title: Some("renamed".into()),
+            layout: None,
+            color: None,
+        };
+        assert!(apply_tab_change(&mut st, 0, &ch));
+        assert_eq!(st.editing_tab, 1);
+        assert_eq!(st.tabs[0].title.as_str(), "renamed");
     }
 
     #[test]
@@ -1814,6 +1885,7 @@ mod tests {
             tab_id: "0:0".into(),
             title: Some("renamed".into()),
             layout: Some("grid".into()),
+            color: None,
         };
         assert!(apply_tab_change(&mut st, 0, &ch));
         assert_eq!(st.active, 1);
@@ -1847,6 +1919,7 @@ mod tests {
             tab_id: "3f2a9c1e-uuid".into(),
             title: None,
             layout: Some("grid".into()),
+            color: None,
         };
         assert!(apply_tab_change(&mut st, idx, &ch));
         assert_eq!(st.tabs[0].layout, Layout::Grid);

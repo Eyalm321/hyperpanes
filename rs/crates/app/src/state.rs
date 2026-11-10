@@ -105,6 +105,8 @@ pub struct DetachedTab {
     pub zoomed: Option<usize>,
     /// Control-plane tab id, carried so a moved/reopened tab keeps its id.
     pub ctl_id: Option<String>,
+    /// Manual tab colour (None = default chrome), carried like `ctl_id`.
+    pub color: Option<Color>,
     pub panes: Vec<DetachedPane>,
 }
 
@@ -988,6 +990,8 @@ pub struct Tab {
     /// as the tab's id in place of the positional `window:index` one, so the id `attach`
     /// returned keeps resolving. `None` for GUI-native tabs. Not persisted across restarts.
     pub ctl_id: Option<String>,
+    /// Manual tab colour (None = default chrome).
+    pub color: Option<Color>,
 }
 
 impl Tab {
@@ -1007,6 +1011,7 @@ impl Tab {
             focused: 0,
             zoomed: None,
             ctl_id: None,
+            color: None,
         }
     }
 
@@ -2210,6 +2215,16 @@ impl State {
         if let Some(t) = self.tabs.get_mut(idx) {
             if t.title.as_str() != title {
                 t.title = title.to_string().into();
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Set (or clear) tab `idx`'s manual colour. Marks dirty only on a real change.
+    pub fn set_tab_color(&mut self, idx: usize, color: Option<Color>) {
+        if let Some(t) = self.tabs.get_mut(idx) {
+            if t.color != color {
+                t.color = color;
                 self.dirty = true;
             }
         }
@@ -5017,6 +5032,7 @@ impl State {
         let focused = tab.focused;
         let zoomed = tab.zoomed;
         let ctl_id = tab.ctl_id;
+        let color = tab.color;
         let panes = tab
             .panes
             .into_iter()
@@ -5043,6 +5059,7 @@ impl State {
                 focused,
                 zoomed,
                 ctl_id,
+                color,
                 panes,
             },
             true,
@@ -5097,6 +5114,7 @@ impl State {
         let mut tab = Tab::empty(det.title.clone());
         tab.layout = det.layout;
         tab.ctl_id = det.ctl_id.clone();
+        tab.color = det.color;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
@@ -5126,6 +5144,7 @@ impl State {
         self.tabs[ti].title = det.title;
         self.tabs[ti].layout = det.layout;
         self.tabs[ti].ctl_id = det.ctl_id;
+        self.tabs[ti].color = det.color;
         for dp in det.panes {
             self.adopt_into_tab(mgr, dp, ti);
         }
@@ -5288,7 +5307,7 @@ impl State {
                     })
                     .collect();
                 GroupSpec {
-color: None,
+                    color: t.color.map(color_hex),
                     title: Some(t.title.to_string()),
                     layout: Some(theme::layout_name(t.layout).to_string()),
                     panes,
@@ -5471,6 +5490,7 @@ color: None,
             .unwrap_or(Layout::Auto);
         let mut tab = Tab::empty(title);
         tab.layout = layout;
+        tab.color = g.color.as_deref().and_then(parse_hex_strict);
         for (i, spec) in g.panes.iter().enumerate() {
             if let Some(ps) = self.make_pane_from_spec(mgr, i, spec) {
                 tab.panes.push(ps);
@@ -6033,6 +6053,19 @@ pub fn parse_hex(s: &str) -> Color {
     theme::accent_for(0, 0)
 }
 
+/// Strict `#rrggbb` parse (leading `#` optional): `None` on any malformed input, unlike
+/// [`parse_hex`] which falls back to an accent. Used for the manual tab colour.
+pub fn parse_hex_strict(s: &str) -> Option<Color> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(Color::from_rgb_u8(r, g, b))
+}
+
 /// Whether a pane `cwd` belongs to the project rooted at `project_path` — the SAME matcher
 /// the cwd tint uses ([`State::note_pane_cwd`]): walk up to the enclosing git root, then
 /// compare by the projects-store dedup key (canonical path, case-insensitive on Windows).
@@ -6458,6 +6491,72 @@ mod session_file_tests {
             spawn_shell: None,
             spawn_env: None,
         }
+    }
+
+    #[test]
+    fn tab_color_snapshot_round_trip_and_strict_parse() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a", 14.0));
+        st.set_tab_color(0, Some(Color::from_rgb_u8(0xaa, 0xbb, 0xcc)));
+        let file = st.to_session_file();
+        let groups = file.groups.clone().unwrap();
+        assert_eq!(groups[0].color.as_deref(), Some("#aabbcc"));
+
+        let mut st2 = fresh();
+        st2.load_workspace(file, &m);
+        let colored = st2.tabs.iter().find(|t| !t.panes.is_empty()).unwrap();
+        assert_eq!(colored.color, Some(Color::from_rgb_u8(0xaa, 0xbb, 0xcc)));
+
+        // Uncoloured tab stays None; an invalid colour restores as None.
+        for (color, want_none) in [(None, true), (Some("nonsense".to_string()), true)] {
+            let mut g = groups[0].clone();
+            g.color = color;
+            let mut st3 = fresh();
+            st3.load_workspace(
+                WorkspaceFile {
+                    groups: Some(vec![g]),
+                    active: Some(0),
+                    ..Default::default()
+                },
+                &m,
+            );
+            let t = st3.tabs.iter().find(|t| !t.panes.is_empty()).unwrap();
+            assert_eq!(t.color.is_none(), want_none);
+        }
+        assert!(parse_hex_strict("#12345").is_none());
+        assert!(parse_hex_strict("#12345g").is_none());
+        assert!(parse_hex_strict("112233").is_some());
+    }
+
+    #[test]
+    fn set_tab_color_marks_dirty_only_on_change() {
+        let mut st = fresh();
+        st.dirty = false;
+        st.set_tab_color(0, None);
+        assert!(!st.dirty);
+        st.set_tab_color(0, Some(Color::from_rgb_u8(1, 2, 3)));
+        assert!(st.dirty);
+        st.dirty = false;
+        st.set_tab_color(0, Some(Color::from_rgb_u8(1, 2, 3)));
+        assert!(!st.dirty);
+    }
+
+    #[test]
+    fn tab_color_survives_detach_and_reattach() {
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a", 14.0));
+        st.tabs.push(Tab::empty("other".into()));
+        st.set_tab_color(0, Some(Color::from_rgb_u8(9, 8, 7)));
+        let (d, _) = st.detach_tab(0).unwrap();
+        assert_eq!(d.color, Some(Color::from_rgb_u8(9, 8, 7)));
+        st.adopt_tab(&m, d);
+        assert_eq!(st.tabs[st.active].color, Some(Color::from_rgb_u8(9, 8, 7)));
     }
 
     #[test]
