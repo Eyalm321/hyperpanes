@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn rejects_a_remote_host() {
         assert_eq!(file_uri_to_path("file://otherbox/home/me"), None);
-        assert_eq!(file_uri_to_path("file://192.168.1.5/srv"), None);
+        assert_eq!(file_uri_to_path("file://192.0.2.5/srv"), None);
     }
 
     #[test]

@@ -84,11 +84,11 @@ fi
 ENCODED_PROJ="$(encode "$PROJ")"
 # The account the poisoned session lives under. It must be an account whose MCP tool set
 # matches what the fixture conversation actually loaded (tokensave/serena/headroom/hyperpanes)
-# — the g2 incident session ran under the goals-rotation account `.claude-sunsations`, and a
+# — the g2 incident session ran under the goals-rotation account `.claude-alt`, and a
 # resume in a store without those servers fails with a NEW 400 ("Tool reference ... not found
 # in available tools") even after the poison is excised. The headless server's markerless scan
 # finds this store via claude_accounts discovery (a `.claude*` home dir with .credentials.json).
-ACCOUNT_DIR="${HP_DEMO_CLAUDE_CONFIG_DIR:-$HOME/.claude-sunsations}"
+ACCOUNT_DIR="${HP_DEMO_CLAUDE_CONFIG_DIR:-$HOME/.claude-alt}"
 if [ ! -d "$ACCOUNT_DIR" ]; then
     echo "FAIL: account dir $ACCOUNT_DIR does not exist (set HP_DEMO_CLAUDE_CONFIG_DIR)"
     exit 1
@@ -238,7 +238,7 @@ else
 fi
 # The session was installed under an ACCOUNT store (not ~/.claude), so the candidate must
 # carry a non-null configDir — that account linkage is what lets resume run under the right
-# CLAUDE_CONFIG_DIR. (~/.claude-sunsations/projects symlinks to the shared store, so the
+# CLAUDE_CONFIG_DIR. (~/.claude-alt/projects symlinks to the shared store, so the
 # reported dir may be either account name; both resolve to the store the file lives in.)
 if [ -n "$CANDIDATE_HIT" ] && [ "$CANDIDATE_HIT" != "null" ] && [ "$CANDIDATE_CONFIG_DIR" != "null" ] && [ -n "$CANDIDATE_CONFIG_DIR" ]; then
     ok "step 4: scan candidates include $SID with configDir=$CANDIDATE_CONFIG_DIR (markerless, account-carrying resolution proved)"

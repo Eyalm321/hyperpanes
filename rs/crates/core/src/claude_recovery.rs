@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn resolves_candidates_across_stores_newest_first_with_correct_config_dir() {
-        let project_root = Path::new("/home/eyalmizrachi/dev/hyperpanes");
+        let project_root = Path::new("/home/user/dev/hyperpanes");
         let encoded = crate::claude_history::encode_project_dir(project_root);
 
         let default_root = temp_dir("default");

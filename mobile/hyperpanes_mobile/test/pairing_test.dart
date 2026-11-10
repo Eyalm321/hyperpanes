@@ -4,17 +4,17 @@ import 'package:hyperpanes_mobile/src/api/pairing.dart';
 void main() {
   group('HostPairing.parse', () {
     test('canonical hp:// pairing URL', () {
-      final p = HostPairing.parse('hp://100.71.2.9:51888/?token=abc123&v=1');
+      final p = HostPairing.parse('hp://100.64.0.1:51888/?token=abc123&v=1');
       expect(p, isNotNull);
-      expect(p!.host, '100.71.2.9');
+      expect(p!.host, '100.64.0.1');
       expect(p.port, 51888);
       expect(p.token, 'abc123');
     });
 
     test('bare host:port with fallback token', () {
-      final p = HostPairing.parse('192.168.0.5:4000', fallbackToken: 'tok');
+      final p = HostPairing.parse('192.0.2.5:4000', fallbackToken: 'tok');
       expect(p, isNotNull);
-      expect(p!.host, '192.168.0.5');
+      expect(p!.host, '192.0.2.5');
       expect(p.port, 4000);
       expect(p.token, 'tok');
     });

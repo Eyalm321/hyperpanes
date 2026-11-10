@@ -165,7 +165,7 @@ mod tests {
         let settings = ControlSettings {
             enabled: true,
             allow_input: true,
-            bind_address: Some("100.71.2.9".into()),
+            bind_address: Some("100.64.0.1".into()),
             port: Some(51888),
         };
         save_to(&p, &settings).unwrap();

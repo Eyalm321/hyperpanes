@@ -214,16 +214,16 @@ mod tests {
 
     /// A real record, captured from a live goal orchestrator.
     const ORCHESTRATOR: &str = r#"{"pid":331629,"sessionId":"bc7d1320-6ab5-4c0f-a40d-72f38e56833c",
-        "cwd":"/home/u/dev/canora-sync","version":"2.1.276","peerProtocol":1,
+        "cwd":"/home/user/dev/myapp","version":"2.1.276","peerProtocol":1,
         "peerFeatures":["notify_idle"],"kind":"interactive","entrypoint":"cli",
         "messagingSocketPath":"/run/user/1000/cc-socks/331629.sock",
-        "name":"goals-canora-sync","nameSource":"user","status":"busy"}"#;
+        "name":"goals-myapp","nameSource":"user","status":"busy"}"#;
 
     #[test]
     fn parses_a_live_orchestrator_record() {
         let p = parse_record(ORCHESTRATOR, &dir()).expect("record parses");
         assert_eq!(p.pid, 331629);
-        assert_eq!(p.name, "goals-canora-sync");
+        assert_eq!(p.name, "goals-myapp");
         assert_eq!(p.status, PeerStatus::Busy);
         assert_eq!(
             p.messaging_socket_path.as_deref(),

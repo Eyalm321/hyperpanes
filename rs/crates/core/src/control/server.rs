@@ -1132,8 +1132,8 @@ mod tests {
             "ws://127.0.0.1:54321/events?token=abc"
         );
         assert_eq!(
-            events_url("100.71.2.9", 51888, "abc"),
-            "ws://100.71.2.9:51888/events?token=abc"
+            events_url("100.64.0.1", 51888, "abc"),
+            "ws://100.64.0.1:51888/events?token=abc"
         );
     }
 
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(!dir.join("control-token").exists());
 
         // Remote bind: minted once, then stable across restarts.
-        shared.set_bind("100.71.2.9", 51888);
+        shared.set_bind("100.64.0.1", 51888);
         let c = master_token(&shared);
         let d = master_token(&shared);
         assert_eq!(c, d);
@@ -1180,8 +1180,8 @@ mod tests {
         assert_eq!(shared.advertised_host(), "127.0.0.1");
         // A specific address advertises itself (local readers can reach the machine's
         // own LAN/Tailscale IP).
-        shared.set_bind("100.71.2.9", 51888);
-        assert_eq!(shared.advertised_host(), "100.71.2.9");
+        shared.set_bind("100.64.0.1", 51888);
+        assert_eq!(shared.advertised_host(), "100.64.0.1");
         // Unspecified listens on loopback too — keep the legacy local URL.
         shared.set_bind("0.0.0.0", 51888);
         assert_eq!(shared.advertised_host(), "127.0.0.1");
