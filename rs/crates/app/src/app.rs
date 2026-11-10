@@ -33,6 +33,7 @@ use crate::command::{dispatch, set_layout_from_id, Command, Effect};
 use crate::drag::{self, DragKind, DragState, Hover};
 use crate::paneview::{self, Ui};
 use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, Overlay, State};
+use crate::tabdock;
 use crate::{theme, window, AppWindow, KeyMsg};
 
 /// The GitHub releases page the NotifyOnly update flow (Linux/macOS) points the user at —
@@ -172,7 +173,19 @@ pub struct Window {
     pub closing: Cell<bool>,
     /// Per-tab strip geometry (window-logical `x`, `width`), reported by the UI and used
     /// to hit-test a tab-strip drop / reorder caret. Index = tab order.
+    /// When the tab bar is docked this is `(window-y, height)` per chip instead (see `tabdock`).
     pub tab_geom: RefCell<Vec<(f32, f32)>>,
+    /// In-flight tab-bar grip drag (t25, #85); `None` when no press is held.
+    pub dock_drag: RefCell<Option<tabdock::DockDrag>>,
+    /// The docked tab column's `(window-x, width)`, reported by the UI (hit-testing).
+    pub tab_col: Cell<(f32, f32)>,
+    /// Wheel-over-tab-strip accumulator.
+    pub wheel: RefCell<tabdock::WheelCycler>,
+    /// Last `tab-dock` / `dock-target` / `dock-dragging` pushed to Slint — same idle-render
+    /// guard as `last_maximized` (setters dirty the tree without an equality check).
+    pub last_dock: Cell<Option<i32>>,
+    pub last_dock_target: Cell<Option<i32>>,
+    pub last_dock_dragging: Cell<Option<bool>>,
     /// Last value pushed to `set_win_maximized` (`None` = never written). Slint property
     /// setters mark the tree dirty without an equality check, so writing the same value
     /// every 8 ms pump forces a wgpu re-render at ~125 Hz even when idle — these caches
@@ -755,6 +768,12 @@ impl App {
             seed: RefCell::new(PendingSeed::Done),
             closing: Cell::new(false),
             tab_geom: RefCell::new(Vec::new()),
+            dock_drag: RefCell::new(None),
+            tab_col: Cell::new((0.0, 0.0)),
+            wheel: RefCell::new(tabdock::WheelCycler::default()),
+            last_dock: Cell::new(None),
+            last_dock_target: Cell::new(None),
+            last_dock_dragging: Cell::new(None),
             last_maximized: Cell::new(None),
             last_control: RefCell::new(None),
             last_update: RefCell::new(None),
@@ -962,6 +981,14 @@ impl App {
             if w.last_maximized.get() != Some(maxd) {
                 w.last_maximized.set(Some(maxd));
                 w.app.set_win_maximized(maxd);
+            }
+            // Tab-bar dock side: written only on change; a flip invalidates the per-chip
+            // geometry (it was reported along the other axis) until the UI re-reports it.
+            let dock = w.state.borrow().tab_dock.to_i32();
+            if w.last_dock.get() != Some(dock) {
+                w.last_dock.set(Some(dock));
+                w.tab_geom.borrow_mut().clear();
+                w.app.set_tab_dock(dock);
             }
         }
 
@@ -2113,6 +2140,20 @@ impl App {
         self.preview_on.set(true);
     }
 
+    /// Write the grip-drag props to Slint, only when they changed (setters dirty the tree
+    /// unconditionally).
+    fn push_dock_drag(&self, w: &Rc<Window>, target: Option<tabdock::TabDock>, dragging: bool) {
+        let t = target.map(|d| d.to_i32()).unwrap_or(-1);
+        if w.last_dock_target.get() != Some(t) {
+            w.last_dock_target.set(Some(t));
+            w.app.set_dock_target(t);
+        }
+        if w.last_dock_dragging.get() != Some(dragging) {
+            w.last_dock_dragging.set(Some(dragging));
+            w.app.set_dock_dragging(dragging);
+        }
+    }
+
     /// Hit-test the global `cursor` against every window's live geometry, resolving it into
     /// a [`Hover`] (which window / tab strip / pane slot it is over). `win == None` means
     /// empty desktop space (→ a tear-off drop makes a new window).
@@ -2137,17 +2178,25 @@ impl App {
                 ..Default::default()
             };
 
-            // Over the top bar → a tab-strip target.
-            if !fullscreen && ly < TOPBAR_H {
+            // Over the tab strip (the top bar, or the docked column) → a tab-strip target.
+            let dock = st.tab_dock;
+            let col = w.tab_col.get();
+            if !fullscreen && tabdock::over_strip(dock, (lx, ly), col) {
                 h.over_strip = true;
-                let (slot, over) = self.tab_hit(w, lx);
+                let (slot, over) = self.tab_hit(w, (lx, ly));
                 h.tab_slot = slot;
                 h.tab_over = over;
                 return h;
             }
 
-            // Otherwise the pane area (area-relative: subtract the top bar).
-            let ax = lx;
+            // Otherwise the pane area (area-relative: subtract the top bar, and the left
+            // column when docked left).
+            let origin_x = if fullscreen {
+                0.0
+            } else {
+                tabdock::area_origin_x(dock, col)
+            };
+            let ax = lx - origin_x;
             let ay = ly - if fullscreen { 0.0 } else { TOPBAR_H };
             let vertical = st.active_is_rows();
             for (j, p) in st.active_tab().panes.iter().enumerate() {
@@ -2173,25 +2222,15 @@ impl App {
         Hover::default() // empty space
     }
 
-    /// Hit-test a window-logical x against the tab strip: returns `(insertion slot, the tab
+    /// Hit-test a window-logical point against the tab strip: returns `(insertion slot, the tab
     /// chip directly under the cursor)`. The slot counts tabs whose centre the cursor has
     /// passed (for the reorder/dock caret); the chip is the tab whose extent contains the
     /// cursor (for spring-load / dock-into-tab). Uses the UI-reported [`Window::tab_geom`].
-    fn tab_hit(&self, w: &Rc<Window>, lx: f32) -> (usize, Option<usize>) {
+    fn tab_hit(&self, w: &Rc<Window>, p: (f32, f32)) -> (usize, Option<usize>) {
         let g = w.tab_geom.borrow();
-        let n = w.state.borrow().tabs.len().min(g.len());
-        let mut slot = 0;
-        let mut over = None;
-        for i in 0..n {
-            let (x, wd) = g[i];
-            if lx >= x + wd / 2.0 {
-                slot = i + 1;
-            }
-            if lx >= x && lx < x + wd {
-                over = Some(i);
-            }
-        }
-        (slot, over)
+        let st = w.state.borrow();
+        let n = st.tabs.len().min(g.len());
+        tabdock::strip_hit(st.tab_dock, &g[..n], p)
     }
 
     /// Right-click chaining (Task 7): a right-click *while a context menu is open* should close
@@ -2227,19 +2266,29 @@ impl App {
             let lx = (cursor.0 - l) as f32 / scale; // window-logical x
             let ly = (cursor.1 - t) as f32 / scale; // window-logical y (from window top)
 
-            // `.fullscreen` is Copy, so this borrow ends with the statement.
-            let fullscreen = win.state.borrow().fullscreen;
+            // `.fullscreen` / `.tab_dock` are Copy, so this borrow ends with the statement.
+            let (fullscreen, dock) = {
+                let st = win.state.borrow();
+                (st.fullscreen, st.tab_dock)
+            };
+            let col = win.tab_col.get();
 
-            // Over the top bar → a tab-strip target (reuses `tab_hit`, which re-borrows on its
-            // own, so our borrow is already released here).
-            if !fullscreen && ly < TOPBAR_H {
-                let (_slot, over) = self.tab_hit(win, lx);
+            // Over the tab strip (top bar or docked column) → a tab-strip target (reuses
+            // `tab_hit`, which re-borrows on its own, so our borrow is already released here).
+            if !fullscreen && tabdock::over_strip(dock, (lx, ly), col) {
+                let (_slot, over) = self.tab_hit(win, (lx, ly));
                 return over.map(|i| Command::OpenTabContext(i, lx, ly));
             }
 
-            // Otherwise the pane area (area-relative: subtract the top bar). Bind the pane hit
-            // out of a scoped borrow, then drop it before we build the command.
-            let ax = lx;
+            // Otherwise the pane area (area-relative: subtract the top bar and the left
+            // column). Bind the pane hit out of a scoped borrow, then drop it before we build
+            // the command.
+            let origin_x = if fullscreen {
+                0.0
+            } else {
+                tabdock::area_origin_x(dock, col)
+            };
+            let ax = lx - origin_x;
             let ay = ly - if fullscreen { 0.0 } else { TOPBAR_H };
             let pane_hit = {
                 let st = win.state.borrow();
@@ -2424,6 +2473,8 @@ impl App {
             if strip_active && spring_tab < 0 {
                 let g = w.tab_geom.borrow();
                 let n = w.state.borrow().tabs.len().min(g.len());
+                // Along the strip's axis: x on top, y when docked (the geometry is already
+                // reported along that axis).
                 let caret = if hover.tab_slot < n {
                     g[hover.tab_slot].0
                 } else if n > 0 {
@@ -2991,6 +3042,86 @@ impl App {
                         g.resize(i + 1, (0.0, 0.0));
                     }
                     g[i] = (x, wd);
+                }
+            });
+        }
+
+        // ---- tab bar dock (t25, #85) ----
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_dock_drag_begin(move |x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    *w.dock_drag.borrow_mut() = Some(tabdock::DockDrag::begin((x, y)));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_dock_drag_move(move |x, y| {
+                if let Some(w) = app.window_by_id(id) {
+                    let scale = w.app.window().scale_factor().max(1.0);
+                    let size = w.app.window().size();
+                    let win_size = (size.width as f32 / scale, size.height as f32 / scale);
+                    let current = w.state.borrow().tab_dock;
+                    let mut d = w.dock_drag.borrow_mut();
+                    let Some(drag) = d.as_mut() else { return };
+                    if drag.moved((x, y), current, win_size) {
+                        let (target, active) = (drag.target, drag.active);
+                        drop(d);
+                        app.push_dock_drag(&w, target, active);
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_dock_drag_end(move || {
+                if let Some(w) = app.window_by_id(id) {
+                    let drag = w.dock_drag.borrow_mut().take();
+                    app.push_dock_drag(&w, None, false);
+                    if let Some(side) = drag.and_then(|d| d.end()) {
+                        app.run_command(&w, Command::SetTabDock(side));
+                    }
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_cycle_tab_dock(move || {
+                if let Some(w) = app.window_by_id(id) {
+                    app.run_command(&w, Command::CycleTabDock);
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            win.app.on_tab_column_geom(move |x, wd| {
+                if let Some(w) = app.window_by_id(id) {
+                    w.tab_col.set((x, wd));
+                }
+            });
+        }
+        {
+            let app = app.clone();
+            let id = win.id;
+            // The UI already decided this wheel event should cycle tabs (Shift does not change
+            // the direction), so only the delta's sign matters here.
+            win.app.on_tab_wheel(move |dy, _shift| {
+                if let Some(w) = app.window_by_id(id) {
+                    let steps = w.wheel.borrow_mut().feed(dy);
+                    for _ in 0..steps.abs() {
+                        let cmd = if steps > 0 {
+                            Command::NextTab
+                        } else {
+                            Command::PrevTab
+                        };
+                        app.run_command(&w, cmd);
+                    }
                 }
             });
         }

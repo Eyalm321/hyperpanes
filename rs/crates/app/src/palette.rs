@@ -104,6 +104,15 @@ pub fn build(state: &State) -> Vec<Entry> {
         Command::CloseTab(state.active),
     ));
 
+    for (title, dock) in crate::tabdock::dock_choices(state.tab_dock) {
+        cmds.push(Entry::new(
+            title,
+            "Move the tab bar to another edge",
+            "tabs dock column vertical sidebar left right top",
+            Command::SetTabDock(dock),
+        ));
+    }
+
     // ---- panes ----
     cmds.push(Entry::new(
         "New pane",

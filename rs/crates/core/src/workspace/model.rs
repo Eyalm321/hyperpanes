@@ -119,6 +119,9 @@ pub struct WindowSpec {
     pub bounds: Option<WindowBounds>,
     #[serde(default)]
     pub groups: Vec<GroupSpec>,
+    /// Where this window's tab bar docks: `"left"` | `"right"`; absent = top. Unknown = top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_dock: Option<String>,
 }
 
 /// The top-level workspace file. Panes may be described at any nesting level
@@ -138,6 +141,9 @@ pub struct WorkspaceFile {
     pub active: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows: Option<Vec<WindowSpec>>,
+    /// Where this window's tab bar docks: `"left"` | `"right"`; absent = top. Unknown = top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_dock: Option<String>,
 }
 
 #[cfg(test)]
@@ -150,6 +156,23 @@ mod tests {
         let parsed: WorkspaceFile = serde_json::from_str(json).expect("parse");
         let out = serde_json::to_string_pretty(&parsed).expect("serialize");
         assert_eq!(out, json, "round-trip mismatch");
+    }
+
+    #[test]
+    fn round_trips_tab_dock_top_level_and_window() {
+        let json = r#"{
+  "windows": [
+    {
+      "groups": [],
+      "tabDock": "left"
+    }
+  ],
+  "tabDock": "right"
+}"#;
+        assert_round_trips(json);
+        let parsed: WorkspaceFile = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.tab_dock.as_deref(), Some("right"));
+        assert_eq!(parsed.windows.unwrap()[0].tab_dock.as_deref(), Some("left"));
     }
 
     #[test]

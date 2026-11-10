@@ -8,6 +8,7 @@
 
 import { Theme } from "theme.slint";
 import { TabItem, LayoutOption } from "types.slint";
+import { PlusIcon, CloseIcon, GripHandle } from "tabdock.slint";
 
 // ---- stroked icons (match the Electron SVGs: 1.7px rounded strokes) ----
 
@@ -18,14 +19,6 @@ component HamburgerIcon inherits Rectangle {
     Rectangle { y: 0;    width: 100%; height: 1.7px; border-radius: 1px; background: ink; }
     Rectangle { y: 5px;  width: 100%; height: 1.7px; border-radius: 1px; background: ink; }
     Rectangle { y: 10px; width: 100%; height: 1.7px; border-radius: 1px; background: ink; }
-}
-
-component PlusIcon inherits Rectangle {
-    in property <color> ink;
-    width: 11px;
-    height: 11px;
-    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: 1.6px; height: 8px; border-radius: 1px; background: ink; }
-    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; height: 1.6px; width: 8px; border-radius: 1px; background: ink; }
 }
 
 component MinIcon inherits Rectangle {
@@ -64,19 +57,6 @@ component RestoreIcon inherits Rectangle {
     }
 }
 
-component CloseIcon inherits Path {
-    in property <color> ink;
-    in property <length> sz: 16px;
-    width: root.sz;
-    height: root.sz;
-    viewbox-width: 16;
-    viewbox-height: 16;
-    stroke: ink;
-    stroke-width: 1.5px;
-    fill: transparent;
-    commands: "M 3.5 3.5 L 12.5 12.5 M 12.5 3.5 L 3.5 12.5";
-}
-
 // ---- one Chrome-style tab ----
 
 component TabChip inherits Rectangle {
@@ -91,6 +71,7 @@ component TabChip inherits Rectangle {
     callback grab();                         // a press on the tab — arm a reorder drag
     callback context(length, length);        // right-click → open the tab menu at (x, y)
     callback report-geom(length, length);    // window-x + width, for hit-testing
+    callback wheel(length, bool);            // wheel over the chip → cycle tabs
 
     // Report this tab's window geometry to the controller so the drag pump can hit-test
     // the strip without Slint pointer delivery. Read from a Timer (imperatively, outside
@@ -116,6 +97,10 @@ component TabChip inherits Rectangle {
     border-top-right-radius: 9px;
     border-width: root.spring-hover ? 2px : (root.active ? 1px : 0px);
     border-color: root.spring-hover ? Theme.brand : Theme.border;
+    accessible-role: tab;
+    accessible-label: root.title;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.select(); }
 
     ta := TouchArea {
         // The hand cursor over a tab is driven from Win32 (window.rs) so it's a real hand.
@@ -132,6 +117,10 @@ component TabChip inherits Rectangle {
                 root.context(self.absolute-position.x + self.mouse-x,
                              self.absolute-position.y + self.mouse-y);
             }
+        }
+        scroll-event(e) => {
+            root.wheel(e.delta-y, e.modifiers.shift);
+            return accept;
         }
     }
 
@@ -221,6 +210,15 @@ export component TopBar inherits Rectangle {
     in property <length> drop-tab-x: 0px;
     in property <bool> drop-tab-active: false;
     in property <int> drop-tab-idx: -1;
+    // ---- tab bar dock (t25): grip + dock state; chips are hidden while docked ----
+    in property <int> tab-dock: 0;
+    in property <bool> dock-dragging: false;
+    in property <int> dock-target: -1;
+    callback dock-drag-begin(length, length);
+    callback dock-drag-move(length, length);
+    callback dock-drag-end();
+    callback cycle-tab-dock();
+    callback tab-wheel(length, bool);
 
     callback select-tab(int);
     callback close-tab(int);
@@ -258,10 +256,10 @@ export component TopBar inherits Rectangle {
 
     // drag/tear-off: a faint wash while the strip is a drop target + an insertion caret at
     // the slot the dragged tab/pane will land in. Visual only (no TouchArea → click-through).
-    if root.drop-strip-active : Rectangle {
+    if root.drop-strip-active && root.tab-dock == 0 : Rectangle {
         background: Theme.brand.with-alpha(0.10);
     }
-    if root.drop-tab-active : Rectangle {
+    if root.drop-tab-active && root.tab-dock == 0 : Rectangle {
         x: root.drop-tab-x - 1.5px;
         y: 4px;
         width: 3px;
@@ -297,43 +295,71 @@ export component TopBar inherits Rectangle {
             }
         }
 
+        // ===== dock grip (top-docked only) =====
+        if root.tab-dock == 0 : VerticalLayout {
+            alignment: center;
+            opacity: root.dock-dragging ? 0.6 : 1.0;
+            GripHandle {
+                tab-dock: root.tab-dock;
+                dock-drag-begin(x, y) => { root.dock-drag-begin(x, y); }
+                dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+                dock-drag-end => { root.dock-drag-end(); }
+                cycle-tab-dock => { root.cycle-tab-dock(); }
+            }
+        }
+
         // ===== tab strip (fills the bar; empty area drags the window) =====
         Rectangle {
             horizontal-stretch: 1;
+            opacity: root.dock-dragging ? 0.6 : 1.0;
             HorizontalLayout {
                 padding-top: 4px;          // bottom-align tabs (28px in the 32px bar)
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 2px;
 
-                for tab[idx] in root.tabs : TabChip {
-                    title: tab.title;
-                    active: tab.active;
-                    editing: root.editing-tab == idx;
-                    spring-hover: root.drop-tab-idx == idx;
-                    select => { root.select-tab(idx); }
-                    close => { root.close-tab(idx); }
-                    begin-rename => { root.begin-rename(idx); }
-                    commit-rename(t) => { root.rename-tab(idx, t); }
-                    grab => { root.tab-grab(idx); }
-                    context(x, y) => { root.tab-context(idx, x, y); }
-                    report-geom(x, w) => { root.tab-geom(idx, x, w); }
-                }
+                // chips + new-tab button live only while top-docked; docked, the strip
+                // is just the empty window-drag area.
+                if root.tab-dock == 0 : HorizontalLayout {
+                    accessible-role: tab-list;
+                    spacing: 2px;
+                    horizontal-stretch: 0;
+                    for tab[idx] in root.tabs : TabChip {
+                        title: tab.title;
+                        active: tab.active;
+                        editing: root.editing-tab == idx;
+                        spring-hover: root.drop-tab-idx == idx;
+                        select => { root.select-tab(idx); }
+                        close => { root.close-tab(idx); }
+                        begin-rename => { root.begin-rename(idx); }
+                        commit-rename(t) => { root.rename-tab(idx, t); }
+                        grab => { root.tab-grab(idx); }
+                        context(x, y) => { root.tab-context(idx, x, y); }
+                        report-geom(x, w) => { root.tab-geom(idx, x, w); }
+                        wheel(d, s) => { root.tab-wheel(d, s); }
+                    }
 
-                // new tab
-                VerticalLayout {
-                    alignment: center;
-                    new-btn := Rectangle {
-                        width: 20px;
-                        height: 20px;
-                        border-radius: 5px;
-                        background: nta.has-hover ? Theme.surface2 : transparent;
-                        PlusIcon {
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            ink: nta.has-hover ? Theme.text : Theme.subtext;
+                    // new tab
+                    VerticalLayout {
+                        alignment: center;
+                        new-btn := Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 5px;
+                            background: nta.has-hover ? Theme.surface2 : transparent;
+                            PlusIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                ink: nta.has-hover ? Theme.text : Theme.subtext;
+                            }
+                            nta := TouchArea {
+                                clicked => { root.new-tab(); }
+                                scroll-event(e) => {
+                                    root.tab-wheel(e.delta-y, e.modifiers.shift);
+                                    return accept;
+                                }
+                            }
                         }
-                        nta := TouchArea { clicked => { root.new-tab(); } }
                     }
                 }
 
@@ -343,6 +369,10 @@ export component TopBar inherits Rectangle {
                     drag := TouchArea {
                         moved => { if (self.pressed) { root.start-drag(); } }
                         double-clicked => { root.max-window(); }
+                        scroll-event(e) => {
+                            root.tab-wheel(e.delta-y, e.modifiers.shift);
+                            return accept;
+                        }
                     }
                 }
             }
