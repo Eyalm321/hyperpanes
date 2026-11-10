@@ -71,3 +71,32 @@ in Preferences > Keybindings hands it back to the pane.
 | Ctrl+PgDn, Ctrl+PgUp | on | Sent as `CSI 6;5~` / `CSI 5;5~`. Terminal vim maps `<C-PageDown>` / `<C-PageUp>` to next/previous tab page by default; emacs binds C-next / C-prior to scroll-left/right; some tmux and mc setups use them too. | ON, documented | Unbind `tab.nextPage` / `tab.prevPage` to hand them back |
 | Ctrl+1..9 | off | Legacy encoding sends Ctrl+2 = NUL (emacs set-mark), Ctrl+3..7 = ESC/FS/GS/RS/US and Ctrl+8 = DEL. | OFF by default | Bind `tab.goto1`..`tab.goto9` (9 = last tab) in Preferences > Keybindings |
 | Wheel over the strip | on | Nothing: the strip is not a pane. | ON | none |
+
+## Tab colour and the control API
+
+Agents can rename and recolour tabs over the control API, the same way `renamePane` and
+`recolorPane` work for panes:
+
+```
+POST /command {"type":"renameTab","tabId":"…","title":"…"}
+POST /command {"type":"recolorTab","tabId":"…","color":"#rrggbb"}   // or "color": null to clear
+```
+
+Tab ids come from `GET /state` (`windows[].tabs[].id`): positional `<windowId>:<tabIndex>` for
+GUI tabs, or the uuid returned by `attach` for tabs it created. Each tab in `/state` carries
+`"color"`: the manual colour as lowercase `#rrggbb`, or `null` when unset.
+
+Validation:
+
+- `renameTab`: `tabId` and `title` must be strings. The title is trimmed; empty is `400`, more
+  than 80 characters is `400` (`tab title too long (max 80 chars)`).
+- `recolorTab`: the `color` key is required. `#rgb` or `#rrggbb` (either case) is accepted and
+  normalised to lowercase `#rrggbb`; `null` clears. Anything else (a missing key, `red`,
+  `#12345`, a number) is `400` (`invalid color "…" (expected #rrggbb, or null to clear)`).
+- A missing `tabId` is `400`; an unknown tab is `404` (`no such tab: <id>`); a scoped token
+  outside the tab's window or tab is `403`.
+
+A coloured tab shows a 3px stripe and a 10% tint of that colour, on the top edge of the chip in
+the top strip and on the outer edge of the chip in docked columns. The colour is saved in the
+session and workspace files (the `color` field of a tab) and restored on relaunch; an invalid
+saved value restores as no colour.
