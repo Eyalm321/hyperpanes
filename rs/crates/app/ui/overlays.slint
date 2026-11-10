@@ -327,7 +327,7 @@ export component CloseConfirm inherits Rectangle {
                 wrap: word-wrap;
             }
             Text {
-                text: "Closing it ends them. Quitting keeps everything running in the background.";
+                text: root.count == 1 ? "Close window ends it. Quit Hyperpanes keeps every window and terminal running in the background, restored on the next launch." : "Close window ends them. Quit Hyperpanes keeps every window and terminal running in the background, restored on the next launch.";
                 color: Theme.subtext;
                 font-size: 12px;
                 wrap: word-wrap;
@@ -336,8 +336,8 @@ export component CloseConfirm inherits Rectangle {
                 spacing: 8px;
                 Rectangle { horizontal-stretch: 1; }
                 Pill { label: "Cancel"; clicked => { root.resolve(0); } }
-                Pill { label: root.count == 1 ? "Close window — end 1 process" : "Close window — end " + root.count + " processes"; clicked => { root.resolve(1); } }
-                Pill { label: "Quit Hyperpanes — keep everything running"; active: true; clicked => { root.resolve(2); } }
+                Pill { label: "Close window"; clicked => { root.resolve(1); } }
+                Pill { label: "Quit Hyperpanes"; active: true; clicked => { root.resolve(2); } }
             }
         }
     }

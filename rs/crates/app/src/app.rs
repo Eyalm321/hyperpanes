@@ -991,22 +991,10 @@ impl App {
         let saved_pos = bounds
             .as_ref()
             .is_some_and(|b| b.x.is_some() && b.y.is_some());
-        if let Some(b) = &bounds {
-            if let (Some(w), Some(h)) = (b.width, b.height) {
-                if w > 0 && h > 0 {
-                    win.app
-                        .window()
-                        .set_size(slint::LogicalSize::new(w as f32, h as f32));
-                }
-            }
-            if let (Some(x), Some(y)) = (b.x, b.y) {
-                win.app
-                    .window()
-                    .set_position(LogicalPosition::new(x as f32, y as f32));
-            }
-            if b.maximized == Some(true) {
-                win.app.window().set_maximized(true);
-            }
+        if let Some((x, y)) = bounds.as_ref().and_then(|b| b.x.zip(b.y)) {
+            win.app
+                .window()
+                .set_position(LogicalPosition::new(x as f32, y as f32));
         }
         if id > 0 && !saved_pos {
             let off = 36.0 * id as f32;
@@ -1015,6 +1003,28 @@ impl App {
                 .set_position(LogicalPosition::new(140.0 + off, 90.0 + off));
         }
         let _ = win.app.show();
+        // Saved size / maximized are applied AFTER the window is shown, on the next loop turn.
+        // The pane area reaches us only through the UI's `changed width/height` handlers, which
+        // never fire for an initial value: a window created at its saved size (and mapped at
+        // that size) would never lay out its panes. Shown at the default size first, the saved
+        // size is then a real change.
+        if let Some(b) = bounds.filter(|b| b.width.is_some() || b.maximized == Some(true)) {
+            let weak = win.app.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(0), move || {
+                let Some(a) = weak.upgrade() else {
+                    return;
+                };
+                if let (Some(w), Some(h)) = (b.width, b.height) {
+                    if w > 0 && h > 0 {
+                        a.window()
+                            .set_size(slint::LogicalSize::new(w as f32, h as f32));
+                    }
+                }
+                if b.maximized == Some(true) {
+                    a.window().set_maximized(true);
+                }
+            });
+        }
         self.windows.borrow_mut().push(win);
     }
 
