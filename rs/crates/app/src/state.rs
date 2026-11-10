@@ -558,6 +558,42 @@ fn resolve_goal_identity(
     (name, color)
 }
 
+/// Env var carrying the running app's version into every pane this GUI spawns. Injected here
+/// (app-side) rather than in core's daemon `build_env`: the session daemon may be an older
+/// binary than the GUI. Frozen at spawn; `/health` and `/state` stay authoritative.
+const RUNNING_VERSION_ENV: &str = "HYPERPANES_VERSION";
+
+fn with_running_version(mut opts: SpawnOptions) -> SpawnOptions {
+    opts.env.get_or_insert_with(Default::default).insert(
+        RUNNING_VERSION_ENV.to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    opts
+}
+
+#[cfg(test)]
+mod running_version_tests {
+    use super::*;
+
+    #[test]
+    fn injected_without_clobbering_other_env() {
+        let o = with_running_version(SpawnOptions::default());
+        assert_eq!(
+            o.env.unwrap().get("HYPERPANES_VERSION").map(String::as_str),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let o = with_running_version(SpawnOptions {
+            env: Some(env),
+            ..Default::default()
+        });
+        let e = o.env.unwrap();
+        assert_eq!(e.get("FOO").map(String::as_str), Some("bar"));
+        assert!(e.contains_key("HYPERPANES_VERSION"));
+    }
+}
+
 #[cfg(test)]
 mod goals_mcp_config_tests {
     #[test]
@@ -1517,6 +1553,7 @@ impl State {
     /// mid-spawn (otherwise it would leak). A spawn error just logs: the pane shows a
     /// dead shell, and a restart re-tries.
     fn spawn_session_async(mgr: &SessionManager, opts: SpawnOptions) {
+        let opts = with_running_version(opts);
         let mgr = mgr.clone();
         let uid = opts.uid.clone();
         // Captured on the UI thread (inside the app's tokio runtime guard); the worker
@@ -4669,7 +4706,7 @@ impl State {
             args: si.args,
             env: si.env.into_iter().collect(),
         });
-        if let Err(e) = mgr.create(SpawnOptions {
+        if let Err(e) = mgr.create(with_running_version(SpawnOptions {
             uid: uid.clone(),
             cols: Some(cols),
             rows: Some(rows),
@@ -4681,7 +4718,7 @@ impl State {
             env: env.clone(),
             integration,
             ..Default::default()
-        }) {
+        })) {
             eprintln!("[hyperpanes] failed to restart {uid}: {e}");
             return;
         }

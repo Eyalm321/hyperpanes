@@ -75,6 +75,8 @@ pub struct Shared {
     pub allow_input: AtomicBool,
     pub pid: u32,
     pub version: String,
+    /// Optional free-form build label (already sanitized). `None` in the public app.
+    build: Mutex<Option<String>>,
     pub port: AtomicU16,
     pub idle_threshold_ms: i64,
     pub control_file: PathBuf,
@@ -152,6 +154,22 @@ pub enum WorkAttach {
     OpenFailed(String),
 }
 
+/// Sanitize a build label for the unauthenticated surfaces: keep only `[A-Za-z0-9 ._,+()-]`,
+/// cap at 64 chars, and reject (→ `None`) anything containing `/ \\ @ :` so no path, host or
+/// user can leak. Empty after trimming → `None`.
+pub fn sanitize_build_label(s: &str) -> Option<String> {
+    if s.contains(['/', '\\', '@', ':']) {
+        return None;
+    }
+    let out: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || " ._,+()-".contains(*c))
+        .take(64)
+        .collect();
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
 impl Shared {
     /// Build the shared state. `allow_input` mirrors control-settings; `control_file` is both the
     /// path written on start and the `HYPERPANES_CONTROL_FILE` injected into spawned panes.
@@ -179,6 +197,7 @@ impl Shared {
             allow_input: AtomicBool::new(allow_input),
             pid: std::process::id(),
             version: version.into(),
+            build: Mutex::new(None),
             port: AtomicU16::new(0),
             idle_threshold_ms: IDLE_THRESHOLD_MS,
             control_file,
@@ -192,6 +211,17 @@ impl Shared {
             remote_connects: Mutex::new(Vec::new()),
             remote_screens: Mutex::new(serde_json::Value::Array(Vec::new())),
         })
+    }
+
+    /// Set the build label reported by `/health` and `/state`. Sanitized via
+    /// [`sanitize_build_label`]; an empty/unsafe label clears it.
+    pub fn set_build(&self, label: Option<&str>) {
+        *self.build.lock().unwrap() = label.and_then(sanitize_build_label);
+    }
+
+    /// The current (sanitized) build label, if any.
+    pub fn build(&self) -> Option<String> {
+        self.build.lock().unwrap().clone()
     }
 
     /// Queue a `connectRemote` request for the GUI host.
@@ -1088,6 +1118,21 @@ mod tests {
     use super::*;
     use crate::control::readmodel::{TabInfo, WindowInfo};
     use tokio::sync::mpsc::unbounded_channel;
+
+    #[test]
+    fn build_label_sanitizer() {
+        assert_eq!(
+            sanitize_build_label("private build, a1b2c3d").as_deref(),
+            Some("private build, a1b2c3d")
+        );
+        assert_eq!(sanitize_build_label("/srv/build/src"), None);
+        assert_eq!(sanitize_build_label("C:\\Users\\x"), None);
+        assert_eq!(sanitize_build_label("user@host"), None);
+        assert_eq!(sanitize_build_label("host:8080"), None);
+        assert_eq!(sanitize_build_label("   "), None);
+        assert_eq!(sanitize_build_label("é€!!"), None);
+        assert_eq!(sanitize_build_label(&"a".repeat(200)).unwrap().len(), 64);
+    }
 
     fn shared_with_pane() -> (Arc<Shared>, String) {
         let (tx, _rx) = unbounded_channel();
