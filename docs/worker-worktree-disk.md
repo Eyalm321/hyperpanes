@@ -44,6 +44,7 @@ linked worktree of one repo (for example a goal's private integration worktree) 
   wt/<queue>-<id8>-<pid>.lock  # its owner lock
   cache/slot-<k>/              # build-cache slot k  → HP_WORKTREE_CACHE_DIR
   cache/slot-<k>.lock          # its lock; mtime = last release
+  cache/slot-<k>.size          # last measured size in bytes (see "Size limits")
 ```
 
 From an MCP client, `spawn_workers` carries the override through its existing `env` passthrough,
@@ -121,6 +122,55 @@ disk:
   never shares a slot. There's no cap by default because eviction already reclaims idle slots
   on demand, and at peak a busy slot holds exactly what a per-worktree `target/` would have held
   anyway.
+
+### Size limits: per-slot cap, root budget, soft floor
+
+Age GC and pressure eviction don't bound a slot's size *while it is reused*. Every version bump,
+`Cargo.lock` change, feature set or branch adds new artifact variants to the same
+`cargo-target/`, plus `incremental/` dirs, so a single slot once grew to 56 GB and filled the
+disk. Three knobs bound it. Each takes a size (bytes or `K/M/G/T`), and **`0` turns it off**.
+Precedence is flag > env > default.
+
+| Knob | Flag | Env | Default |
+| --- | --- | --- | --- |
+| Per-slot cap | `--slot-max-size <size>` | `HYPERPANES_WORKTREE_SLOT_MAX` | 20G |
+| Root-wide budget | `--cache-max-size <size>` | `HYPERPANES_WORKTREE_CACHE_MAX` | 100G |
+| Proactive free-space floor | `--soft-free <size>` | `HYPERPANES_WORKTREE_SOFT_FREE` | 40G |
+
+- **Per-slot cap.** Enforced while holding the slot's lock, at two points: when the task's child
+  exits (before the slot is released), and right after a slot is acquired (a backstop for slots
+  left by older runners). An over-cap slot is pruned in two stages: first every `incremental/` dir
+  under `cargo-target` is deleted; if the slot is still over the cap, its contents are deleted
+  (the slot dir and its lock file are kept).
+- **Root budget.** The sum of all slot sizes across every repo under the root (they share the
+  filesystem) is checked at runner start and between claims. Over budget, idle slots are evicted
+  least recently used first until the total fits. Busy slots count toward the total but can't be
+  evicted.
+- **Soft floor.** Between claims, if free space on the root is below the floor, idle slots are
+  evicted LRU until it is met. It sits above the hard `--min-free` refusal, which is unchanged: it
+  keeps the disk from ever reaching that refusal.
+
+**Size sidecar.** Walking a large cache is slow, so a release writes the measured size to
+`cache/slot-<k>.size` (decimal bytes, written under the lock). The release stamps the lock file's
+mtime first and writes the sidecar second, so a sidecar whose mtime is at least the lock's was
+measured after the last release and is fresh. A fresh sidecar lets acquire and the budget check skip
+the walk; otherwise the slot is walked. Sizes are on-disk usage (like `du`), symlinks are never
+followed, and every walk is logged with its duration (`slot-3: measured 31.0 GiB in 2.4s`).
+
+Every action logs one line, for example:
+
+```text
+slot-3: pruned incremental 11.2 GiB (31.0 GiB > cap 20.0 GiB)
+evicted idle myapp-1a2b3c4d/slot-1 (57.0 GiB; cache 160.0 GiB > budget 100.0 GiB)
+evicted idle myapp-1a2b3c4d/slot-2 (free 35.0 GiB < soft floor 40.0 GiB)
+```
+
+**Manual prune.** `hyperpanes worker --prune-cache [--dry-run]` applies the same rules once. It
+resolves the root like the worker (`--worktree-root`, env, default), needs no queue and doesn't
+touch the control plane. For every idle slot it applies the per-slot cap, then the root budget and
+floor, and prints one line per slot with the action and before/after size. Busy slots print
+`busy, skipped`. `--dry-run` prints the plan and deletes nothing. The three size flags above apply
+to it too.
 
 Slot lock files are never deleted, because deleting one races a concurrent acquirer. To reclaim
 everything for a repo by hand, stop its runners and `rm -rf <root>/<repo>-<hash8>/cache`.
