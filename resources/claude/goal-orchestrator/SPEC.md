@@ -53,6 +53,12 @@ prompt wedges the pane).
   the advisor:** include `advisor=<your $HYPERPANES_PANE_ID>` in every payload so an impl agent that
   hits a strategic fork can consult you mid-build instead of guessing or bouncing the whole subtask
   (see IMPL.md "Consult your advisor").
+- **Put every requirement in the payload.** An impl agent is one `claude -p` turn, and nothing is
+  pushed into it. A correction you send after fan-out (`send_message` to its pane) reaches it only
+  at its next checkpoint, when it reads its own inbox (IMPL.md "Checkpoints"). An agent already past
+  its last checkpoint never sees it. If a spec change can't wait for that: nack the task or close
+  its pane and re-enqueue a corrected payload, or hand-apply the change at integration. Never assume
+  a sent correction landed. Check the diff, and the `seq` the agent names in its commit message.
 - `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
   project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
   split on newlines>, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <your
@@ -133,7 +139,7 @@ prompt wedges the pane).
   for `<taskId>:` consults and answer fast (`send_message {to:<the `from` pane id on the message>,
   from:"$HYPERPANES_PANE_ID", body:<crisp decision>}`). A 20-second answer here saves a thrown-away
   subtask and a whole re-spec round-trip — this is the point of pairing your intelligence with their
-  cheap execution.
+  cheap execution. Your reply reaches the agent only when it next polls its inbox; it is not pushed.
 - **Wait for the whole wave — synchronization barrier.** Don't verify or report `done` while any
   impl pane is still `working`. Collect every subtask's result (or its failure) first; a green check
   on a half-built tree is a false pass.
@@ -151,9 +157,19 @@ prompt wedges the pane).
   shapes trust `rs/crates/core/src/control/routes.rs`, not inlined recipes. Never let a spawned
   impl agent call `ToolSearch`/deferred tool loading on its first turn — an unanswered tool call is
   exactly what poisons a transcript.
+- **Your own builds: one target dir per goal, and you clean it up.** Builds you run yourself
+  (verify, integrate, acceptance) share ONE ad-hoc target dir for the whole goal (e.g.
+  `CARGO_TARGET_DIR=~/.cache/hyperpanes/<goal>-target`). Never make one per branch, and never put
+  it in `/tmp` or inside a worktree. Before a cold build, check free space
+  (`df -BG --output=avail <dir>`). Under 40G, delete `<target>/*/incremental` first. If it's still
+  under 40G, don't build: report `blocked disk <free>G`. When the goal is done, delete the whole
+  dir. The worker runner bounds its own cache slots (hyperpanes#74: slot cap, cache budget, soft floor; `hyperpanes
+  worker --prune-cache [--dry-run]`), but your ad-hoc dir is outside those slots and is your job.
 - **Collect** impl results (queue results / their panes). Review each agent's branch/diff; land the
   work on the goal's integration branch, resolving conflicts. Re-scope + re-enqueue a failed
-  subtask (bounded).
+  subtask (bounded). An acked task whose branch is empty (`git log <base>..<branch>` shows nothing)
+  is lost work, not done: the runner deletes the worktree on exit and acks on exit 0 even when
+  nothing was committed (hyperpanes#86). Re-enqueue it.
 - **Re-spec on surprise.** If building reveals the spec was wrong, revise it, post `progress
   respec: <why>`, and continue — bounded; don't grind a broken spec.
 - **Verify acceptance** — run the spec's acceptance checks yourself. Iterate until they pass or
