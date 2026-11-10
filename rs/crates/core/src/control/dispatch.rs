@@ -204,6 +204,14 @@ pub fn handle_command(
         }
     }
 
+    // `attach` group colours are validated up front so a bad one fails with 400 before any pane
+    // is spawned (the same rule as `recolorTab`).
+    if ty == "attach" {
+        if let Err(msg) = validate_attach_colors(cmd) {
+            return DispatchResult::err(400, &msg);
+        }
+    }
+
     match exec(ty, cmd, model, sessions, control_file, window_id) {
         Ok((result, notify)) => {
             let mut r = DispatchResult::ok(result, notify);
@@ -288,10 +296,15 @@ fn exec(
                             panes.push(spawn_pane(sessions, control_file, ps)?);
                         }
                     }
+                    // Validated by `validate_attach_colors`; null or absent = no manual colour.
+                    let color = g
+                        .get("color")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_hex_color);
                     let tab = TabInfo {
                         id: tab_id.clone(),
                         title,
-                        color: None,
+                        color,
                         layout,
                         panes,
                         pane_group: None,
@@ -1122,7 +1135,7 @@ fn resolve_rename_tab(cmd: &Value, model: &ReadModel) -> Result<(String, String)
 }
 
 /// Normalise `#rgb` / `#rrggbb` (either case) to lowercase `#rrggbb`.
-fn normalize_hex_color(s: &str) -> Option<String> {
+pub(crate) fn normalize_hex_color(s: &str) -> Option<String> {
     let h = s.strip_prefix('#')?;
     if !h.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
@@ -1140,6 +1153,30 @@ fn normalize_hex_color(s: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Check every `attach` group's optional tab `color`: absent or null is fine, a string must be
+/// `#rgb` / `#rrggbb` (as for `recolorTab`), anything else is an error naming the group.
+fn validate_attach_colors(cmd: &Value) -> Result<(), String> {
+    let Some(groups) = cmd.get("groups").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (i, g) in groups.iter().enumerate() {
+        match g.get("color") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if normalize_hex_color(s).is_some() => {}
+            Some(v) => {
+                let shown = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Err(format!(
+                    "invalid color \"{shown}\" in groups[{i}] (expected #rrggbb, or null for none)"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a `recolorTab` command to `(tab id, colour or None to clear)`.
@@ -1759,6 +1796,59 @@ mod tests {
 
     fn first_tab(m: &ReadModel) -> &TabInfo {
         m.tabs().next().unwrap().1
+    }
+
+    fn tab_by_id<'a>(m: &'a ReadModel, id: &str) -> &'a TabInfo {
+        m.tabs().find(|(_, t)| t.id == id).unwrap().1
+    }
+
+    #[test]
+    fn attach_tab_takes_a_normalised_manual_color() {
+        let mut m = model_one_window();
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"attach","windowId":1,"as":"tab","groups":[
+                {"title":"a","color":"#ABC","panes":[]},
+                {"title":"b","color":null,"panes":[]},
+                {"title":"c","panes":[]}
+            ]}),
+        );
+        assert_eq!(r.status, 200, "{:?}", r.body);
+        let ids: Vec<String> = r.body["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tab_by_id(&m, &ids[0]).color.as_deref(), Some("#aabbcc"));
+        assert_eq!(tab_by_id(&m, &ids[1]).color, None);
+        assert_eq!(tab_by_id(&m, &ids[2]).color, None);
+        // The manual colour is the same field recolorTab sets and clears.
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":ids[0],"color":null}),
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(tab_by_id(&m, &ids[0]).color, None);
+    }
+
+    #[test]
+    fn attach_bad_group_color_is_400_and_adds_no_tab() {
+        for bad in [json!("red"), json!("#12345"), json!(7)] {
+            let mut m = model_one_window();
+            let before = m.tabs().count();
+            let r = tab_cmd(
+                &mut m,
+                json!({"type":"attach","windowId":1,"groups":[
+                    {"title":"ok","panes":[]},
+                    {"title":"bad","color":bad,"panes":[]}
+                ]}),
+            );
+            assert_eq!(r.status, 400, "{bad}: {:?}", r.body);
+            let msg = r.body["error"].as_str().unwrap();
+            assert!(msg.contains("groups[1]"), "{msg}");
+            assert_eq!(m.tabs().count(), before, "no tab may be added on a bad colour");
+        }
     }
 
     #[test]

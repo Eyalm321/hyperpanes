@@ -1255,6 +1255,11 @@ impl ControlHost {
                         t.ctl_id = Some(c.tab_id.clone());
                     }
                 }
+                // ...and the manual colour `attach` gave it (`groups[].color`).
+                let color = snap
+                    .and_then(|s| s.color.as_deref())
+                    .and_then(crate::state::parse_hex_strict);
+                st.set_tab_color(new_ti, color);
                 st.switch_tab(saved);
                 created_tabs.insert(c.tab_id.clone(), (c.window_id, new_ti));
             }

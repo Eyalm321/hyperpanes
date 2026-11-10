@@ -90,6 +90,20 @@ Tab ids come from `GET /state` (`windows[].tabs[].id`): positional `<windowId>:<
 GUI tabs, or the uuid returned by `attach` for tabs it created. Each tab in `/state` carries
 `"color"`: the manual colour as lowercase `#rrggbb`, or `null` when unset.
 
+An agent can also colour a tab when it creates it: give the group a `color` in `attach` (MCP
+`open_tab`), next to its `title`. The per-pane `color` inside `panes` is unchanged and still
+sets a pane's frame colour.
+
+```
+POST /command {"type":"attach","windowId":0,"groups":[{"title":"build","color":"#e5484d","panes":[{}]}]}
+```
+
+It sets the same manual tab colour as `recolorTab`: same validation and normalisation, the same
+precedence over a group colour, and `recolorTab` with `null` clears it later. A bad group colour
+is `400` (`invalid color "…" in groups[<i>] …`), checked before any pane is spawned. `null` or no
+`color` means no manual colour. A tab's `color` in a workspace file does the same when the
+workspace is launched or restored.
+
 Validation:
 
 - `renameTab`: `tabId` and `title` must be strings. The title is trimmed; empty is `400`, more
