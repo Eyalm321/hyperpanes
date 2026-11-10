@@ -153,6 +153,39 @@ So `restartApp {scope:"full"}`, a crash that takes the daemon down, and a reboot
 every orphaned claim at boot with no added latency. Details, the worst case and the trust model
 are in `docs/worker-pool.md` ("Across an app relaunch").
 
+## Claude session hook: isolated instances never register it
+
+The GUI registers `resources/claude/hp-claude-session-hook.sh` as a `SessionStart`/`SessionEnd`
+hook in the `settings.json` of every Claude account it knows (`claude_hook::ensure_registered`,
+called from the GUI `main`). That file belongs to the real account and outlives the process.
+When a scratch install registered its own copy and the scratch tree was later deleted, every
+`claude` on that account started with `SessionStart:startup hook error` (issue #92).
+
+**Rule** (`claude_hook::registration_decision`, evaluated in order):
+
+1. `HYPERPANES_CLAUDE_HOOK=1` (also `true`/`yes`/`on`/`install`) always registers;
+   `HYPERPANES_CLAUDE_HOOK=0` (also `false`/`no`/`off`/`never`) never does.
+2. An isolated instance skips. That means the control file, state, data or config dir is not
+   at its default (the same no-override baseline Guard 1 uses).
+3. A cargo dev build skips. Such a build is a hook found inside a cargo target dir, where
+   `CACHEDIR.TAG` sits up to five levels above the script.
+4. Anything else is a packaged install (FHS prefix, AppImage, `.app`, Windows install dir)
+   and registers, exactly as before.
+
+A skip writes nothing and logs `[claude-hook] not registering: <why>` on stderr. An isolated
+instance loses nothing by skipping, because the hook resolves its marker dir from the *pane's*
+`XDG_STATE_HOME`. The system-installed hook therefore already writes markers into the isolated
+instance's own state dir. A user who runs their real instance with non-default XDG dirs
+should set `HYPERPANES_CLAUDE_HOOK=1`.
+
+**Self-healing.** Each register pass also removes hook entries whose command is an absolute
+path to a `hp-claude-session-hook.sh` that no longer exists, such as a deleted scratch tree or
+an old AppImage mount. It removes a matcher group only when that left it empty, and the event
+key only when that left it empty. Foreign hooks, relative commands and other events are never
+touched. A file is rewritten only when something changed, atomically, and through a symlinked
+`settings.json` rather than over it. `serde_json` reorders the keys of a rewritten file, as it
+always has.
+
 ## Tests
 
 - `rs/crates/core/tests/work_db_single_owner.rs` (real child processes running the production
@@ -173,4 +206,5 @@ are in `docs/worker-pool.md` ("Across an app relaunch").
   (red before, green after), `full_restart_requeues_a_dead_workers_claim_at_boot` and
   `holderless_claim_is_requeued_at_boot`.
 - Unit tests: `control::work_lock::tests::*`, `persistence::isolation::tests::*`,
-  `control::holder::tests::*` and the `control::work::tests::boot_recovery_*` set.
+  `control::holder::tests::*`, the `control::work::tests::boot_recovery_*` set and
+  `claude_hook::tests::*` (registration rule, stale-entry pruning, symlinked settings).
