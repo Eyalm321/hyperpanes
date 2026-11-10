@@ -4082,6 +4082,65 @@ impl State {
 
 /// Phase-5: context menus + the actions they invoke. Kept in its own `impl` block so the
 /// right-click feature reads as one unit (it only ever calls the same mutate→set-dirty seam).
+/// Outcome of [`plan_claude_resume`]: the (possibly extended) launch plus the side effects the
+/// caller applies to the spawn.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ResumePlan {
+    pub(crate) command: Option<String>,
+    pub(crate) args: Option<Vec<String>>,
+    /// Line typed into the pane's shell at first output (shell-pane resume).
+    pub(crate) startup: Option<String>,
+    /// Overrides the spawn cwd (the conversation's own directory).
+    pub(crate) cwd: Option<String>,
+    /// `CLAUDE_CONFIG_DIR` to set on the spawn env (direct claude relaunch only).
+    pub(crate) config_dir_env: Option<String>,
+}
+
+/// Decide how a pane with a recorded Claude conversation `id` is resumed. No recorded command
+/// → a shell pane: type `claude --resume <id>`. A command whose program is `claude` →
+/// `--resume <id>` is appended to its own argv (or command line), keeping its born-with flags.
+/// Any other program ignores the marker.
+pub(crate) fn plan_claude_resume(
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    id: &str,
+    resume_cwd: Option<&str>,
+    config_dir: Option<&str>,
+) -> ResumePlan {
+    // `CLAUDE_CONFIG_DIR='<dir>' ` prefix for typed resume lines; empty for the default account.
+    let cfg_prefix = config_dir
+        .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
+        .unwrap_or_default();
+    let head = command
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let head = head.rsplit(['/', '\\']).next().unwrap_or(head).to_string();
+    let mut plan = ResumePlan {
+        command,
+        args,
+        ..Default::default()
+    };
+    if plan.command.is_none() {
+        plan.startup = Some(match resume_cwd {
+            Some(cwd) => format!("cd '{cwd}' && {cfg_prefix}claude --resume {id}\r"),
+            None => format!("{cfg_prefix}claude --resume {id}\r"),
+        });
+    } else if head == "claude" || head == "claude.exe" {
+        plan.cwd = resume_cwd.map(str::to_string);
+        // The account rides the spawn env rather than the command line so the resumed process
+        // reads the right store.
+        plan.config_dir_env = config_dir.map(str::to_string);
+        match &mut plan.args {
+            Some(a) => a.extend(["--resume".to_string(), id.to_string()]),
+            None => plan.command = plan.command.map(|c| format!("{c} --resume {id}")),
+        }
+    }
+    plan
+}
+
 impl State {
     // ---- context-menu lifecycle ----
 
@@ -5371,41 +5430,23 @@ impl State {
         }
         let mut startup = None;
         if let Some(id) = &resume_id {
-            // `CLAUDE_CONFIG_DIR='<dir>' ` prefix for typed resume lines (the shell-pane path);
-            // empty when there's no recorded account (the default).
-            let cfg_prefix = resume_config_dir
-                .as_deref()
-                .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
-                .unwrap_or_default();
-            let head = spawn_command
-                .as_deref()
-                .unwrap_or("")
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
-            if spawn_command.is_none() {
-                startup = Some(match &resume_cwd {
-                    Some(cwd) => format!("cd '{cwd}' && {cfg_prefix}claude --resume {id}\r"),
-                    None => format!("{cfg_prefix}claude --resume {id}\r"),
-                });
-            } else if head == "claude" || head == "claude.exe" {
-                if resume_cwd.is_some() {
-                    spawn_cwd = resume_cwd.clone();
-                }
-                // Direct claude relaunch keeps its born-with flags; the account rides the spawn
-                // env rather than the command line so the resumed process reads the right store.
-                if let Some(dir) = &resume_config_dir {
-                    spawn_env
-                        .get_or_insert_with(Default::default)
-                        .insert("CLAUDE_CONFIG_DIR".to_string(), dir.clone());
-                }
-                match &mut spawn_args {
-                    // Direct-argv spawn: extend the argv.
-                    Some(a) => a.extend(["--resume".to_string(), id.clone()]),
-                    // Shell-string spawn: extend the command line.
-                    None => spawn_command = spawn_command.map(|c| format!("{c} --resume {id}")),
-                }
+            let r = plan_claude_resume(
+                spawn_command.take(),
+                spawn_args.take(),
+                id,
+                resume_cwd.as_deref(),
+                resume_config_dir.as_deref(),
+            );
+            spawn_command = r.command;
+            spawn_args = r.args;
+            startup = r.startup;
+            if let Some(c) = r.cwd {
+                spawn_cwd = Some(c);
+            }
+            if let Some(dir) = r.config_dir_env {
+                spawn_env
+                    .get_or_insert_with(Default::default)
+                    .insert("CLAUDE_CONFIG_DIR".to_string(), dir);
             }
         }
 
