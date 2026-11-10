@@ -1,11 +1,11 @@
 //! In-process command execution — replaces the Electron renderer round-trip + correlationId.
 //! POST /command mutates the central `readmodel` directly and returns `{ok, result}`
 //! SYNCHRONOUSLY (the set_meta echo race is now structurally impossible). Commands:
-//! newPane (→ returns new paneId) / closePane / setLayout / renamePane / recolorPane / setMeta /
-//! focusPane / openTab(attach) / restartPane / readScreen / recoverPane. PRESERVE the response
-//! shapes + status mapping byte-for-byte: 500 on action error, 404 window-not-found, 400
-//! missing-type/target, 403 scope error. `readScreen` serializes the central `alacritty_terminal`
-//! Term via `session::screen` (`SessionManager::render_screen`).
+//! newPane (→ returns new paneId) / closePane / setLayout / renameTab / recolorTab / renamePane /
+//! recolorPane / setMeta / focusPane / openTab(attach) / restartPane / readScreen / recoverPane.
+//! PRESERVE the response shapes + status mapping byte-for-byte: 500 on action error, 404
+//! window-not-found, 400 missing-type/target, 403 scope error. `readScreen` serializes the
+//! central `alacritty_terminal` Term via `session::screen` (`SessionManager::render_screen`).
 //!
 //! `recoverPane` is the agent-pane API-error recovery contract documented in
 //! `docs/agent-recovery.md`, built on the pure detection/classification/repair logic in
@@ -152,6 +152,27 @@ pub fn handle_command(
         };
     }
 
+    // `renameTab` / `recolorTab` carry only a tabId, so they are handled before the generic
+    // window resolution (which would answer 400 "needs a paneId or windowId").
+    if ty == "renameTab" {
+        return match resolve_rename_tab(cmd, model) {
+            Ok((tab_id, title)) => {
+                model.rename_tab(&tab_id, &title);
+                DispatchResult::ok(None, true)
+            }
+            Err((status, msg)) => DispatchResult::err(status, &msg),
+        };
+    }
+    if ty == "recolorTab" {
+        return match resolve_recolor_tab(cmd, model) {
+            Ok((tab_id, color)) => {
+                model.recolor_tab(&tab_id, color);
+                DispatchResult::ok(None, true)
+            }
+            Err((status, msg)) => DispatchResult::err(status, &msg),
+        };
+    }
+
     // Resolve a target window: explicit windowId (number or numeric string), else the pane's window.
     let window_id = window_id_field(cmd).or_else(|| {
         cmd.get("paneId")
@@ -180,6 +201,14 @@ pub fn handle_command(
                 400,
                 "newPane spec fields (command/args/cwd/label/subtitle/color/shell/env/meta/project) must be nested under \"pane\", not top-level, e.g. { \"type\": \"newPane\", \"windowId\": 0, \"pane\": { \"command\": … } }",
             );
+        }
+    }
+
+    // `attach` group colours are validated up front so a bad one fails with 400 before any pane
+    // is spawned (the same rule as `recolorTab`).
+    if ty == "attach" {
+        if let Err(msg) = validate_attach_colors(cmd) {
+            return DispatchResult::err(400, &msg);
         }
     }
 
@@ -267,9 +296,15 @@ fn exec(
                             panes.push(spawn_pane(sessions, control_file, ps)?);
                         }
                     }
+                    // Validated by `validate_attach_colors`; null or absent = no manual colour.
+                    let color = g
+                        .get("color")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_hex_color);
                     let tab = TabInfo {
                         id: tab_id.clone(),
                         title,
+                        color,
                         layout,
                         panes,
                         pane_group: None,
@@ -1061,6 +1096,124 @@ pub fn command_scope_error(
     Some("a scoped token needs a paneId, tabId, or windowId on the command".to_string())
 }
 
+/// Max length (chars) of a tab title set over the control API.
+const MAX_TAB_TITLE_CHARS: usize = 80;
+
+fn existing_tab_id(cmd: &Value, model: &ReadModel, needs: &str) -> Result<String, (u16, String)> {
+    let tab_id = cmd
+        .get("tabId")
+        .and_then(Value::as_str)
+        .ok_or((400, needs.to_string()))?;
+    if model.tab_window(tab_id).is_none() {
+        return Err((404, format!("no such tab: {tab_id}")));
+    }
+    Ok(tab_id.to_string())
+}
+
+/// Resolve a `renameTab` command to `(tab id, trimmed title)`, or `(http status, message)`.
+fn resolve_rename_tab(cmd: &Value, model: &ReadModel) -> Result<(String, String), (u16, String)> {
+    const NEEDS: &str = "renameTab needs a tabId and a title";
+    if cmd.get("tabId").and_then(Value::as_str).is_none() {
+        return Err((400, NEEDS.to_string()));
+    }
+    let title = cmd
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or((400, NEEDS.to_string()))?
+        .trim();
+    if title.is_empty() {
+        return Err((400, NEEDS.to_string()));
+    }
+    if title.chars().count() > MAX_TAB_TITLE_CHARS {
+        return Err((
+            400,
+            format!("tab title too long (max {MAX_TAB_TITLE_CHARS} chars)"),
+        ));
+    }
+    let tab_id = existing_tab_id(cmd, model, NEEDS)?;
+    Ok((tab_id, title.to_string()))
+}
+
+/// Normalise `#rgb` / `#rrggbb` (either case) to lowercase `#rrggbb`.
+pub(crate) fn normalize_hex_color(s: &str) -> Option<String> {
+    let h = s.strip_prefix('#')?;
+    if !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    match h.len() {
+        6 => Some(format!("#{}", h.to_ascii_lowercase())),
+        3 => {
+            let mut out = String::from("#");
+            for c in h.chars() {
+                let c = c.to_ascii_lowercase();
+                out.push(c);
+                out.push(c);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Check every `attach` group's optional tab `color`: absent or null is fine, a string must be
+/// `#rgb` / `#rrggbb` (as for `recolorTab`), anything else is an error naming the group.
+fn validate_attach_colors(cmd: &Value) -> Result<(), String> {
+    let Some(groups) = cmd.get("groups").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for (i, g) in groups.iter().enumerate() {
+        match g.get("color") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if normalize_hex_color(s).is_some() => {}
+            Some(v) => {
+                let shown = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Err(format!(
+                    "invalid color \"{shown}\" in groups[{i}] (expected #rrggbb, or null for none)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a `recolorTab` command to `(tab id, colour or None to clear)`.
+fn resolve_recolor_tab(
+    cmd: &Value,
+    model: &ReadModel,
+) -> Result<(String, Option<String>), (u16, String)> {
+    const NEEDS: &str = "recolorTab needs a tabId and a color";
+    if cmd.get("tabId").and_then(Value::as_str).is_none() {
+        return Err((400, NEEDS.to_string()));
+    }
+    let color = match cmd.get("color") {
+        Some(Value::Null) => None,
+        Some(v) => match v.as_str().and_then(normalize_hex_color) {
+            Some(c) => Some(c),
+            None => {
+                let shown = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Err((
+                    400,
+                    format!("invalid color \"{shown}\" (expected #rrggbb, or null to clear)"),
+                ));
+            }
+        },
+        None => {
+            return Err((
+                400,
+                "invalid color \"undefined\" (expected #rrggbb, or null to clear)".to_string(),
+            ))
+        }
+    };
+    let tab_id = existing_tab_id(cmd, model, NEEDS)?;
+    Ok((tab_id, color))
+}
+
 /// The layout names a tab can take (the GUI's `layout_name` set).
 pub const LAYOUT_NAMES: [&str; 6] = ["auto", "single", "columns", "rows", "grid", "main-stack"];
 
@@ -1334,6 +1487,7 @@ mod tests {
             tabs: vec![TabInfo {
                 id: "t1".into(),
                 title: "Tab 1".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![],
                 pane_group: None,
@@ -1634,6 +1788,197 @@ mod tests {
         assert_eq!(r.status, 400);
         assert!(r.body["error"].as_str().unwrap().contains("main-stack"));
         assert_eq!(m.tabs().next().unwrap().1.layout, "auto");
+    }
+
+    fn tab_cmd(m: &mut ReadModel, cmd: Value) -> DispatchResult {
+        set_layout(m, cmd)
+    }
+
+    fn first_tab(m: &ReadModel) -> &TabInfo {
+        m.tabs().next().unwrap().1
+    }
+
+    fn tab_by_id<'a>(m: &'a ReadModel, id: &str) -> &'a TabInfo {
+        m.tabs().find(|(_, t)| t.id == id).unwrap().1
+    }
+
+    #[test]
+    fn attach_tab_takes_a_normalised_manual_color() {
+        let mut m = model_one_window();
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"attach","windowId":1,"as":"tab","groups":[
+                {"title":"a","color":"#ABC","panes":[]},
+                {"title":"b","color":null,"panes":[]},
+                {"title":"c","panes":[]}
+            ]}),
+        );
+        assert_eq!(r.status, 200, "{:?}", r.body);
+        let ids: Vec<String> = r.body["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tab_by_id(&m, &ids[0]).color.as_deref(), Some("#aabbcc"));
+        assert_eq!(tab_by_id(&m, &ids[1]).color, None);
+        assert_eq!(tab_by_id(&m, &ids[2]).color, None);
+        // The manual colour is the same field recolorTab sets and clears.
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":ids[0],"color":null}),
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(tab_by_id(&m, &ids[0]).color, None);
+    }
+
+    #[test]
+    fn attach_bad_group_color_is_400_and_adds_no_tab() {
+        for bad in [json!("red"), json!("#12345"), json!(7)] {
+            let mut m = model_one_window();
+            let before = m.tabs().count();
+            let r = tab_cmd(
+                &mut m,
+                json!({"type":"attach","windowId":1,"groups":[
+                    {"title":"ok","panes":[]},
+                    {"title":"bad","color":bad,"panes":[]}
+                ]}),
+            );
+            assert_eq!(r.status, 400, "{bad}: {:?}", r.body);
+            let msg = r.body["error"].as_str().unwrap();
+            assert!(msg.contains("groups[1]"), "{msg}");
+            assert_eq!(
+                m.tabs().count(),
+                before,
+                "no tab may be added on a bad colour"
+            );
+        }
+    }
+
+    #[test]
+    fn rename_tab_sets_and_trims_title() {
+        let mut m = model_one_window();
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"renameTab","tabId":"t1","title":"  build  "}),
+        );
+        assert_eq!(r.status, 200);
+        assert!(r.notify_state);
+        assert_eq!(first_tab(&m).title, "build");
+    }
+
+    #[test]
+    fn rename_tab_rejects_bad_input() {
+        let mut m = model_one_window();
+        let before = first_tab(&m).title.clone();
+        let long = "x".repeat(81);
+        for cmd in [
+            json!({"type":"renameTab","tabId":"t1","title":""}),
+            json!({"type":"renameTab","tabId":"t1","title":"   "}),
+            json!({"type":"renameTab","tabId":"t1","title":long}),
+            json!({"type":"renameTab","tabId":"t1","title":5}),
+            json!({"type":"renameTab","tabId":7,"title":"x"}),
+            json!({"type":"renameTab","title":"x"}),
+        ] {
+            assert_eq!(tab_cmd(&mut m, cmd).status, 400);
+        }
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"renameTab","tabId":"t1","title":"x".repeat(81)}),
+        );
+        assert_eq!(r.body["error"], json!("tab title too long (max 80 chars)"));
+        assert_eq!(first_tab(&m).title, before);
+        let ok80 = "x".repeat(80);
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"renameTab","tabId":"t1","title":ok80}),
+        );
+        assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn recolor_tab_sets_normalises_and_clears() {
+        let mut m = model_one_window();
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":"t1","color":"#ABC"}),
+        );
+        assert_eq!(r.status, 200);
+        assert!(r.notify_state);
+        assert_eq!(first_tab(&m).color.as_deref(), Some("#aabbcc"));
+        tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":"t1","color":"#A1B2C3"}),
+        );
+        assert_eq!(first_tab(&m).color.as_deref(), Some("#a1b2c3"));
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":"t1","color":null}),
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(first_tab(&m).color, None);
+    }
+
+    #[test]
+    fn recolor_tab_rejects_bad_colours_and_leaves_model_unchanged() {
+        let mut m = model_one_window();
+        tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":"t1","color":"#112233"}),
+        );
+        for cmd in [
+            json!({"type":"recolorTab","tabId":"t1","color":"red"}),
+            json!({"type":"recolorTab","tabId":"t1","color":"#12345"}),
+            json!({"type":"recolorTab","tabId":"t1","color":"#12345g"}),
+            json!({"type":"recolorTab","tabId":"t1","color":42}),
+            json!({"type":"recolorTab","tabId":"t1"}),
+            json!({"type":"recolorTab","color":"#fff"}),
+        ] {
+            assert_eq!(tab_cmd(&mut m, cmd).status, 400);
+        }
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":"t1","color":"red"}),
+        );
+        assert_eq!(
+            r.body["error"],
+            json!("invalid color \"red\" (expected #rrggbb, or null to clear)")
+        );
+        assert_eq!(first_tab(&m).color.as_deref(), Some("#112233"));
+    }
+
+    #[test]
+    fn tab_commands_unknown_tab_is_404() {
+        let mut m = model_one_window();
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"renameTab","tabId":"nope","title":"x"}),
+        );
+        assert_eq!(r.status, 404);
+        assert_eq!(r.body["error"], json!("no such tab: nope"));
+        let r = tab_cmd(
+            &mut m,
+            json!({"type":"recolorTab","tabId":"nope","color":"#fff"}),
+        );
+        assert_eq!(r.status, 404);
+    }
+
+    #[test]
+    fn tab_commands_respect_scope() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let scope = Scope {
+            window_ids: Some(vec![999]),
+            ..Default::default()
+        };
+        for cmd in [
+            json!({"type":"renameTab","tabId":"t1","title":"x"}),
+            json!({"type":"recolorTab","tabId":"t1","color":"#fff"}),
+        ] {
+            let r = handle_command(&mut m, &s, None, Some(&scope), &cmd, &speech());
+            assert_eq!(r.status, 403);
+        }
+        assert_eq!(first_tab(&m).color, None);
     }
 
     #[tokio::test]

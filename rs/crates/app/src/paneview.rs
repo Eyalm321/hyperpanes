@@ -229,6 +229,16 @@ fn a11y_wanted() -> bool {
     })
 }
 
+/// The colour a tab chip's stripe + tint use, if any. A manual tab colour (`recolorTab`) wins
+/// over a pane group's project colour; a group with no project colour falls back to neutral; an
+/// ordinary tab with no manual colour has none.
+pub(crate) fn tab_stripe_color(
+    manual: Option<slint::Color>,
+    group: Option<&crate::state::PaneGroup>,
+) -> Option<slint::Color> {
+    manual.or_else(|| group.map(|g| g.color.unwrap_or(theme::GROUP_NEUTRAL)))
+}
+
 /// Accessible label of a tab: the plain title, or "<title>, pane group[, <project>]" (t28).
 pub(crate) fn group_a11y_label(title: &str, group: bool, project: Option<&str>) -> String {
     if !group {
@@ -528,15 +538,15 @@ pub fn resync(
                     .and_then(|id| state.projects.iter().find(|p| p.id == id))
                     .map(|p| p.name.clone())
             });
+            // A manual tab colour (recolorTab) overrides the group/project colour.
+            let stripe = tab_stripe_color(t.color, t.pane_group.as_ref());
             TabItem {
                 title: t.title.clone(),
                 active: i == active,
+                has_color: t.color.is_some(),
+                color: t.color.unwrap_or_default(),
                 group: t.pane_group.is_some(),
-                group_color: t
-                    .pane_group
-                    .as_ref()
-                    .and_then(|g| g.color)
-                    .unwrap_or(theme::GROUP_NEUTRAL),
+                group_color: stripe.unwrap_or(theme::GROUP_NEUTRAL),
                 a11y_label: group_a11y_label(&t.title, t.pane_group.is_some(), project.as_deref())
                     .into(),
             }

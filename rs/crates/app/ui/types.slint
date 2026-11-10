@@ -127,6 +127,9 @@ export struct PaneItem {
 export struct TabItem {
     title: string,
     active: bool,
+    // manual tab colour (control recolorTab / persisted); has-color=false → default chrome
+    has-color: bool,
+    color: color,
     // pane-group tab (t28): leading stripe + tint in `group-color`, a group glyph, and the
     // accessible label ("<title>, pane group[, <project>]").
     group: bool,

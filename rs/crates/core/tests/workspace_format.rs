@@ -42,6 +42,7 @@ fn kitchen_sink() -> WorkspaceFile {
         env_dropped: Some(vec!["MY_SECRET".to_string()]),
     };
     let group = GroupSpec {
+        color: Some("#aabbcc".into()),
         title: Some("build".into()),
         layout: Some("main-stack".into()),
         panes: vec![pane.clone(), PaneSpec::default()],
@@ -148,6 +149,7 @@ fn group_split_state_survives_disk_round_trip() {
     let path = temp_file("split");
     let ws = WorkspaceFile {
         groups: Some(vec![GroupSpec {
+            color: None,
             title: Some("t".into()),
             layout: Some("columns".into()),
             panes: vec![
@@ -215,6 +217,18 @@ fn windows_of_normalises_each_round_tripped_shape_identically() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+#[test]
+fn group_tab_color_round_trips_and_is_omitted_when_unset() {
+    let with: GroupSpec = serde_json::from_str(r##"{"title":"a","color":"#aabbcc"}"##).unwrap();
+    assert_eq!(with.color.as_deref(), Some("#aabbcc"));
+    let back: GroupSpec = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+    assert_eq!(back, with);
+
+    let without: GroupSpec = serde_json::from_str(r#"{"title":"a"}"#).unwrap();
+    assert_eq!(without.color, None);
+    assert!(!serde_json::to_string(&without).unwrap().contains("color"));
 }
 
 #[test]

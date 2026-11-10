@@ -125,6 +125,8 @@ impl std::fmt::Debug for PaneInfo {
 pub struct TabInfo {
     pub id: String,
     pub title: String,
+    /// Manual tab colour, lowercase `#rrggbb`; `None` = unset.
+    pub color: Option<String>,
     pub layout: String,
     pub panes: Vec<PaneInfo>,
     /// Set when this tab is a pane group (published by the GUI host; `None` for ordinary tabs).
@@ -450,6 +452,28 @@ impl ReadModel {
         false
     }
 
+    /// Rename a tab. Returns false if the tab is unknown.
+    pub fn rename_tab(&mut self, tab_id: &str, title: &str) -> bool {
+        for w in &mut self.windows {
+            if let Some(tab) = w.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.title = title.to_string();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set (or clear, with `None`) a tab's manual colour. Returns false if the tab is unknown.
+    pub fn recolor_tab(&mut self, tab_id: &str, color: Option<String>) -> bool {
+        for w in &mut self.windows {
+            if let Some(tab) = w.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.color = color;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Rename a pane's header. `set_subtitle` decides whether `subtitle` is touched at all;
     /// an empty subtitle clears it (TS `subtitle:""`).
     pub fn rename_pane(
@@ -654,6 +678,7 @@ impl ReadModel {
                 tabs.push(TabOut {
                     id: t.id.clone(),
                     title: t.title.clone(),
+                    color: t.color.clone(),
                     layout: t.layout.clone(),
                     panes,
                     pane_group: t.pane_group.clone(),
@@ -704,6 +729,7 @@ pub struct WindowOut {
 pub struct TabOut {
     pub id: String,
     pub title: String,
+    pub color: Option<String>,
     pub layout: String,
     pub panes: Vec<PaneOut>,
     /// `{project,color}` for a pane-group tab, else `null` (always present).
@@ -813,6 +839,7 @@ mod tests {
         let tab = TabInfo {
             id: "1:0".into(),
             title: "t".into(),
+            color: None,
             layout: "auto".into(),
             panes: vec![p],
             pane_group: None,
@@ -828,6 +855,7 @@ mod tests {
             tabs: vec![TabInfo {
                 id: "t1".to_string(),
                 title: "Tab 1".to_string(),
+                color: None,
                 layout: "auto".to_string(),
                 panes: vec![pane("p1", "u1")],
                 pane_group: None,
@@ -848,7 +876,7 @@ mod tests {
         // Optionals omitted; activity present; key ORDER preserved (struct order, not sorted).
         assert_eq!(
             s,
-            r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#888888","status":"running","activity":"busy"}],"paneGroup":null}]}]}"##
+            r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","color":null,"layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#888888","status":"running","activity":"busy"}],"paneGroup":null}]}]}"##
         );
     }
 
@@ -893,6 +921,7 @@ mod tests {
             tabs: vec![TabInfo {
                 id: "t2".into(),
                 title: "Tab 2".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![pane("p3", "u3")],
                 pane_group: None,
@@ -924,6 +953,47 @@ mod tests {
         // A session uid resolves to its pane.
         assert_eq!(m.resolve_pane_id("u-abc").as_deref(), Some("pane-abc"));
         assert_eq!(m.resolve_pane_id("ghost"), None);
+    }
+
+    /// t34 × t28: a tab's manual `color` and its `paneGroup.color` are separate fields in
+    /// `/state`; the manual one is what `recolorTab` sets and clears.
+    #[test]
+    fn state_serializes_manual_color_beside_pane_group_color() {
+        let mut m = seeded();
+        if let Some(t) = m.windows[0].tabs.get_mut(0) {
+            t.pane_group = Some(PaneGroupInfo {
+                project: Some("p1".into()),
+                color: Some("#112233".into()),
+            });
+        }
+        assert!(m.recolor_tab("t1", Some("#aabbcc".into())));
+        let v = serde_json::to_value(m.state_for_scope(None, &|_p| Activity::Exited)).unwrap();
+        let tab = &v["windows"][0]["tabs"][0];
+        assert_eq!(tab["color"], json!("#aabbcc"));
+        assert_eq!(tab["paneGroup"]["color"], json!("#112233"));
+        assert!(m.recolor_tab("t1", None));
+        let v = serde_json::to_value(m.state_for_scope(None, &|_p| Activity::Exited)).unwrap();
+        let tab = &v["windows"][0]["tabs"][0];
+        assert!(tab["color"].is_null());
+        assert_eq!(tab["paneGroup"]["color"], json!("#112233"));
+    }
+
+    #[test]
+    fn state_serializes_tab_color_or_null() {
+        let mut m = seeded();
+        let v = serde_json::to_value(m.state_for_scope(None, &|_p| Activity::Exited)).unwrap();
+        assert!(v["windows"][0]["tabs"][0]["color"].is_null());
+        assert!(v["windows"][0]["tabs"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("color"));
+        assert!(m.recolor_tab("t1", Some("#aabbcc".into())));
+        assert!(m.rename_tab("t1", "renamed"));
+        assert!(!m.recolor_tab("ghost", None));
+        assert!(!m.rename_tab("ghost", "x"));
+        let v = serde_json::to_value(m.state_for_scope(None, &|_p| Activity::Exited)).unwrap();
+        assert_eq!(v["windows"][0]["tabs"][0]["color"], json!("#aabbcc"));
+        assert_eq!(v["windows"][0]["tabs"][0]["title"], json!("renamed"));
     }
 
     #[test]

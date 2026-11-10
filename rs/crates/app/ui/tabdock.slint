@@ -84,6 +84,8 @@ component VTabChip inherits Rectangle {
     in property <bool> active;
     in property <bool> editing;
     in property <bool> spring-hover: false;
+    in property <bool> has-color: false;     // manual tab colour set
+    in property <color> tab-color;
     in property <bool> group: false;         // pane-group tab (t28)
     in property <color> group-color: Theme.subtext;
     in property <string> a11y-label: "";
@@ -117,15 +119,17 @@ component VTabChip inherits Rectangle {
     border-width: root.spring-hover ? 2px : 0px;
     border-color: Theme.brand;
 
-    // pane-group tint + 3px stripe on the leading edge (the side facing away from the panes'
-    // active bar, so both can show): left edge when docked right, right edge docked left.
-    if root.group : Rectangle {
-        background: root.group-color.with-alpha(0.10);
+    // Tab tint + 3px stripe on the leading edge (the side facing away from the panes' active
+    // bar, so both can show), for a pane-group tab or a tab with a manual colour. The manual
+    // colour (recolorTab) wins over the group colour.
+    property <color> stripe-color: root.has-color ? root.tab-color : root.group-color;
+    if root.group || root.has-color : Rectangle {
+        background: root.stripe-color.with-alpha(0.10);
     }
-    if root.group : Rectangle {
+    if root.group || root.has-color : Rectangle {
         x: root.bar-left ? parent.width - 3px : 0px;
         width: 3px;
-        background: root.group-color;
+        background: root.stripe-color;
     }
 
     ta := TouchArea {
@@ -331,6 +335,8 @@ export component TabColumn inherits Rectangle {
                     a11y-label: tab.a11y-label;
                     editing: root.editing-tab == idx;
                     spring-hover: root.drop-tab-idx == idx;
+                    has-color: tab.has-color;
+                    tab-color: tab.color;
                     bar-left: root.tab-dock == 1;
                     overflowing: root.overflowing;
                     select => { root.select-tab(idx); }

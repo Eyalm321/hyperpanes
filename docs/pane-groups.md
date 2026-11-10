@@ -52,6 +52,9 @@ selected". See the decision table in [tab-bar.md](tab-bar.md).
 - **Colour** (first match wins): the project shared by every pane; the clicked or focused
   pane's project; the first pane with a project; neutral. A pane's project is the project
   whose git root contains its working directory. Recolouring the project recolours the tab.
+  A manual tab colour set over the control API (`recolorTab`) overrides the group colour until
+  it is cleared (`"color": null`) or the user picks a "Group Color". See
+  [tab-bar.md](tab-bar.md#tab-colour-and-the-control-api).
 - **Ungroup** sends the panes back to the tab they came from, if it is still open, and closes
   the group tab. Otherwise the tab just stops being a group. Ungroup never closes a pane.
 - The origin of a group is runtime-only; after a restart a group tab ungroups into an ordinary
@@ -65,7 +68,8 @@ is not saved. See [hyperpanes-format.md](hyperpanes-format.md).
 
 ## Control API
 
-- `GET /state`: every tab carries `paneGroup` or `null`.
+- `GET /state`: every tab carries `paneGroup` or `null`, next to the tab's manual `color`
+  (`recolorTab`, or `null`).
 - `POST /command {"type":"groupPanes","paneIds":[...],"title"?,"project"?}` returns
   `{"tabId"}`; the panes must be local, in one window, at least 2 (they may come from
   different tabs).
