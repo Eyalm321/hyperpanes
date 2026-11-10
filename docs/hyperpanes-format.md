@@ -69,6 +69,19 @@ present into a flat window list (precedence `windows` → `groups` → `panes`, 
 | `mainFraction` | `number?` (f64) | main-stack split fraction (0 < f < 1) |
 | `focused`      | `number?` (u32) | index of the focused pane (default 0) |
 | `zoomed`       | `number?` (u32) | index of the maximized pane (default: none) |
+| `paneGroup`    | `PaneGroupSpec?` | present when the tab is a *pane group* (see below); omitted otherwise |
+
+### `PaneGroupSpec` (a tab marked as a group)
+
+| JSON field | Rust type | Notes |
+|---|---|---|
+| `project` | `string?` | project id the group belongs to |
+| `color`   | `string?` | `#rrggbb` stripe/tint colour |
+
+Both fields are optional and omitted when unset. Naming caveat: a **pane group** is a tab the
+user created by multi-selecting panes and grouping them (it carries `paneGroup`), whereas
+`GroupSpec` is the file's name for *any* tab. Older versions ignore `paneGroup` and load an
+ordinary tab, and unknown fields inside it are tolerated.
 
 ### `PaneSpec`
 
@@ -259,3 +272,18 @@ extension allow-lists (1, 2) and the installer association (4).
 
 *This document is advisory. It changes no behavior; the schema and I/O above describe the code
 as it exists at the time of writing.*
+
+## Pane groups over the control API
+
+- `GET /state`: every tab carries `"paneGroup": {"project": …, "color": …}` or `null`.
+- `POST /command {"type":"groupPanes","paneIds":["…","…"],"title"?,"project"?}` → `{"ok":true,"tabId":"…","result":{"tabId":"…"}}`.
+  Needs ≥2 distinct, existing, local panes in ONE window (they may come from different tabs).
+  `project` is a project id or name. Otherwise `400` with a message (`no such pane`, `unknown
+  project`, `… must all be in one window`, …).
+- `POST /command {"type":"ungroupPanes","tabId":"…"}` → `{"ok":true}`; `400` if the tab doesn't
+  exist or isn't a pane group.
+
+Both are validated against the read model, then **queued for the GUI app** to apply
+(`Shared::take_pane_group_requests`), since only the GUI can move panes across tabs. A headless
+server (no GUI) accepts and queues the request but never applies it. Scoped tokens need every
+pane (or the tab) in scope, like `recolorPane`.

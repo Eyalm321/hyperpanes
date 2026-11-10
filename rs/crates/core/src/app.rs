@@ -181,6 +181,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
                 color: None,
                 layout: "auto".into(),
                 panes: vec![],
+                pane_group: None,
             }],
         });
         return;
@@ -212,6 +213,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
                 color: None,
                 layout,
                 panes,
+                pane_group: None,
             });
         }
         if active_tab_id.is_none() {

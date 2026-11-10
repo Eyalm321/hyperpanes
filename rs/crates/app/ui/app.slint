@@ -203,6 +203,8 @@ export component AppWindow inherits Window {
     callback move-pane-new-window();
     // drag / tear-off (Wave 2)
     callback pane-grab(int);                 // a pane header was pressed (arm a drag)
+    callback pane-select-toggle(int);        // Ctrl/Cmd+press on a pane header (multi-select, t28)
+    in property <int> selection-count: 0;    // multi-selected panes (0 = none; else ≥ 2) → hint chip
     callback tab-grab(int);                  // a tab was pressed (arm a reorder)
     callback tab-geom(int, length, length);  // report a tab's window-x + width
     // ---- tab bar dock (t25, #85) — controller-owned, per window ----
@@ -300,6 +302,7 @@ export component AppWindow inherits Window {
 
         // The top bar hides in OS fullscreen (chrome-free terminal).
         if !root.fullscreen : TopBar {
+            selection-count: root.selection-count;
             macos: root.macos;
             tabs: root.tabs;
             editing-tab: root.editing-tab;
@@ -354,6 +357,7 @@ export component AppWindow inherits Window {
             if root.tab-dock == 2 && !root.fullscreen : TabColumn {
                 tab-dock: root.tab-dock;
                 dock-dragging: root.dock-dragging;
+                selection-count: root.selection-count;
                 tabs: root.tabs;
                 editing-tab: root.editing-tab;
                 drop-strip-active: root.drop-strip-active;
@@ -393,6 +397,7 @@ export component AppWindow inherits Window {
                 drop-rect-active: root.drop-rect-active;
 
                 pane-grab(i) => { root.pane-grab(i); }
+                pane-select-toggle(i) => { root.pane-select-toggle(i); }
                 pane-context(i, x, y) => { root.pane-context(i, x, y); }
                 taskbar-context(i, x, y) => { root.taskbar-context(i, x, y); }
                 key(i, m) => { root.key(i, m); }
@@ -427,6 +432,7 @@ export component AppWindow inherits Window {
             if root.tab-dock == 1 && !root.fullscreen : TabColumn {
                 tab-dock: root.tab-dock;
                 dock-dragging: root.dock-dragging;
+                selection-count: root.selection-count;
                 tabs: root.tabs;
                 editing-tab: root.editing-tab;
                 drop-strip-active: root.drop-strip-active;

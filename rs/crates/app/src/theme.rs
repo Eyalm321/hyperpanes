@@ -5,6 +5,9 @@ use hyperpanes_core::layout::presets::Layout;
 use hyperpanes_terminal_widget::Font;
 use slint::Color;
 
+/// Neutral stripe/glyph colour for a pane-group tab that has no project colour (Theme.subtext).
+pub const GROUP_NEUTRAL: Color = Color::from_rgb_u8(0x93, 0x99, 0xb2);
+
 /// The selectable frame palettes (pane dot + frame-border colors), the native port of
 /// the renderer's `theme.ts` `PALETTES`. Every palette shares the same 8 slots in the
 /// same order — red · amber · green · blue · purple · pink · teal · yellow — so a pane

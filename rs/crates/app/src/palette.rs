@@ -113,6 +113,36 @@ pub fn build(state: &State) -> Vec<Entry> {
         ));
     }
 
+    // ---- pane selection + groups (t28, #96) ----
+    cmds.push(Entry::new(
+        "Toggle selection of focused pane",
+        "Add/remove the focused pane in the multi-selection",
+        "select multi pane group",
+        Command::ToggleFocusedSelection,
+    ));
+    if state.selection_active() {
+        cmds.push(Entry::new(
+            "Group selected panes",
+            "Move the selected panes into a coloured tab",
+            "group selection panes tab",
+            Command::GroupSelection,
+        ));
+        cmds.push(Entry::new(
+            "Clear pane selection",
+            "Deselect all selected panes",
+            "clear selection deselect panes",
+            Command::ClearSelection,
+        ));
+    }
+    if state.active_tab().pane_group.is_some() && state.active_tab().remote.is_none() {
+        cmds.push(Entry::new(
+            "Ungroup tab",
+            "Send the panes back to their original tab",
+            "ungroup group tab panes",
+            Command::UngroupActive,
+        ));
+    }
+
     // ---- panes ----
     cmds.push(Entry::new(
         "New pane",

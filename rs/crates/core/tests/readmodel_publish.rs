@@ -40,6 +40,7 @@ fn gui_window(panes: Vec<PaneInfo>) -> WindowInfo {
             color: None,
             layout: "auto".to_string(),
             panes,
+            pane_group: None,
         }],
     }
 }
@@ -137,6 +138,7 @@ fn carryover_rehomes_into_active_tab_and_never_duplicates() {
             color: None,
             layout: "auto".to_string(),
             panes: vec![pane("ctl-a", "u-a")],
+            pane_group: None,
         },
     ));
 

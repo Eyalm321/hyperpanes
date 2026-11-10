@@ -117,6 +117,10 @@ export struct PaneItem {
     // badge). The native app removes a pane the moment its session exits, so this is
     // structurally always false today — kept for Electron parity / a future status model.
     exited: bool,
+    // multi-select (t28): this pane is in the Ctrl+click selection (outline + tint + badge),
+    // and the a11y description ("N panes selected", "" when not selected).
+    selected: bool,
+    select-desc: string,
 }
 
 // One tab (workspace group) chip in the strip.
@@ -126,6 +130,11 @@ export struct TabItem {
     // manual tab colour (control recolorTab / persisted); has-color=false → default chrome
     has-color: bool,
     color: color,
+    // pane-group tab (t28): leading stripe + tint in `group-color`, a group glyph, and the
+    // accessible label ("<title>, pane group[, <project>]").
+    group: bool,
+    group-color: color,
+    a11y-label: string,
 }
 
 // A draggable resize seam (vertical column / horizontal row / main-stack main).

@@ -192,6 +192,23 @@ pub enum Command {
     RestoreReminder(String),
     /// Hide the fired-reminder alert toast for session uid `0` (the reminder + bell badge stay).
     DismissReminderToast(String),
+    // ---- multi-select + pane groups (t28, #96) ----
+    /// Ctrl+click on pane `0`'s header: toggle it in the multi-selection.
+    ToggleSelectPane(usize),
+    /// Palette/keybinding: toggle the focused pane in the selection.
+    ToggleFocusedSelection,
+    /// Group the selected panes into a tab (Ctrl+G, guarded by an active selection).
+    GroupSelection,
+    /// Group the selection with pane `0` (the right-clicked one) as the colour anchor.
+    GroupSelectionAt(usize),
+    /// Drop the pane selection (Esc, guarded by an active selection).
+    ClearSelection,
+    /// Ungroup group tab `0` (tab/pane menus).
+    UngroupTab(usize),
+    /// Ungroup the active tab (palette / unbound keybinding).
+    UngroupActive,
+    /// Recolour group tab `0` to project `1` (`None` = follow the panes' own project).
+    SetGroupColor(usize, Option<String>),
     /// Move pane `0` into a brand-new tab (disabled when its tab has <2 panes).
     MovePaneToNewTab(usize),
     /// Move pane `0` into existing tab `1`.
@@ -493,6 +510,22 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::ToggleReminders => state.toggle_reminders(),
         Command::RestoreReminder(uid) => state.restore_reminder(&uid, mgr),
         Command::DismissReminderToast(uid) => state.dismiss_reminder_toast(&uid),
+        Command::ToggleSelectPane(i) => state.toggle_select(i),
+        Command::ToggleFocusedSelection => state.toggle_focused_selection(),
+        Command::GroupSelection => {
+            let f = state.active_tab().focused;
+            state.group_selection(Some(f), mgr);
+        }
+        Command::GroupSelectionAt(i) => {
+            state.group_selection(Some(i), mgr);
+        }
+        Command::ClearSelection => state.clear_selection(),
+        Command::UngroupTab(i) => state.ungroup(i, mgr),
+        Command::UngroupActive => {
+            let a = state.active;
+            state.ungroup(a, mgr);
+        }
+        Command::SetGroupColor(i, proj) => state.set_group_color(i, proj),
         Command::MovePaneToNewTab(i) => state.move_pane_to_new_tab(i, mgr),
         Command::MovePaneToTab(i, t) => state.move_pane_to_tab(i, t, mgr),
         // ---- tab context-menu actions ----

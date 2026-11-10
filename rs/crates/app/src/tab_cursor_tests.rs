@@ -100,6 +100,9 @@ impl H {
                 active: i == 0,
                 has_color: false,
                 color: Default::default(),
+                group: false,
+                group_color: slint::Color::default(),
+                a11y_label: Default::default(),
             })
             .collect();
         win.set_tabs(ModelRc::from(Rc::new(VecModel::from(tabs))));

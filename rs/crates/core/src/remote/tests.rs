@@ -156,6 +156,7 @@ impl Host {
                 color: None,
                 layout: "auto".into(),
                 panes: vec![],
+                pane_group: None,
             }],
         });
         shared.tokens.lock().unwrap().set_master(MASTER.to_string());

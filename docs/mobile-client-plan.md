@@ -16,7 +16,7 @@ API** (`rs/crates/core/src/control/`):
 | Agent liveness (working / awaiting-input / done / exited) | `activity` + `liveness` frames |
 | Scrollback / attach snapshot | `GET /panes/{id}/output` (raw ANSI replay + byte `cursor`) |
 | Typing / prompting / key chords | `POST /panes/{id}/input` (`data`+`submit`, `keys`) |
-| Pane management | `POST /command` (`newPane`, `closePane`, `restartPane`, `renamePane`, `recolorPane`, `renameTab`, `recolorTab`, `setLayout`, `focusPane`) |
+| Pane management | `POST /command` (`newPane`, `closePane`, `restartPane`, `renamePane`, `recolorPane`, `renameTab`, `recolorTab`, `setLayout`, `focusPane`, `groupPanes`, `ungroupPanes`) |
 | Auth | bearer token — a per-device token minted by `hyperpanes pair` via `POST /devices` (master + scoped tokens also exist) |
 
 So the client is architecturally identical to the MCP server — but with a terminal

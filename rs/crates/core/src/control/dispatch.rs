@@ -294,6 +294,7 @@ fn exec(
                         color: None,
                         layout,
                         panes,
+                        pane_group: None,
                     };
                     if !model.insert_tab(window_id, tab) {
                         return Err(format!("window not found: {window_id}"));
@@ -1452,6 +1453,7 @@ mod tests {
                 color: None,
                 layout: "auto".into(),
                 panes: vec![],
+                pane_group: None,
             }],
         });
         m

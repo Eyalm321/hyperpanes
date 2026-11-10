@@ -107,6 +107,8 @@ pub struct DetachedTab {
     pub ctl_id: Option<String>,
     /// Manual tab colour (None = default chrome), carried like `ctl_id`.
     pub color: Option<Color>,
+    /// Pane-group marker, carried so a moved/reopened group tab stays a group.
+    pub pane_group: Option<PaneGroup>,
     pub panes: Vec<DetachedPane>,
 }
 
@@ -970,10 +972,44 @@ fn shell_label(program: &str) -> String {
     }
 }
 
+/// Marker + styling of a pane-group tab (t28, #96): the project (id) it belongs to and the
+/// stripe/tint colour, cached so a project that vanishes doesn't blank the tab.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PaneGroup {
+    pub project: Option<String>,
+    pub color: Option<Color>,
+}
+
+static TAB_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_tab_uid() -> u64 {
+    TAB_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Project choice for a new group: the project every member shares; else the anchor's own;
+/// else the first member that has one; else none. `members` are per-pane project ids in pane
+/// order; `anchor` indexes into it (out of range → treated as "no anchor").
+pub(crate) fn resolve_group_project(members: &[Option<String>], anchor: usize) -> Option<String> {
+    if let Some(Some(first)) = members.first() {
+        if members.iter().all(|m| m.as_deref() == Some(first.as_str())) {
+            return Some(first.clone());
+        }
+    }
+    if let Some(Some(a)) = members.get(anchor) {
+        return Some(a.clone());
+    }
+    members.iter().flatten().next().cloned()
+}
+
 /// One tab = a self-contained workspace group (the Rust port of `useWorkspace`'s
 /// `Group`). Background tabs keep their `PaneState`s — and thus their live
 /// sessions — alive; only the active tab is mounted in the UI models.
 pub struct Tab {
+    /// Runtime-only monotonic identity (never persisted): lets the group→origin map survive
+    /// tab reordering/closing without index bookkeeping.
+    pub uid: u64,
+    /// `Some` for a pane-group tab (t28, #96): a tab made from a multi-selection of panes.
+    pub pane_group: Option<PaneGroup>,
     pub title: SharedString,
     pub panes: Vec<PaneState>,
     pub layout: Layout,
@@ -994,6 +1030,25 @@ pub struct Tab {
     pub color: Option<Color>,
 }
 
+impl PaneState {
+    /// Strip this pane down to its re-hostable essentials (session stays alive).
+    fn into_detached(self) -> DetachedPane {
+        DetachedPane {
+            uid: self.uid,
+            title: self.title,
+            subtitle: self.subtitle,
+            pinned_accent: self.pinned_accent,
+            show_frame: self.show_frame,
+            show_dot: self.show_dot,
+            font_px: self.font_px,
+            spawn_command: self.spawn_command,
+            spawn_args: self.spawn_args,
+            spawn_shell: self.spawn_shell,
+            spawn_env: self.env,
+        }
+    }
+}
+
 impl Tab {
     #[cfg(test)]
     pub(crate) fn new_for_test(title: SharedString) -> Self {
@@ -1002,6 +1057,8 @@ impl Tab {
 
     pub(crate) fn empty(title: SharedString) -> Self {
         Tab {
+            uid: next_tab_uid(),
+            pane_group: None,
             remote: None,
             title,
             panes: Vec::new(),
@@ -1049,6 +1106,14 @@ pub struct State {
     /// Which edge this window's tab bar is docked to (t25, #85). Per window; persisted in
     /// the session snapshot as `tabDock`.
     pub tab_dock: TabDock,
+    /// Multi-selected panes of the ACTIVE tab (session uids, click order). Invariant:
+    /// empty or ≥2 entries. Runtime only.
+    pub selection: Vec<String>,
+    /// A single pane armed by the keyboard/palette "toggle selection" before a second one
+    /// joins (the mouse path seeds with the focused pane instead). Not a selection.
+    pub pending_select: Option<String>,
+    /// Group tab uid → uid of the tab its panes came from (Ungroup returns them there).
+    pub group_origin: std::collections::HashMap<u64, u64>,
     /// Index of the tab whose title is being edited inline (-1 = none).
     pub editing_tab: i32,
     /// Index (within the active tab) of the pane whose label is being edited inline
@@ -1302,6 +1367,9 @@ impl State {
             tab_seq: 0,
             fullscreen: false,
             tab_dock: TabDock::Top,
+            selection: Vec::new(),
+            pending_select: None,
+            group_origin: std::collections::HashMap::new(),
             editing_tab: -1,
             editing_pane: -1,
             last_blink: Instant::now(),
@@ -1822,6 +1890,12 @@ impl State {
     /// is dropped. Shared by [`Self::close_pane_in`] (which then kills the session) and
     /// pane re-host (which keeps the session alive to rebind it in another window).
     fn take_pane_in(&mut self, ti: usize, idx: usize) -> Option<(PaneState, bool)> {
+        let out = self.take_pane_in_inner(ti, idx)?;
+        self.selection_forget(&out.0.uid);
+        Some(out)
+    }
+
+    fn take_pane_in_inner(&mut self, ti: usize, idx: usize) -> Option<(PaneState, bool)> {
         if ti >= self.tabs.len() {
             return None;
         }
@@ -2098,6 +2172,7 @@ impl State {
         if dest == from {
             return;
         }
+        self.clear_selection();
         let active_title_idx = self.active;
         let tab = self.tabs.remove(from);
         self.tabs.insert(dest, tab);
@@ -2304,6 +2379,7 @@ impl State {
     // ---- tabs ----
 
     pub fn new_tab(&mut self, mgr: &SessionManager) {
+        self.clear_selection();
         let tab = self.fresh_tab();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
@@ -2318,6 +2394,7 @@ impl State {
         if idx >= self.tabs.len() {
             return true;
         }
+        self.clear_selection();
         if self.tabs.len() <= 1 {
             // Last tab: kill its sessions and signal quit.
             for p in &self.tabs[idx].panes {
@@ -2341,6 +2418,7 @@ impl State {
 
     pub fn switch_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() && idx != self.active {
+            self.clear_selection();
             self.active = idx;
             self.editing_tab = -1;
             self.dirty = true;
@@ -3393,6 +3471,7 @@ impl State {
     /// mutations use; the dirty signal is driven by [`crate::control_host::ControlHost::sync`].
     pub fn refresh_projects(&mut self) {
         self.projects = sidebar::list();
+        self.refresh_group_colors(); // a control-side recolour updates group tabs live
         self.dirty = true;
     }
 
@@ -3498,6 +3577,7 @@ impl State {
         let new = parse_hex(color);
         projects::set_project_color(&p.id, color);
         self.projects = sidebar::list();
+        self.refresh_group_colors();
         // Propagate to open panes across ALL tabs: same matcher as the cwd tint
         // (`note_pane_cwd`): pane cwd → enclosing git root → the store's path key.
         for tab in &mut self.tabs {
@@ -4280,6 +4360,11 @@ impl State {
     /// the focused pane or active tab.
     pub fn open_pane_context(&mut self, idx: usize, x: f32, y: f32) {
         if idx < self.active_tab().panes.len() {
+            // Right-clicking an UNSELECTED pane drops the selection first (t28, #96).
+            let uid = self.active_tab().panes[idx].uid.clone();
+            if !self.selection.contains(&uid) {
+                self.clear_selection();
+            }
             self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, false));
             self.dirty = true;
         }
@@ -4303,6 +4388,7 @@ impl State {
     /// Open the tab-strip menu for tab `idx`, anchored at window-logical `(x, y)`.
     pub fn open_tab_context(&mut self, idx: usize, x: f32, y: f32) {
         if idx < self.tabs.len() {
+            self.clear_selection(); // any tab-strip action drops the pane selection
             self.ctx = Some(crate::contextmenu::tab_menu(self, idx, x, y));
             self.dirty = true;
         }
@@ -4932,6 +5018,398 @@ impl State {
         self.adopt_into_tab(mgr, dp, target);
     }
 
+    // ---- multi-select + pane groups (t28, #96) ----
+
+    /// Whether a selection (≥2 panes) is active — the guard for Ctrl+G / Esc.
+    pub fn selection_active(&self) -> bool {
+        self.selection.len() >= 2
+    }
+
+    /// `0` when `uid` isn't drawn as selected, else the selection size it belongs to (`1` = the
+    /// armed pending pane) — feeds the pane header's "N panes selected" description.
+    pub fn selected_count_for(&self, uid: &str) -> usize {
+        if self.selection.iter().any(|u| u == uid) {
+            self.selection.len()
+        } else if self.pending_select.as_deref() == Some(uid) {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Whether `uid` is drawn as selected (a real selection member, or the armed pending pane).
+    pub fn is_selected(&self, uid: &str) -> bool {
+        self.selection.iter().any(|u| u == uid) || self.pending_select.as_deref() == Some(uid)
+    }
+
+    /// Drop the whole selection (and any armed pending pane).
+    pub fn clear_selection(&mut self) {
+        if !self.selection.is_empty() || self.pending_select.is_some() {
+            self.selection.clear();
+            self.pending_select = None;
+            self.dirty = true;
+        }
+    }
+
+    /// Remove `uid` from the selection (pane closed/moved), re-establishing empty-or-≥2.
+    fn selection_forget(&mut self, uid: &str) {
+        if self.pending_select.as_deref() == Some(uid) {
+            self.pending_select = None;
+            self.dirty = true;
+        }
+        if self.selection.iter().any(|u| u == uid) {
+            self.selection.retain(|u| u != uid);
+            if self.selection.len() < 2 {
+                self.selection.clear();
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// Whether active-tab pane `idx` may be selected: local tab, local pane.
+    fn selectable(&self, idx: usize) -> bool {
+        let t = self.active_tab();
+        t.remote.is_none() && t.panes.get(idx).is_some_and(|p| p.remote.is_none())
+    }
+
+    /// Ctrl+click on a pane header: toggle active-tab pane `idx`. The first toggle also adds
+    /// the focused pane (a selection is never a lone pane). Selecting the focused pane first
+    /// with nothing else selected is therefore a no-op until a second pane is clicked.
+    pub fn toggle_select(&mut self, idx: usize) {
+        self.toggle_select_with(idx, true);
+    }
+
+    /// Palette "Toggle selection of focused pane": like [`Self::toggle_select`] but with no
+    /// focus seeding — the first pane is only *armed* (`pending_select`) until a second joins.
+    pub fn toggle_focused_selection(&mut self) {
+        let idx = self.active_tab().focused;
+        self.toggle_select_with(idx, false);
+    }
+
+    fn toggle_select_with(&mut self, idx: usize, seed_focus: bool) {
+        if !self.selectable(idx) {
+            return;
+        }
+        let uid = self.active_tab().panes[idx].uid.clone();
+        // Selection belongs to the active tab only.
+        let tab_uids: Vec<String> = self
+            .active_tab()
+            .panes
+            .iter()
+            .map(|p| p.uid.clone())
+            .collect();
+        self.selection.retain(|u| tab_uids.contains(u));
+        if self.selection.len() < 2 {
+            self.selection.clear();
+        }
+        self.dirty = true;
+        if self.selection.is_empty() {
+            let focused = self.active_tab().focused;
+            let seed = if seed_focus && focused != idx && self.selectable(focused) {
+                Some(self.active_tab().panes[focused].uid.clone())
+            } else {
+                self.pending_select
+                    .take()
+                    .filter(|u| *u != uid && tab_uids.contains(u))
+            };
+            match seed {
+                Some(first) => {
+                    self.pending_select = None;
+                    self.selection = vec![first, uid];
+                }
+                None => {
+                    // Lone pane: arm / disarm, never a 1-pane selection.
+                    self.pending_select = match self.pending_select.take() {
+                        Some(u) if u == uid => None,
+                        _ => Some(uid),
+                    };
+                }
+            }
+            return;
+        }
+        if let Some(pos) = self.selection.iter().position(|u| *u == uid) {
+            self.selection.remove(pos);
+            if self.selection.len() < 2 {
+                self.selection.clear();
+            }
+        } else {
+            self.selection.push(uid);
+        }
+    }
+
+    /// Per-pane project id: the project whose git root contains the pane's cwd.
+    fn pane_project_id(&self, uid: &str) -> Option<String> {
+        let cwd = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .find(|p| p.uid == uid)?
+            .cwd
+            .clone()?;
+        let root = sidebar::git_root_of(&cwd)?;
+        let key = projects::path_key(&root.to_string_lossy());
+        self.projects
+            .iter()
+            .find(|p| projects::path_key(&p.path) == key)
+            .map(|p| p.id.clone())
+    }
+
+    /// Re-resolve every group tab's cached colour from the live project list (a project
+    /// recolour must update the tab). A vanished project keeps its cached colour.
+    pub fn refresh_group_colors(&mut self) {
+        for t in &mut self.tabs {
+            if let Some(g) = t.pane_group.as_mut() {
+                if let Some(p) = g
+                    .project
+                    .as_deref()
+                    .and_then(|id| self.projects.iter().find(|p| p.id == id))
+                {
+                    let c = parse_hex(&p.color);
+                    if g.color != Some(c) {
+                        g.color = Some(c);
+                        self.dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The "Group Color ▸" flyout rows: `(label, project index or -1)`. The first row is
+    /// "Use project colour" (-1); then one row per known project.
+    pub fn group_color_choices(&self) -> Vec<(String, i32)> {
+        let mut v = vec![("Use project colour".to_string(), -1)];
+        v.extend(
+            self.projects
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.name.clone(), i as i32)),
+        );
+        v
+    }
+
+    /// Tab menu "Group Color": point group tab `ti` at project `project` (its colour), or — with
+    /// `None` — back at the panes' own project ("Use project colour"). The user's pick also clears
+    /// any manual tab colour (`recolorTab`), which would otherwise keep overriding the group colour.
+    pub fn set_group_color(&mut self, ti: usize, project: Option<String>) {
+        let Some(t) = self.tabs.get(ti).filter(|t| t.pane_group.is_some()) else {
+            return;
+        };
+        let id = project.or_else(|| {
+            let members: Vec<Option<String>> = t
+                .panes
+                .iter()
+                .map(|p| self.pane_project_id(&p.uid))
+                .collect();
+            resolve_group_project(&members, t.focused)
+        });
+        let color = id
+            .as_deref()
+            .and_then(|i| self.projects.iter().find(|p| p.id == i))
+            .map(|p| parse_hex(&p.color));
+        self.tabs[ti].color = None;
+        let g = self.tabs[ti].pane_group.as_mut().unwrap();
+        g.project = id;
+        if color.is_some() {
+            g.color = color;
+        }
+        self.dirty = true;
+    }
+
+    /// Group the active tab's selection (Ctrl+G / menu). `anchor` = the clicked/focused pane
+    /// index driving colour resolution. Returns whether a group was made.
+    pub fn group_selection(&mut self, anchor: Option<usize>, mgr: &SessionManager) -> bool {
+        if !self.selection_active() {
+            return false;
+        }
+        let tab = self.active_tab();
+        let anchor_uid = anchor
+            .and_then(|i| tab.panes.get(i))
+            .or_else(|| tab.panes.get(tab.focused))
+            .map(|p| p.uid.clone())
+            .unwrap_or_default();
+        // Current pane order, not click order.
+        let uids: Vec<String> = tab
+            .panes
+            .iter()
+            .filter(|p| self.selection.contains(&p.uid))
+            .map(|p| p.uid.clone())
+            .collect();
+        self.clear_selection();
+        self.group_panes_uids(mgr, &uids, &anchor_uid, None, None, None)
+            .is_some()
+    }
+
+    /// The shared grouping core (GUI selection + control `groupPanes`). `uids` may span tabs;
+    /// remote panes are skipped; needs ≥2 survivors. Returns the new/marked tab's index.
+    /// `title`/`project` override the derived ones; `ctl_id` becomes the tab's control id.
+    pub fn group_panes_uids(
+        &mut self,
+        mgr: &SessionManager,
+        uids: &[String],
+        anchor_uid: &str,
+        title: Option<&str>,
+        project: Option<&str>,
+        ctl_id: Option<String>,
+    ) -> Option<usize> {
+        let mut members: Vec<(usize, usize, String)> = Vec::new();
+        for u in uids {
+            if let Some((ti, pi)) = self.find_pane(u) {
+                let t = &self.tabs[ti];
+                if t.remote.is_none()
+                    && t.panes[pi].remote.is_none()
+                    && !members.iter().any(|m| m.2 == *u)
+                {
+                    members.push((ti, pi, u.clone()));
+                }
+            }
+        }
+        if members.len() < 2 {
+            return None;
+        }
+        // Project + colour + title.
+        let member_projects: Vec<Option<String>> =
+            members.iter().map(|m| self.pane_project_id(&m.2)).collect();
+        let anchor_pos = members.iter().position(|m| m.2 == anchor_uid).unwrap_or(0);
+        let project_id = project
+            .map(str::to_string)
+            .or_else(|| resolve_group_project(&member_projects, anchor_pos));
+        let proj = project_id
+            .as_deref()
+            .and_then(|id| self.projects.iter().find(|p| p.id == id));
+        let color = proj.map(|p| parse_hex(&p.color));
+        let title: SharedString = title
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .or_else(|| proj.map(|p| p.name.clone()))
+            .unwrap_or_else(|| "Group".to_string())
+            .into();
+        let group = PaneGroup {
+            project: project_id,
+            color,
+        };
+
+        // In place: every pane of ONE tab is a member.
+        let first_ti = members[0].0;
+        let all_one_tab = members.iter().all(|m| m.0 == first_ti)
+            && self.tabs[first_ti].panes.len() == members.len();
+        if all_one_tab {
+            let t = &mut self.tabs[first_ti];
+            t.pane_group = Some(group);
+            t.title = title;
+            t.zoomed = None;
+            if ctl_id.is_some() {
+                t.ctl_id = ctl_id;
+            }
+            if let Some(i) = t.panes.iter().position(|p| p.uid == anchor_uid) {
+                t.focused = i;
+            }
+            self.active = first_ti;
+            self.editing_tab = -1;
+            self.dirty = true;
+            return Some(first_ti);
+        }
+
+        // New tab right after the source (the anchor's tab, else the first member's).
+        let src_ti = self
+            .find_pane(anchor_uid)
+            .map(|(ti, _)| ti)
+            .filter(|ti| members.iter().any(|m| m.0 == *ti))
+            .unwrap_or(first_ti);
+        let src_uid = self.tabs[src_ti].uid;
+        // Single source tab → keep its current pane order; otherwise the given order.
+        let mut order = members.clone();
+        if members.iter().all(|m| m.0 == src_ti) {
+            order.sort_by_key(|m| m.1);
+        }
+        let order_uids: Vec<String> = order.iter().map(|m| m.2.clone()).collect();
+        let mut dets = Vec::new();
+        for u in &order_uids {
+            if let Some((ti, pi)) = self.find_pane(u) {
+                if let Some((ps, _)) = self.take_pane_in(ti, pi) {
+                    dets.push(ps.into_detached());
+                }
+            }
+        }
+        let at = self
+            .tabs
+            .iter()
+            .position(|t| t.uid == src_uid)
+            .map(|i| i + 1)
+            .unwrap_or_else(|| src_ti.min(self.tabs.len()));
+        let mut tab = Tab::empty(title);
+        tab.pane_group = Some(group);
+        tab.layout = Layout::Auto;
+        tab.ctl_id = ctl_id;
+        let new_uid = tab.uid;
+        self.tabs.insert(at, tab);
+        self.active = at;
+        self.editing_tab = -1;
+        for dp in dets {
+            self.adopt_into_tab(mgr, dp, at);
+        }
+        let t = &mut self.tabs[at];
+        t.zoomed = None;
+        t.focused = t
+            .panes
+            .iter()
+            .position(|p| p.uid == anchor_uid)
+            .unwrap_or(0);
+        self.group_origin.insert(new_uid, src_uid);
+        self.clear_selection();
+        self.dirty = true;
+        Some(at)
+    }
+
+    /// Ungroup tab `ti`: panes return to their origin tab when it still exists; otherwise the
+    /// tab just stops being a group. Never closes a pane.
+    pub fn ungroup(&mut self, ti: usize, mgr: &SessionManager) {
+        let Some(t) = self.tabs.get(ti) else { return };
+        if t.pane_group.is_none() || t.remote.is_some() {
+            return;
+        }
+        let gid = t.uid;
+        self.clear_selection();
+        let origin = self.group_origin.remove(&gid);
+        let origin_ok = origin.is_some_and(|o| {
+            self.tabs
+                .iter()
+                .any(|x| x.uid == o && x.uid != gid && x.remote.is_none())
+        });
+        if !origin_ok {
+            self.tabs[ti].pane_group = None;
+            self.dirty = true;
+            return;
+        }
+        let origin = origin.unwrap();
+        let mut dets = Vec::new();
+        while let Some(gi) = self.tabs.iter().position(|x| x.uid == gid) {
+            if self.tabs[gi].panes.is_empty() {
+                break;
+            }
+            match self.take_pane_in(gi, 0) {
+                Some((ps, _)) => dets.push(ps.into_detached()),
+                None => break,
+            }
+        }
+        // The last take dropped the (now empty) group tab; it can only survive if it was the
+        // sole tab, which `origin_ok` rules out.
+        let Some(oi) = self.tabs.iter().position(|x| x.uid == origin) else {
+            return;
+        };
+        let first = dets.first().map(|d| d.uid.clone());
+        for dp in dets {
+            self.adopt_into_tab(mgr, dp, oi);
+        }
+        self.active = oi;
+        if let Some(f) = first {
+            if let Some(i) = self.tabs[oi].panes.iter().position(|p| p.uid == f) {
+                self.tabs[oi].focused = i;
+            }
+        }
+        self.dirty = true;
+    }
+
     // ---- tab actions ----
 
     /// Duplicate tab `idx`: a fresh tab adopting its layout + title with the same number of
@@ -5033,6 +5511,7 @@ impl State {
         let zoomed = tab.zoomed;
         let ctl_id = tab.ctl_id;
         let color = tab.color;
+        let pane_group = tab.pane_group;
         let panes = tab
             .panes
             .into_iter()
@@ -5060,6 +5539,7 @@ impl State {
                 zoomed,
                 ctl_id,
                 color,
+                pane_group,
                 panes,
             },
             true,
@@ -5115,6 +5595,7 @@ impl State {
         tab.layout = det.layout;
         tab.ctl_id = det.ctl_id.clone();
         tab.color = det.color;
+        tab.pane_group = det.pane_group.clone();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.editing_tab = -1;
@@ -5145,6 +5626,7 @@ impl State {
         self.tabs[ti].layout = det.layout;
         self.tabs[ti].ctl_id = det.ctl_id;
         self.tabs[ti].color = det.color;
+        self.tabs[ti].pane_group = det.pane_group;
         for dp in det.panes {
             self.adopt_into_tab(mgr, dp, ti);
         }
@@ -5315,6 +5797,12 @@ impl State {
                     main_fraction: Some(t.main_fraction),
                     focused: Some(t.focused as u32),
                     zoomed: t.zoomed.map(|z| z as u32),
+                    pane_group: t.pane_group.as_ref().map(|g| {
+                        hyperpanes_core::workspace::model::PaneGroupSpec {
+                            project: g.project.clone(),
+                            color: g.color.map(color_hex),
+                        }
+                    }),
                 }
             })
             .collect();
@@ -5491,6 +5979,10 @@ impl State {
         let mut tab = Tab::empty(title);
         tab.layout = layout;
         tab.color = g.color.as_deref().and_then(parse_hex_strict);
+        tab.pane_group = g.pane_group.as_ref().map(|pg| PaneGroup {
+            project: pg.project.clone(),
+            color: pg.color.as_deref().map(parse_hex),
+        });
         for (i, spec) in g.panes.iter().enumerate() {
             if let Some(ps) = self.make_pane_from_spec(mgr, i, spec) {
                 tab.panes.push(ps);
@@ -7648,5 +8140,377 @@ mod tab_dock_tests {
             assert!(!(0..40)
                 .any(|r| matches!(st.ctx_command(r), Some(Command::SetTabDock(d)) if d == cur)));
         }
+    }
+}
+
+#[cfg(test)]
+mod pane_group_tests {
+    //! t28 (#96): multi-select + pane groups — selection invariant/clear rules, group (in place
+    //! and new tab), colour resolution, ungroup (origin alive / gone), persistence.
+    use super::*;
+
+    fn det(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        }
+    }
+
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+
+    /// A state whose active tab hosts panes `names`.
+    fn with_panes(names: &[&str]) -> (State, SessionManager) {
+        let mut st = State::new(theme::load_font(1.0));
+        let m = mgr();
+        for n in names {
+            st.adopt_pane(&m, det(n));
+        }
+        (st, m)
+    }
+
+    fn uids(st: &State, ti: usize) -> Vec<String> {
+        st.tabs[ti].panes.iter().map(|p| p.uid.clone()).collect()
+    }
+
+    #[test]
+    fn first_ctrl_click_adds_focused_pane_too() {
+        let (mut st, _m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(2);
+        assert_eq!(st.selection, vec!["a", "c"]);
+        assert!(st.selection_active());
+    }
+
+    #[test]
+    fn selection_drops_to_one_clears() {
+        let (mut st, _m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.toggle_select(2);
+        assert_eq!(st.selection.len(), 3);
+        st.toggle_select(2);
+        assert_eq!(st.selection.len(), 2);
+        st.toggle_select(1);
+        assert!(st.selection.is_empty(), "never a lone selected pane");
+    }
+
+    #[test]
+    fn ctrl_click_on_focused_pane_alone_is_not_a_selection() {
+        let (mut st, _m) = with_panes(&["a", "b"]);
+        st.focus_pane(0);
+        st.toggle_select(0);
+        assert!(st.selection.is_empty());
+    }
+
+    #[test]
+    fn remote_panes_are_not_selectable() {
+        let (mut st, _m) = with_panes(&["a", "b"]);
+        st.focus_pane(0);
+        st.active_tab_mut().panes[1].remote = Some(crate::remote::RemotePaneInfo {
+            host_key: 1,
+            host_pane_id: "x".into(),
+            cols: 80,
+            rows: 24,
+            exited: false,
+            exit_code: None,
+            gone: false,
+            host_subtitle: None,
+        });
+        st.toggle_select(1);
+        assert!(st.selection.is_empty());
+    }
+
+    #[test]
+    fn palette_toggle_arms_then_selects() {
+        let (mut st, _m) = with_panes(&["a", "b"]);
+        st.focus_pane(0);
+        st.toggle_focused_selection();
+        assert!(st.selection.is_empty());
+        assert!(st.is_selected("a"), "armed pane is drawn selected");
+        assert!(!st.selection_active());
+        st.focus_pane(1);
+        st.toggle_focused_selection();
+        assert_eq!(st.selection, vec!["a", "b"]);
+        assert!(st.pending_select.is_none());
+    }
+
+    #[test]
+    fn tab_switch_and_tab_strip_actions_clear_selection() {
+        let (mut st, m) = with_panes(&["a", "b"]);
+        st.adopt_pane_as_tab(&m, det("z"), None, None);
+        st.switch_tab(0);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        assert!(st.selection_active());
+        st.reorder_tab(0, 2);
+        assert!(st.selection.is_empty(), "tab-strip action clears");
+        let ai = st.active;
+        st.focus_pane(0);
+        st.toggle_select(1);
+        assert!(st.selection_active());
+        st.switch_tab(1 - ai.min(1));
+        assert!(st.selection.is_empty());
+    }
+
+    #[test]
+    fn closing_a_selected_pane_rechecks_invariant() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        assert_eq!(st.selection.len(), 2);
+        st.close_pane(1, &m);
+        assert!(st.selection.is_empty());
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.toggle_select(2);
+        st.close_pane(2, &m);
+        assert_eq!(st.selection, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn group_all_panes_marks_tab_in_place() {
+        let (mut st, m) = with_panes(&["a", "b"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        let n = st.tabs.len();
+        assert!(st.group_selection(Some(0), &m));
+        assert_eq!(st.tabs.len(), n, "no new tab when everything is selected");
+        let t = st.active_tab();
+        assert!(t.pane_group.is_some());
+        assert_eq!(t.title.as_str(), "Group");
+        assert!(st.selection.is_empty());
+    }
+
+    #[test]
+    fn group_subset_makes_tab_right_after_source_in_pane_order() {
+        let (mut st, m) = with_panes(&["a", "b", "c", "d"]);
+        st.adopt_pane_as_tab(&m, det("z"), None, None); // a tab after the source
+        st.switch_tab(0);
+        st.focus_pane(0);
+        st.toggle_select(3);
+        st.toggle_select(1); // click order d,b ... pane order b,d
+        assert!(st.group_selection(Some(3), &m));
+        assert_eq!(st.tabs.len(), 3);
+        assert_eq!(
+            st.active, 1,
+            "new tab sits right after the source and is active"
+        );
+        assert_eq!(uids(&st, 0), vec!["c"]);
+        assert_eq!(uids(&st, 1), vec!["a", "b", "d"]);
+        assert!(st.tabs[1].pane_group.is_some());
+        assert_eq!(st.tabs[1].layout, Layout::Auto);
+        assert_eq!(st.tabs[1].focused, 2, "anchor 'd' focused");
+        assert!(st.tabs[0].pane_group.is_none());
+    }
+
+    #[test]
+    fn group_subset_moves_in_current_pane_order() {
+        let (mut st, m) = with_panes(&["a", "b", "c", "d"]);
+        st.focus_pane(3);
+        st.toggle_select(1);
+        assert_eq!(st.selection, vec!["d", "b"]);
+        assert!(st.group_selection(Some(1), &m));
+        assert_eq!(uids(&st, 1), vec!["b", "d"]);
+        assert_eq!(uids(&st, 0), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn group_unzooms_source() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.active_tab_mut().zoomed = Some(1);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        assert!(st.tabs.iter().all(|t| t.zoomed.is_none()));
+    }
+
+    #[test]
+    fn ungroup_returns_panes_to_origin_when_open() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        assert_eq!(st.tabs.len(), 2);
+        st.ungroup(st.active, &m);
+        assert_eq!(st.tabs.len(), 1, "group tab closed");
+        let mut u = uids(&st, 0);
+        u.sort();
+        assert_eq!(u, vec!["a", "b", "c"], "no pane closed");
+        assert!(st.group_origin.is_empty());
+    }
+
+    #[test]
+    fn ungroup_when_origin_gone_just_clears_marker() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        // Close the origin tab (index 0).
+        st.close_tab(0, &m);
+        assert_eq!(st.tabs.len(), 1);
+        let n = st.tabs[0].panes.len();
+        st.ungroup(0, &m);
+        assert!(st.tabs[0].pane_group.is_none());
+        assert_eq!(st.tabs[0].panes.len(), n);
+    }
+
+    #[test]
+    fn ungroup_in_place_group_becomes_ordinary_tab() {
+        let (mut st, m) = with_panes(&["a", "b"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        st.ungroup(0, &m);
+        assert!(st.tabs[0].pane_group.is_none());
+        assert_eq!(st.tabs[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn resolve_project_shared_then_anchor_then_first() {
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(resolve_group_project(&[s("p"), s("p")], 1), s("p"));
+        assert_eq!(resolve_group_project(&[s("p"), s("q"), None], 1), s("q"));
+        assert_eq!(resolve_group_project(&[None, s("q"), s("r")], 0), s("q"));
+        assert_eq!(resolve_group_project(&[None, None], 0), None);
+        // shared requires EVERY member to have it
+        assert_eq!(resolve_group_project(&[s("p"), None], 1), s("p"));
+    }
+
+    #[test]
+    fn project_colour_resolves_and_updates_live() {
+        let repo = std::env::temp_dir().join(format!("hp_pg_{}", std::process::id()));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        let path = repo.to_string_lossy().to_string();
+        st.projects = vec![hyperpanes_core::persistence::projects::Project {
+            id: "proj1".into(),
+            path: path.clone(),
+            name: "myproj".into(),
+            color: "#112233".into(),
+            last_opened_at: None,
+        }];
+        st.tabs[0].panes[0].cwd = Some(path.clone());
+        st.tabs[0].panes[1].cwd = Some(path);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        let g = st.tabs[1].pane_group.clone().unwrap();
+        assert_eq!(g.project.as_deref(), Some("proj1"));
+        assert_eq!(g.color, Some(parse_hex("#112233")));
+        assert_eq!(st.tabs[1].title.as_str(), "myproj");
+        // recolour → tab follows
+        st.projects[0].color = "#445566".into();
+        st.refresh_group_colors();
+        assert_eq!(
+            st.tabs[1].pane_group.as_ref().unwrap().color,
+            Some(parse_hex("#445566"))
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// t34: a manual tab colour (recolorTab) overrides the group/project colour; clearing it
+    /// shows the group colour again.
+    #[test]
+    fn manual_tab_colour_overrides_group_colour_and_clearing_restores_it() {
+        use crate::paneview::tab_stripe_color;
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        let group_c = parse_hex("#0a0b0c");
+        st.tabs[1].pane_group = Some(PaneGroup {
+            project: Some("p1".into()),
+            color: Some(group_c),
+        });
+        let manual = Color::from_rgb_u8(0xaa, 0xbb, 0xcc);
+        let stripe = |st: &State, ti: usize| {
+            tab_stripe_color(st.tabs[ti].color, st.tabs[ti].pane_group.as_ref())
+        };
+        assert_eq!(stripe(&st, 1), Some(group_c));
+        st.set_tab_color(1, Some(manual));
+        assert_eq!(stripe(&st, 1), Some(manual), "manual colour wins over the group colour");
+        assert_eq!(st.tabs[1].pane_group.as_ref().unwrap().color, Some(group_c));
+        st.set_tab_color(1, None);
+        assert_eq!(stripe(&st, 1), Some(group_c), "clearing shows the group colour again");
+        // A group with no project colour falls back to neutral; an ordinary tab has no stripe
+        // unless it has a manual colour.
+        st.tabs[1].pane_group.as_mut().unwrap().color = None;
+        assert_eq!(stripe(&st, 1), Some(theme::GROUP_NEUTRAL));
+        assert_eq!(stripe(&st, 0), None);
+        st.set_tab_color(0, Some(manual));
+        assert_eq!(stripe(&st, 0), Some(manual));
+    }
+
+    /// t34: the user's "Group Color" pick clears a manual tab colour so the pick visibly wins.
+    #[test]
+    fn group_color_pick_clears_manual_tab_colour() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        st.set_tab_color(1, Some(Color::from_rgb_u8(1, 2, 3)));
+        st.set_group_color(1, None);
+        assert_eq!(st.tabs[1].color, None);
+        // An ordinary tab is not a group: the pick is a no-op and keeps its manual colour.
+        st.set_tab_color(0, Some(Color::from_rgb_u8(4, 5, 6)));
+        st.set_group_color(0, None);
+        assert_eq!(st.tabs[0].color, Some(Color::from_rgb_u8(4, 5, 6)));
+    }
+
+    /// t34: a group tab's manual colour and its group colour persist side by side.
+    #[test]
+    fn manual_colour_and_group_colour_round_trip_together() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        st.tabs[1].pane_group = Some(PaneGroup {
+            project: Some("p1".into()),
+            color: Some(parse_hex("#0a0b0c")),
+        });
+        st.set_tab_color(1, Some(Color::from_rgb_u8(0xaa, 0xbb, 0xcc)));
+        let snap = st.to_session_file();
+        let g = &snap.groups.as_ref().unwrap()[1];
+        assert_eq!(g.color.as_deref(), Some("#aabbcc"));
+        assert_eq!(g.pane_group.as_ref().unwrap().color.as_deref(), Some("#0a0b0c"));
+        let mut st2 = State::new(theme::load_font(1.0));
+        st2.load_workspace(snap, &m);
+        let t = st2.tabs.iter().find(|t| t.pane_group.is_some()).unwrap();
+        assert_eq!(t.color, Some(Color::from_rgb_u8(0xaa, 0xbb, 0xcc)));
+        assert_eq!(t.pane_group.as_ref().unwrap().color, Some(parse_hex("#0a0b0c")));
+    }
+
+    #[test]
+    fn pane_group_round_trips_through_snapshot() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.group_selection(Some(0), &m);
+        st.tabs[1].pane_group = Some(PaneGroup {
+            project: Some("p1".into()),
+            color: Some(parse_hex("#0a0b0c")),
+        });
+        let snap = st.to_session_file();
+        let groups = snap.groups.clone().unwrap();
+        let pg = groups[1].pane_group.clone().unwrap();
+        assert_eq!(pg.project.as_deref(), Some("p1"));
+        assert_eq!(pg.color.as_deref(), Some("#0a0b0c"));
+        assert!(groups[0].pane_group.is_none());
+        // JSON key is camelCase and absent for ordinary tabs.
+        let json = serde_json::to_string(&groups).unwrap();
+        assert!(json.contains("\"paneGroup\""));
     }
 }

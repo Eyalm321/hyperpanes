@@ -90,6 +90,22 @@ pub struct GroupSpec {
     /// index of the maximized pane (default: none)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zoomed: Option<u32>,
+    /// Present when the tab is a "pane group" (panes the user multi-selected and grouped).
+    /// Older versions ignore it and load an ordinary tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_group: Option<PaneGroupSpec>,
+}
+
+/// Marker + styling of a pane-group tab: the project it belongs to and its stripe/tint colour.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneGroupSpec {
+    /// Project id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// `#rrggbb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Saved OS-window geometry.

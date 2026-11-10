@@ -112,9 +112,30 @@ pub struct Shared {
     /// `connectRemote` requests queued off the UI thread; the GUI host drains them each tick
     /// ([`Self::take_remote_connects`]). Unread in the headless bin.
     remote_connects: Mutex<Vec<crate::remote::ConnectRequest>>,
+    /// `groupPanes`/`ungroupPanes` requests queued for the GUI host ([`Self::take_pane_group_requests`]).
+    pane_group_requests: Mutex<Vec<PaneGroupRequest>>,
     /// The GUI's latest `remoteScreen` snapshot (array of attached remote panes), republished
     /// by the GUI host; served verbatim by the `remoteScreen` command.
     remote_screens: Mutex<serde_json::Value>,
+}
+
+/// A pane-group request queued by `groupPanes` / `ungroupPanes` for the GUI host to execute
+/// (the read model cannot move panes across tabs; only the GUI can). Drained each tick via
+/// [`Shared::take_pane_group_requests`]. A headless server never drains it, so the requests
+/// stay queued and unapplied.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneGroupRequest {
+    /// Move `pane_ids` (all local, all in `window_id`) into a new tab `tab_id` after the current
+    /// one, marked as a pane group. `project` is a resolved project id.
+    Group {
+        tab_id: String,
+        window_id: i64,
+        pane_ids: Vec<String>,
+        title: Option<String>,
+        project: Option<String>,
+    },
+    /// Turn the group tab `tab_id` back into ordinary tab(s).
+    Ungroup { tab_id: String },
 }
 
 /// Which work queue an instance runs — `/health`'s stable `workQueue` field.
@@ -209,6 +230,7 @@ impl Shared {
             runtime: OnceLock::new(),
             speech: SpeechService::new(speech_settings_path),
             remote_connects: Mutex::new(Vec::new()),
+            pane_group_requests: Mutex::new(Vec::new()),
             remote_screens: Mutex::new(serde_json::Value::Array(Vec::new())),
         })
     }
@@ -232,6 +254,16 @@ impl Shared {
     /// Drain queued `connectRemote` requests (GUI host, once per tick).
     pub fn take_remote_connects(&self) -> Vec<crate::remote::ConnectRequest> {
         std::mem::take(&mut *self.remote_connects.lock().unwrap())
+    }
+
+    /// Queue a pane-group request for the GUI host.
+    pub fn queue_pane_group_request(&self, req: PaneGroupRequest) {
+        self.pane_group_requests.lock().unwrap().push(req);
+    }
+
+    /// Drain queued pane-group requests (GUI host, once per tick).
+    pub fn take_pane_group_requests(&self) -> Vec<PaneGroupRequest> {
+        std::mem::take(&mut *self.pane_group_requests.lock().unwrap())
     }
 
     /// Publish the GUI's current attached-remote-pane snapshot (see `remoteScreen`).
@@ -1170,6 +1202,7 @@ mod tests {
                 color: None,
                 layout: "auto".into(),
                 panes: vec![pane],
+                pane_group: None,
             }],
         });
         (shared, "u1".to_string())

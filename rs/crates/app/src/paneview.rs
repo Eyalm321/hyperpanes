@@ -229,6 +229,28 @@ fn a11y_wanted() -> bool {
     })
 }
 
+/// The colour a tab chip's stripe + tint use, if any. A manual tab colour (`recolorTab`) wins
+/// over a pane group's project colour; a group with no project colour falls back to neutral; an
+/// ordinary tab with no manual colour has none.
+pub(crate) fn tab_stripe_color(
+    manual: Option<slint::Color>,
+    group: Option<&crate::state::PaneGroup>,
+) -> Option<slint::Color> {
+    manual.or_else(|| group.map(|g| g.color.unwrap_or(theme::GROUP_NEUTRAL)))
+}
+
+/// Accessible label of a tab: the plain title, or "<title>, pane group[, <project>]" (t28).
+pub(crate) fn group_a11y_label(title: &str, group: bool, project: Option<&str>) -> String {
+    if !group {
+        return title.to_string();
+    }
+    match project {
+        Some(p) => format!("{title}, pane group, {p}"),
+        None => format!("{title}, pane group"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn pane_item(
     ps: &PaneState,
     focused: bool,
@@ -237,6 +259,7 @@ fn pane_item(
     show_dot: bool,
     font_px: f32,
     dictate: i32,
+    selected_n: usize,
 ) -> PaneItem {
     let (x, y, w, h) = ps.rect;
     // Project the clickable-path hover overlay (if any) into the model row.
@@ -350,6 +373,12 @@ fn pane_item(
         // The native app drops a pane the moment its session exits, so a live pane is never
         // "exited"; the field exists for the taskbar's Electron-parity badge.
         exited: false,
+        selected: selected_n > 0,
+        select_desc: match selected_n {
+            0 => SharedString::new(),
+            1 => "selected".into(),
+            n => format!("{n} panes selected").into(),
+        },
     }
 }
 
@@ -493,15 +522,34 @@ pub fn resync(
 
     // tab strip
     let active = state.active;
+    app.set_selection_count(if state.selection_active() {
+        state.selection.len() as i32
+    } else {
+        0
+    });
     let tabs: Vec<TabItem> = state
         .tabs
         .iter()
         .enumerate()
-        .map(|(i, t)| TabItem {
-            title: t.title.clone(),
-            active: i == active,
-            has_color: t.color.is_some(),
-            color: t.color.unwrap_or_default(),
+        .map(|(i, t)| {
+            let project = t.pane_group.as_ref().and_then(|g| {
+                g.project
+                    .as_deref()
+                    .and_then(|id| state.projects.iter().find(|p| p.id == id))
+                    .map(|p| p.name.clone())
+            });
+            // A manual tab colour (recolorTab) overrides the group/project colour.
+            let stripe = tab_stripe_color(t.color, t.pane_group.as_ref());
+            TabItem {
+                title: t.title.clone(),
+                active: i == active,
+                has_color: t.color.is_some(),
+                color: t.color.unwrap_or_default(),
+                group: t.pane_group.is_some(),
+                group_color: stripe.unwrap_or(theme::GROUP_NEUTRAL),
+                a11y_label: group_a11y_label(&t.title, t.pane_group.is_some(), project.as_deref())
+                    .into(),
+            }
         })
         .collect();
     sync_model(&ui.tabs, tabs);
@@ -549,6 +597,7 @@ pub fn resync(
                 show_dot,
                 p.font_px,
                 dictate_phase_for(&p.uid),
+                state.selected_count_for(&p.uid),
             )
         })
         .collect();
@@ -1113,7 +1162,16 @@ pub fn resync(
                     .collect();
                 sync_model(&ui.ctx_layouts, layouts);
                 sync_model(&ui.ctx_swatches, Vec::new());
-                sync_model(&ui.ctx_tabs, Vec::new());
+                // "Group Color ▸" reuses the Move-to-Tab flyout list (label + idx).
+                let choices: Vec<CtxTab> = state
+                    .group_color_choices()
+                    .into_iter()
+                    .map(|(label, idx)| CtxTab {
+                        label: label.into(),
+                        idx,
+                    })
+                    .collect();
+                sync_model(&ui.ctx_tabs, choices);
             }
             CtxKind::App => {
                 // The application menu's Layout submenu: Automatic + the 5 presets, radio ✓ on
@@ -1286,6 +1344,17 @@ pub fn pump(
             0
         }
     };
+    let sel_uids = state.selection.clone();
+    let sel_pending = state.pending_select.clone();
+    let sel_for = move |uid: &str| -> usize {
+        if sel_uids.iter().any(|u| u == uid) {
+            sel_uids.len()
+        } else if sel_pending.as_deref() == Some(uid) {
+            1
+        } else {
+            0
+        }
+    };
     let active_idx = state.active;
     let focused = state.tabs[active_idx].focused;
     let tab = &mut state.tabs[active_idx];
@@ -1377,6 +1446,7 @@ pub fn pump(
                     show_dot,
                     ps.font_px,
                     dictate_phase_for(&ps.uid),
+                    sel_for(&ps.uid),
                 ),
             );
         }
