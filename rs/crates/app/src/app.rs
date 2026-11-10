@@ -91,6 +91,32 @@ fn which_systemd_run() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Linux appends this to `/proc/self/exe` (what `current_exe()` reads) once the running binary's
+/// file has been replaced or removed — exactly what a package upgrade does (the new file is
+/// renamed over the old path while we keep the old inode).
+const DELETED_EXE_SUFFIX: &str = " (deleted)";
+
+/// The binary a self-restart relaunches: `current_exe()` with the kernel's ` (deleted)` suffix
+/// stripped, so a restart after a package upgrade execs the NEW binary now installed at the
+/// original path (#69). Without this the relauncher tried to exec a path that does not exist and
+/// the app quit without coming back. A path that merely ends in the suffix but whose stripped form
+/// is not a file is left as it is.
+fn relaunch_exe(
+    exe: &std::path::Path,
+    is_file: impl Fn(&std::path::Path) -> bool,
+) -> std::path::PathBuf {
+    if let Some(stripped) = exe
+        .to_str()
+        .and_then(|s| s.strip_suffix(DELETED_EXE_SUFFIX))
+        .map(std::path::Path::new)
+    {
+        if is_file(stripped) {
+            return stripped.to_path_buf();
+        }
+    }
+    exe.to_path_buf()
+}
+
 /// Sentinel "row" the context-menu click-away catcher hands to `ctx-pick` to request a
 /// right-click *chain* (Task 7): close the open menu and reopen the one under the new cursor
 /// in a single action. `app.slint` is owned by another track and can't gain a dedicated
@@ -528,7 +554,10 @@ impl App {
         // teardown); fall back to a bare setsid spawn on non-systemd hosts. The brief sleep
         // lets the old single-instance socket be released before the new GUI binds it.
         if let Ok(exe) = std::env::current_exe() {
-            let relaunch = format!("sleep 2; exec '{}'", exe.display());
+            let exe = relaunch_exe(&exe, |p| p.is_file());
+            // The binary goes in as `$0`, never spliced into the script, so no path can break
+            // the quoting.
+            let relaunch = "sleep 2; exec \"$0\"";
             let systemd_run = which_systemd_run();
             let mut cmd = if let Some(sr) = &systemd_run {
                 let mut c = std::process::Command::new(sr);
@@ -541,11 +570,12 @@ impl App {
                     "/bin/sh",
                     "-c",
                 ])
-                .arg(&relaunch);
+                .arg(relaunch)
+                .arg(&exe);
                 c
             } else {
                 let mut c = std::process::Command::new("/bin/sh");
-                c.arg("-c").arg(&relaunch);
+                c.arg("-c").arg(relaunch).arg(&exe);
                 c
             };
             cmd.stdin(std::process::Stdio::null())
@@ -3616,5 +3646,36 @@ mod option_form_tests {
         // A stray `❯` shell prompt without numbered options is not a form.
         let shell = "❯ ls\nsrc  target\n";
         assert!(!screen_shows_option_form(shell));
+    }
+}
+
+#[cfg(test)]
+mod relaunch_tests {
+    use super::relaunch_exe;
+
+    #[test]
+    fn relaunch_exe_strips_the_deleted_suffix_after_an_upgrade() {
+        let exe = std::path::Path::new("/usr/bin/myapp (deleted)");
+        let got = relaunch_exe(exe, |p| p == std::path::Path::new("/usr/bin/myapp"));
+        assert_eq!(got, std::path::PathBuf::from("/usr/bin/myapp"));
+    }
+
+    #[test]
+    fn relaunch_exe_keeps_a_live_path() {
+        let exe = std::path::Path::new("/usr/bin/myapp");
+        assert_eq!(relaunch_exe(exe, |_| true), exe.to_path_buf());
+    }
+
+    #[test]
+    fn relaunch_exe_keeps_the_path_when_nothing_is_installed_there() {
+        // Uninstalled, not upgraded: no file at the stripped path, so nothing better to run.
+        let exe = std::path::Path::new("/opt/myapp/myapp (deleted)");
+        assert_eq!(relaunch_exe(exe, |_| false), exe.to_path_buf());
+    }
+
+    #[test]
+    fn relaunch_exe_strips_only_a_trailing_suffix() {
+        let exe = std::path::Path::new("/opt/a (deleted) dir/myapp");
+        assert_eq!(relaunch_exe(exe, |_| true), exe.to_path_buf());
     }
 }
