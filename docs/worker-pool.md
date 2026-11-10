@@ -118,6 +118,19 @@ requeues it once the re-armed lease expires: at most `max(remaining lease, visib
 + 5 s` (the reaper tick) after boot, i.e. **35 s** with the default 30 s visibility timeout and
 a runner-held lease.
 
+**Stranded queues.** Requeueing a dead claim only helps if a runner comes back to consume it. A
+worker pane that was started in a way a restore cannot reproduce leaves its recovered task
+`queued` with no consumer. The reaper tick therefore remembers, per queue, the tasks boot
+recovery requeued and the boot time. If, after a grace period, some of them are still `queued`
+and nothing has claimed from that queue since boot, the queue is **stranded**: one log line
+(`[work] queue <name>: <n> recovered task(s) still unclaimed <grace>s after restart (no
+consumer)`, names and counts only), a coalesced `queue` event, and an optional
+`stranded: {tasks, since}` object on that queue's `GET /queues` entry (`since` is the boot time
+in ms; the field is omitted when not stranded, and obeys the same queue scope as the counts).
+The first claim from the queue clears it. The grace comes from `HYPERPANES_STRANDED_GRACE`,
+whole seconds with an optional `s` suffix (`120` or `120s`); default 120 s, `0` turns the
+report off.
+
 **The runner rides out the relaunch.** On a loopback bind the relaunched app listens on a fresh
 port with a freshly minted token. The runner resolves its control file once at start
 (`HYPERPANES_CONTROL_FILE`, else the default) and, on a connection error or a 401, re-reads

@@ -714,13 +714,24 @@ pub async fn run_queue_flusher(shared: Arc<Shared>) {
 /// wedged past its lease. Exhausted tasks dead-letter. No-op (cheap indexed scan) when idle.
 pub async fn run_reaper_ticker(shared: Arc<Shared>) {
     let mut interval = tokio::time::interval(Duration::from_millis(REAPER_TICK_MS));
+    let grace = crate::control::work::stranded_grace_ms();
     loop {
         interval.tick().await;
-        let reaped = shared.work.lock().unwrap().reap_expired(now_ms());
+        let (reaped, stranded) = {
+            let mut wq = shared.work.lock().unwrap();
+            let now = now_ms();
+            (wq.reap_expired(now), wq.check_stranded(now, grace))
+        };
         if !reaped.is_empty() {
             eprintln!(
                 "[work] reaper requeued/dead-lettered {} task(s)",
                 reaped.len()
+            );
+        }
+        for (queue, n) in stranded {
+            eprintln!(
+                "{}",
+                crate::control::work::stranded_log_line(&queue, n, grace)
             );
         }
     }

@@ -1593,6 +1593,61 @@ mod tests {
         assert_eq!(plan.args.unwrap(), ["-c", "echo hi"]);
     }
 
+    /// #67: a control-spawned worker-runner pane (not a claude program) restores with its exact
+    /// argv and its filtered env, so it re-claims after a daemon-replacing restart. A claude
+    /// session marker (the resume id) never appends `--resume` to a non-claude program.
+    #[test]
+    fn control_worker_pane_restores_with_argv_env_and_no_resume() {
+        let mut c = model_pane(
+            Some("hyperpanes"),
+            Some(vec![
+                "worker",
+                "--queue",
+                "myapp-g1",
+                "--worktree",
+                "--base",
+                "main",
+                "--",
+                "sh",
+                "-c",
+                "echo hi",
+            ]),
+        );
+        let mut env = hyperpanes_core::session::spawn::EnvMap::new();
+        for (k, v) in [
+            ("HP_GOAL_PERSONA_DIR", "/opt/personas"),
+            ("CLAUDE_CONFIG_DIR", "/home/user/.claude-a"),
+            ("GH_TOKEN", "x"),
+        ] {
+            env.insert(k.to_string(), v.to_string());
+        }
+        c.env = Some(env);
+        let spec = adopted_snapshot_spec(&c);
+        let want_args = spec.args.clone().unwrap();
+        let plan = crate::state::plan_claude_resume(
+            spec.command.clone(),
+            spec.args.clone(),
+            "abc-123",
+            None,
+            None,
+        );
+        assert_eq!(plan.startup, None);
+        assert_eq!(plan.command.as_deref(), Some("hyperpanes"));
+        let args = plan.args.unwrap();
+        assert_eq!(args, want_args, "same args, no --resume appended");
+        assert!(!args.iter().any(|a| a == "--resume"));
+        assert_eq!(args[..3], ["worker", "--queue", "myapp-g1"]);
+        let spawn = hyperpanes_core::workspace::env_persist::merge_restore_env(
+            spec.env.as_ref(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(spawn["HP_GOAL_PERSONA_DIR"], "/opt/personas");
+        assert_eq!(spawn["CLAUDE_CONFIG_DIR"], "/home/user/.claude-a");
+        assert!(!spawn.contains_key("GH_TOKEN"));
+    }
+
     fn pane(id: &str, uid: &str) -> PaneInfo {
         PaneInfo {
             id: id.to_string(),
