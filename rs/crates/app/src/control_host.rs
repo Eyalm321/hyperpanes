@@ -72,6 +72,36 @@ impl CtlFields {
     }
 }
 
+/// The launch spec (command/args/shell/env) to publish for a pane. Control-owned fields win; a
+/// pane the GUI itself spawned (launchers, New Pane dialog, restored sessions) has no control
+/// entry, so its own recorded spawn spec is published instead. Without it a resume has no
+/// program or argv to relaunch and falls back to typing a bare `claude --resume`. The env is
+/// carried into the read model for the resume path only; it is never serialized into `/state`.
+fn effective_launch_spec(
+    c: CtlFields,
+    gui_command: Option<&String>,
+    gui_args: Option<&Vec<String>>,
+    gui_shell: Option<&String>,
+    gui_env: Option<&hyperpanes_core::session::spawn::EnvMap>,
+) -> CtlFields {
+    let (command, args, shell) = if c.command.is_some() {
+        (c.command, c.args, c.shell)
+    } else {
+        (
+            gui_command.cloned(),
+            gui_args.cloned(),
+            c.shell.or_else(|| gui_shell.cloned()),
+        )
+    };
+    CtlFields {
+        command,
+        args,
+        shell,
+        meta: c.meta,
+        env: c.env.or_else(|| gui_env.cloned()),
+    }
+}
+
 /// Meta queued for a pane that may not be in the read model yet (see `ControlHost::queue_meta`).
 struct PendingMeta {
     /// Session uid of the target pane.
@@ -904,7 +934,13 @@ impl ControlHost {
                     let color = color_hex(p.accent);
                     let subtitle = p.subtitle.as_ref().map(|s| s.to_string());
                     let talk = p.talk;
-                    let c = ctl.get(&uid).cloned().unwrap_or_default();
+                    let c = effective_launch_spec(
+                        ctl.get(&uid).cloned().unwrap_or_default(),
+                        p.spawn_command.as_ref(),
+                        p.spawn_args.as_ref(),
+                        p.spawn_shell.as_ref(),
+                        p.env.as_ref(),
+                    );
                     new_prev.insert(
                         uid.clone(),
                         PaneSnap {
@@ -1269,6 +1305,32 @@ mod tests {
         // reconcile stores it in the side store; publish re-stamps it onto the rebuilt pane.
         let c = CtlFields::from_model(&mp);
         assert_eq!(c.env.as_ref(), Some(&env));
+    }
+
+    #[test]
+    fn gui_spawned_pane_launch_spec_reaches_the_resume_path() {
+        let mut env = hyperpanes_core::session::spawn::EnvMap::new();
+        env.insert("MY_VAR".to_string(), "x".to_string());
+        let args = vec!["--model".to_string(), "sonnet".to_string()];
+        // No control entry (default CtlFields): the GUI pane's own spec is published.
+        let c = effective_launch_spec(
+            CtlFields::default(),
+            Some(&"claude".to_string()),
+            Some(&args),
+            None,
+            Some(&env),
+        );
+        assert_eq!(c.command.as_deref(), Some("claude"));
+        assert_eq!(c.args.as_ref(), Some(&args));
+        assert_eq!(c.env.as_ref(), Some(&env));
+        // A control-owned spec is left alone.
+        let ctl = CtlFields {
+            command: Some("other".to_string()),
+            ..CtlFields::default()
+        };
+        let c = effective_launch_spec(ctl, Some(&"claude".to_string()), Some(&args), None, None);
+        assert_eq!(c.command.as_deref(), Some("other"));
+        assert!(c.args.is_none());
     }
 
     #[test]

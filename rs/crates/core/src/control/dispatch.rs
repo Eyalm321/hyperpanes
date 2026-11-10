@@ -765,13 +765,23 @@ fn respawn_resuming(
     // instead (the shell-pane path below) would drop all of them: the agent would come back
     // tool-less, prompt-wedged, and persona-less. When we rebuild the launch we also anchor
     // the pane at the conversation's own cwd and skip the typed line.
-    let resume_launch = resume_command(pane.command.as_deref(), &target.session_id);
+    let resume_launch = resume_launch(
+        pane.command.as_deref(),
+        pane.args.as_deref(),
+        &target.session_id,
+    );
     let resume_cwd = crate::claude_panes::valid_resume_cwd(&target.cwd).then(|| target.cwd.clone());
     let opts = SpawnOptions {
         uid: new_uid.clone(),
         shell: pane.shell.clone(),
-        args: pane.args.clone(),
-        command: resume_launch.clone().or_else(|| pane.command.clone()),
+        args: match &resume_launch {
+            Some(l) => l.args.clone(),
+            None => pane.args.clone(),
+        },
+        command: resume_launch
+            .as_ref()
+            .map(|l| l.command.clone())
+            .or_else(|| pane.command.clone()),
         cwd: if resume_launch.is_some() {
             resume_cwd.clone().or_else(|| pane.cwd.clone())
         } else {
@@ -1057,26 +1067,152 @@ fn window_id_field(cmd: &Value) -> Option<i64> {
     })
 }
 
-/// Rebuild a directly-launched claude command so a resumed pane keeps every flag it
-/// was born with (`--mcp-config`, `--append-system-prompt-file`,
-/// `--dangerously-skip-permissions`, `--model`) by appending `--resume <session_id>` to
-/// its original launch. Returns `None` when `base` doesn't launch claude directly (a
-/// shell-hosted pane — the caller keeps typing a bare `claude --resume` into its shell).
-///
-/// `session_id` is UUID-shaped (it comes from a SessionStart marker, gated on write), so
-/// it needs no shell-quoting here. `respawn_pane` never bakes the resume flag back into
-/// the stored command, so `base` is always the pristine original — but we still guard
-/// against a pre-existing `--resume` to stay idempotent if that ever changes.
-fn resume_command(base: Option<&str>, session_id: &str) -> Option<String> {
-    let base = base?.trim();
-    // Only rewrite a direct claude invocation; never append flags to a plain shell.
-    let launches_claude = base
-        .split_whitespace()
-        .any(|tok| tok == "claude" || tok.rsplit('/').next() == Some("claude"));
-    if !launches_claude || base.contains("--resume ") {
-        return launches_claude.then(|| base.to_string());
+/// The launch a resumed claude pane is respawned with: the original program and argv, minus any
+/// earlier session-selection flags, plus `--resume <session>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumeLaunch {
+    command: String,
+    args: Option<Vec<String>>,
+}
+
+/// Claude Code flags that pick which conversation a launch attaches to. A resume replaces them
+/// all with a single `--resume <session>`. Each entry is `(flag, takes_value)`; the value is
+/// optional for `--resume`/`-r`/`--from-pr`/`--teleport` (consumed only when the next token is
+/// not itself a flag) and required for `--session-id`.
+const SESSION_FLAGS: &[(&str, bool)] = &[
+    ("--resume", true),
+    ("-r", true),
+    ("--continue", false),
+    ("-c", false),
+    ("--session-id", true),
+    ("--from-pr", true),
+    ("--teleport", true),
+    ("--fork-session", false),
+];
+
+/// Which of `tokens` survive removing the session-selection flags (and their values).
+fn keep_after_stripping_session_flags(tokens: &[&str]) -> Vec<bool> {
+    let mut keep = vec![true; tokens.len()];
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        // `--flag=value` form.
+        if let Some((flag, _)) = tok.split_once('=') {
+            if flag.starts_with("--") && SESSION_FLAGS.iter().any(|(f, _)| *f == flag) {
+                keep[i] = false;
+            }
+        } else if let Some((_, takes_value)) = SESSION_FLAGS.iter().find(|(f, _)| *f == tok) {
+            keep[i] = false;
+            if *takes_value {
+                if let Some(next) = tokens.get(i + 1) {
+                    if !next.starts_with('-') {
+                        keep[i + 1] = false;
+                        i += 1;
+                    }
+                }
+            }
+        }
+        i += 1;
     }
-    Some(format!("{base} --resume {session_id}"))
+    keep
+}
+
+/// Byte spans of the whitespace-separated tokens of `s`, treating a `'…'` or `"…"` run as part
+/// of its token so a quoted path with spaces stays whole.
+fn shell_token_spans(s: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut quote: Option<char> = None;
+    for (i, ch) in s.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                start.get_or_insert(i);
+            }
+            None if ch.is_whitespace() => {
+                if let Some(st) = start.take() {
+                    spans.push((st, i));
+                }
+            }
+            None => {
+                start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(st) = start {
+        spans.push((st, s.len()));
+    }
+    spans
+}
+
+fn is_claude_program(tok: &str) -> bool {
+    tok == "claude" || tok.rsplit(['/', '\\']).next() == Some("claude")
+}
+
+/// Rebuild a claude launch for a resume: keep the original program and every original argument
+/// (`--model`, `--settings`, `--mcp-config`, `--append-system-prompt-file`, permission flags),
+/// drop earlier session-selection flags (`--resume <id>`, `--resume=<id>`, `-r <id>`,
+/// `--continue`, `-c`, `--session-id <id>`, `--from-pr`, `--teleport`, `--fork-session`) and add
+/// `--resume <session_id>` once.
+///
+/// Handles both launch shapes: a direct argv (`command` is the program, `args` its argv) and a
+/// flags-in-the-command-string launch (`command` = `claude --model m …`, no args), where every
+/// byte of the string outside the removed flags is preserved. Returns `None` when the launch is
+/// not a claude one (a shell-hosted pane — the caller types a bare `claude --resume` into it).
+fn resume_launch(
+    command: Option<&str>,
+    args: Option<&[String]>,
+    session_id: &str,
+) -> Option<ResumeLaunch> {
+    let command = command?.trim();
+    // Direct argv: the program is the whole `command`, the flags live in `args`.
+    if let Some(args) = args.filter(|a| !a.is_empty()) {
+        if !is_claude_program(command) {
+            return None;
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let keep = keep_after_stripping_session_flags(&refs);
+        let mut out: Vec<String> = args
+            .iter()
+            .zip(keep)
+            .filter(|(_, k)| *k)
+            .map(|(a, _)| a.clone())
+            .collect();
+        out.push("--resume".to_string());
+        out.push(session_id.to_string());
+        return Some(ResumeLaunch {
+            command: command.to_string(),
+            args: Some(out),
+        });
+    }
+    // Command string: only rewrite a direct claude invocation; never append flags to a shell.
+    let spans = shell_token_spans(command);
+    let toks: Vec<&str> = spans.iter().map(|&(a, b)| &command[a..b]).collect();
+    let prog = toks.iter().position(|t| is_claude_program(t))?;
+    // Only the tokens after the program are flags (an env prefix or wrapper before it is kept).
+    let keep = keep_after_stripping_session_flags(&toks[prog + 1..]);
+    let mut out = String::new();
+    let mut last_end = 0;
+    for (idx, &(a, b)) in spans.iter().enumerate() {
+        let removed = idx > prog && !keep[idx - prog - 1];
+        if removed {
+            last_end = b;
+            continue;
+        }
+        out.push_str(&command[last_end..a]);
+        out.push_str(&command[a..b]);
+        last_end = b;
+    }
+    out.push_str(&format!(" --resume {session_id}"));
+    Some(ResumeLaunch {
+        command: out,
+        args: None,
+    })
 }
 
 fn new_id() -> String {
@@ -1524,39 +1660,166 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resume_command_appends_flags_to_direct_claude() {
-        let base = "claude --dangerously-skip-permissions                     --append-system-prompt-file /x/SPEC.md --model m --mcp-config /x/mcp.json";
-        let got = resume_command(Some(base), "abc-123").unwrap();
-        // Every original flag survives, and the resume id is appended.
-        assert!(got.starts_with(base));
-        assert!(got.ends_with(" --resume abc-123"));
-        assert!(got.contains("--mcp-config /x/mcp.json"));
-        assert!(got.contains("--append-system-prompt-file /x/SPEC.md"));
-        assert!(got.contains("--dangerously-skip-permissions"));
+    fn sv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn resume_command_handles_absolute_claude_path() {
-        let got = resume_command(Some("/usr/bin/claude --model m"), "id9").unwrap();
-        assert_eq!(got, "/usr/bin/claude --model m --resume id9");
+    fn resume_launch_table() {
+        // (command, args, expected command, expected args)
+        type Case = (
+            &'static str,
+            Option<Vec<String>>,
+            &'static str,
+            Option<Vec<String>>,
+        );
+        let cases: Vec<Case> = vec![
+            // Flags in args survive; --resume added once.
+            (
+                "claude",
+                Some(sv(&["--model", "sonnet", "--settings", "/path/s.json"])),
+                "claude",
+                Some(sv(&[
+                    "--model",
+                    "sonnet",
+                    "--settings",
+                    "/path/s.json",
+                    "--resume",
+                    "S",
+                ])),
+            ),
+            // Every earlier session flag form is removed.
+            (
+                "claude",
+                Some(sv(&["--model", "m", "--resume", "old"])),
+                "claude",
+                Some(sv(&["--model", "m", "--resume", "S"])),
+            ),
+            (
+                "claude",
+                Some(sv(&["--resume=old", "--model", "m"])),
+                "claude",
+                Some(sv(&["--model", "m", "--resume", "S"])),
+            ),
+            (
+                "claude",
+                Some(sv(&["-r", "old", "--model", "m"])),
+                "claude",
+                Some(sv(&["--model", "m", "--resume", "S"])),
+            ),
+            (
+                "claude",
+                Some(sv(&["--continue", "--model", "m", "-c"])),
+                "claude",
+                Some(sv(&["--model", "m", "--resume", "S"])),
+            ),
+            (
+                "claude",
+                Some(sv(&[
+                    "--session-id",
+                    "u-1",
+                    "--session-id=u-2",
+                    "--model",
+                    "m",
+                ])),
+                "claude",
+                Some(sv(&["--model", "m", "--resume", "S"])),
+            ),
+            // A bare --resume followed by another flag does not eat that flag.
+            (
+                "/usr/bin/claude",
+                Some(sv(&["--resume", "--model", "m"])),
+                "/usr/bin/claude",
+                Some(sv(&["--model", "m", "--resume", "S"])),
+            ),
+            // Args with spaces stay single elements.
+            (
+                "claude",
+                Some(sv(&["--settings", "/my dir/s.json"])),
+                "claude",
+                Some(sv(&["--settings", "/my dir/s.json", "--resume", "S"])),
+            ),
+            // Flags inside the command string.
+            (
+                "claude --model sonnet --resume old --settings /p/s.json",
+                None,
+                "claude --model sonnet --settings /p/s.json --resume S",
+                None,
+            ),
+            (
+                "/usr/bin/claude --model m -c",
+                None,
+                "/usr/bin/claude --model m --resume S",
+                None,
+            ),
+            (
+                "claude --settings '/my dir/s.json' --resume=old",
+                None,
+                "claude --settings '/my dir/s.json' --resume S",
+                None,
+            ),
+            ("claude", None, "claude --resume S", None),
+            ("claude", Some(vec![]), "claude --resume S", None),
+        ];
+        for (cmd, args, want_cmd, want_args) in cases {
+            let got = resume_launch(Some(cmd), args.as_deref(), "S")
+                .unwrap_or_else(|| panic!("no launch for {cmd:?} {args:?}"));
+            assert_eq!(got.command, want_cmd, "command for {cmd:?} {args:?}");
+            assert_eq!(got.args, want_args, "args for {cmd:?} {args:?}");
+        }
     }
 
     #[test]
-    fn resume_command_skips_non_claude_and_empty() {
-        // Shell-hosted pane → None (caller keeps the typed-`claude --resume` path).
-        assert_eq!(resume_command(Some("bash -l"), "id"), None);
-        assert_eq!(resume_command(Some("  "), "id"), None);
-        assert_eq!(resume_command(None, "id"), None);
-        // A word merely containing "claude" must not trip the direct-launch check.
-        assert_eq!(resume_command(Some("echo declaude"), "id"), None);
+    fn resume_launch_leaves_non_claude_alone() {
+        assert_eq!(resume_launch(Some("bash"), Some(&sv(&["-l"])), "S"), None);
+        assert_eq!(resume_launch(Some("bash -l"), None, "S"), None);
+        assert_eq!(resume_launch(Some("  "), None, "S"), None);
+        assert_eq!(resume_launch(None, None, "S"), None);
+        assert_eq!(resume_launch(Some("echo declaude"), None, "S"), None);
     }
 
     #[test]
-    fn resume_command_is_idempotent_when_already_resuming() {
-        let base = "claude --model m --resume old-id";
-        // Never double-append; return the command unchanged.
-        assert_eq!(resume_command(Some(base), "new-id").unwrap(), base);
+    fn restart_resume_keeps_original_args_and_adds_resume_once() {
+        let mut m = model_one_window();
+        let pane = PaneInfo {
+            id: "p1".into(),
+            session_uid: "u1".into(),
+            label: "a".into(),
+            subtitle: None,
+            color: "#888888".into(),
+            command: Some("claude".into()),
+            args: Some(sv(&[
+                "--model",
+                "sonnet",
+                "--resume",
+                "old",
+                "--settings",
+                "/p/s.json",
+            ])),
+            cwd: None,
+            shell: None,
+            status: crate::control::readmodel::PaneStatus::Running,
+            exit_code: None,
+            meta: None,
+            talk: false,
+            env: None,
+        };
+        assert!(m.insert_pane(1, pane.clone()));
+        let l = resume_launch(pane.command.as_deref(), pane.args.as_deref(), "new").unwrap();
+        let args = l.args.unwrap();
+        assert_eq!(args.iter().filter(|a| *a == "--resume").count(), 1);
+        assert_eq!(
+            args,
+            sv(&[
+                "--model",
+                "sonnet",
+                "--settings",
+                "/p/s.json",
+                "--resume",
+                "new"
+            ])
+        );
+        assert_eq!(l.command, "claude");
     }
 
     // ---- recoverPane ----
