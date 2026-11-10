@@ -624,12 +624,17 @@ impl ControlHost {
             // 2. Reconcile the model→GUI deltas (what the control plane changed) on the UI thread.
             let reconciled = self.reconcile(windows, mgr, &cur, &cur_tabs, &cur_active, &focus_uid);
 
+            // 2b. Execute queued `groupPanes` / `ungroupPanes` requests against the GUI (only
+            //     the GUI can move panes across tabs), before the republish so this tick's
+            //     read-model already shows the new/changed tab.
+            let grouped = self.apply_pane_group_requests(&shared, windows, mgr);
+
             // 3. Republish the (now-updated) live GUI tree into the read-model.
             let republished = self.publish(&mut model, windows);
 
             // 3b. Stamp any meta the GUI queued for panes that now exist in the model.
             self.apply_pending_meta(&mut model);
-            (reconciled || healed, republished)
+            (reconciled || healed || grouped, republished)
         };
 
         // 4. Nudge WS clients if the published structure changed (GUI- or control-driven).
@@ -713,6 +718,31 @@ impl ControlHost {
             .lock()
             .unwrap()
             .set_focused_pane(focused_pane_id);
+    }
+
+    /// Drain the queued pane-group requests and run each on the owning window's state.
+    /// Returns whether any request changed the GUI.
+    fn apply_pane_group_requests(
+        &self,
+        shared: &Shared,
+        windows: &[Rc<Window>],
+        mgr: &Arc<SessionManager>,
+    ) -> bool {
+        let reqs = shared.take_pane_group_requests();
+        let mut changed = false;
+        for req in &reqs {
+            // A control pane id resolves to its GUI session uid through the alias map; a
+            // GUI-native pane's id IS its uid.
+            let resolve = |id: &str| self.uid_for_pane_id(id).unwrap_or_else(|| id.to_string());
+            for w in windows {
+                let mut st = w.state.borrow_mut();
+                if apply_pane_group_request(&mut st, mgr, w.id as i64, &resolve, req) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        changed
     }
 
     /// Self-heal (recovery, independent of the publish-race fix): a control-spawned pane whose
@@ -1117,7 +1147,12 @@ impl ControlHost {
                     title,
                     layout,
                     panes,
-                    pane_group: None,
+                    pane_group: tab.pane_group.as_ref().map(|g| {
+                        hyperpanes_core::control::readmodel::PaneGroupInfo {
+                            project: g.project.clone(),
+                            color: g.color.map(color_hex),
+                        }
+                    }),
                 });
             }
             tree.push(WindowInfo {
@@ -1413,6 +1448,56 @@ fn remove_from_gui(windows: &[Rc<Window>], uid: &str) {
 /// created with (`open_tab`), else the positional `"{wid}:{ti}"`.
 fn tab_model_id(wid: i64, ti: usize, tab: &crate::state::Tab) -> String {
     tab.ctl_id.clone().unwrap_or_else(|| format!("{wid}:{ti}"))
+}
+
+/// Execute one queued pane-group request on window `window_id`'s state `st`. `resolve` maps a
+/// control pane id to its GUI session uid. Returns whether it changed this window (so the caller
+/// stops looking). A `Group` for another window, or with <2 resolvable local panes, is a no-op;
+/// the new tab's `ctl_id` is the `tab_id` the API already returned, so that id resolves.
+pub(crate) fn apply_pane_group_request(
+    st: &mut crate::state::State,
+    mgr: &SessionManager,
+    window_id: i64,
+    resolve: &dyn Fn(&str) -> String,
+    req: &server::PaneGroupRequest,
+) -> bool {
+    use server::PaneGroupRequest as R;
+    match req {
+        R::Group {
+            tab_id,
+            window_id: wid,
+            pane_ids,
+            title,
+            project,
+        } => {
+            if *wid != window_id {
+                return false;
+            }
+            let uids: Vec<String> = pane_ids.iter().map(|id| resolve(id)).collect();
+            let Some(anchor) = uids.first().cloned() else {
+                return false;
+            };
+            st.group_panes_uids(
+                mgr,
+                &uids,
+                &anchor,
+                title.as_deref(),
+                project.as_deref(),
+                Some(tab_id.clone()),
+            )
+            .is_some()
+        }
+        R::Ungroup { tab_id } => {
+            let Some(ti) = resolve_tab_index(&st.tabs, tab_id) else {
+                return false;
+            };
+            if st.tabs[ti].pane_group.is_none() {
+                return false;
+            }
+            st.ungroup(ti, mgr);
+            true
+        }
+    }
 }
 
 /// Map a model tab id (control id or positional) to a GUI tab index within one window.
@@ -1850,6 +1935,65 @@ mod tests {
         };
         assert!(apply_tab_change(&mut st, idx, &ch));
         assert_eq!(st.tabs[0].layout, Layout::Grid);
+    }
+
+    #[test]
+    fn pane_group_requests_drain_into_state() {
+        use hyperpanes_core::control::server::PaneGroupRequest as R;
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        for n in ["a", "b", "c"] {
+            st.adopt_pane(&m, crate::state::DetachedPane {
+                uid: n.into(),
+                title: n.into(),
+                subtitle: None,
+                pinned_accent: None,
+                show_frame: None,
+                show_dot: None,
+                font_px: 14.0,
+                spawn_command: None,
+                spawn_args: None,
+                spawn_shell: None,
+                spawn_env: None,
+            });
+        }
+        // Control pane ids are aliases for GUI uids.
+        let resolve = |id: &str| id.trim_start_matches("ctl-").to_string();
+        let group = R::Group {
+            tab_id: "tab-uuid-1".into(),
+            window_id: 7,
+            pane_ids: vec!["ctl-a".into(), "ctl-b".into()],
+            title: Some("My group".into()),
+            project: None,
+        };
+        // wrong window → untouched
+        assert!(!apply_pane_group_request(&mut st, &m, 8, &resolve, &group));
+        assert_eq!(st.tabs.len(), 1);
+        assert!(apply_pane_group_request(&mut st, &m, 7, &resolve, &group));
+        assert_eq!(st.tabs.len(), 2);
+        let g = &st.tabs[1];
+        assert!(g.pane_group.is_some());
+        assert_eq!(g.title.as_str(), "My group");
+        assert_eq!(g.ctl_id.as_deref(), Some("tab-uuid-1"), "the id the API returned resolves");
+        assert_eq!(resolve_tab_index(&st.tabs, "tab-uuid-1"), Some(1));
+        // ungroup by that id returns the panes; the tab is gone.
+        let un = R::Ungroup { tab_id: "tab-uuid-1".into() };
+        assert!(apply_pane_group_request(&mut st, &m, 7, &resolve, &un));
+        assert_eq!(st.tabs.len(), 1);
+        assert_eq!(st.tabs[0].panes.len(), 3);
+        // ungroup of an unknown / non-group tab is a no-op
+        assert!(!apply_pane_group_request(&mut st, &m, 7, &resolve, &un));
+        // <2 resolvable panes → no group
+        let one = R::Group {
+            tab_id: "t2".into(),
+            window_id: 7,
+            pane_ids: vec!["ctl-a".into(), "ctl-nope".into()],
+            title: None,
+            project: None,
+        };
+        assert!(!apply_pane_group_request(&mut st, &m, 7, &resolve, &one));
+        assert_eq!(st.tabs.len(), 1);
     }
 
     #[test]
