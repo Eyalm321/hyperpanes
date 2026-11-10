@@ -45,6 +45,7 @@ linked worktree of one repo (for example a goal's private integration worktree) 
   cache/slot-<k>/              # build-cache slot k  → HP_WORKTREE_CACHE_DIR
   cache/slot-<k>.lock          # its lock; mtime = last release
   cache/slot-<k>.size          # last measured size in bytes (see "Size limits")
+  evidence/<queue>-<id8>-<pid>.patch  # uncommitted work saved before removal (see below)
 ```
 
 From an MCP client, `spawn_workers` carries the override through its existing `env` passthrough,
@@ -54,7 +55,8 @@ env:{HYPERPANES_WORKTREE_ROOT:"/data/hp-worktrees"}}`.
 ## Auto-removal and the orphan sweep
 
 A finished task's worktree is removed as before (`git worktree remove --force`, then whatever is
-left), and its branch stays.
+left), and its branch stays. Before it is removed, the runner checks the task's result and saves
+any uncommitted work (see [Task results and evidence patches](#task-results-and-evidence-patches)).
 
 Each task worktree also has an **owner lock**, an OS file lock (`flock` on unix, `LockFileEx` on
 Windows) on `wt/<name>.lock`. The runner takes it *before* creating the worktree and holds it
@@ -66,12 +68,13 @@ swept out from under it.
 When a `--worktree` runner starts, it sweeps its repo's directory:
 
 - A `wt/<name>` whose lock file is missing, or whose lock it can take, is an **orphan** (its
-  owner is dead). The runner logs the orphan's branch and how many uncommitted changes it
-  discards, removes it (`git worktree remove --force`, falling back to deleting the directory),
-  then deletes the lock file.
+  owner is dead). The runner saves the orphan's uncommitted changes to an evidence patch, logs
+  its branch, the change count and the patch path, removes it (`git worktree remove --force`,
+  falling back to deleting the directory), then deletes the lock file.
 - A `wt/<name>` whose lock is held is live and left alone.
 - A lone lock file older than 24 hours with a free lock is deleted.
 - Then `git worktree prune` drops stale admin entries.
+- Evidence patches older than 14 days are deleted.
 
 The OS releases a dead process's locks, so a SIGKILLed or OOM-killed runner's worktree is
 reclaimed by the next runner that starts for the same repo. Pid reuse can't fool the check the
@@ -80,6 +83,57 @@ commit-first protocol survive.
 
 Worktrees left in `/tmp/hp-wt-*` by older builds aren't swept. They're on tmpfs and disappear at
 reboot, and `git worktree prune` clears their admin entries.
+
+## Task results and evidence patches
+
+A `--worktree` task's result is its commits. The runner used to ack every exit 0 and then delete
+the worktree, so a child that exited cleanly without committing (#86) counted as done and its
+uncommitted work disappeared with the directory. Now, after the child exits and **before** the
+worktree is removed, the runner:
+
+1. Counts `git rev-list --count <fork-sha>..worker/<queue>/<id8>`. `<fork-sha>` is the exact
+   commit the worktree was created from, resolved at creation, not the `--base` ref. That ref can
+   advance mid-task (a dependent wave's integration branch), and counting against it would hide
+   or invent commits.
+2. If the tree is dirty, saves the uncommitted work (tracked changes plus untracked files that
+   aren't gitignored, so `target/` and other build output stay out) as a binary-safe patch
+   against the worktree's HEAD, at `<root>/<repo>-<hash8>/evidence/<queue>-<id8>-<pid>.patch`.
+   To recover it, run `git apply <patch>` on a checkout of the task branch. The save stages into
+   the dying worktree's index but never commits, and it runs after the commit count. A patch can
+   contain anything the agent left lying around, such as a stray `.env` that isn't gitignored, so
+   the `evidence/` dir is `0700`, each patch is `0600`, and the runner logs only the path, never
+   the contents.
+
+Then:
+
+| Child exit | Commits beyond the fork sha | Outcome |
+|---|---|---|
+| 0 | ≥ 1 | ack. If uncommitted work was also left, the patch is saved and a warning logged. |
+| 0 | 0 | **failed**: nack with `requeue: false`, reason `no commit on worker/<queue>/<id8> beyond base <sha12> (child exited 0); uncommitted changes saved to <patch>`, or `…; worktree was clean, nothing saved`. |
+| 0 | unknown (git failed) | retryable nack, `cannot verify commits on <branch>: <error>`. An unverified result is never acked. |
+| non-zero / runner error | any | the usual retryable nack (backoff, `max_attempts`), with `; uncommitted changes saved to <patch>` appended when there was work to save. |
+
+An empty result is failed outright rather than retried. A task that reported success without
+committing would most likely do the same thing again, and every retry would burn a full agent run.
+A failed task isn't claimed, so it never shows up as stranded.
+
+If the patch can't be written, the reason says so and the worktree directory is **kept**: its
+owner lock is released, so the next runner's startup sweep treats it as an orphan, retries the
+save, and then removes it.
+
+**Retention.** Patches are kept 14 days (the same as idle cache slots) and deleted by the startup
+sweep. They're small, since ignored build output is excluded, so there's no size cap. Cache slots
+are untouched by any of this.
+
+**Empty results that are legitimate.** Some queues produce no commit by design, such as read-only
+checks or reports delivered over the message bus. Run those runners with `--allow-empty-result`
+(or env `HYPERPANES_WORKER_ALLOW_EMPTY_RESULT=1`; `true`/`yes`/`on` also work), and an exit 0 acks
+as before. Patches are still saved. From MCP, pass it through `spawn_workers`' `env`:
+`env:{HYPERPANES_WORKER_ALLOW_EMPTY_RESULT:"1"}`. The flag only matters with `--worktree`;
+without a worktree there is no branch to check, and exit 0 still acks.
+
+The goal personas already tell impl agents to commit before they exit. This makes the runner
+enforce it.
 
 ## Shared warm build cache: per-repo slots
 
