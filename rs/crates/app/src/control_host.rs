@@ -1492,6 +1492,45 @@ mod tests {
         );
     }
 
+    /// A pane that already went through a resume (restartPane / recoverPane add
+    /// `--resume <old>`) restores with exactly ONE `--resume <new>`, not two.
+    #[test]
+    fn adopted_resumed_pane_restores_with_a_single_resume() {
+        let c = model_pane(
+            Some("claude"),
+            Some(vec![
+                "--model",
+                "opus",
+                "--resume",
+                "old-id",
+                "--session-id",
+                "x",
+            ]),
+        );
+        let spec = adopted_snapshot_spec(&c);
+        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "new-id", None, None);
+        assert_eq!(plan.startup, None);
+        assert_eq!(plan.command.as_deref(), Some("claude"));
+        assert_eq!(
+            plan.args.unwrap(),
+            ["--model", "opus", "--resume", "new-id"]
+        );
+    }
+
+    /// A command-string claude launch has its earlier session flags (`--continue`) stripped.
+    #[test]
+    fn adopted_string_command_with_continue_is_stripped() {
+        let c = model_pane(Some("claude --continue --model m"), None);
+        let spec = adopted_snapshot_spec(&c);
+        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "new-id", None, None);
+        assert_eq!(plan.startup, None);
+        assert_eq!(
+            plan.command.as_deref(),
+            Some("claude --model m --resume new-id")
+        );
+        assert_eq!(plan.args, None);
+    }
+
     /// A control pane running a non-claude program round-trips its command; no resume.
     #[test]
     fn adopted_control_non_claude_pane_round_trips_command() {

@@ -1117,10 +1117,13 @@ fn window_id_field(cmd: &Value) -> Option<i64> {
 
 /// The launch a resumed claude pane is respawned with: the original program and argv, minus any
 /// earlier session-selection flags, plus `--resume <session>`.
+/// A claude launch rebuilt for a resume (see [`resume_launch`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ResumeLaunch {
-    command: String,
-    args: Option<Vec<String>>,
+pub struct ResumeLaunch {
+    /// The program (direct argv) or the whole command line (command-string launch).
+    pub command: String,
+    /// The argv for a direct launch; `None` for a command-string launch.
+    pub args: Option<Vec<String>>,
 }
 
 /// Claude Code flags that pick which conversation a launch attaches to. A resume replaces them
@@ -1199,7 +1202,10 @@ fn shell_token_spans(s: &str) -> Vec<(usize, usize)> {
 }
 
 fn is_claude_program(tok: &str) -> bool {
-    tok == "claude" || tok.rsplit(['/', '\\']).next() == Some("claude")
+    matches!(
+        tok.rsplit(['/', '\\']).next(),
+        Some("claude") | Some("claude.exe")
+    )
 }
 
 /// Rebuild a claude launch for a resume: keep the original program and every original argument
@@ -1212,7 +1218,7 @@ fn is_claude_program(tok: &str) -> bool {
 /// flags-in-the-command-string launch (`command` = `claude --model m …`, no args), where every
 /// byte of the string outside the removed flags is preserved. Returns `None` when the launch is
 /// not a claude one (a shell-hosted pane — the caller types a bare `claude --resume` into it).
-fn resume_launch(
+pub fn resume_launch(
     command: Option<&str>,
     args: Option<&[String]>,
     session_id: &str,
@@ -1855,6 +1861,19 @@ mod tests {
             assert_eq!(got.command, want_cmd, "command for {cmd:?} {args:?}");
             assert_eq!(got.args, want_args, "args for {cmd:?} {args:?}");
         }
+    }
+
+    #[test]
+    fn resume_launch_accepts_windows_claude_exe() {
+        let l = resume_launch(
+            Some(r"C:\tools\claude.exe"),
+            Some(&sv(&["--model", "m", "--resume", "old"])),
+            "S",
+        )
+        .unwrap();
+        assert_eq!(l.args, Some(sv(&["--model", "m", "--resume", "S"])));
+        let l = resume_launch(Some("claude.exe -c --model m"), None, "S").unwrap();
+        assert_eq!(l.command, "claude.exe --model m --resume S");
     }
 
     #[test]

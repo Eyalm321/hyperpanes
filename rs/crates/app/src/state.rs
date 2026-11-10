@@ -4097,9 +4097,10 @@ pub(crate) struct ResumePlan {
 }
 
 /// Decide how a pane with a recorded Claude conversation `id` is resumed. No recorded command
-/// → a shell pane: type `claude --resume <id>`. A command whose program is `claude` →
-/// `--resume <id>` is appended to its own argv (or command line), keeping its born-with flags.
-/// Any other program ignores the marker.
+/// → a shell pane: type `claude --resume <id>`. A claude launch → rebuilt by core's
+/// `resume_launch` (shared with restartPane/recoverPane): born-with flags kept, earlier
+/// session-selection flags dropped, `--resume <id>` added once. Any other program ignores the
+/// marker.
 pub(crate) fn plan_claude_resume(
     command: Option<String>,
     args: Option<Vec<String>>,
@@ -4111,34 +4112,36 @@ pub(crate) fn plan_claude_resume(
     let cfg_prefix = config_dir
         .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
         .unwrap_or_default();
-    let head = command
-        .as_deref()
-        .unwrap_or("")
-        .split_whitespace()
-        .next()
-        .unwrap_or("");
-    let head = head.rsplit(['/', '\\']).next().unwrap_or(head).to_string();
-    let mut plan = ResumePlan {
-        command,
-        args,
-        ..Default::default()
-    };
-    if plan.command.is_none() {
-        plan.startup = Some(match resume_cwd {
-            Some(cwd) => format!("cd '{cwd}' && {cfg_prefix}claude --resume {id}\r"),
-            None => format!("{cfg_prefix}claude --resume {id}\r"),
-        });
-    } else if head == "claude" || head == "claude.exe" {
-        plan.cwd = resume_cwd.map(str::to_string);
-        // The account rides the spawn env rather than the command line so the resumed process
-        // reads the right store.
-        plan.config_dir_env = config_dir.map(str::to_string);
-        match &mut plan.args {
-            Some(a) => a.extend(["--resume".to_string(), id.to_string()]),
-            None => plan.command = plan.command.map(|c| format!("{c} --resume {id}")),
-        }
+    if command.is_none() {
+        return ResumePlan {
+            startup: Some(match resume_cwd {
+                Some(cwd) => format!("cd '{cwd}' && {cfg_prefix}claude --resume {id}\r"),
+                None => format!("{cfg_prefix}claude --resume {id}\r"),
+            }),
+            ..Default::default()
+        };
     }
-    plan
+    // A claude launch is rebuilt by the same function restartPane/recoverPane use (#54): every
+    // original flag is kept, earlier session-selection flags (`--resume <old>`, `--continue`,
+    // `--session-id <id>`, ...) are dropped, and `--resume <id>` is added exactly once. A pane
+    // running some other program is left alone (`None`).
+    match hyperpanes_core::control::dispatch::resume_launch(command.as_deref(), args.as_deref(), id)
+    {
+        Some(l) => ResumePlan {
+            command: Some(l.command),
+            args: l.args,
+            // The account rides the spawn env rather than the command line so the resumed
+            // process reads the right store.
+            cwd: resume_cwd.map(str::to_string),
+            config_dir_env: config_dir.map(str::to_string),
+            startup: None,
+        },
+        None => ResumePlan {
+            command,
+            args,
+            ..Default::default()
+        },
+    }
 }
 
 impl State {
