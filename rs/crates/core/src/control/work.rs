@@ -318,6 +318,78 @@ impl Counts {
 pub struct QueueSummary {
     pub queue: String,
     pub counts: Counts,
+    /// Present only while the queue is [stranded](stranded_queues): boot recovery requeued
+    /// tasks and no consumer has claimed from the queue since. Omitted from the wire otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stranded: Option<Stranded>,
+}
+
+/// A stranded queue's report: `tasks` recovered tasks still unclaimed, `since` the boot
+/// time (ms epoch) of the recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stranded {
+    pub tasks: usize,
+    pub since: i64,
+}
+
+/// Default grace before a queue with unclaimed recovered tasks is reported stranded.
+pub const DEFAULT_STRANDED_GRACE_MS: i64 = 120_000;
+
+/// Parse `HYPERPANES_STRANDED_GRACE`: whole seconds, optionally suffixed `s` (`"120"` or
+/// `"120s"`). `0` turns the report off; unset or unparseable falls back to the default.
+/// Returns milliseconds.
+pub fn parse_stranded_grace(raw: Option<&str>) -> i64 {
+    let Some(raw) = raw else {
+        return DEFAULT_STRANDED_GRACE_MS;
+    };
+    let t = raw.trim();
+    let t = t.strip_suffix('s').unwrap_or(t).trim();
+    match t.parse::<u32>() {
+        Ok(secs) => i64::from(secs) * 1000,
+        Err(_) => DEFAULT_STRANDED_GRACE_MS,
+    }
+}
+
+/// The grace from the environment (see [`parse_stranded_grace`]).
+pub fn stranded_grace_ms() -> i64 {
+    parse_stranded_grace(std::env::var("HYPERPANES_STRANDED_GRACE").ok().as_deref())
+}
+
+/// Boot-recovery record per queue: the recovered (requeued) task ids and the boot time.
+pub type RecoveredByQueue = std::collections::BTreeMap<String, (Vec<String>, i64)>;
+
+/// PURE: which queues are stranded at `now`. A queue is stranded when its boot-recovered
+/// tasks are past `grace_ms`, at least one is still `queued` (`still_queued(id)`), and nothing
+/// has claimed from the queue since boot. `grace_ms <= 0` disables. Returns
+/// `(queue, still-queued recovered tasks, boot_ms)` sorted by queue.
+pub fn stranded_queues(
+    recovered: &RecoveredByQueue,
+    still_queued: &dyn Fn(&str) -> bool,
+    claimed_since_boot: &std::collections::BTreeSet<String>,
+    now_ms: i64,
+    grace_ms: i64,
+) -> Vec<(String, usize, i64)> {
+    if grace_ms <= 0 {
+        return Vec::new();
+    }
+    recovered
+        .iter()
+        .filter(|(q, (_, boot))| !claimed_since_boot.contains(*q) && now_ms - boot >= grace_ms)
+        .filter_map(|(q, (ids, boot))| {
+            let n = ids.iter().filter(|id| still_queued(id)).count();
+            (n > 0).then(|| (q.clone(), n, *boot))
+        })
+        .collect()
+}
+
+/// The one-time log line for a newly stranded queue. Names and counts only: never task
+/// titles, payloads or ids.
+pub fn stranded_log_line(queue: &str, n: usize, grace_ms: i64) -> String {
+    format!(
+        "[work] queue {queue}: {n} recovered task(s) still unclaimed {}s after restart (no consumer)",
+        grace_ms / 1000
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +451,12 @@ pub struct WorkQueue {
     /// Queues whose task states changed since the last [`take_changed`](Self::take_changed).
     /// Feeds the coalesced queue-changed signal (`Shared::flush_queue_changes`).
     changed: std::collections::BTreeSet<String>,
+    /// Boot-recovered tasks per queue (see [`stranded_queues`]).
+    recovered: RecoveredByQueue,
+    /// Queues claimed from since this process opened the DB; clears a stranded flag.
+    claimed_since_boot: std::collections::BTreeSet<String>,
+    /// Queues currently flagged stranded (drives `queues()` and flip detection).
+    stranded: std::collections::BTreeMap<String, Stranded>,
 }
 
 impl WorkQueue {
@@ -457,6 +535,9 @@ impl WorkQueue {
             seq: seq as u64,
             fence: fence as u64,
             changed: std::collections::BTreeSet::new(),
+            recovered: RecoveredByQueue::new(),
+            claimed_since_boot: std::collections::BTreeSet::new(),
+            stranded: std::collections::BTreeMap::new(),
         })
     }
 
@@ -589,6 +670,8 @@ impl WorkQueue {
         tx.commit().ok()?;
         self.fence = next_fence;
         self.changed.insert(queue.to_string());
+        self.claimed_since_boot.insert(queue.to_string());
+        self.stranded.remove(queue);
         Some(Claim {
             task,
             fencing_token: next_fence,
@@ -774,6 +857,17 @@ impl WorkQueue {
             now,
             "control server restarted: in-flight task recovered",
         );
+        // Recovery is the "boot" the stranded report counts claims from.
+        self.claimed_since_boot.clear();
+        for r in &reaped {
+            if r.disposition == Disposition::Requeued {
+                self.recovered
+                    .entry(r.task.queue.clone())
+                    .or_insert_with(|| (Vec::new(), now))
+                    .0
+                    .push(r.task.id.clone());
+            }
+        }
         let mut kept = Vec::new();
         for id in live {
             let _ = self.conn.execute(
@@ -929,8 +1023,54 @@ impl WorkQueue {
             }
         }
         map.into_iter()
-            .map(|(queue, counts)| QueueSummary { queue, counts })
+            .map(|(queue, counts)| QueueSummary {
+                stranded: self.stranded.get(&queue).copied(),
+                queue,
+                counts,
+            })
             .collect()
+    }
+
+    /// Re-evaluate the stranded report at `now` with `grace_ms` (0 = off). A flip in either
+    /// direction marks the queue changed so the coalesced `queue` event fires. Returns the
+    /// queues that NEWLY became stranded as `(queue, tasks)`, for the caller to log once.
+    pub fn check_stranded(&mut self, now: i64, grace_ms: i64) -> Vec<(String, usize)> {
+        let queued: std::collections::HashSet<String> = self
+            .recovered
+            .values()
+            .flat_map(|(ids, _)| ids.iter())
+            .filter(|id| {
+                matches!(
+                    Self::fetch(&self.conn, id).ok().flatten().map(|t| t.state),
+                    Some(TaskState::Queued)
+                )
+            })
+            .cloned()
+            .collect();
+        let now_set = stranded_queues(
+            &self.recovered,
+            &|id| queued.contains(id),
+            &self.claimed_since_boot,
+            now,
+            grace_ms,
+        );
+        let mut fresh = Vec::new();
+        let mut next = std::collections::BTreeMap::new();
+        for (q, n, since) in now_set {
+            if !self.stranded.contains_key(&q) {
+                fresh.push((q.clone(), n));
+            }
+            next.insert(q, Stranded { tasks: n, since });
+        }
+        let flipped: Vec<String> = next
+            .keys()
+            .filter(|q| !self.stranded.contains_key(*q))
+            .chain(self.stranded.keys().filter(|q| !next.contains_key(*q)))
+            .cloned()
+            .collect();
+        self.changed.extend(flipped);
+        self.stranded = next;
+        fresh
     }
 
     /// Retention: delete terminal (`done`/`failed`/`dead`) tasks in `queue` last touched at
@@ -1904,5 +2044,135 @@ mod tests {
         assert!(!json.contains("claimedBy"));
         assert!(!json.contains("fencingToken"));
         assert!(!json.contains("\"result\""));
+    }
+
+    // ---- stranded-queue report (hyperpanes#67) -------------------------------------------
+
+    fn rec(queue: &str, ids: &[&str], boot: i64) -> RecoveredByQueue {
+        let mut m = RecoveredByQueue::new();
+        m.insert(
+            queue.to_string(),
+            (ids.iter().map(|s| s.to_string()).collect(), boot),
+        );
+        m
+    }
+
+    #[test]
+    fn stranded_planner_grace_boundary_claim_off_and_empty() {
+        let none = std::collections::BTreeSet::new();
+        let queued = |_: &str| true;
+        let r = rec("myapp-g1", &["a", "b"], 1_000);
+        // just before / at the grace boundary
+        assert!(stranded_queues(&r, &queued, &none, 1_000 + 119_999, 120_000).is_empty());
+        assert_eq!(
+            stranded_queues(&r, &queued, &none, 1_000 + 120_000, 120_000),
+            vec![("myapp-g1".to_string(), 2, 1_000)]
+        );
+        // a claim since boot clears it
+        let claimed: std::collections::BTreeSet<String> = ["myapp-g1".to_string()].into();
+        assert!(stranded_queues(&r, &queued, &claimed, 999_999, 120_000).is_empty());
+        // 0 = off
+        assert!(stranded_queues(&r, &queued, &none, 999_999, 0).is_empty());
+        // all recovered tasks claimed/done since: not stranded
+        assert!(stranded_queues(&r, &|_| false, &none, 999_999, 120_000).is_empty());
+        // only the still-queued ones count
+        assert_eq!(
+            stranded_queues(&r, &|id| id == "a", &none, 999_999, 120_000)[0].1,
+            1
+        );
+        // no recovered tasks: never stranded
+        assert!(stranded_queues(&RecoveredByQueue::new(), &queued, &none, 999_999, 1).is_empty());
+    }
+
+    #[test]
+    fn stranded_grace_parses_seconds() {
+        assert_eq!(parse_stranded_grace(None), 120_000);
+        assert_eq!(parse_stranded_grace(Some("30")), 30_000);
+        assert_eq!(parse_stranded_grace(Some("120s")), 120_000);
+        assert_eq!(parse_stranded_grace(Some("0")), 0);
+        assert_eq!(parse_stranded_grace(Some("junk")), 120_000);
+    }
+
+    #[test]
+    fn stranded_flag_flips_mark_the_queue_changed_both_ways() {
+        let mut wq = q();
+        // pre-fix overview has no stranded report at all
+        enq(&mut wq, "myapp-g1", "{}", 0);
+        wq.claim("myapp-g1", "w", 60_000, 1).unwrap();
+        assert!(wq.queues()[0].stranded.is_none());
+        wq.recover_in_flight_with(10, &|_, _| false);
+        wq.take_changed();
+        // inside the grace: nothing
+        assert!(wq.check_stranded(10 + 119_999, 120_000).is_empty());
+        assert!(wq.take_changed().is_empty());
+        // past it: flagged once, queue marked changed
+        assert_eq!(
+            wq.check_stranded(10 + 120_000, 120_000),
+            vec![("myapp-g1".to_string(), 1)]
+        );
+        assert_eq!(wq.take_changed(), vec!["myapp-g1"]);
+        assert_eq!(
+            wq.queues()[0].stranded,
+            Some(Stranded {
+                tasks: 1,
+                since: 10
+            })
+        );
+        // a repeat tick neither re-logs nor re-marks
+        assert!(wq.check_stranded(10 + 130_000, 120_000).is_empty());
+        assert!(wq.take_changed().is_empty());
+        // first claim clears it and marks changed (claim itself marks the queue)
+        wq.claim("myapp-g1", "w2", 60_000, 200_000).unwrap();
+        assert!(wq.queues()[0].stranded.is_none());
+        assert_eq!(wq.take_changed(), vec!["myapp-g1"]);
+        assert!(wq.check_stranded(500_000, 120_000).is_empty());
+    }
+
+    #[test]
+    fn stranded_clearing_without_a_claim_also_marks_changed() {
+        // The reverse flip via the planner: the recovered task is drained another way
+        // (cancelled/purged), so the flag drops on the next check.
+        let mut wq = q();
+        let t = enq(&mut wq, "myapp-g1", "{}", 0);
+        wq.claim("myapp-g1", "w", 60_000, 1).unwrap();
+        wq.recover_in_flight_with(10, &|_, _| false);
+        wq.check_stranded(200_000, 120_000);
+        wq.take_changed();
+        wq.conn
+            .execute("UPDATE tasks SET state='dead' WHERE id=?1", params![t.id])
+            .unwrap();
+        assert!(wq.check_stranded(200_005, 120_000).is_empty());
+        assert_eq!(wq.take_changed(), vec!["myapp-g1"]);
+        assert!(wq.queues()[0].stranded.is_none());
+    }
+
+    #[test]
+    fn stranded_log_line_has_name_and_count_only() {
+        let mut wq = q();
+        let t = wq.enqueue(
+            "myapp-g1",
+            "secret-payload",
+            EnqueueOpts {
+                title: "secret-title".into(),
+                ..EnqueueOpts::default()
+            },
+            0,
+        );
+        let line = stranded_log_line("myapp-g1", 3, 120_000);
+        assert_eq!(
+            line,
+            "[work] queue myapp-g1: 3 recovered task(s) still unclaimed 120s after restart (no consumer)"
+        );
+        assert!(!line.contains(&t.id) && !line.contains("secret"));
+    }
+
+    #[test]
+    fn stranded_is_omitted_from_the_wire_when_absent() {
+        let s = QueueSummary {
+            queue: "q".into(),
+            counts: Counts::default(),
+            stranded: None,
+        };
+        assert!(!serde_json::to_string(&s).unwrap().contains("stranded"));
     }
 }

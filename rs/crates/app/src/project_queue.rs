@@ -258,6 +258,7 @@ mod tests {
     fn qs(queue: &str, queued: usize, claimed: usize, done: usize) -> QueueSummary {
         QueueSummary {
             queue: queue.into(),
+            stranded: None,
             counts: Counts {
                 queued,
                 claimed,
@@ -312,6 +313,7 @@ mod tests {
     fn lane_q(queue: &str, q: usize, c: usize, d: usize, f: usize, x: usize) -> QueueSummary {
         QueueSummary {
             queue: queue.into(),
+            stranded: None,
             counts: Counts {
                 queued: q,
                 claimed: c,

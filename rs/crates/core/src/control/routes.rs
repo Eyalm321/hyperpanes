@@ -2832,4 +2832,58 @@ mod golden {
             r#"{"error":"queue out of scope","queue":"deploy"}"#
         );
     }
+
+    /// Put `queue` into the stranded state: one claimed task, boot recovery requeues it
+    /// (no holder), nobody claims, and the grace elapses.
+    fn strand(s: &Server, queue: &str) {
+        let mut wq = s.shared.work.lock().unwrap();
+        wq.enqueue(queue, "x", crate::control::work::EnqueueOpts::default(), 0);
+        wq.claim(queue, "w", 60_000, 1).unwrap();
+        wq.recover_in_flight_with(10, &|_, _| false);
+        assert_eq!(wq.check_stranded(10 + 120_000, 120_000).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn queues_overview_stranded_respects_queue_scope() {
+        let s = boot(true).await;
+        strand(&s, "build");
+        strand(&s, "deploy");
+        let get = |tok: String| {
+            let url = format!("{}/queues", s.base);
+            async move {
+                client()
+                    .get(url)
+                    .header("authorization", format!("Bearer {tok}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+        // master sees both, each with its stranded report
+        let all = get(s.token.clone()).await;
+        let qs = all["queues"].as_array().unwrap();
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0]["stranded"]["tasks"], json!(1));
+        assert_eq!(qs[0]["stranded"]["since"], json!(10));
+        // a token scoped to "build" sees only its own entry (and its stranded info)
+        let minted: Value = post(
+            &s,
+            "/tokens",
+            &s.token,
+            r#"{"scope":{"queueIds":["build"]}}"#,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        let scoped = get(minted["token"].as_str().unwrap().to_string()).await;
+        let qs = scoped["queues"].as_array().unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0]["queue"], json!("build"));
+        assert!(qs[0]["stranded"].is_object());
+        assert!(!scoped.to_string().contains("deploy"));
+    }
 }
