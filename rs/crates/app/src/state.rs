@@ -2228,10 +2228,16 @@ impl State {
     /// How many panes in this window run a process (see `app::runs_a_process`). Counts every
     /// tab incl. background ones, plus parked reminder panes and closed-tab-stack panes —
     /// exactly the sessions that closing the window would end (`session_uids`).
-    pub fn running_process_count(&self, mgr: &SessionManager) -> usize {
+    /// `markers` is the App's event-fed liveness mirror, used when the backend keeps none (the
+    /// daemon). Exited = the session manager no longer knows the uid.
+    pub fn running_process_count(
+        &self,
+        mgr: &SessionManager,
+        markers: &std::collections::HashMap<String, hyperpanes_core::session_manager::Liveness>,
+    ) -> usize {
         let run = |uid: &str, program: bool| {
-            let live = mgr.liveness(uid);
-            crate::app::runs_a_process(live.is_none(), program, live.as_ref())
+            let live = mgr.liveness(uid).or_else(|| markers.get(uid).copied());
+            crate::app::runs_a_process(!mgr.has(uid), program, live.as_ref())
         };
         let panes = self
             .tabs

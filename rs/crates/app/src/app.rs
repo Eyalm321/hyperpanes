@@ -137,6 +137,37 @@ fn close_needs_confirm(
     is_daemon && keep_alive && !is_last_window && running_count > 0
 }
 
+/// Fold one marker event into the per-uid liveness mirror (same transitions as core's
+/// in-process `apply_marker`). Non-marker events are ignored.
+fn apply_marker_event(
+    map: &mut std::collections::HashMap<String, hyperpanes_core::session_manager::Liveness>,
+    ev: &SessionEvent,
+) {
+    use hyperpanes_core::session_manager::{AgentLiveness as A, Liveness};
+    let (uid, running, ready, code) = match ev {
+        SessionEvent::CommandStart { uid } => (uid, true, false, None),
+        SessionEvent::CommandEnd { uid, code } => (uid, false, true, *code),
+        SessionEvent::PromptReady { uid } => (uid, false, true, None),
+        SessionEvent::AgentState { uid, state, code } => match state {
+            A::Busy => (uid, true, false, None),
+            A::AwaitingInput | A::Done | A::Error => (uid, false, true, *code),
+        },
+        _ => return,
+    };
+    let l = map.entry(uid.clone()).or_insert(Liveness {
+        prompt_ready: false,
+        command_running: false,
+        last_exit_code: None,
+        marker_seen: false,
+    });
+    l.marker_seen = true;
+    l.command_running = running;
+    l.prompt_ready = ready;
+    if code.is_some() {
+        l.last_exit_code = code;
+    }
+}
+
 /// Whether a pane "runs a process": not exited AND (a program pane — spawned with an explicit
 /// command rather than a bare shell — OR OSC-133 liveness says a command is running). Shells
 /// that never emitted a prompt marker count as idle. Mirrors core's `activity_for`.
@@ -333,6 +364,10 @@ pub struct App {
     /// hash fed to the engine and when, so we feed only on change and at most every
     /// [`AI_FEED_INTERVAL`].
     ai_feed: RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>>,
+    /// OSC-133 / agent-state marker liveness per session uid, mirrored from the event stream.
+    /// The daemon backend keeps no liveness mirror (`SessionManager::liveness` is `None` there),
+    /// so the close-window confirm reads this instead. Starts empty after a GUI relaunch.
+    markers: RefCell<std::collections::HashMap<String, hyperpanes_core::session_manager::Liveness>>,
     /// The embedded control HTTP+WS server host (default-OFF): publishes the live windows→
     /// tabs→panes tree into `core::control`'s read-model + applies inbound `/command`s to the
     /// GUI in-process, so the MCP / agent orchestration drives this process like Electron.
@@ -401,6 +436,7 @@ impl App {
             ai: crate::ai::AiBridge::spawn(),
             ai_ctx_sig: RefCell::new(std::collections::HashMap::new()),
             ai_feed: RefCell::new(std::collections::HashMap::new()),
+            markers: RefCell::new(std::collections::HashMap::new()),
             control,
             update: crate::update::Updater::new(),
             timer: RefCell::new(None),
@@ -1105,7 +1141,9 @@ impl App {
         let running = if is_last {
             0
         } else {
-            win.state.borrow().running_process_count(&self.mgr)
+            win.state
+                .borrow()
+                .running_process_count(&self.mgr, &self.markers.borrow())
         };
         if close_needs_confirm(
             self.mgr.is_daemon(),
@@ -1616,6 +1654,7 @@ impl App {
                 fed
             }
             SessionEvent::Exit { uid, .. } => {
+                self.markers.borrow_mut().remove(&uid);
                 self.ai.send(crate::ai::AiMsg::Exit { uid: uid.clone() });
                 self.ai_feed.borrow_mut().remove(&uid);
                 if let Some(w) = find_window(windows, &uid) {
@@ -1629,10 +1668,14 @@ impl App {
             }
             // OSC-133 / agent-state liveness markers: consumed by the control server for
             // liveness, not relevant to the GUI render path. Ignore (0 bytes fed).
+            // Mirrored here only for the close-window confirm (`markers`).
             SessionEvent::CommandStart { .. }
             | SessionEvent::CommandEnd { .. }
             | SessionEvent::PromptReady { .. }
-            | SessionEvent::AgentState { .. } => 0,
+            | SessionEvent::AgentState { .. } => {
+                apply_marker_event(&mut self.markers.borrow_mut(), &ev);
+                0
+            }
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
                     let project = {
@@ -4259,6 +4302,35 @@ mod multi_window_session_tests {
             .map(|g| g.title.clone().unwrap())
             .collect();
         assert_eq!(titles, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn marker_events_feed_the_daemon_liveness_mirror() {
+        use hyperpanes_core::session_manager::{AgentLiveness, SessionEvent};
+        let mut m = std::collections::HashMap::new();
+        let u = || "u1".to_string();
+        super::apply_marker_event(&mut m, &SessionEvent::CommandStart { uid: u() });
+        assert!(runs_a_process(false, false, m.get("u1")));
+        super::apply_marker_event(
+            &mut m,
+            &SessionEvent::CommandEnd {
+                uid: u(),
+                code: Some(0),
+            },
+        );
+        assert!(!runs_a_process(false, false, m.get("u1")));
+        super::apply_marker_event(
+            &mut m,
+            &SessionEvent::AgentState {
+                uid: u(),
+                state: AgentLiveness::Busy,
+                code: None,
+            },
+        );
+        assert!(runs_a_process(false, false, m.get("u1")));
+        super::apply_marker_event(&mut m, &SessionEvent::PromptReady { uid: u() });
+        assert!(!runs_a_process(false, false, m.get("u1")));
+        assert_eq!(m["u1"].last_exit_code, Some(0));
     }
 
     #[test]
