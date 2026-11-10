@@ -73,7 +73,7 @@ fn is_runtime_key(k: &str) -> bool {
     RUNTIME_KEYS.contains(&k) || k.starts_with("HP_TASK_")
 }
 
-const SECRET_WORDS: &[&str] = &[
+pub(crate) const SECRET_WORDS: &[&str] = &[
     "TOKEN",
     "SECRET",
     "PASSWORD",
@@ -118,7 +118,7 @@ const SECRET_VALUE_PREFIXES: &[&str] = &[
     "AIza",
 ];
 
-fn is_secret_value(v: &str) -> bool {
+pub(crate) fn is_secret_value(v: &str) -> bool {
     SECRET_VALUE_PREFIXES.iter().any(|p| v.starts_with(p)) || v.contains("-----BEGIN")
 }
 
