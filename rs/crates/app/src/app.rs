@@ -58,6 +58,59 @@ const TOPBAR_H: f32 = 32.0;
 /// `paneview.slint`. Used to show the open-hand cursor only over the handle, not the body.
 const HEADER_BAND: f32 = 26.0;
 
+/// Compose the session file from per-window specs: `windows[]` only (no top-level groups —
+/// an older single-window reader takes `windows[0]`, and old top-level-groups files still
+/// load via `windows_of`). Windows with no tabs are skipped; `None` when nothing is left.
+fn session_file_of(
+    mut windows: Vec<hyperpanes_core::workspace::model::WindowSpec>,
+) -> Option<hyperpanes_core::workspace::model::WorkspaceFile> {
+    windows.retain(|w| !w.groups.is_empty());
+    if windows.is_empty() {
+        return None;
+    }
+    Some(hyperpanes_core::workspace::model::WorkspaceFile {
+        windows: Some(windows),
+        ..Default::default()
+    })
+}
+
+/// Every tab group of a session file — top-level groups (old format) AND each window's.
+fn session_groups_mut(
+    file: &mut hyperpanes_core::workspace::model::WorkspaceFile,
+) -> Vec<&mut hyperpanes_core::workspace::model::GroupSpec> {
+    let mut out: Vec<&mut hyperpanes_core::workspace::model::GroupSpec> = Vec::new();
+    if let Some(g) = file.groups.as_mut() {
+        out.extend(g.iter_mut());
+    }
+    if let Some(ws) = file.windows.as_mut() {
+        for w in ws {
+            out.extend(w.groups.iter_mut());
+        }
+    }
+    out
+}
+
+/// A single-window file carrying `ws` (the seed for one restored OS window).
+fn single_window_file(
+    ws: &hyperpanes_core::workspace::model::WindowSpec,
+) -> hyperpanes_core::workspace::model::WorkspaceFile {
+    hyperpanes_core::workspace::model::WorkspaceFile {
+        name: ws.title.clone(),
+        groups: Some(ws.groups.clone()),
+        active: ws.active,
+        tab_dock: ws.tab_dock.clone(),
+        ..Default::default()
+    }
+}
+
+/// Whether closing windows must leave their sessions ALIVE (no `remote::kill`): only when the
+/// close takes the last window (`survivors == 0`), the backend is the daemon and keep-alive
+/// is on — i.e. exactly a Quit with keep-alive, which leaves the daemon running so a relaunch
+/// re-attaches. Any survivor, keep-alive off, or the in-process backend → kill as before.
+fn close_keeps_sessions(is_daemon: bool, keep_alive: bool, survivors: usize) -> bool {
+    is_daemon && keep_alive && survivors == 0
+}
+
 /// Write the final window's live workspace snapshot to `last-workspace.json` — the "last
 /// session" a bare relaunch restores via core's `resolve_launch_workspace` fallback (#14:
 /// this is what carries per-pane zoom, layout, focus and cwds across a plain relaunch).
@@ -327,11 +380,12 @@ impl App {
     /// (`HYPERPANES_PANE_ID`): the control host's alias for a control-spawned pane, the
     /// session uid itself for a GUI-native one — hence the lookup lives here, above both.
     fn embed_claude_sessions(&self, file: &mut hyperpanes_core::workspace::model::WorkspaceFile) {
+        self.embed_claude_groups(session_groups_mut(file));
+    }
+
+    /// [`Self::embed_claude_sessions`] for one window's tab groups.
+    fn embed_claude_groups(&self, groups: Vec<&mut hyperpanes_core::workspace::model::GroupSpec>) {
         use hyperpanes_core::claude_panes;
-        let groups = match file.groups.as_mut() {
-            Some(g) => g,
-            None => return,
-        };
         for g in groups {
             for p in &mut g.panes {
                 let Some(uid) = p.uid.as_deref() else {
@@ -563,6 +617,50 @@ impl App {
         }
     }
 
+    /// One window's snapshot: its tabs/active/dock (via `State::to_session_file_with`) plus
+    /// its OS geometry (logical px). Fields the platform can't report stay `None` (e.g. the
+    /// position on Wayland, which Slint reports as 0,0).
+    fn window_spec(&self, w: &Window) -> hyperpanes_core::workspace::model::WindowSpec {
+        use hyperpanes_core::workspace::model::{WindowBounds, WindowSpec};
+        let mut f = w
+            .state
+            .borrow()
+            .to_session_file_with(|u| self.control.meta_for_uid(u));
+        self.embed_claude_sessions(&mut f);
+        let win = w.app.window();
+        let scale = win.scale_factor().max(0.1);
+        let size = win.size();
+        let pos = win.position();
+        let mut b = WindowBounds::default();
+        if size.width > 0 && size.height > 0 {
+            b.width = Some((size.width as f32 / scale).round() as i64);
+            b.height = Some((size.height as f32 / scale).round() as i64);
+        }
+        if pos.x != 0 || pos.y != 0 {
+            b.x = Some((pos.x as f32 / scale).round() as i64);
+            b.y = Some((pos.y as f32 / scale).round() as i64);
+        }
+        if window::is_maximized(w.hwnd.get()) {
+            b.maximized = Some(true);
+        }
+        WindowSpec {
+            active: f.active,
+            groups: f.groups.take().unwrap_or_default(),
+            tab_dock: f.tab_dock.take(),
+            bounds: (b != WindowBounds::default()).then_some(b),
+            ..Default::default()
+        }
+    }
+
+    /// Session snapshot of `wins` (in order) as a multi-window file, or `None` when no
+    /// window has any tab (so callers never clobber a good save with an empty one).
+    fn session_snapshot(
+        &self,
+        wins: &[Rc<Window>],
+    ) -> Option<hyperpanes_core::workspace::model::WorkspaceFile> {
+        session_file_of(wins.iter().map(|w| self.window_spec(w)).collect())
+    }
+
     /// Execute a pending `restartApp` control command (flag set by the route; see
     /// `Shared::restart_app`): flush a final snapshot, spawn a detached relauncher of our
     /// own binary, optionally shut the session daemon down (scope "full" — every pane dies
@@ -573,12 +671,8 @@ impl App {
             return;
         }
         // Final snapshot NOW — don't rely on the last autosave tick being fresh.
-        if let Some(w) = self.windows.borrow().first() {
-            let mut f = w
-                .state
-                .borrow()
-                .to_session_file_with(|u| self.control.meta_for_uid(u));
-            self.embed_claude_sessions(&mut f);
+        let wins: Vec<Rc<Window>> = self.windows.borrow().clone();
+        if let Some(f) = self.session_snapshot(&wins) {
             persist_last_session(&f);
         }
         // Detached relauncher. It must outlive us AND escape our cgroup: `setsid` alone
@@ -639,8 +733,7 @@ impl App {
     /// Crash-recovery autosave (#2): periodically snapshot the current session to
     /// `last-workspace.json` so a crash — or any relaunch — restores the workspace as it was.
     /// Reuses the same writer + restore path as the clean-close save; throttled to a few seconds
-    /// and skipped when nothing changed. Snapshots the primary (first) window, matching the
-    /// single-window clean-close/restore behaviour. Cheap: the snapshot is structural (layout +
+    /// and skipped when nothing changed. Snapshots EVERY open window (`windows[]`). Cheap: the snapshot is structural (layout +
     /// cwd + labels + zoom), never scrollback. Called every tick; early-returns most of them.
     fn autosave_session(&self) {
         const EVERY: Duration = Duration::from_secs(4);
@@ -650,21 +743,12 @@ impl App {
                 return;
             }
         }
-        let file = match self.windows.borrow().first() {
-            Some(w) => {
-                let mut f = w
-                    .state
-                    .borrow()
-                    .to_session_file_with(|u| self.control.meta_for_uid(u));
-                self.embed_claude_sessions(&mut f);
-                f
-            }
-            None => return,
-        };
-        // Never clobber a good save with a transient empty snapshot (e.g. mid window-close).
-        if file.groups.as_deref().map_or(true, |g| g.is_empty()) {
+        let wins: Vec<Rc<Window>> = self.windows.borrow().clone();
+        // Never clobber a good save with a transient empty snapshot (e.g. mid window-close):
+        // `session_snapshot` yields None when no window has any tab.
+        let Some(file) = self.session_snapshot(&wins) else {
             return;
-        }
+        };
         let json = match serde_json::to_string(&file) {
             Ok(j) => j,
             Err(_) => return,
@@ -717,6 +801,34 @@ impl App {
     /// Realize a new OS window, wire its callbacks to act on its own state, show it, and
     /// register it. `seed` decides its first pane (empty shell, or a re-hosted session).
     pub fn spawn_window(self: &Rc<Self>, seed: PendingSeed) {
+        self.spawn_window_with_bounds(seed, None);
+    }
+
+    /// Restore a launch/session file: window 0 gets `windows[0]`, each further window spec
+    /// opens its own OS window (in order) with its saved bounds. A single-window (or
+    /// old-format top-level-groups) file behaves exactly as before.
+    pub fn spawn_restored(self: &Rc<Self>, file: hyperpanes_core::workspace::model::WorkspaceFile) {
+        let wins = hyperpanes_core::workspace::io::windows_of(Some(&file));
+        if wins.len() <= 1 {
+            let bounds = wins.first().and_then(|w| w.bounds.clone());
+            self.spawn_window_with_bounds(PendingSeed::Workspace(Box::new(file)), bounds);
+            return;
+        }
+        for ws in &wins {
+            self.spawn_window_with_bounds(
+                PendingSeed::Workspace(Box::new(single_window_file(ws))),
+                ws.bounds.clone(),
+            );
+        }
+    }
+
+    /// [`Self::spawn_window`] applying saved OS-window `bounds` (size, position, maximized)
+    /// where present; a window with a saved position skips the cascade offset.
+    fn spawn_window_with_bounds(
+        self: &Rc<Self>,
+        seed: PendingSeed,
+        bounds: Option<hyperpanes_core::workspace::model::WindowBounds>,
+    ) {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
 
@@ -797,7 +909,27 @@ impl App {
         win.app
             .set_pref_keep_alive(win.state.borrow().settings.keep_alive);
         // Cascade additional windows so they don't land exactly on top of each other.
-        if id > 0 {
+        let saved_pos = bounds
+            .as_ref()
+            .is_some_and(|b| b.x.is_some() && b.y.is_some());
+        if let Some(b) = &bounds {
+            if let (Some(w), Some(h)) = (b.width, b.height) {
+                if w > 0 && h > 0 {
+                    win.app
+                        .window()
+                        .set_size(slint::LogicalSize::new(w as f32, h as f32));
+                }
+            }
+            if let (Some(x), Some(y)) = (b.x, b.y) {
+                win.app
+                    .window()
+                    .set_position(LogicalPosition::new(x as f32, y as f32));
+            }
+            if b.maximized == Some(true) {
+                win.app.window().set_maximized(true);
+            }
+        }
+        if id > 0 && !saved_pos {
             let off = 36.0 * id as f32;
             win.app
                 .window()
@@ -1164,16 +1296,28 @@ impl App {
         //    the last session (tabs, layout, focus, per-pane zoom — #14) via core's
         //    `resolve_launch_workspace` fallback.
         if windows.iter().any(|w| w.closing.get()) {
+            let will_survive = windows.iter().filter(|w| !w.closing.get()).count();
+            let keep_sessions = close_keeps_sessions(
+                self.mgr.is_daemon(),
+                crate::prefs::load().keep_alive,
+                will_survive,
+            );
+            // Snapshot BEFORE any session dies. With no survivors, the closing windows ARE
+            // every window that was open at the start of this reap, so one snapshot of them
+            // is the whole session; with survivors the autosave keeps the file fresh.
+            let closing: Vec<Rc<Window>> = windows
+                .iter()
+                .filter(|w| w.closing.get())
+                .cloned()
+                .collect();
+            let last_session = if will_survive == 0 {
+                self.session_snapshot(&closing)
+            } else {
+                None
+            };
             let mut survivors = Vec::new();
-            let mut last_session = None;
             for w in self.windows.borrow().iter() {
                 if w.closing.get() {
-                    let mut f = w
-                        .state
-                        .borrow()
-                        .to_session_file_with(|u| self.control.meta_for_uid(u));
-                    self.embed_claude_sessions(&mut f);
-                    last_session = Some(f);
                     // Tell the AI engine to forget this window's panes, and drop its context sig.
                     self.ai.send(crate::ai::AiMsg::DropWindow {
                         window_id: w.id as i64,
@@ -1181,7 +1325,9 @@ impl App {
                     self.ai_ctx_sig.borrow_mut().remove(&w.id);
                     for uid in w.state.borrow().session_uids() {
                         self.ai_feed.borrow_mut().remove(&uid);
-                        crate::remote::kill(&self.mgr, &uid);
+                        if !keep_sessions {
+                            crate::remote::kill(&self.mgr, &uid);
+                        }
                     }
                     let _ = w.app.window().hide();
                 } else {
@@ -3903,5 +4049,109 @@ mod last_session_mode_tests {
         super::persist_last_session_to(&path, &file);
         assert_eq!(mode(&path), 0o600);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod multi_window_session_tests {
+    use super::{close_keeps_sessions, session_file_of, session_groups_mut, single_window_file};
+    use hyperpanes_core::workspace::io::windows_of;
+    use hyperpanes_core::workspace::model::{
+        GroupSpec, PaneSpec, WindowBounds, WindowSpec, WorkspaceFile,
+    };
+
+    fn group(label: &str) -> GroupSpec {
+        GroupSpec {
+            title: Some(label.into()),
+            panes: vec![PaneSpec {
+                label: Some(label.into()),
+                uid: Some(format!("uid-{label}")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn win(labels: &[&str], active: u32, x: i64) -> WindowSpec {
+        WindowSpec {
+            active: Some(active),
+            groups: labels.iter().map(|l| group(l)).collect(),
+            bounds: Some(WindowBounds {
+                x: Some(x),
+                y: Some(x + 1),
+                width: Some(800),
+                height: Some(600),
+                maximized: Some(x > 100),
+                fullscreen: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn two_window_round_trip() {
+        let f = session_file_of(vec![win(&["a", "b"], 1, 10), win(&["c"], 0, 200)]).unwrap();
+        assert!(f.groups.is_none());
+        let json = serde_json::to_string(&f).unwrap();
+        let back: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let wins = windows_of(Some(&back));
+        assert_eq!(wins.len(), 2);
+        assert_eq!(wins[0].groups.len(), 2);
+        assert_eq!(wins[0].active, Some(1));
+        assert_eq!(wins[1].groups.len(), 1);
+        assert_eq!(wins[1].bounds.as_ref().unwrap().x, Some(200));
+        assert_eq!(wins[1].bounds.as_ref().unwrap().maximized, Some(true));
+        assert_eq!(wins[0].bounds.as_ref().unwrap().maximized, Some(false));
+    }
+
+    #[test]
+    fn empty_windows_skipped_and_none_when_all_empty() {
+        assert!(session_file_of(vec![WindowSpec::default()]).is_none());
+        let f = session_file_of(vec![WindowSpec::default(), win(&["a"], 0, 1)]).unwrap();
+        assert_eq!(f.windows.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn old_single_window_file_loads_as_one_window() {
+        let old = WorkspaceFile {
+            groups: Some(vec![group("x"), group("y")]),
+            active: Some(1),
+            ..Default::default()
+        };
+        let wins = windows_of(Some(&old));
+        assert_eq!(wins.len(), 1);
+        assert_eq!(wins[0].groups.len(), 2);
+        assert_eq!(wins[0].active, Some(1));
+    }
+
+    #[test]
+    fn older_reader_sees_window_zero() {
+        let f = session_file_of(vec![win(&["a", "b"], 1, 10), win(&["c"], 0, 20)]).unwrap();
+        let first = &windows_of(Some(&f))[0];
+        assert_eq!(first.groups[0].title.as_deref(), Some("a"));
+        // The per-window seed used on restore carries the same content.
+        let seed = single_window_file(first);
+        assert_eq!(windows_of(Some(&seed))[0].groups.len(), 2);
+        assert_eq!(windows_of(Some(&seed))[0].active, Some(1));
+    }
+
+    #[test]
+    fn embed_walk_covers_every_window() {
+        let mut f = session_file_of(vec![win(&["a", "b"], 0, 1), win(&["c"], 0, 2)]).unwrap();
+        let titles: Vec<_> = session_groups_mut(&mut f)
+            .iter()
+            .map(|g| g.title.clone().unwrap())
+            .collect();
+        assert_eq!(titles, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn close_keeps_sessions_truth_table() {
+        assert!(close_keeps_sessions(true, true, 0));
+        assert!(!close_keeps_sessions(true, true, 1));
+        assert!(!close_keeps_sessions(true, true, 3));
+        assert!(!close_keeps_sessions(true, false, 0));
+        assert!(!close_keeps_sessions(false, true, 0));
+        assert!(!close_keeps_sessions(false, false, 0));
     }
 }
