@@ -107,7 +107,7 @@ fn state_is_byte_exact_over_a_real_socket() {
     // any) — this crate has no JSON parser available (public-API + std only), so the
     // known-exact prefix/suffix around that one variable value are checked directly.
     let app = format!(r#"{{"app":{{"version":"{}"}},"#, env!("CARGO_PKG_VERSION"));
-    let prefix = r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#3b82f6","status":"running","activity":"busy"}]}]}],"speech":{"muted":false,"focusedOnly":false,"backend":""##;
+    let prefix = r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","color":null,"layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#3b82f6","status":"running","activity":"busy"}]}]}],"speech":{"muted":false,"focusedOnly":false,"backend":""##;
     let prefix = format!("{app}{}", &prefix["{".len()..]);
     let suffix = r#"","speakingPane":null}}"#;
     assert!(body.starts_with(&prefix), "unexpected body: {body}");

@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn state_serializes_tab_color_or_null() {
         let mut m = seeded();
-        let v = serde_json::to_value(m.state_for_scope(None)).unwrap();
+        let v = serde_json::to_value(m.state_for_scope(None, &|_p| Activity::Exited)).unwrap();
         assert!(v["windows"][0]["tabs"][0]["color"].is_null());
         assert!(v["windows"][0]["tabs"][0]
             .as_object()
@@ -952,7 +952,7 @@ mod tests {
         assert!(m.rename_tab("t1", "renamed"));
         assert!(!m.recolor_tab("ghost", None));
         assert!(!m.rename_tab("ghost", "x"));
-        let v = serde_json::to_value(m.state_for_scope(None)).unwrap();
+        let v = serde_json::to_value(m.state_for_scope(None, &|_p| Activity::Exited)).unwrap();
         assert_eq!(v["windows"][0]["tabs"][0]["color"], json!("#aabbcc"));
         assert_eq!(v["windows"][0]["tabs"][0]["title"], json!("renamed"));
     }

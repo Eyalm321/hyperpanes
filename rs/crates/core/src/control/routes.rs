@@ -2206,7 +2206,7 @@ mod golden {
         // so only its shape is asserted, not the exact backend name.
         assert_eq!(
             body["windows"],
-            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[]}]}])
+            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","color":null,"layout":"auto","panes":[]}]}])
         );
         assert_eq!(body["speech"]["muted"], json!(false));
         assert_eq!(body["speech"]["focusedOnly"], json!(false));
