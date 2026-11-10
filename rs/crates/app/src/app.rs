@@ -330,19 +330,27 @@ impl App {
                     .unwrap_or_else(|| uid.to_string());
                 if let Some(s) = claude_panes::read_pane_session(&pane_id) {
                     let meta = p.meta.get_or_insert_with(Default::default);
-                    meta.insert(claude_panes::META_KEY.to_string(), s.session_id);
+                    meta.insert(claude_panes::META_KEY.to_string(), s.session_id.clone());
                     // The hook-reported cwd is authoritative for a claude pane: `--resume`
                     // only finds sessions in the current directory's project, and the pane's
                     // own cwd can be stale (no OSC 7 re-emit inside a TUI after re-attach).
                     if claude_panes::valid_resume_cwd(&s.cwd) {
                         meta.insert(claude_panes::META_CWD_KEY.to_string(), s.cwd.clone());
-                        p.cwd = Some(s.cwd);
+                        p.cwd = Some(s.cwd.clone());
                     }
                     // The account (CLAUDE_CONFIG_DIR) the conversation was saved under —
                     // restore re-sets it so `claude --resume` finds the right transcript
                     // store. Absent/invalid ⇒ the default account, so record nothing.
                     if claude_panes::valid_config_dir(&s.config_dir) {
-                        meta.insert(claude_panes::META_CONFIG_DIR_KEY.to_string(), s.config_dir);
+                        meta.insert(
+                            claude_panes::META_CONFIG_DIR_KEY.to_string(),
+                            s.config_dir.clone(),
+                        );
+                    }
+                    // The flags a shell-typed claude was started with (or why they were not
+                    // recorded), so a restored shell pane can replay them.
+                    if let Some((key, value)) = s.argv_meta() {
+                        meta.insert(key.to_string(), value);
                     }
                 }
             }

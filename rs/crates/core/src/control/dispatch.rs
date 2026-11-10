@@ -1228,6 +1228,19 @@ fn shell_token_spans(s: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// `tokens` (the argv after the program) with the session-selection flags and their values
+/// removed — the flags a resume replaces with its own `--resume <id>`.
+pub fn strip_session_flag_tokens(tokens: &[String]) -> Vec<String> {
+    let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let keep = keep_after_stripping_session_flags(&refs);
+    tokens
+        .iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(t, _)| t.clone())
+        .collect()
+}
+
 fn is_claude_program(tok: &str) -> bool {
     matches!(
         tok.rsplit(['/', '\\']).next(),
