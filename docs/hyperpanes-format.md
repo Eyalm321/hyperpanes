@@ -62,6 +62,7 @@ present into a flat window list (precedence `windows` → `groups` → `panes`, 
 | JSON field | Rust type | Notes |
 |---|---|---|
 | `title`        | `string?`       | tab title |
+| `color`        | `string?`       | manual tab colour `#rrggbb` |
 | `layout`       | `string?`       | tab layout id |
 | `panes`        | `PaneSpec[]`    | the tab's panes (required array) |
 | `sizes`        | `number[]?`     | per-slot split fractions (sum → 1; length matches `panes`) |

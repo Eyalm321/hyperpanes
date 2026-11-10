@@ -75,3 +75,54 @@ in Preferences > Keybindings hands it back to the pane.
 | Esc (`pane.clearSelection`) | on, **guarded** | Nothing unless 2+ panes are selected. With no selection Esc reaches the pane unchanged (0x1b). | ON, guarded | Rebind or unbind `pane.clearSelection` |
 | Ungroup tab (`tab.ungroup`) | off | Nothing: unbound. Ctrl+Shift+G looks like Ctrl+G to many programs, so there is no default. | OFF by default | Bind `tab.ungroup` in Preferences > Keybindings |
 | Wheel over the strip | on | Nothing: the strip is not a pane. | ON | none |
+
+## Tab colour and the control API
+
+Agents can rename and recolour tabs over the control API, the same way `renamePane` and
+`recolorPane` work for panes:
+
+```
+POST /command {"type":"renameTab","tabId":"…","title":"…"}
+POST /command {"type":"recolorTab","tabId":"…","color":"#rrggbb"}   // or "color": null to clear
+```
+
+Tab ids come from `GET /state` (`windows[].tabs[].id`): positional `<windowId>:<tabIndex>` for
+GUI tabs, or the uuid returned by `attach` for tabs it created. Each tab in `/state` carries
+`"color"`: the manual colour as lowercase `#rrggbb`, or `null` when unset.
+
+An agent can also colour a tab when it creates it: give the group a `color` in `attach` (MCP
+`open_tab`), next to its `title`. The per-pane `color` inside `panes` is unchanged and still
+sets a pane's frame colour.
+
+```
+POST /command {"type":"attach","windowId":0,"groups":[{"title":"build","color":"#e5484d","panes":[{}]}]}
+```
+
+It sets the same manual tab colour as `recolorTab`: same validation and normalisation, the same
+precedence over a group colour, and `recolorTab` with `null` clears it later. A bad group colour
+is `400` (`invalid color "…" in groups[<i>] …`), checked before any pane is spawned. `null` or no
+`color` means no manual colour. A tab's `color` in a workspace file does the same when the
+workspace is launched or restored.
+
+Validation:
+
+- `renameTab`: `tabId` and `title` must be strings. The title is trimmed; empty is `400`, more
+  than 80 characters is `400` (`tab title too long (max 80 chars)`).
+- `recolorTab`: the `color` key is required. `#rgb` or `#rrggbb` (either case) is accepted and
+  normalised to lowercase `#rrggbb`; `null` clears. Anything else (a missing key, `red`,
+  `#12345`, a number) is `400` (`invalid color "…" (expected #rrggbb, or null to clear)`).
+- A missing `tabId` is `400`; an unknown tab is `404` (`no such tab: <id>`); a scoped token
+  outside the tab's window or tab is `403`.
+
+A coloured tab shows a 3px stripe and a 10% tint of that colour on the chip's leading edge: the
+left edge in the top strip, and the edge facing away from the panes in docked columns (the same
+stripe a pane-group tab uses).
+
+**Precedence with pane groups** ([pane-groups.md](pane-groups.md)). A manual tab colour set by
+`recolorTab` overrides a group tab's project colour, on the stripe, the tint and the group glyph.
+`"color": null` clears only the manual colour, so the group colour shows again. `/state` keeps
+the two apart: `color` is the manual colour, and `paneGroup.color` is the group colour. Picking a
+colour from the tab menu's "Group Color" also clears the manual colour, so the user's pick wins.
+
+The colour is saved in the session and workspace files (the `color` field of a tab) and restored
+on relaunch; an invalid saved value restores as no colour.

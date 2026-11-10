@@ -1961,6 +1961,7 @@ mod golden {
             tabs: vec![TabInfo {
                 id: "t1".into(),
                 title: "Tab 1".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![],
                 pane_group: None,
@@ -2032,6 +2033,7 @@ mod golden {
                 tabs: vec![TabInfo {
                     id: "w2t".into(),
                     title: "T".into(),
+                    color: None,
                     layout: "auto".into(),
                     panes: vec![],
                     pane_group: None,
@@ -2044,6 +2046,7 @@ mod golden {
                 tabs: vec![TabInfo {
                     id: "g1".into(),
                     title: "Group".into(),
+                    color: None,
                     layout: "auto".into(),
                     panes: vec![],
                     pane_group: Some(PaneGroupInfo::default()),
@@ -2399,7 +2402,7 @@ mod golden {
         // so only its shape is asserted, not the exact backend name.
         assert_eq!(
             body["windows"],
-            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[],"paneGroup":null}]}])
+            json!([{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","color":null,"layout":"auto","panes":[],"paneGroup":null}]}])
         );
         assert_eq!(body["speech"]["muted"], json!(false));
         assert_eq!(body["speech"]["focusedOnly"], json!(false));

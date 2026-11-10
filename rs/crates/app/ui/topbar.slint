@@ -64,6 +64,8 @@ component TabChip inherits Rectangle {
     in property <bool> active;
     in property <bool> editing;
     in property <bool> spring-hover: false;   // a dragged pane is hovering this tab
+    in property <bool> has-color: false;      // manual tab colour set
+    in property <color> tab-color;
     in property <bool> group: false;          // pane-group tab (t28)
     in property <color> group-color: Theme.subtext;
     in property <string> a11y-label: "";
@@ -105,16 +107,18 @@ component TabChip inherits Rectangle {
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
 
-    // pane-group tint + 3px leading-edge stripe (drawn under the TouchArea)
-    if root.group : Rectangle {
-        background: root.group-color.with-alpha(0.10);
+    // Tab tint + 3px leading-edge stripe (drawn under the TouchArea) for a pane-group tab or a
+    // tab with a manual colour. The manual colour (recolorTab) wins over the group colour.
+    property <color> stripe-color: root.has-color ? root.tab-color : root.group-color;
+    if root.group || root.has-color : Rectangle {
+        background: root.stripe-color.with-alpha(0.10);
         border-top-left-radius: 9px;
         border-top-right-radius: 9px;
     }
-    if root.group : Rectangle {
+    if root.group || root.has-color : Rectangle {
         x: 0px;
         width: 3px;
-        background: root.group-color;
+        background: root.stripe-color;
         border-top-left-radius: 9px;
     }
 
@@ -349,6 +353,8 @@ export component TopBar inherits Rectangle {
                     for tab[idx] in root.tabs : TabChip {
                         title: tab.title;
                         active: tab.active;
+                        has-color: tab.has-color;
+                        tab-color: tab.color;
                         group: tab.group;
                         group-color: tab.group-color;
                         a11y-label: tab.a11y-label;

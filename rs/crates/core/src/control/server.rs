@@ -1199,6 +1199,7 @@ mod tests {
             tabs: vec![TabInfo {
                 id: "t1".into(),
                 title: "Tab".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![pane],
                 pane_group: None,

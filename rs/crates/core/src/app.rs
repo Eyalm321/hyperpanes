@@ -178,6 +178,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
             tabs: vec![TabInfo {
                 id: tab_id,
                 title: "Tab 1".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![],
                 pane_group: None,
@@ -201,6 +202,11 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
             }
             let title = g.title.unwrap_or_else(|| "Tab".into());
             let layout = g.layout.unwrap_or_else(|| "auto".into());
+            // A workspace tab's manual colour; an invalid value seeds as no colour.
+            let color = g
+                .color
+                .as_deref()
+                .and_then(crate::control::dispatch::normalize_hex_color);
             let panes = g
                 .panes
                 .iter()
@@ -209,6 +215,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
             tabs.push(TabInfo {
                 id: tab_id,
                 title,
+                color,
                 layout,
                 panes,
                 pane_group: None,
