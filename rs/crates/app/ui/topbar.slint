@@ -256,10 +256,10 @@ export component TopBar inherits Rectangle {
 
     // drag/tear-off: a faint wash while the strip is a drop target + an insertion caret at
     // the slot the dragged tab/pane will land in. Visual only (no TouchArea → click-through).
-    if root.drop-strip-active : Rectangle {
+    if root.drop-strip-active && root.tab-dock == 0 : Rectangle {
         background: Theme.brand.with-alpha(0.10);
     }
-    if root.drop-tab-active : Rectangle {
+    if root.drop-tab-active && root.tab-dock == 0 : Rectangle {
         x: root.drop-tab-x - 1.5px;
         y: 4px;
         width: 3px;
@@ -312,7 +312,6 @@ export component TopBar inherits Rectangle {
         Rectangle {
             horizontal-stretch: 1;
             opacity: root.dock-dragging ? 0.6 : 1.0;
-            accessible-role: tab-list;
             HorizontalLayout {
                 padding-top: 4px;          // bottom-align tabs (28px in the 32px bar)
                 padding-left: 6px;
@@ -322,6 +321,7 @@ export component TopBar inherits Rectangle {
                 // chips + new-tab button live only while top-docked; docked, the strip
                 // is just the empty window-drag area.
                 if root.tab-dock == 0 : HorizontalLayout {
+                accessible-role: tab-list;
                 spacing: 2px;
                 horizontal-stretch: 0;
                 for tab[idx] in root.tabs : TabChip {

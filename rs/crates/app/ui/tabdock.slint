@@ -239,6 +239,11 @@ export component TabColumn inherits Rectangle {
     property <bool> overflowing: fl.viewport-height > fl.height;
 
     width: 176px;
+    // The tab list's natural height must not leak into the window's size constraints: the
+    // column is a sibling of the panes, and its short content height would otherwise
+    // become the window's MAX height, shrinking the window to ~200px on docking.
+    min-height: 0px;
+    max-height: 100000px;
     background: Theme.mantle;
 
     Timer {
