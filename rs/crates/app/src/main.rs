@@ -508,6 +508,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("0") => false,
         _ => cfg!(unix),
     };
+    // Every pane this GUI spawns carries HYPERPANES_VERSION = this app's version.
+    hyperpanes_core::session_manager::set_running_version(env!("CARGO_PKG_VERSION"));
     let mgr = Arc::new(if want_daemon {
         match SessionManager::new_daemon(etx.clone(), &salt) {
             Ok(m) => {

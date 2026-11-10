@@ -187,6 +187,9 @@ struct HealthOut {
     /// no boot recovery, no reaper on the DB) or `"memory"` (never attached / open failed).
     /// Deliberately no paths or pids — `/health` is unauthenticated.
     work_queue: &'static str,
+    /// Additive: optional sanitized build label; omitted when unset (public app).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<String>,
 }
 
 async fn health(State(shared): State<Arc<Shared>>) -> Response {
@@ -197,6 +200,7 @@ async fn health(State(shared): State<Arc<Shared>>) -> Response {
         version: shared.version.clone(),
         allow_input: shared.allow_input(),
         work_queue: shared.work_queue_mode().as_str(),
+        build: shared.build(),
     })
 }
 
@@ -214,7 +218,15 @@ struct SpeechOut {
 }
 
 #[derive(Serialize)]
+struct AppOut {
+    version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<String>,
+}
+
+#[derive(Serialize)]
 struct StateWithSpeechOut {
+    app: AppOut,
     windows: Vec<WindowOut>,
     speech: SpeechOut,
 }
@@ -232,6 +244,10 @@ async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respons
     };
     let status = shared.speech.status();
     ok_json(StateWithSpeechOut {
+        app: AppOut {
+            version: shared.version.clone(),
+            build: shared.build(),
+        },
         windows: out.windows,
         speech: SpeechOut {
             muted: status.muted,
@@ -2195,6 +2211,36 @@ mod golden {
         assert_eq!(body["speech"]["focusedOnly"], json!(false));
         assert!(body["speech"]["backend"].is_string());
         assert_eq!(body["speech"]["speakingPane"], Value::Null);
+        // `app` is additive and first; public (no build label) has no `build` key.
+        assert_eq!(body["app"], json!({"version": "0.1.8"}));
+        assert!(body["app"].as_object().unwrap().get("build").is_none());
+    }
+
+    #[tokio::test]
+    async fn state_and_health_report_build_label_when_set() {
+        let s = boot(true).await;
+        s.shared.set_build(Some("private build, abc1234"));
+        let body = client()
+            .get(format!("{}/state", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.starts_with(
+            r#"{"app":{"version":"0.1.8","build":"private build, abc1234"},"windows""#
+        ));
+        let h = client()
+            .get(format!("{}/health", s.base))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(h.ends_with(r#""workQueue":"memory","build":"private build, abc1234"}"#));
     }
 
     #[tokio::test]

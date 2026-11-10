@@ -65,6 +65,7 @@ const RUNTIME_KEYS: &[&str] = &[
     "HP_FENCING_TOKEN",
     "HP_QUEUE",
     "HP_WORKTREE_CACHE_DIR",
+    "HYPERPANES_VERSION",
 ];
 
 fn is_runtime_key(k: &str) -> bool {
@@ -236,6 +237,23 @@ mod tests {
     }
     fn meta(v: &str) -> BTreeMap<String, String> {
         env(&[(META_PERSIST_ENV, v)])
+    }
+
+    #[test]
+    fn running_version_is_never_persisted() {
+        let e = env(&[("HYPERPANES_VERSION", "1.2.3"), ("EDITOR", "vim")]);
+        for mode in [
+            Mode::Default,
+            Mode::All,
+            Mode::Keys(vec!["HYPERPANES_VERSION".into(), "EDITOR".into()]),
+        ] {
+            let (kept, dropped) = persistable_env(&e, &mode, &[]);
+            assert!(!kept.contains_key("HYPERPANES_VERSION"), "{mode:?}");
+            assert!(
+                dropped.iter().any(|k| k == "HYPERPANES_VERSION"),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]
