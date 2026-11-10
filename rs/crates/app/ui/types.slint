@@ -4,13 +4,6 @@
 import { HiRect } from "@widgets";
 
 // One tiled pane: the rendered terminal surface + its placement + chrome state.
-// One task-state lane row under an expanded project (count as text; dim = zero).
-export struct LaneItem {
-    label: string,
-    count: string,
-    dim: bool,
-}
-
 export struct PaneItem {
     surface: image,
     title: string,
@@ -200,8 +193,6 @@ export struct ProjectItem {
     query: string,
     // Non-terminal work-queue task count badge text ("" = hidden), see project_queue.rs.
     queue-badge: string,
-    // Task-state lanes (Queued/Running/Done/Failed/Dead); empty = no lane block (#7).
-    lanes: [LaneItem],
 }
 
 // ===== reminder panes (Track F) =====

@@ -140,6 +140,18 @@ pub fn handle_command(
         return DispatchResult::ok(None, false);
     }
 
+    // `setLayout` validates its own target + layout name up front so an unknown tab or layout
+    // is an error rather than a silently-acknowledged no-op.
+    if ty == "setLayout" {
+        return match resolve_set_layout(cmd, model) {
+            Ok((tab_id, layout)) => {
+                model.set_layout(&tab_id, &layout);
+                DispatchResult::ok(None, true)
+            }
+            Err((status, msg)) => DispatchResult::err(status, &msg),
+        };
+    }
+
     // Resolve a target window: explicit windowId (number or numeric string), else the pane's window.
     let window_id = window_id_field(cmd).or_else(|| {
         cmd.get("paneId")
@@ -242,7 +254,7 @@ fn exec(
                     let title = g
                         .get("title")
                         .and_then(Value::as_str)
-                        .unwrap_or("Tab")
+                        .unwrap_or("")
                         .to_string();
                     let layout = g
                         .get("layout")
@@ -352,12 +364,6 @@ fn exec(
                 }
                 other => Err(format!("unknown recoverPane action: {other}")),
             }
-        }
-        "setLayout" => {
-            let tab_id = str_field(cmd, "tabId")?;
-            let layout = str_field(cmd, "layout")?;
-            model.set_layout(&tab_id, &layout);
-            Ok((None, true))
         }
         "renamePane" => {
             let pane_id = str_field(cmd, "paneId")?;
@@ -1050,6 +1056,48 @@ pub fn command_scope_error(
     Some("a scoped token needs a paneId, tabId, or windowId on the command".to_string())
 }
 
+/// The layout names a tab can take (the GUI's `layout_name` set).
+pub const LAYOUT_NAMES: [&str; 6] = ["auto", "single", "columns", "rows", "grid", "main-stack"];
+
+/// Resolve a `setLayout` command to `(tab id, layout name)`, or `(http status, message)`.
+/// The tab is `tabId`, else the active tab of `windowId`, else the tab holding `paneId`.
+fn resolve_set_layout(cmd: &Value, model: &ReadModel) -> Result<(String, String), (u16, String)> {
+    const NEEDS: &str = "setLayout needs a tabId (or a windowId, which targets its active tab) \
+         and a layout";
+    let layout = match cmd.get("layout").and_then(Value::as_str) {
+        Some(l) => l.to_string(),
+        None => return Err((400, NEEDS.to_string())),
+    };
+    if !LAYOUT_NAMES.contains(&layout.as_str()) {
+        return Err((
+            400,
+            format!(
+                "unknown layout \"{layout}\" (expected one of: {})",
+                LAYOUT_NAMES.join(", ")
+            ),
+        ));
+    }
+    let tab_id = if let Some(t) = cmd.get("tabId").and_then(Value::as_str) {
+        t.to_string()
+    } else if let Some(w) = window_id_field(cmd) {
+        model
+            .active_tab_id(w)
+            .ok_or((404, format!("no such window or tab: windowId {w}")))?
+    } else if let Some(c) = cmd
+        .get("paneId")
+        .and_then(Value::as_str)
+        .and_then(|p| model.coords_of(p))
+    {
+        c.tab_id
+    } else {
+        return Err((400, NEEDS.to_string()));
+    };
+    if model.tab_window(&tab_id).is_none() {
+        return Err((404, format!("no such tab: {tab_id}")));
+    }
+    Ok((tab_id, layout))
+}
+
 fn str_field(cmd: &Value, key: &str) -> Result<String, String> {
     cmd.get(key)
         .and_then(Value::as_str)
@@ -1491,7 +1539,47 @@ mod tests {
             &speech(),
         );
         assert_eq!(r.status, 400);
-        assert_eq!(r.body["error"], json!("command needs a paneId or windowId"));
+        let msg = r.body["error"].as_str().unwrap();
+        assert!(msg.contains("tabId") && msg.contains("windowId"), "{msg}");
+    }
+
+    fn set_layout(m: &mut ReadModel, cmd: Value) -> DispatchResult {
+        let s = sessions();
+        handle_command(m, &s, None, None, &cmd, &speech())
+    }
+
+    #[test]
+    fn set_layout_by_tab_id_or_window_id() {
+        let mut m = model_one_window();
+        let r = set_layout(
+            &mut m,
+            json!({"type":"setLayout","tabId":"t1","layout":"single"}),
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(m.tabs().next().unwrap().1.layout, "single");
+        let r = set_layout(
+            &mut m,
+            json!({"type":"setLayout","windowId":1,"layout":"grid"}),
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(m.tabs().next().unwrap().1.layout, "grid");
+    }
+
+    #[test]
+    fn set_layout_unknown_tab_or_layout_is_an_error() {
+        let mut m = model_one_window();
+        let r = set_layout(
+            &mut m,
+            json!({"type":"setLayout","tabId":"nope","layout":"single"}),
+        );
+        assert_eq!(r.status, 404);
+        let r = set_layout(
+            &mut m,
+            json!({"type":"setLayout","tabId":"t1","layout":"bogus"}),
+        );
+        assert_eq!(r.status, 400);
+        assert!(r.body["error"].as_str().unwrap().contains("main-stack"));
+        assert_eq!(m.tabs().next().unwrap().1.layout, "auto");
     }
 
     #[tokio::test]
