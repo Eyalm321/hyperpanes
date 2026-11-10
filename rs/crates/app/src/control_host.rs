@@ -247,8 +247,11 @@ pub struct ControlHost {
     heal_pending: RefCell<HashMap<String, std::time::Instant>>,
     /// Last-known `(label, meta)` per control-spawned session uid, refreshed every sync while the
     /// read-model holds the pane. The self-heal restores it instead of a generic placeholder.
-    last_known: RefCell<HashMap<String, (String, Option<BTreeMap<String, String>>)>>,
+    last_known: RefCell<HashMap<String, KnownIdentity>>,
 }
+
+/// A pane's last-known `(label, meta)`, kept for the self-heal.
+type KnownIdentity = (String, Option<BTreeMap<String, String>>);
 
 /// How long a live control-spawned session must stay untracked before the self-heal
 /// re-inserts its pane into the read-model.
@@ -1410,9 +1413,7 @@ fn gui_uid_for_pane_id(
 /// without a Slint window. Returns `(uid, pane_id)` pairs.
 /// The label + meta a self-healed pane comes back with: the last-known pair when there is one,
 /// else the generic placeholder; always marked `hp.recovered` (a runtime key, never persisted).
-fn healed_identity(
-    known: Option<&(String, Option<BTreeMap<String, String>>)>,
-) -> (String, BTreeMap<String, String>) {
+fn healed_identity(known: Option<&KnownIdentity>) -> (String, BTreeMap<String, String>) {
     let (label, mut meta) = match known {
         Some((l, m)) => (l.clone(), m.clone().unwrap_or_default()),
         None => ("recovered".to_string(), BTreeMap::new()),
