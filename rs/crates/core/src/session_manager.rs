@@ -540,6 +540,72 @@ impl SessionRegistry {
 /// socket + reader thread (the daemon backend is single-connection; a clone is another
 /// handle, not another connection). Preserving `Clone` keeps GUI code that moves an owned
 /// `mgr.clone()` onto a worker thread (`state.rs::spawn_session_async`) untouched.
+/// Env var carrying the running app's version into every pane spawned through a
+/// [`SessionManager`] in this process.
+pub const RUNNING_VERSION_ENV: &str = "HYPERPANES_VERSION";
+
+static RUNNING_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the running app's version (the GUI calls this once at startup). Every later
+/// [`SessionManager::create`] then stamps it into the spawn env as `HYPERPANES_VERSION`, on
+/// every path (new pane, restore, restartPane, recoverPane, supervisor restart). Stamped on the
+/// GUI side, not in the daemon's `build_env`: the session daemon can be an older binary than the
+/// GUI, and it passes `opts.env` through. A process that never calls this (the daemon itself,
+/// tests) stamps nothing. Frozen at pane spawn; `/health` and `/state` stay authoritative.
+pub fn set_running_version(version: &str) {
+    let _ = RUNNING_VERSION.set(version.to_string());
+}
+
+fn stamp_running_version(opts: SpawnOptions) -> SpawnOptions {
+    stamp_version(opts, RUNNING_VERSION.get().map(String::as_str))
+}
+
+/// Overwrites any recorded value (a restart re-uses the pane's stored env), keeps other keys.
+fn stamp_version(mut opts: SpawnOptions, version: Option<&str>) -> SpawnOptions {
+    if let Some(v) = version {
+        opts.env
+            .get_or_insert_with(Default::default)
+            .insert(RUNNING_VERSION_ENV.to_string(), v.to_string());
+    }
+    opts
+}
+
+#[cfg(test)]
+mod running_version_tests {
+    use super::*;
+
+    #[test]
+    fn stamps_version_over_recorded_env_and_keeps_other_keys() {
+        let o = stamp_version(SpawnOptions::default(), Some("1.2.3"));
+        assert_eq!(
+            o.env.unwrap().get(RUNNING_VERSION_ENV).map(String::as_str),
+            Some("1.2.3")
+        );
+        let mut env = EnvMap::new();
+        env.insert("FOO".into(), "bar".into());
+        env.insert(RUNNING_VERSION_ENV.into(), "0.0.1".into());
+        let o = stamp_version(
+            SpawnOptions {
+                env: Some(env),
+                ..Default::default()
+            },
+            Some("1.2.3"),
+        );
+        let e = o.env.unwrap();
+        assert_eq!(e.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(
+            e.get(RUNNING_VERSION_ENV).map(String::as_str),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn unset_version_stamps_nothing() {
+        let o = stamp_version(SpawnOptions::default(), None);
+        assert!(o.env.is_none());
+    }
+}
+
 #[derive(Clone)]
 pub enum SessionManager {
     /// The PTYs live in this process (the default, pre-daemon path).
@@ -613,6 +679,7 @@ impl SessionManager {
     /// task is running (in-process), or the create request is sent (daemon). Errors if the
     /// pty fails to spawn (in-process) / the request can't be sent (daemon).
     pub fn create(&self, opts: SpawnOptions) -> io::Result<()> {
+        let opts = stamp_running_version(opts);
         match self {
             SessionManager::InProcess(r) => r.create(opts),
             SessionManager::Daemon(d) => d.create(opts),
@@ -623,6 +690,7 @@ impl SessionManager {
     /// backend ignores the factory (a closure can't cross a socket; the daemon owns real
     /// PTYs) and spawns a normal session — no production caller uses `create_with`.
     pub fn create_with(&self, opts: SpawnOptions, factory: SpawnFn) -> io::Result<()> {
+        let opts = stamp_running_version(opts);
         match self {
             SessionManager::InProcess(r) => r.create_with(opts, factory),
             SessionManager::Daemon(d) => d.create_with(opts, factory),
