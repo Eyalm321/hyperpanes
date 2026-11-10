@@ -203,6 +203,8 @@ mod tests {
             session_id: "sess-1".into(),
             cwd: "/home/me/dev/x".into(),
             config_dir: "/home/me/.claude-alt".into(),
+            argv: None,
+            argv_unavailable: None,
         };
         let path = transcript_path(&marker).unwrap();
         assert_eq!(
@@ -217,6 +219,8 @@ mod tests {
             session_id: "sess-1".into(),
             cwd: "/home/me/dev/x".into(),
             config_dir: String::new(),
+            argv: None,
+            argv_unavailable: None,
         };
         let path = transcript_path(&marker).unwrap();
         let home = std::env::var_os("USERPROFILE")
@@ -236,6 +240,8 @@ mod tests {
             session_id: "sess-1".into(),
             cwd: String::new(),
             config_dir: String::new(),
+            argv: None,
+            argv_unavailable: None,
         };
         assert!(transcript_path(&marker).is_none());
     }

@@ -1141,6 +1141,33 @@ const SESSION_FLAGS: &[(&str, bool)] = &[
     ("--fork-session", false),
 ];
 
+/// Which of `tokens` survive a resume: the session-selection flags (and their values) are
+/// removed, and so are the positional tokens (the launch's initial prompt) — a resume
+/// continues the conversation, it does not re-send the first message. When the classifier
+/// meets an unknown flag it cannot tell a prompt from a flag value, so only the session flags
+/// go (conservative). `shell_syntax` marks a command string: a token holding unquoted shell
+/// syntax (`|`, `;`, `$(…)`, …) is not a claude argument, so nothing positional is dropped.
+fn keep_for_resume(tokens: &[&str], shell_syntax: bool) -> Vec<bool> {
+    let mut keep = keep_after_stripping_session_flags(tokens);
+    let c = crate::claude_argv::classify(tokens);
+    let shelly = shell_syntax
+        && tokens.iter().any(|t| {
+            !t.starts_with(['\'', '"']) && t.contains(['|', '&', ';', '<', '>', '(', ')', '`', '$'])
+        });
+    if !c.has_unknown && !shelly {
+        for (k, kind) in keep.iter_mut().zip(&c.kinds) {
+            if matches!(
+                kind,
+                crate::claude_argv::TokenKind::Positional
+                    | crate::claude_argv::TokenKind::Separator
+            ) {
+                *k = false;
+            }
+        }
+    }
+    keep
+}
+
 /// Which of `tokens` survive removing the session-selection flags (and their values).
 fn keep_after_stripping_session_flags(tokens: &[&str]) -> Vec<bool> {
     let mut keep = vec![true; tokens.len()];
@@ -1201,6 +1228,19 @@ fn shell_token_spans(s: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// `tokens` (the argv after the program) with the session-selection flags and their values
+/// removed — the flags a resume replaces with its own `--resume <id>`.
+pub fn strip_session_flag_tokens(tokens: &[String]) -> Vec<String> {
+    let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    let keep = keep_after_stripping_session_flags(&refs);
+    tokens
+        .iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(t, _)| t.clone())
+        .collect()
+}
+
 fn is_claude_program(tok: &str) -> bool {
     matches!(
         tok.rsplit(['/', '\\']).next(),
@@ -1212,7 +1252,9 @@ fn is_claude_program(tok: &str) -> bool {
 /// (`--model`, `--settings`, `--mcp-config`, `--append-system-prompt-file`, permission flags),
 /// drop earlier session-selection flags (`--resume <id>`, `--resume=<id>`, `-r <id>`,
 /// `--continue`, `-c`, `--session-id <id>`, `--from-pr`, `--teleport`, `--fork-session`) and add
-/// `--resume <session_id>` once.
+/// `--resume <session_id>` once. The launch's positional prompt is dropped too (a resume
+/// continues the conversation; `restartPane`'s explicit `prompt` field is how a message is sent
+/// on resume), unless the argv holds a flag this build does not know.
 ///
 /// Handles both launch shapes: a direct argv (`command` is the program, `args` its argv) and a
 /// flags-in-the-command-string launch (`command` = `claude --model m …`, no args), where every
@@ -1230,7 +1272,7 @@ pub fn resume_launch(
             return None;
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let keep = keep_after_stripping_session_flags(&refs);
+        let keep = keep_for_resume(&refs, false);
         let mut out: Vec<String> = args
             .iter()
             .zip(keep)
@@ -1249,7 +1291,7 @@ pub fn resume_launch(
     let toks: Vec<&str> = spans.iter().map(|&(a, b)| &command[a..b]).collect();
     let prog = toks.iter().position(|t| is_claude_program(t))?;
     // Only the tokens after the program are flags (an env prefix or wrapper before it is kept).
-    let keep = keep_after_stripping_session_flags(&toks[prog + 1..]);
+    let keep = keep_for_resume(&toks[prog + 1..], true);
     let mut out = String::new();
     let mut last_end = 0;
     for (idx, &(a, b)) in spans.iter().enumerate() {
@@ -1861,6 +1903,130 @@ mod tests {
             assert_eq!(got.command, want_cmd, "command for {cmd:?} {args:?}");
             assert_eq!(got.args, want_args, "args for {cmd:?} {args:?}");
         }
+    }
+
+    #[test]
+    fn resume_launch_drops_positional_prompt_from_argv() {
+        let l = resume_launch(
+            Some("claude"),
+            Some(&sv(&[
+                "--model",
+                "m",
+                "fix the build",
+                "--add-dir",
+                "/a",
+                "/b",
+                "--verbose",
+            ])),
+            "S",
+        )
+        .unwrap();
+        assert_eq!(
+            l.args,
+            Some(sv(&[
+                "--model",
+                "m",
+                "--add-dir",
+                "/a",
+                "/b",
+                "--verbose",
+                "--resume",
+                "S"
+            ]))
+        );
+        // `--` and what follows it are positional too.
+        let l = resume_launch(
+            Some("claude"),
+            Some(&sv(&["--model", "m", "--", "-x", "go"])),
+            "S",
+        )
+        .unwrap();
+        assert_eq!(l.args, Some(sv(&["--model", "m", "--resume", "S"])));
+    }
+
+    #[test]
+    fn resume_launch_drops_positional_prompt_from_command_string() {
+        let l = resume_launch(
+            Some("claude --model m   'fix the \"build\" now'  --verbose"),
+            None,
+            "S",
+        )
+        .unwrap();
+        assert_eq!(l.command, "claude --model m  --verbose --resume S");
+        let l = resume_launch(Some("claude 'first' --resume old"), None, "S").unwrap();
+        assert_eq!(l.command, "claude --resume S");
+        // Shell syntax after the program: nothing positional is touched.
+        let l = resume_launch(Some("claude --model m | tee out.log"), None, "S").unwrap();
+        assert_eq!(l.command, "claude --model m | tee out.log --resume S");
+    }
+
+    #[test]
+    fn resume_launch_keeps_positional_when_a_flag_is_unknown() {
+        let l = resume_launch(
+            Some("claude"),
+            Some(&sv(&["--future-flag", "--resume", "old", "hello"])),
+            "S",
+        )
+        .unwrap();
+        assert_eq!(
+            l.args,
+            Some(sv(&["--future-flag", "hello", "--resume", "S"]))
+        );
+        let l = resume_launch(Some("claude --future-flag hello -c"), None, "S").unwrap();
+        assert_eq!(l.command, "claude --future-flag hello --resume S");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    // The guard serialises the process-global queue path; the await is the output poll.
+    #[allow(clippy::await_holding_lock)]
+    async fn restart_resume_with_prompt_relaunches_without_positional_and_enqueues_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::resume_queue::tests::lock();
+        crate::resume_queue::tests::use_scratch_queue();
+        // A stand-in `claude` that echoes the argv it was relaunched with.
+        let dir = std::env::temp_dir().join(format!("hp-fake-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\necho \"argv:[$*]\"\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut m = model_one_window();
+        let s = sessions();
+        let pane = PaneInfo {
+            id: "p1".into(),
+            session_uid: "u1".into(),
+            label: "a".into(),
+            subtitle: None,
+            color: "#888888".into(),
+            command: Some(bin.to_string_lossy().into_owned()),
+            args: Some(sv(&["--model", "m", "original launch prompt"])),
+            cwd: None,
+            shell: None,
+            status: crate::control::readmodel::PaneStatus::Running,
+            exit_code: None,
+            meta: None,
+            talk: false,
+            env: None,
+        };
+        assert!(m.insert_pane(1, pane.clone()));
+        let target = ResumeTarget {
+            session_id: "0198c4a2-1f2e-4d3c-8a5b-9e7f6c5d4b3a".into(),
+            cwd: String::new(),
+            config_dir: None,
+        };
+        respawn_resuming(&mut m, &s, None, &pane, &target, None, Some("new message")).unwrap();
+        let uid = m.pane("p1").unwrap().session_uid.clone();
+        let out = wait_for_output(&s, &uid, "argv:[").await;
+        assert!(
+            out.contains(&format!("argv:[--model m --resume {}]", target.session_id)),
+            "relaunch argv: {out:?}"
+        );
+        assert!(!out.contains("original launch prompt"), "{out:?}");
+        let queued = crate::resume_queue::take_for(&target.session_id);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].text, "new message");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

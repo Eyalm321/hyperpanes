@@ -4117,17 +4117,18 @@ pub(crate) fn plan_claude_resume(
     id: &str,
     resume_cwd: Option<&str>,
     config_dir: Option<&str>,
+    recorded_argv: &hyperpanes_core::claude_panes::RecordedArgv,
 ) -> ResumePlan {
-    // `CLAUDE_CONFIG_DIR='<dir>' ` prefix for typed resume lines; empty for the default account.
-    let cfg_prefix = config_dir
-        .map(|d| format!("CLAUDE_CONFIG_DIR='{d}' "))
-        .unwrap_or_default();
     if command.is_none() {
+        // A shell pane: the flags the user typed (recorded by the session hook) are replayed,
+        // or a visible notice is typed first when they cannot be.
         return ResumePlan {
-            startup: Some(match resume_cwd {
-                Some(cwd) => format!("cd '{cwd}' && {cfg_prefix}claude --resume {id}\r"),
-                None => format!("{cfg_prefix}claude --resume {id}\r"),
-            }),
+            startup: Some(hyperpanes_core::claude_panes::shell_resume_line(
+                resume_cwd,
+                config_dir,
+                id,
+                recorded_argv,
+            )),
             ..Default::default()
         };
     }
@@ -5517,6 +5518,7 @@ impl State {
                 id,
                 resume_cwd.as_deref(),
                 resume_config_dir.as_deref(),
+                &hyperpanes_core::claude_panes::RecordedArgv::from_meta(spec.meta.as_ref()),
             );
             spawn_command = r.command;
             spawn_args = r.args;

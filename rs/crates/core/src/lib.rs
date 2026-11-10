@@ -9,6 +9,7 @@ pub mod ai;
 pub mod ansi_strip;
 pub mod app;
 pub mod claude_accounts;
+pub mod claude_argv;
 pub mod claude_history;
 pub mod claude_hook;
 pub mod claude_panes;
