@@ -5880,7 +5880,8 @@ impl State {
 
     /// Load a parsed workspace file: append a tab per group of its first window and switch to
     /// the first appended tab. Each pane re-spawns from its spec (label/color/cwd/command/
-    /// shell). Shared by [`Self::open_workspace`].
+    /// shell). Shared by [`Self::open_workspace`]. Only `windows[0]` is loaded into THIS window;
+    /// further windows of a multi-window file are opened at launch by `App::spawn_restored`.
     pub fn load_workspace(&mut self, file: WorkspaceFile, mgr: &SessionManager) {
         let windows = windows_of(Some(&file));
         let Some(win) = windows.into_iter().next() else {

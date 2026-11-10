@@ -584,7 +584,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     perf::mark("main: spawn_window begin");
-    application.spawn_window(seed);
+    match seed {
+        // A multi-window session/workspace file reopens every window.
+        PendingSeed::Workspace(file) => application.spawn_restored(*file),
+        other => application.spawn_window(other),
+    }
     perf::mark("main: spawn_window done");
 
     // If auto-update is on, do a quiet GitHub-releases check on startup. This runs on a
