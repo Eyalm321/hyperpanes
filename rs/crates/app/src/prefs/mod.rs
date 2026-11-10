@@ -187,6 +187,10 @@ pub struct Settings {
     /// OFF makes quit ask the daemon to shut down (kill its sessions + exit). INERT for the
     /// in-process backend (those PTYs die with the GUI regardless).
     pub keep_alive: bool,
+    /// Whether programs running in a pane may SET the system clipboard with OSC 52
+    /// (`ESC ] 52 ; c ; <base64> BEL`, e.g. a TUI's copy shortcut — also over ssh). ON by
+    /// default, like most terminals. Write-only: OSC 52 *reads* are never answered.
+    pub osc52_clipboard: bool,
 }
 
 impl Default for Settings {
@@ -209,6 +213,7 @@ impl Default for Settings {
             auto_update: false,
             copy_on_select: false,
             keep_alive: true,
+            osc52_clipboard: true,
         }
     }
 }
@@ -347,7 +352,8 @@ mod tests {
             idle_alert_seconds: 120,
             auto_update: true,
             copy_on_select: true,
-            keep_alive: false, // non-default (defaults to true)
+            keep_alive: false,      // non-default (defaults to true)
+            osc52_clipboard: false, // non-default (defaults to true)
         }
     }
 

@@ -72,6 +72,36 @@ impl CtlFields {
     }
 }
 
+/// The launch spec (command/args/shell/env) to publish for a pane. Control-owned fields win; a
+/// pane the GUI itself spawned (launchers, New Pane dialog, restored sessions) has no control
+/// entry, so its own recorded spawn spec is published instead. Without it a resume has no
+/// program or argv to relaunch and falls back to typing a bare `claude --resume`. The env is
+/// carried into the read model for the resume path only; it is never serialized into `/state`.
+fn effective_launch_spec(
+    c: CtlFields,
+    gui_command: Option<&String>,
+    gui_args: Option<&Vec<String>>,
+    gui_shell: Option<&String>,
+    gui_env: Option<&hyperpanes_core::session::spawn::EnvMap>,
+) -> CtlFields {
+    let (command, args, shell) = if c.command.is_some() {
+        (c.command, c.args, c.shell)
+    } else {
+        (
+            gui_command.cloned(),
+            gui_args.cloned(),
+            c.shell.or_else(|| gui_shell.cloned()),
+        )
+    };
+    CtlFields {
+        command,
+        args,
+        shell,
+        meta: c.meta,
+        env: c.env.or_else(|| gui_env.cloned()),
+    }
+}
+
 /// Meta queued for a pane that may not be in the read model yet (see `ControlHost::queue_meta`).
 struct PendingMeta {
     /// Session uid of the target pane.
@@ -91,6 +121,62 @@ struct PaneSnap {
     color: String,
     subtitle: Option<String>,
     talk: bool,
+}
+
+/// A tab's model-visible chrome (title + layout name), the unit the tab reconcile diffs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TabSnap {
+    title: String,
+    layout: String,
+}
+
+/// Model tab id → (window id, title/layout snapshot).
+type TabSnaps = HashMap<String, (i64, TabSnap)>;
+
+/// One tab-level change a control command made to the model since the last publish.
+#[derive(Debug, PartialEq, Eq)]
+struct TabChange {
+    tab_id: String,
+    title: Option<String>,
+    layout: Option<String>,
+}
+
+/// Pure diff: tabs present in both baselines whose title/layout differ. A tab absent from
+/// `prev` is new (materialized by the adopt path, not here); absent from `cur` is gone.
+fn diff_tabs(prev: &HashMap<String, TabSnap>, cur: &HashMap<String, TabSnap>) -> Vec<TabChange> {
+    let mut out: Vec<TabChange> = cur
+        .iter()
+        .filter_map(|(id, c)| {
+            let p = prev.get(id)?;
+            let title = (c.title != p.title).then(|| c.title.clone());
+            let layout = (c.layout != p.layout).then(|| c.layout.clone());
+            (title.is_some() || layout.is_some()).then(|| TabChange {
+                tab_id: id.clone(),
+                title,
+                layout,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.tab_id.cmp(&b.tab_id));
+    out
+}
+
+/// Apply one [`TabChange`] to a window's state without moving its active tab. Returns whether
+/// anything was applied (false for an out-of-range tab or an unknown layout name).
+fn apply_tab_change(st: &mut crate::state::State, idx: usize, ch: &TabChange) -> bool {
+    if idx >= st.tabs.len() {
+        return false;
+    }
+    let mut applied = false;
+    if let Some(l) = ch.layout.as_deref().and_then(crate::state::parse_layout) {
+        st.set_tab_layout(idx, l);
+        applied = true;
+    }
+    if let Some(t) = &ch.title {
+        st.set_tab_title(idx, t);
+        applied = true;
+    }
+    applied
 }
 
 /// Hosts the embedded control server beside the GUI. UI-thread-owned (all interior mutability
@@ -131,6 +217,8 @@ pub struct ControlHost {
     pending_meta: RefCell<Vec<PendingMeta>>,
     /// The read-model panes as last published (baseline for the next reconcile diff).
     prev: RefCell<HashMap<String, PaneSnap>>,
+    /// Tab title/layout as last published, keyed by model tab id (baseline for tab reconcile).
+    prev_tabs: RefCell<HashMap<String, TabSnap>>,
     /// The active tab id per window as last published (baseline for focus reconcile).
     prev_active: RefCell<HashMap<i64, Option<String>>>,
     /// The window ids present in the read-model (so a rebuild can drop them all first).
@@ -176,6 +264,7 @@ impl ControlHost {
             ctl: RefCell::new(HashMap::new()),
             pending_meta: RefCell::new(Vec::new()),
             prev: RefCell::new(HashMap::new()),
+            prev_tabs: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
             prev_windows: RefCell::new(Vec::new()),
             talk_notice_shown: RefCell::new(HashSet::new()),
@@ -311,6 +400,7 @@ impl ControlHost {
         self.pane_ids.borrow_mut().clear();
         self.ctl.borrow_mut().clear();
         self.prev.borrow_mut().clear();
+        self.prev_tabs.borrow_mut().clear();
         self.prev_active.borrow_mut().clear();
         self.prev_windows.borrow_mut().clear();
         self.heal_pending.borrow_mut().clear();
@@ -516,8 +606,10 @@ impl ControlHost {
             // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
             let (cur, cur_active, focus_uid) = self.snapshot_model(&model, windows);
 
+            let cur_tabs = snapshot_tabs(&model);
+
             // 2. Reconcile the model→GUI deltas (what the control plane changed) on the UI thread.
-            let reconciled = self.reconcile(windows, mgr, &cur, &cur_active, &focus_uid);
+            let reconciled = self.reconcile(windows, mgr, &cur, &cur_tabs, &cur_active, &focus_uid);
 
             // 3. Republish the (now-updated) live GUI tree into the read-model.
             let republished = self.publish(&mut model, windows);
@@ -558,10 +650,6 @@ impl ControlHost {
                     let counts = crate::project_queue::project_open_counts(&queues, &st.projects);
                     let other = crate::project_queue::other_open_count(&queues, &st.projects);
                     st.set_project_queue_counts(counts, other);
-                    let lanes = crate::project_queue::project_lane_counts(&queues, &st.projects);
-                    let other_lanes =
-                        crate::project_queue::other_lane_counts(&queues, &st.projects);
-                    st.set_lane_counts(lanes, other_lanes);
                 }
             }
         }
@@ -716,6 +804,7 @@ impl ControlHost {
         windows: &[Rc<Window>],
         mgr: &Arc<SessionManager>,
         cur: &HashMap<String, ModelPane>,
+        cur_tabs: &TabSnaps,
         cur_active: &HashMap<i64, Option<String>>,
         focus_uid: &HashMap<i64, Option<String>>,
     ) -> bool {
@@ -766,7 +855,15 @@ impl ControlHost {
                     _ => {
                         // Adopt the already-live session into the tab the MODEL placed it in
                         // (replay-primed, no PTY restart).
-                        self.adopt_control_pane(windows, mgr, uid, c, cur, &mut created_tabs);
+                        self.adopt_control_pane(
+                            windows,
+                            mgr,
+                            uid,
+                            c,
+                            cur,
+                            cur_tabs,
+                            &mut created_tabs,
+                        );
                         self.pane_ids
                             .borrow_mut()
                             .insert(uid.clone(), c.pane_id.clone());
@@ -794,6 +891,27 @@ impl ControlHost {
             }
         }
 
+        // Control tab-level changes (`setLayout`, tab rename) the model took since the last
+        // publish. Applied per tab by index without touching the window's active tab.
+        {
+            let cur_snaps: HashMap<String, TabSnap> = cur_tabs
+                .iter()
+                .map(|(id, (_, s))| (id.clone(), s.clone()))
+                .collect();
+            for ch in diff_tabs(&self.prev_tabs.borrow(), &cur_snaps) {
+                let (wid, _) = &cur_tabs[&ch.tab_id];
+                let Some(w) = windows.iter().find(|w| w.id as i64 == *wid) else {
+                    continue;
+                };
+                let idx = resolve_tab_index(&w.state.borrow().tabs, &ch.tab_id);
+                if let Some(idx) = idx {
+                    if apply_tab_change(&mut w.state.borrow_mut(), idx, &ch) {
+                        structural = true;
+                    }
+                }
+            }
+        }
+
         // Control `focusPane` flipped a window's active tab: mirror the tab switch. Resolve the
         // focused tab by a pane that actually lives in it (stable across tab reorder/close),
         // falling back to the positional id only when the active tab is empty.
@@ -812,7 +930,10 @@ impl ControlHost {
                 .get(wid)
                 .and_then(|u| u.as_ref())
                 .and_then(|u| w.state.borrow_mut().find_pane(u).map(|(ti, _)| ti));
-            let idx = by_uid.or_else(|| act.as_deref().and_then(parse_tab_index));
+            let idx = by_uid.or_else(|| {
+                act.as_deref()
+                    .and_then(|a| resolve_tab_index(&w.state.borrow().tabs, a))
+            });
             if let Some(idx) = idx {
                 w.state.borrow_mut().switch_tab(idx);
             }
@@ -879,13 +1000,17 @@ impl ControlHost {
 
         let mut new_windows = Vec::new();
         let mut new_prev = HashMap::new();
+        let mut new_prev_tabs = HashMap::new();
         let mut new_active = HashMap::new();
         let mut tree = Vec::new();
         for w in windows {
             let wid = w.id as i64;
             new_windows.push(wid);
             let st = w.state.borrow();
-            let active_tab_id = Some(format!("{wid}:{}", st.active));
+            let active_tab_id = st
+                .tabs
+                .get(st.active)
+                .map(|t| tab_model_id(wid, st.active, t));
             new_active.insert(wid, active_tab_id.clone());
             let mut tabs = Vec::new();
             for (ti, tab) in st.tabs.iter().enumerate() {
@@ -895,7 +1020,7 @@ impl ControlHost {
                 if tab.remote.is_some() {
                     continue;
                 }
-                let tab_id = format!("{wid}:{ti}");
+                let tab_id = tab_model_id(wid, ti, tab);
                 let mut panes = Vec::new();
                 for p in &tab.panes {
                     let uid = p.uid.clone();
@@ -904,7 +1029,13 @@ impl ControlHost {
                     let color = color_hex(p.accent);
                     let subtitle = p.subtitle.as_ref().map(|s| s.to_string());
                     let talk = p.talk;
-                    let c = ctl.get(&uid).cloned().unwrap_or_default();
+                    let c = effective_launch_spec(
+                        ctl.get(&uid).cloned().unwrap_or_default(),
+                        p.spawn_command.as_ref(),
+                        p.spawn_args.as_ref(),
+                        p.spawn_shell.as_ref(),
+                        p.env.as_ref(),
+                    );
                     new_prev.insert(
                         uid.clone(),
                         PaneSnap {
@@ -931,10 +1062,19 @@ impl ControlHost {
                         env: c.env,
                     });
                 }
+                let title = tab.title.to_string();
+                let layout = crate::theme::layout_name(tab.layout).to_string();
+                new_prev_tabs.insert(
+                    tab_id.clone(),
+                    TabSnap {
+                        title: title.clone(),
+                        layout: layout.clone(),
+                    },
+                );
                 tabs.push(TabInfo {
                     id: tab_id,
-                    title: tab.title.to_string(),
-                    layout: crate::theme::layout_name(tab.layout).to_string(),
+                    title,
+                    layout,
                     panes,
                 });
             }
@@ -966,6 +1106,7 @@ impl ControlHost {
 
         *self.prev_windows.borrow_mut() = new_windows;
         *self.prev.borrow_mut() = new_prev;
+        *self.prev_tabs.borrow_mut() = new_prev_tabs;
         *self.prev_active.borrow_mut() = new_active;
         structural
     }
@@ -975,6 +1116,7 @@ impl ControlHost {
     /// resolved (in order): a sibling pane already in the GUI for the same model tab → a tab made
     /// this tick for that model tab → the positional model tab id → otherwise a brand-new GUI tab
     /// (an `attach as:tab` group). Adopting into a background tab does NOT steal the user's focus.
+    #[allow(clippy::too_many_arguments)]
     fn adopt_control_pane(
         &self,
         windows: &[Rc<Window>],
@@ -982,6 +1124,7 @@ impl ControlHost {
         uid: &str,
         c: &ModelPane,
         cur: &HashMap<String, ModelPane>,
+        cur_tabs: &TabSnaps,
         created_tabs: &mut HashMap<String, (i64, usize)>,
     ) {
         let target = windows
@@ -1022,8 +1165,17 @@ impl ControlHost {
             None => {
                 let mut st = w.state.borrow_mut();
                 let saved = st.active;
-                st.adopt_pane_as_tab(mgr, det);
+                let snap = cur_tabs.get(&c.tab_id).map(|(_, s)| s);
+                let title = snap.map(|s| s.title.as_str());
+                let layout = snap.and_then(|s| crate::state::parse_layout(&s.layout));
+                st.adopt_pane_as_tab(mgr, det, title, layout);
                 let new_ti = st.tabs.len().saturating_sub(1);
+                // A control-created tab keeps the id `attach` returned for its whole life.
+                if parse_tab_index(&c.tab_id).is_none() {
+                    if let Some(t) = st.tabs.get_mut(new_ti) {
+                        t.ctl_id = Some(c.tab_id.clone());
+                    }
+                }
                 st.switch_tab(saved);
                 created_tabs.insert(c.tab_id.clone(), (c.window_id, new_ti));
             }
@@ -1061,15 +1213,32 @@ impl ControlHost {
                 return Some(*ti);
             }
         }
-        // 3. A positional "{window_id}:{index}" model tab id that maps to a live GUI tab.
-        if let Some(idx) = parse_tab_index(&c.tab_id) {
-            if idx < w.state.borrow().tabs.len() {
-                return Some(idx);
-            }
+        // 3. A control tab id or positional "{window_id}:{index}" id that maps to a live GUI tab.
+        if let Some(idx) = resolve_tab_index(&w.state.borrow().tabs, &c.tab_id) {
+            return Some(idx);
         }
         // 4. Otherwise the model put it in a brand-new tab → signal "make one".
         None
     }
+}
+
+/// Every model tab's title/layout keyed by tab id, with its window id.
+fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
+    model
+        .tabs()
+        .map(|(wid, t)| {
+            (
+                t.id.clone(),
+                (
+                    wid,
+                    TabSnap {
+                        title: t.title.clone(),
+                        layout: t.layout.clone(),
+                    },
+                ),
+            )
+        })
+        .collect()
 }
 
 /// A pane as read from the control read-model.
@@ -1192,6 +1361,20 @@ fn remove_from_gui(windows: &[Rc<Window>], uid: &str) {
     }
 }
 
+/// The id the read model publishes for GUI tab `ti` of window `wid`: the control id the tab was
+/// created with (`open_tab`), else the positional `"{wid}:{ti}"`.
+fn tab_model_id(wid: i64, ti: usize, tab: &crate::state::Tab) -> String {
+    tab.ctl_id.clone().unwrap_or_else(|| format!("{wid}:{ti}"))
+}
+
+/// Map a model tab id (control id or positional) to a GUI tab index within one window.
+fn resolve_tab_index(tabs: &[crate::state::Tab], id: &str) -> Option<usize> {
+    if let Some(i) = tabs.iter().position(|t| t.ctl_id.as_deref() == Some(id)) {
+        return Some(i);
+    }
+    parse_tab_index(id).filter(|&i| i < tabs.len())
+}
+
 /// Parse the tab index out of a `"{window_id}:{tab_index}"` id.
 fn parse_tab_index(tab_id: &str) -> Option<usize> {
     tab_id.rsplit(':').next()?.parse().ok()
@@ -1212,6 +1395,7 @@ fn env_truthy(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperpanes_core::layout::presets::Layout;
 
     fn pane(id: &str, uid: &str) -> PaneInfo {
         PaneInfo {
@@ -1247,6 +1431,105 @@ mod tests {
         m
     }
 
+    fn snap(title: &str, layout: &str) -> TabSnap {
+        TabSnap {
+            title: title.into(),
+            layout: layout.into(),
+        }
+    }
+
+    #[test]
+    fn diff_tabs_reports_layout_and_title_changes_on_any_tab() {
+        let prev: HashMap<_, _> = [
+            ("0:0".to_string(), snap("term 1", "auto")),
+            ("0:1".to_string(), snap("term 2", "single")),
+        ]
+        .into();
+        let mut cur = prev.clone();
+        cur.insert("0:0".into(), snap("term 1", "single"));
+        cur.insert("0:1".into(), snap("renamed", "single"));
+        cur.insert("0:2".into(), snap("brand new", "grid")); // new tab: not a delta
+        let d = diff_tabs(&prev, &cur);
+        assert_eq!(
+            d,
+            vec![
+                TabChange {
+                    tab_id: "0:0".into(),
+                    title: None,
+                    layout: Some("single".into())
+                },
+                TabChange {
+                    tab_id: "0:1".into(),
+                    title: Some("renamed".into()),
+                    layout: None
+                },
+            ]
+        );
+        assert!(diff_tabs(&prev, &prev).is_empty());
+    }
+
+    #[test]
+    fn apply_tab_change_targets_background_tab_and_keeps_active() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        st.tabs
+            .push(crate::state::Tab::new_for_test("term 2".into()));
+        assert_eq!(st.tabs.len(), 2);
+        st.switch_tab(1);
+        let ch = TabChange {
+            tab_id: "0:0".into(),
+            title: Some("renamed".into()),
+            layout: Some("grid".into()),
+        };
+        assert!(apply_tab_change(&mut st, 0, &ch));
+        assert_eq!(st.active, 1);
+        assert_eq!(st.tabs[0].layout, Layout::Grid);
+        assert_eq!(st.tabs[0].title.as_str(), "renamed");
+        assert_eq!(st.tabs[1].layout, Layout::Auto);
+        assert!(!apply_tab_change(&mut st, 9, &ch));
+    }
+
+    #[test]
+    fn control_tab_id_survives_republish_and_set_layout_applies() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        let mut t = crate::state::Tab::new_for_test("term 2".into());
+        t.ctl_id = Some("3f2a9c1e-uuid".into());
+        st.tabs.push(t);
+        // Republish: control tab keeps its id, native tab stays positional.
+        let ids = |st: &crate::state::State| -> Vec<String> {
+            st.tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| tab_model_id(0, i, t))
+                .collect()
+        };
+        assert_eq!(ids(&st), vec!["0:0", "3f2a9c1e-uuid"]);
+        // Reordering the tabs doesn't change the control id.
+        st.tabs.swap(0, 1);
+        assert_eq!(ids(&st), vec!["3f2a9c1e-uuid", "0:1"]);
+        // setLayout with the id attach returned still resolves and applies.
+        let idx = resolve_tab_index(&st.tabs, "3f2a9c1e-uuid").unwrap();
+        let ch = TabChange {
+            tab_id: "3f2a9c1e-uuid".into(),
+            title: None,
+            layout: Some("grid".into()),
+        };
+        assert!(apply_tab_change(&mut st, idx, &ch));
+        assert_eq!(st.tabs[0].layout, Layout::Grid);
+    }
+
+    #[test]
+    fn resolve_tab_index_uuid_positional_and_unknown() {
+        let mut st = crate::state::State::new(crate::theme::load_font(1.0));
+        let mut t = crate::state::Tab::new_for_test("b".into());
+        t.ctl_id = Some("abc-123".into());
+        st.tabs.push(t);
+        assert_eq!(resolve_tab_index(&st.tabs, "abc-123"), Some(1));
+        assert_eq!(resolve_tab_index(&st.tabs, "0:0"), Some(0));
+        assert_eq!(resolve_tab_index(&st.tabs, "0:1"), Some(1));
+        assert_eq!(resolve_tab_index(&st.tabs, "0:7"), None);
+        assert_eq!(resolve_tab_index(&st.tabs, "nope-uuid"), None);
+    }
+
     #[test]
     fn ctl_fields_carry_spawn_env_across_republish() {
         let mut env = hyperpanes_core::session::spawn::EnvMap::new();
@@ -1269,6 +1552,32 @@ mod tests {
         // reconcile stores it in the side store; publish re-stamps it onto the rebuilt pane.
         let c = CtlFields::from_model(&mp);
         assert_eq!(c.env.as_ref(), Some(&env));
+    }
+
+    #[test]
+    fn gui_spawned_pane_launch_spec_reaches_the_resume_path() {
+        let mut env = hyperpanes_core::session::spawn::EnvMap::new();
+        env.insert("MY_VAR".to_string(), "x".to_string());
+        let args = vec!["--model".to_string(), "sonnet".to_string()];
+        // No control entry (default CtlFields): the GUI pane's own spec is published.
+        let c = effective_launch_spec(
+            CtlFields::default(),
+            Some(&"claude".to_string()),
+            Some(&args),
+            None,
+            Some(&env),
+        );
+        assert_eq!(c.command.as_deref(), Some("claude"));
+        assert_eq!(c.args.as_ref(), Some(&args));
+        assert_eq!(c.env.as_ref(), Some(&env));
+        // A control-owned spec is left alone.
+        let ctl = CtlFields {
+            command: Some("other".to_string()),
+            ..CtlFields::default()
+        };
+        let c = effective_launch_spec(ctl, Some(&"claude".to_string()), Some(&args), None, None);
+        assert_eq!(c.command.as_deref(), Some("other"));
+        assert!(c.args.is_none());
     }
 
     #[test]
