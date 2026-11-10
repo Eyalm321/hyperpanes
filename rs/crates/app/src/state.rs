@@ -3895,7 +3895,15 @@ impl State {
             accent: (!proj_color.is_empty()).then(|| parse_hex(&proj_color)),
             show_frame: (!proj_color.is_empty()).then_some(true),
             show_dot: (!proj_color.is_empty()).then_some(true),
-            env: Some(env),
+            // The orchestrator runs unattended (its meta role `goals-orch` is stamped after spawn,
+            // so derive the env from the same role here).
+            env: hyperpanes_core::session_manager::stamp_unattended(
+                Some(env),
+                Some(&std::collections::BTreeMap::from([(
+                    "role".to_string(),
+                    "goals-orch".to_string(),
+                )])),
+            ),
             ..Default::default()
         };
         if let Some(uid) = self.add_pane_opts(mgr, opts) {
@@ -4663,6 +4671,24 @@ impl State {
         // A restart is a brand-new session — mint via the backend (daemon → cross-run-unique
         // uid; in-process → `pane-N`). See `SessionManager::fresh_uid`.
         let uid = mgr.fresh_uid();
+        // Carry `HYPERPANES_UNATTENDED` over: the pane's role meta lives in the control host, so
+        // use what this pane was spawned with (its recorded env, or a registered orchestrator).
+        let was_unattended = self.active_tab().panes.get(idx).is_some_and(|p| {
+            self.goal_orch_models.contains_key(&p.uid)
+                || p.env.as_ref().is_some_and(|e| {
+                    e.contains_key(hyperpanes_core::session_manager::UNATTENDED_ENV)
+                })
+        });
+        let env = if was_unattended {
+            let mut e = env.unwrap_or_default();
+            e.insert(
+                hyperpanes_core::session_manager::UNATTENDED_ENV.to_string(),
+                "1".to_string(),
+            );
+            Some(e)
+        } else {
+            env
+        };
         let shell = prefs::effective_shell(&self.settings.default_shell);
         let shell_path = shell
             .clone()
@@ -5600,6 +5626,19 @@ impl State {
             goal_env.as_ref(),
             config_dir_env.as_deref(),
         );
+        // Re-derive `HYPERPANES_UNATTENDED` from the role (never persisted). A registered goal
+        // orchestrator counts even when an older snapshot lacks the `role` meta.
+        let spawn_env = if self.goal_orch_models.contains_key(&uid) {
+            hyperpanes_core::session_manager::stamp_unattended(
+                spawn_env,
+                Some(&std::collections::BTreeMap::from([(
+                    "role".to_string(),
+                    "goals-orch".to_string(),
+                )])),
+            )
+        } else {
+            hyperpanes_core::session_manager::stamp_unattended(spawn_env, spec.meta.as_ref())
+        };
         self.note_env_dropped(&uid, spec);
 
         let mut pane = TerminalPane::new(

@@ -311,13 +311,17 @@ fn exec(
                 });
                 // Keep the env the pane was opened with; the restart env layers on top.
                 let merged_env = merge_env(pane.env.as_ref(), env_override);
+                let spawn_env = crate::session_manager::stamp_unattended(
+                    merged_env.clone(),
+                    pane.meta.as_ref(),
+                );
                 let opts = SpawnOptions {
                     uid: new_uid.clone(),
                     shell: pane.shell.clone(),
                     args: pane.args.clone(),
                     command: pane.command.clone(),
                     cwd: pane.cwd.clone(),
-                    env: merged_env.clone(),
+                    env: spawn_env,
                     cols: None,
                     rows: None,
                     pane_id: Some(pane_id.clone()),
@@ -793,7 +797,7 @@ fn respawn_resuming(
         } else {
             pane.cwd.clone()
         },
-        env: env_override.clone(),
+        env: crate::session_manager::stamp_unattended(env_override.clone(), pane.meta.as_ref()),
         cols: None,
         rows: None,
         pane_id: Some(pane_id.to_string()),
@@ -956,7 +960,7 @@ fn spawn_pane(
         args: args.clone(),
         command: command.clone(),
         cwd: cwd.clone(),
-        env: env.clone(),
+        env: crate::session_manager::stamp_unattended(env.clone(), meta.as_ref()),
         cols: None,
         rows: None,
         pane_id: Some(pane_id.clone()),

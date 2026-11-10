@@ -570,6 +570,85 @@ fn stamp_version(mut opts: SpawnOptions, version: Option<&str>) -> SpawnOptions 
     opts
 }
 
+/// Env var marking a pane the app launched to run unattended (no human at the keyboard), so
+/// tools inside it (hooks, guards) can refuse instead of raising an interactive prompt nobody
+/// answers. Value is always `"1"`; absent for every other pane.
+pub const UNATTENDED_ENV: &str = "HYPERPANES_UNATTENDED";
+
+/// Pane meta `role`s that run unattended: impl workers, the goals orchestrator and spec agents
+/// (the latter two are also [`crate::control::nudge::NUDGED_ROLES`]).
+pub const UNATTENDED_ROLES: &[&str] = &["worker", "goals-orch", "spec"];
+
+/// `(HYPERPANES_UNATTENDED, "1")` when the pane's meta `role` is in [`UNATTENDED_ROLES`].
+///
+/// Derived from the role on every spawn (new pane, restart, restore, resume) and never
+/// persisted (see `env_persist`). A role set by `setMeta` AFTER the pane spawned only takes
+/// effect at the pane's next restart.
+pub fn unattended_env(
+    meta: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<(&'static str, &'static str)> {
+    meta?
+        .get("role")
+        .is_some_and(|r| UNATTENDED_ROLES.contains(&r.as_str()))
+        .then_some((UNATTENDED_ENV, "1"))
+}
+
+/// Layer [`unattended_env`] onto a spawn env. A non-unattended pane has the key REMOVED, so a
+/// stale value carried in a recorded env never survives a role change.
+pub fn stamp_unattended(
+    env: Option<EnvMap>,
+    meta: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<EnvMap> {
+    match unattended_env(meta) {
+        Some((k, v)) => {
+            let mut e = env.unwrap_or_default();
+            e.insert(k.to_string(), v.to_string());
+            Some(e)
+        }
+        None => env.map(|mut e| {
+            e.remove(UNATTENDED_ENV);
+            e
+        }),
+    }
+}
+
+#[cfg(test)]
+mod unattended_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn role(r: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([("role".to_string(), r.to_string())])
+    }
+
+    #[test]
+    fn org_roles_are_unattended_others_are_not() {
+        for r in ["worker", "goals-orch", "spec"] {
+            assert_eq!(
+                unattended_env(Some(&role(r))),
+                Some((UNATTENDED_ENV, "1")),
+                "{r}"
+            );
+        }
+        assert_eq!(unattended_env(Some(&role("lead"))), None);
+        assert_eq!(unattended_env(Some(&BTreeMap::new())), None);
+        assert_eq!(unattended_env(None), None);
+    }
+
+    #[test]
+    fn stamp_adds_for_unattended_and_strips_stale_for_others() {
+        let e = stamp_unattended(None, Some(&role("worker"))).unwrap();
+        assert_eq!(e.get(UNATTENDED_ENV).map(String::as_str), Some("1"));
+        let mut base = EnvMap::new();
+        base.insert("FOO".into(), "bar".into());
+        base.insert(UNATTENDED_ENV.into(), "1".into());
+        let e = stamp_unattended(Some(base), Some(&role("lead"))).unwrap();
+        assert_eq!(e.get("FOO").map(String::as_str), Some("bar"));
+        assert!(!e.contains_key(UNATTENDED_ENV));
+        assert!(stamp_unattended(None, None).is_none());
+    }
+}
+
 #[cfg(test)]
 mod running_version_tests {
     use super::*;
