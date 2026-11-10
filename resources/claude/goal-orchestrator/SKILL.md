@@ -106,6 +106,12 @@ Do not accept a spec agent's `done` on its word. Gate it:
 - **Rubric criterion** — spawn a short-lived judge pane (`open_pane` running
   `claude --dangerously-skip-permissions -p "<rubric>\n<evidence>"`, must exit 0 iff satisfied),
   then `close_pane` it.
+- **Running version vs. the release a fix shipped in.** Before relying on a hyperpanes fix (or
+  reporting one as live), check the version actually running: `whoami` / `control_status` (the
+  `app.version` / `version` field), or `$HYPERPANES_VERSION` in a pane as a fallback (it is fixed
+  when the pane spawns, so the API wins after an upgrade). If it is older than the release the fix
+  shipped in, say "fixed in vX, not installed (running vY)" and don't assume the fixed behavior;
+  merged but not yet released is "merged, not released".
 Only flip a goal to `Done` when its criteria pass. On failure, bounce it back to the spec agent
 with the specific gap.
 
