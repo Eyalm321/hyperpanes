@@ -98,21 +98,21 @@ pub fn list() -> Vec<QueuedPrompt> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     /// The queue path is a process-global (an env var), so the tests that point it at their
     /// own file must not run concurrently — serialize them on one mutex.
-    fn lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
         static L: OnceLock<Mutex<()>> = OnceLock::new();
         L.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
     /// Point the queue at a unique, empty temp file for this test — hermetic and
     /// platform-independent (no reliance on `state_dir()` honoring XDG_STATE_HOME).
-    fn use_scratch_queue() {
+    pub(crate) fn use_scratch_queue() {
         static N: AtomicU32 = AtomicU32::new(0);
         let f = std::env::temp_dir().join(format!(
             "hp-rq-{}-{}.json",
