@@ -308,3 +308,14 @@ with the daemon backend and keep-alive on it keeps every session and saves every
 otherwise it ends the sessions like a close does. Closing a NON-last window ends its panes;
 with the daemon backend and keep-alive on, the app first asks (Cancel / Close window / Quit)
 when any of its panes runs a process.
+
+Each pane's control meta (`setMeta` / `openPane` `meta`) is saved in its `PaneSpec.meta` and
+re-applied to the pane after a relaunch, whether it was re-attached or re-spawned. Runtime-only
+keys (`hp.recovered`, `hp.env-dropped`, any key whose last segment ends in `state` or is
+`status` / `activity` / `liveness`) and secret-looking keys or values are not saved; at most
+64 keys, values up to 4 KiB. A self-healed pane keeps its last-known label and meta.
+
+"Runs a process" for the close prompt means a program pane (spawned with a command) or a shell
+whose shell-integration markers report a running command. Marker state is not carried across a
+GUI relaunch, so a command started in a shell before the relaunch counts as idle until the
+shell's next marker.
