@@ -12,6 +12,7 @@
 import { Theme } from "theme.slint";
 import { PaneItem, TabItem, DividerItem, LayoutOption, PaletteItem, ProjectItem, LaneItem, TaskPanelItem, PrefOption, FramePaletteOption, KeybindingItem, MenuEntry, CtxTab, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 import { TopBar } from "topbar.slint";
+import { TabColumn, DockPreview } from "tabdock.slint";
 import { PaneView } from "paneview.slint";
 import { OverlayLayer } from "overlays.slint";
 import { SidebarRail } from "sidebar.slint";
@@ -310,6 +311,14 @@ export component AppWindow inherits Window {
             drop-tab-x: root.drop-tab-x;
             drop-tab-active: root.drop-tab-active;
             drop-tab-idx: root.drop-tab-idx;
+            tab-dock: root.tab-dock;
+            dock-dragging: root.dock-dragging;
+            dock-target: root.dock-target;
+            dock-drag-begin(x, y) => { root.dock-drag-begin(x, y); }
+            dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+            dock-drag-end => { root.dock-drag-end(); }
+            cycle-tab-dock => { root.cycle-tab-dock(); }
+            tab-wheel(d, s) => { root.tab-wheel(d, s); }
 
             tab-grab(i) => { root.tab-grab(i); }
             tab-geom(i, x, w) => { root.tab-geom(i, x, w); }
@@ -341,6 +350,31 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             vertical-stretch: 1;
             spacing: 0px;
+
+            if root.tab-dock == 2 && !root.fullscreen : TabColumn {
+                tab-dock: root.tab-dock;
+                dock-dragging: root.dock-dragging;
+                tabs: root.tabs;
+                editing-tab: root.editing-tab;
+                drop-strip-active: root.drop-strip-active;
+                drop-tab-x: root.drop-tab-x;
+                drop-tab-active: root.drop-tab-active;
+                drop-tab-idx: root.drop-tab-idx;
+                select-tab(i) => { root.select-tab(i); }
+                close-tab(i) => { root.close-tab(i); }
+                tab-context(i, x, y) => { root.tab-context(i, x, y); }
+                new-tab => { root.new-tab(); }
+                begin-rename(i) => { root.begin-rename(i); }
+                rename-tab(i, t) => { root.rename-tab(i, t); }
+                tab-grab(i) => { root.tab-grab(i); }
+                tab-geom(i, p, l) => { root.tab-geom(i, p, l); }
+                dock-drag-begin(x, y) => { root.dock-drag-begin(x, y); }
+                dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+                dock-drag-end => { root.dock-drag-end(); }
+                cycle-tab-dock => { root.cycle-tab-dock(); }
+                tab-column-geom(x, w) => { root.tab-column-geom(x, w); }
+                tab-wheel(d, s) => { root.tab-wheel(d, s); }
+            }
 
             PaneView {
                 horizontal-stretch: 1;
@@ -390,6 +424,31 @@ export component AppWindow inherits Window {
                 pane-search-closed(i) => { root.pane-search-closed(i); }
             }
 
+            if root.tab-dock == 1 && !root.fullscreen : TabColumn {
+                tab-dock: root.tab-dock;
+                dock-dragging: root.dock-dragging;
+                tabs: root.tabs;
+                editing-tab: root.editing-tab;
+                drop-strip-active: root.drop-strip-active;
+                drop-tab-x: root.drop-tab-x;
+                drop-tab-active: root.drop-tab-active;
+                drop-tab-idx: root.drop-tab-idx;
+                select-tab(i) => { root.select-tab(i); }
+                close-tab(i) => { root.close-tab(i); }
+                tab-context(i, x, y) => { root.tab-context(i, x, y); }
+                new-tab => { root.new-tab(); }
+                begin-rename(i) => { root.begin-rename(i); }
+                rename-tab(i, t) => { root.rename-tab(i, t); }
+                tab-grab(i) => { root.tab-grab(i); }
+                tab-geom(i, p, l) => { root.tab-geom(i, p, l); }
+                dock-drag-begin(x, y) => { root.dock-drag-begin(x, y); }
+                dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+                dock-drag-end => { root.dock-drag-end(); }
+                cycle-tab-dock => { root.cycle-tab-dock(); }
+                tab-column-geom(x, w) => { root.tab-column-geom(x, w); }
+                tab-wheel(d, s) => { root.tab-wheel(d, s); }
+            }
+
             // Shown whenever the setting is on AND not fullscreen (mirrors
             // `!fullscreenPaneId && showSidebar && <Sidebar/>`).
             if root.show-sidebar && !root.fullscreen : SidebarRail {
@@ -416,6 +475,36 @@ export component AppWindow inherits Window {
         }
     }
 
+    // ===== tab-dock drag previews (click-through; no TouchArea) =====
+    if root.dock-dragging && !root.fullscreen : Rectangle {
+        if root.tab-dock != 2 : Rectangle {
+            x: 0px; y: 32px; width: 3px; height: parent.height - 32px;
+            background: Theme.brand;
+        }
+        if root.tab-dock != 1 : Rectangle {
+            property <length> rail: (root.show-sidebar && !root.fullscreen) ? ((root.sidebar-open || RemindersAdapter.open) ? 280px : 44px) : 0px;
+            x: parent.width - self.rail - 3px; y: 32px; width: 3px; height: parent.height - 32px;
+            background: Theme.brand;
+        }
+        if root.dock-target == 1 || root.dock-target == 2 : DockPreview {
+            property <length> rail: (root.show-sidebar && !root.fullscreen) ? ((root.sidebar-open || RemindersAdapter.open) ? 280px : 44px) : 0px;
+            x: root.dock-target == 1 ? parent.width - self.rail - 176px : 0px;
+            y: 32px;
+            width: 176px;
+            height: parent.height - 32px;
+        }
+        if root.dock-target == 0 : Rectangle {
+            width: parent.width - 132px;
+            height: 32px;
+            background: Theme.brand.with-alpha(0.12);
+            Rectangle {
+                y: parent.height - 2px;
+                height: 2px;
+                background: Theme.brand;
+            }
+        }
+    }
+
     // ===== fired-reminder alert toasts (Track: wave3y-reminder-fire) =====
     // A top-right stack of alert cards, one per fired reminder whose toast hasn't been
     // clicked/dismissed (~10s auto-expiry — see state::REMINDER_TOAST_MS). Clicking a card
@@ -426,7 +515,7 @@ export component AppWindow inherits Window {
     // no new overlay system.
     VerticalLayout {
         width: 300px;
-        x: parent.width - self.width - 56px;   // clear of the 44px sidebar rail
+        x: parent.width - self.width - 56px - ((root.tab-dock == 1 && !root.fullscreen) ? 176px : 0px);   // clear of the 44px sidebar rail (+ right tab column)
         y: root.fullscreen ? 12px : 44px;      // below the 32px top bar
         spacing: 8px;
         alignment: start;
