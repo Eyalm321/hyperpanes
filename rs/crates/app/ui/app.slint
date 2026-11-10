@@ -204,6 +204,16 @@ export component AppWindow inherits Window {
     callback pane-grab(int);                 // a pane header was pressed (arm a drag)
     callback tab-grab(int);                  // a tab was pressed (arm a reorder)
     callback tab-geom(int, length, length);  // report a tab's window-x + width
+    // ---- tab bar dock (t25, #85) — controller-owned, per window ----
+    in property <int> tab-dock: 0;             // 0 top · 1 right · 2 left
+    in property <bool> dock-dragging: false;   // a grip drag is past the threshold
+    in property <int> dock-target: -1;         // -1 none · else the side a release docks to (0 top · 1 right · 2 left)
+    callback dock-drag-begin(length, length);  // grip pressed at window-logical (x, y)
+    callback dock-drag-move(length, length);   // pointer moved while the grip is held (window-logical x, y)
+    callback dock-drag-end();                  // grip released (controller commits if dock-target != -1)
+    callback cycle-tab-dock();                 // grip's accessible default action: top -> right -> left -> top
+    callback tab-column-geom(length, length);  // docked column window-x + width (hit-testing; reported by a Timer)
+    callback tab-wheel(length, bool);          // wheel over the tab strip/column that should cycle tabs: raw delta-y, shift held
     // panes / layout
     callback new-pane();
     callback open-new-pane();   // Shift+＋ / "New pane…" → open the options dialog

@@ -36,6 +36,8 @@ pub enum KeyTok {
     Enter,
     Space,
     Escape,
+    PageUp,
+    PageDown,
 }
 
 impl KeyTok {
@@ -54,6 +56,8 @@ impl KeyTok {
             KeyTok::Enter => "enter".into(),
             KeyTok::Space => "space".into(),
             KeyTok::Escape => "escape".into(),
+            KeyTok::PageUp => "pageup".into(),
+            KeyTok::PageDown => "pagedown".into(),
         }
     }
 
@@ -70,6 +74,8 @@ impl KeyTok {
             "enter" => Some(KeyTok::Enter),
             "space" => Some(KeyTok::Space),
             "escape" => Some(KeyTok::Escape),
+            "pageup" => Some(KeyTok::PageUp),
+            "pagedown" => Some(KeyTok::PageDown),
             _ => {
                 let mut chars = s.chars();
                 match (chars.next(), chars.next()) {
@@ -97,6 +103,8 @@ impl KeyTok {
             KeyTok::Enter => "Enter".into(),
             KeyTok::Space => "Space".into(),
             KeyTok::Escape => "Esc".into(),
+            KeyTok::PageUp => "PgUp".into(),
+            KeyTok::PageDown => "PgDn".into(),
         }
     }
 }
@@ -204,7 +212,8 @@ impl From<Chord> for ChordRepr {
 /// command it dispatches. The `id` keys the user override (and survives a chord/label change).
 pub struct Binding {
     pub id: &'static str,
-    pub chord: Chord,
+    /// The default chord; `None` = unbound by default (nothing fires until the user binds one).
+    pub chord: Option<Chord>,
     /// Category heading the keybindings list groups this row under (see [`CATEGORY_ORDER`]).
     pub category: &'static str,
     /// Human label — surfaced by the Preferences keybindings list.
@@ -225,8 +234,16 @@ pub fn default_bindings() -> Vec<Binding> {
     use KeyTok::*;
     let b = |id, ctrl, alt, shift, key, category, label, command| Binding {
         id,
-        chord: Chord::new(ctrl, alt, shift, key),
+        chord: Some(Chord::new(ctrl, alt, shift, key)),
         category,
+        label,
+        command,
+    };
+    // A binding that ships with no chord: the user binds one in Preferences → Keybindings.
+    let u = |id, label, command| Binding {
+        id,
+        chord: None,
+        category: "Tabs",
         label,
         command,
     };
@@ -273,6 +290,35 @@ pub fn default_bindings() -> Vec<Binding> {
             "Previous tab",
             Command::PrevTab,
         ),
+        b(
+            "tab.nextPage",
+            true,
+            false,
+            false,
+            PageDown,
+            "Tabs",
+            "Next tab (Ctrl+PgDn)",
+            Command::NextTab,
+        ),
+        b(
+            "tab.prevPage",
+            true,
+            false,
+            false,
+            PageUp,
+            "Tabs",
+            "Previous tab (Ctrl+PgUp)",
+            Command::PrevTab,
+        ),
+        u("tab.goto1", "Go to tab 1", Command::SelectTabNumber(1)),
+        u("tab.goto2", "Go to tab 2", Command::SelectTabNumber(2)),
+        u("tab.goto3", "Go to tab 3", Command::SelectTabNumber(3)),
+        u("tab.goto4", "Go to tab 4", Command::SelectTabNumber(4)),
+        u("tab.goto5", "Go to tab 5", Command::SelectTabNumber(5)),
+        u("tab.goto6", "Go to tab 6", Command::SelectTabNumber(6)),
+        u("tab.goto7", "Go to tab 7", Command::SelectTabNumber(7)),
+        u("tab.goto8", "Go to tab 8", Command::SelectTabNumber(8)),
+        u("tab.goto9", "Go to last tab", Command::SelectTabNumber(9)),
         b(
             "tab.reopen",
             true,
@@ -533,10 +579,10 @@ impl Keymap {
 
     /// The effective chord for `id`: the user override if set (which may be `None` = unbound),
     /// else `default`. `None` means nothing fires this binding.
-    fn effective(&self, id: &str, default: Chord) -> Option<Chord> {
+    fn effective(&self, id: &str, default: Option<Chord>) -> Option<Chord> {
         match self.overrides.get(id) {
             Some(opt) => *opt,
-            None => Some(default),
+            None => default,
         }
     }
 
@@ -667,6 +713,84 @@ mod tests {
         Keymap {
             overrides: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn tab_cycle_chords_resolve_by_default() {
+        let km = empty_keymap();
+        let m = |shift, key| km.match_chord(true, false, shift, key);
+        assert!(matches!(m(false, KeyTok::Tab), Some(Command::NextTab)));
+        assert!(matches!(m(false, KeyTok::PageDown), Some(Command::NextTab)));
+        assert!(matches!(m(true, KeyTok::Tab), Some(Command::PrevTab)));
+        assert!(matches!(m(false, KeyTok::PageUp), Some(Command::PrevTab)));
+    }
+
+    #[test]
+    fn goto_tab_is_unbound_until_the_user_binds_it() {
+        let mut km = empty_keymap();
+        for n in 1..=9 {
+            let ch = char::from_digit(n, 10).unwrap();
+            assert!(km
+                .match_chord(true, false, false, KeyTok::Char(ch))
+                .is_none());
+        }
+        let row = |km: &Keymap| km.rows().into_iter().find(|r| r.id == "tab.goto1").unwrap();
+        assert!(row(&km).unbound);
+        assert!(row(&km).parts.is_empty());
+        assert!(!row(&km).overridden);
+        assert!(km.label_for("tab.goto1").is_none());
+        // Bind Ctrl+1 → fires SelectTabNumber(1).
+        km.overrides.insert(
+            "tab.goto1".into(),
+            Some(Chord::new(true, false, false, KeyTok::Char('1'))),
+        );
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('1')),
+            Some(Command::SelectTabNumber(1))
+        ));
+        assert!(!row(&km).unbound);
+        // Reset returns it to unbound.
+        km.overrides.remove("tab.goto1");
+        assert!(km
+            .match_chord(true, false, false, KeyTok::Char('1'))
+            .is_none());
+        assert!(row(&km).unbound);
+        // Ctrl+9 maps to the "last tab" command when bound.
+        let nine = bindings().iter().find(|b| b.id == "tab.goto9").unwrap();
+        assert!(nine.chord.is_none());
+        assert!(matches!(nine.command, Command::SelectTabNumber(9)));
+        assert_eq!(nine.label, "Go to last tab");
+    }
+
+    #[test]
+    fn unbinding_page_chord_hands_it_back() {
+        let mut km = empty_keymap();
+        km.overrides.insert("tab.nextPage".into(), None);
+        assert!(km
+            .match_chord(true, false, false, KeyTok::PageDown)
+            .is_none());
+        // Ctrl+PgUp is a separate binding and keeps working.
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::PageUp),
+            Some(Command::PrevTab)
+        ));
+    }
+
+    #[test]
+    fn page_keys_can_be_captured_for_a_rebind() {
+        // The rebind capture path is `key_tok_from_text` → `Keymap::set`.
+        use slint::platform::Key;
+        for (k, tok) in [
+            (Key::PageUp, KeyTok::PageUp),
+            (Key::PageDown, KeyTok::PageDown),
+        ] {
+            let s: slint::SharedString = k.into();
+            assert_eq!(crate::key_tok_from_text(&s, true), Some(tok));
+        }
+        assert_eq!(
+            Chord::new(true, false, false, KeyTok::PageDown).label(),
+            format!("{CTRL_LABEL}+PgDn")
+        );
     }
 
     #[test]
@@ -859,6 +983,8 @@ mod tests {
             KeyTok::Enter,
             KeyTok::Space,
             KeyTok::Escape,
+            KeyTok::PageUp,
+            KeyTok::PageDown,
         ] {
             assert_eq!(KeyTok::from_token(&tok.token()), Some(tok));
         }
@@ -871,9 +997,11 @@ mod tests {
         let rows = km.rows();
         assert_eq!(rows.len(), default_bindings().len());
         // Every row has an id, a label + at least one chord chip, and starts un-overridden.
+        // (The Ctrl+1..9 "Go to tab" rows ship unbound, so only they may lack chips.)
+        assert!(rows.iter().all(|r| !r.id.is_empty() && !r.label.is_empty()));
         assert!(rows
             .iter()
-            .all(|r| !r.id.is_empty() && !r.label.is_empty() && !r.parts.is_empty()));
+            .all(|r| !r.parts.is_empty() || r.id.starts_with("tab.goto")));
         assert!(rows.iter().all(|r| !r.overridden));
         // The palette row renders as Ctrl / Shift / P chips under General.
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();

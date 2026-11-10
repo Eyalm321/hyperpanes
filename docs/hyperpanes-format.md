@@ -36,6 +36,7 @@ present into a flat window list (precedence `windows` → `groups` → `panes`, 
 | `groups`  | `GroupSpec[]?`      | tabs → one window of tabs |
 | `active`  | `number?` (u32)     | active tab index when using `groups` |
 | `windows` | `WindowSpec[]?`     | full multi-window shape |
+| `tabDock` | `string?`           | tab bar side for the single window synthesized from `groups`/`panes`; same values as `WindowSpec.tabDock` |
 
 ### `WindowSpec`
 
@@ -45,6 +46,7 @@ present into a flat window list (precedence `windows` → `groups` → `panes`, 
 | `active` | `number?` (u32)  | active tab index |
 | `bounds` | `WindowBounds?`  | saved OS-window geometry |
 | `groups` | `GroupSpec[]`    | tabs (required array; a window with none is dropped on load) |
+| `tabDock` | `string?`       | where the tab bar docks: `"left"` \| `"right"`. Absent = top (the default and never written); any unknown value is treated as top. See `docs/tab-bar.md` |
 
 ### `WindowBounds`
 
