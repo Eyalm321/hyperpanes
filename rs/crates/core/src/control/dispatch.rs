@@ -1847,7 +1847,11 @@ mod tests {
             assert_eq!(r.status, 400, "{bad}: {:?}", r.body);
             let msg = r.body["error"].as_str().unwrap();
             assert!(msg.contains("groups[1]"), "{msg}");
-            assert_eq!(m.tabs().count(), before, "no tab may be added on a bad colour");
+            assert_eq!(
+                m.tabs().count(),
+                before,
+                "no tab may be added on a bad colour"
+            );
         }
     }
 

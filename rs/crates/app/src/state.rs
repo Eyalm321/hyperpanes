@@ -8441,10 +8441,18 @@ mod pane_group_tests {
         };
         assert_eq!(stripe(&st, 1), Some(group_c));
         st.set_tab_color(1, Some(manual));
-        assert_eq!(stripe(&st, 1), Some(manual), "manual colour wins over the group colour");
+        assert_eq!(
+            stripe(&st, 1),
+            Some(manual),
+            "manual colour wins over the group colour"
+        );
         assert_eq!(st.tabs[1].pane_group.as_ref().unwrap().color, Some(group_c));
         st.set_tab_color(1, None);
-        assert_eq!(stripe(&st, 1), Some(group_c), "clearing shows the group colour again");
+        assert_eq!(
+            stripe(&st, 1),
+            Some(group_c),
+            "clearing shows the group colour again"
+        );
         // A group with no project colour falls back to neutral; an ordinary tab has no stripe
         // unless it has a manual colour.
         st.tabs[1].pane_group.as_mut().unwrap().color = None;
@@ -8473,6 +8481,11 @@ mod pane_group_tests {
     /// t34: a group tab's manual colour and its group colour persist side by side.
     #[test]
     fn manual_colour_and_group_colour_round_trip_together() {
+        // Restoring a snapshot spawns panes, which needs a Tokio runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
         let (mut st, m) = with_panes(&["a", "b", "c"]);
         st.focus_pane(0);
         st.toggle_select(1);
@@ -8485,12 +8498,18 @@ mod pane_group_tests {
         let snap = st.to_session_file();
         let g = &snap.groups.as_ref().unwrap()[1];
         assert_eq!(g.color.as_deref(), Some("#aabbcc"));
-        assert_eq!(g.pane_group.as_ref().unwrap().color.as_deref(), Some("#0a0b0c"));
+        assert_eq!(
+            g.pane_group.as_ref().unwrap().color.as_deref(),
+            Some("#0a0b0c")
+        );
         let mut st2 = State::new(theme::load_font(1.0));
         st2.load_workspace(snap, &m);
         let t = st2.tabs.iter().find(|t| t.pane_group.is_some()).unwrap();
         assert_eq!(t.color, Some(Color::from_rgb_u8(0xaa, 0xbb, 0xcc)));
-        assert_eq!(t.pane_group.as_ref().unwrap().color, Some(parse_hex("#0a0b0c")));
+        assert_eq!(
+            t.pane_group.as_ref().unwrap().color,
+            Some(parse_hex("#0a0b0c"))
+        );
     }
 
     #[test]
