@@ -148,6 +148,9 @@ fn run_worker(repo: &Path, control: &Path, extra: &[&str], child: &[&str]) -> st
             repo.parent().unwrap().join("wtroot"),
         )
         .env("HYPERPANES_WORKTREE_MIN_FREE", "0")
+        .env("HYPERPANES_WORKTREE_SLOT_MAX", "0")
+        .env("HYPERPANES_WORKTREE_CACHE_MAX", "0")
+        .env("HYPERPANES_WORKTREE_SOFT_FREE", "0")
         .args([
             "worker",
             "--queue",

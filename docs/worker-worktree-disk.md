@@ -135,13 +135,18 @@ Precedence is flag > env > default.
 | --- | --- | --- | --- |
 | Per-slot cap | `--slot-max-size <size>` | `HYPERPANES_WORKTREE_SLOT_MAX` | 20G |
 | Root-wide budget | `--cache-max-size <size>` | `HYPERPANES_WORKTREE_CACHE_MAX` | 100G |
-| Proactive free-space floor | `--soft-free <size>` | `HYPERPANES_WORKTREE_SOFT_FREE` | 40G |
+| Proactive free-space floor | `--soft-free <size>` | `HYPERPANES_WORKTREE_SOFT_FREE` | min(40G, 10% of the disk) |
 
 - **Per-slot cap.** Enforced while holding the slot's lock, at two points: when the task's child
   exits (before the slot is released), and right after a slot is acquired (a backstop for slots
   left by older runners). An over-cap slot is pruned in two stages: first every `incremental/` dir
   under `cargo-target` is deleted; if the slot is still over the cap, its contents are deleted
   (the slot dir and its lock file are kept).
+- **Soft floor default.** Without a flag or env value, the soft floor is the smaller of 40G and a
+  tenth of the total size of the filesystem holding the worktree root: 10G on a 100G disk, 40G on
+  anything from 400G up. A flat 40G on a small disk (a laptop SSD, a CI runner) would evict every
+  idle warm slot on every claim and the cache would never stay warm. An explicit value always wins,
+  and `0` turns the floor off.
 - **Root budget.** The sum of all slot sizes across every repo under the root (they share the
   filesystem) is checked at runner start and between claims. Over budget, idle slots are evicted
   least recently used first until the total fits. Busy slots count toward the total but can't be

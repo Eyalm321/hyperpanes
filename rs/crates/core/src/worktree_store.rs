@@ -47,8 +47,12 @@ pub const CACHE_MAX_ENV: &str = "HYPERPANES_WORKTREE_CACHE_MAX";
 pub const DEFAULT_CACHE_MAX: u64 = 100 * 1024 * 1024 * 1024;
 /// Env var for the proactive free-space floor (`--soft-free`); `0` = off.
 pub const SOFT_FREE_ENV: &str = "HYPERPANES_WORKTREE_SOFT_FREE";
-/// Default soft free-space floor: 40 GiB.
+/// Upper bound of the default soft free-space floor: 40 GiB. The effective default is
+/// [`default_soft_free`]: the smaller of this and a tenth of the filesystem's total size, so a
+/// small disk (a laptop SSD, a CI runner) doesn't evict every idle warm slot on every claim.
 pub const DEFAULT_SOFT_FREE: u64 = 40 * 1024 * 1024 * 1024;
+/// The default soft floor is at most `1 / SOFT_FREE_FS_DIVISOR` of the filesystem's total size.
+pub const SOFT_FREE_FS_DIVISOR: u64 = 10;
 
 /// A lone `*.lock` (no dir) older than this is debris.
 const LONE_LOCK_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -179,11 +183,33 @@ pub fn available_bytes(path: &Path) -> io::Result<u64> {
             _ => break,
         }
     }
-    available_bytes_existing(p)
+    fs_space_existing(p).map(|(avail, _)| avail)
 }
 
+/// Total size in bytes of the filesystem holding `path` (walks up like [`available_bytes`]).
+pub fn total_bytes(path: &Path) -> io::Result<u64> {
+    let mut p = path;
+    while !p.exists() {
+        match p.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => p = parent,
+            _ => break,
+        }
+    }
+    fs_space_existing(p).map(|(_, total)| total)
+}
+
+/// Pure: the default soft free-space floor for a filesystem of `fs_total` bytes: the smaller of
+/// [`DEFAULT_SOFT_FREE`] and a tenth of the disk. Unknown/zero size falls back to the cap.
+pub fn default_soft_free(fs_total: Option<u64>) -> u64 {
+    match fs_total {
+        Some(t) if t > 0 => DEFAULT_SOFT_FREE.min(t / SOFT_FREE_FS_DIVISOR),
+        _ => DEFAULT_SOFT_FREE,
+    }
+}
+
+/// `(available to this user, total)` bytes of the filesystem holding the existing `path`.
 #[cfg(unix)]
-fn available_bytes_existing(path: &Path) -> io::Result<u64> {
+fn fs_space_existing(path: &Path) -> io::Result<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
@@ -197,20 +223,32 @@ fn available_bytes_existing(path: &Path) -> io::Result<u64> {
     let st = unsafe { st.assume_init() };
     // Field widths differ per platform (u32 on macOS), so the casts are needed there.
     #[allow(clippy::unnecessary_cast)]
-    Ok((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+    let frsize = st.f_frsize as u64;
+    #[allow(clippy::unnecessary_cast)]
+    let (bavail, blocks) = (st.f_bavail as u64, st.f_blocks as u64);
+    Ok((bavail.saturating_mul(frsize), blocks.saturating_mul(frsize)))
 }
 
 #[cfg(windows)]
-fn available_bytes_existing(path: &Path) -> io::Result<u64> {
+fn fs_space_existing(path: &Path) -> io::Result<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut avail: u64 = 0;
-    // SAFETY: `wide` is NUL-terminated and outlives the call; `avail` is a valid out-pointer.
-    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut avail), None, None) }
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    Ok(avail)
+    let mut total: u64 = 0;
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `avail`/`total` are valid
+    // out-pointers.
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut avail),
+            Some(&mut total),
+            None,
+        )
+    }
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok((avail, total))
 }
 
 // ───────────────────────── task owner lock ─────────────────────────
@@ -854,11 +892,13 @@ pub struct CachePolicy {
 }
 
 impl CachePolicy {
-    /// Resolve each knob from its flag, then its real env var, then the default.
+    /// Resolve each knob from its flag, then its real env var, then the default. The soft floor's
+    /// default depends on the size of the filesystem holding `root` ([`default_soft_free`]).
     pub fn resolve(
         slot_max: Option<u64>,
         cache_max: Option<u64>,
         soft_free: Option<u64>,
+        root: &Path,
     ) -> Result<Self, String> {
         let env = |n: &str| std::env::var(n).ok();
         Ok(Self {
@@ -878,7 +918,7 @@ impl CachePolicy {
                 soft_free,
                 env(SOFT_FREE_ENV),
                 SOFT_FREE_ENV,
-                DEFAULT_SOFT_FREE,
+                default_soft_free(total_bytes(root).ok()),
             )?,
         })
     }
@@ -1643,6 +1683,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         Vec::new()
+    }
+
+    #[test]
+    fn default_soft_free_is_a_tenth_of_the_disk_capped_at_40g() {
+        const G: u64 = 1024 * 1024 * 1024;
+        // A small disk (laptop SSD / CI runner) gets a tenth of its size, not a flat 40G.
+        assert_eq!(default_soft_free(Some(100 * G)), 10 * G);
+        assert_eq!(default_soft_free(Some(256 * G)), 25 * G + 6 * G / 10);
+        // A big disk hits the 40G cap.
+        assert_eq!(default_soft_free(Some(2048 * G)), 40 * G);
+        assert_eq!(default_soft_free(Some(400 * G)), 40 * G);
+        // Unknown or zero size falls back to the cap.
+        assert_eq!(default_soft_free(None), 40 * G);
+        assert_eq!(default_soft_free(Some(0)), 40 * G);
+    }
+
+    #[test]
+    fn soft_free_explicit_setting_beats_the_disk_default() {
+        // flag > env > default; `0` stays "off".
+        let d = default_soft_free(Some(100 * 1024 * 1024 * 1024));
+        assert_eq!(resolve_size_setting(Some(0), None, SOFT_FREE_ENV, d), Ok(0));
+        assert_eq!(
+            resolve_size_setting(None, Some("5G".into()), SOFT_FREE_ENV, d),
+            Ok(5 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(resolve_size_setting(None, None, SOFT_FREE_ENV, d), Ok(d));
+    }
+
+    #[test]
+    fn total_bytes_is_at_least_available_bytes() {
+        let t = std::env::temp_dir();
+        let total = total_bytes(&t).unwrap();
+        assert!(total > 0);
+        assert!(total >= available_bytes(&t).unwrap());
     }
 
     #[test]

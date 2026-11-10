@@ -474,6 +474,7 @@ fn run_prune_cache(args: &WorkerArgs) -> Result<(), Box<dyn Error>> {
         args.slot_max_size,
         args.cache_max_size,
         args.soft_free,
+        &root,
     )?;
     println!(
         "prune-cache{}: root {} (slot cap {}, budget {}, soft floor {})",
@@ -1409,11 +1410,6 @@ impl WtStore {
                 .map_err(|e| format!("{}: {e}", worktree_store::MAX_SLOTS_ENV))?,
             _ => 0,
         };
-        let policy = worktree_store::CachePolicy::resolve(
-            args.slot_max_size,
-            args.cache_max_size,
-            args.soft_free,
-        )?;
         let out = Command::new("git")
             .current_dir(&cwd)
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -1429,6 +1425,13 @@ impl WtStore {
         }
         let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
         let root = worktree_store::root_from_env(args.worktree_root.as_deref(), &cwd);
+        // The soft floor's default is sized to the root's filesystem (see `default_soft_free`).
+        let policy = worktree_store::CachePolicy::resolve(
+            args.slot_max_size,
+            args.cache_max_size,
+            args.soft_free,
+            &root,
+        )?;
         let key_dir = root.join(worktree_store::repo_key(&common));
         worktree_store::write_repo_file(&key_dir, &common)
             .map_err(|e| format!("worktree: cannot create {}: {e}", key_dir.display()))?;
