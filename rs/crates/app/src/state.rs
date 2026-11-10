@@ -5077,7 +5077,12 @@ impl State {
         }
         let uid = self.active_tab().panes[idx].uid.clone();
         // Selection belongs to the active tab only.
-        let tab_uids: Vec<String> = self.active_tab().panes.iter().map(|p| p.uid.clone()).collect();
+        let tab_uids: Vec<String> = self
+            .active_tab()
+            .panes
+            .iter()
+            .map(|p| p.uid.clone())
+            .collect();
         self.selection.retain(|u| tab_uids.contains(u));
         if self.selection.len() < 2 {
             self.selection.clear();
@@ -5088,7 +5093,9 @@ impl State {
             let seed = if seed_focus && focused != idx && self.selectable(focused) {
                 Some(self.active_tab().panes[focused].uid.clone())
             } else {
-                self.pending_select.take().filter(|u| *u != uid && tab_uids.contains(u))
+                self.pending_select
+                    .take()
+                    .filter(|u| *u != uid && tab_uids.contains(u))
             };
             match seed {
                 Some(first) => {
@@ -5211,7 +5218,8 @@ impl State {
             .map(|p| p.uid.clone())
             .collect();
         self.clear_selection();
-        self.group_panes_uids(mgr, &uids, &anchor_uid, None, None, None).is_some()
+        self.group_panes_uids(mgr, &uids, &anchor_uid, None, None, None)
+            .is_some()
     }
 
     /// The shared grouping core (GUI selection + control `groupPanes`). `uids` may span tabs;
@@ -5259,7 +5267,10 @@ impl State {
             .or_else(|| proj.map(|p| p.name.clone()))
             .unwrap_or_else(|| "Group".to_string())
             .into();
-        let group = PaneGroup { project: project_id, color };
+        let group = PaneGroup {
+            project: project_id,
+            color,
+        };
 
         // In place: every pane of ONE tab is a member.
         let first_ti = members[0].0;
@@ -5322,7 +5333,11 @@ impl State {
         }
         let t = &mut self.tabs[at];
         t.zoomed = None;
-        t.focused = t.panes.iter().position(|p| p.uid == anchor_uid).unwrap_or(0);
+        t.focused = t
+            .panes
+            .iter()
+            .position(|p| p.uid == anchor_uid)
+            .unwrap_or(0);
         self.group_origin.insert(new_uid, src_uid);
         self.clear_selection();
         self.dirty = true;
@@ -8187,7 +8202,10 @@ mod pane_group_tests {
         st.toggle_select(1); // click order d,b ... pane order b,d
         assert!(st.group_selection(Some(3), &m));
         assert_eq!(st.tabs.len(), 3);
-        assert_eq!(st.active, 1, "new tab sits right after the source and is active");
+        assert_eq!(
+            st.active, 1,
+            "new tab sits right after the source and is active"
+        );
         assert_eq!(uids(&st, 0), vec!["c"]);
         assert_eq!(uids(&st, 1), vec!["a", "b", "d"]);
         assert!(st.tabs[1].pane_group.is_some());
@@ -8294,7 +8312,10 @@ mod pane_group_tests {
         // recolour → tab follows
         st.projects[0].color = "#445566".into();
         st.refresh_group_colors();
-        assert_eq!(st.tabs[1].pane_group.as_ref().unwrap().color, Some(parse_hex("#445566")));
+        assert_eq!(
+            st.tabs[1].pane_group.as_ref().unwrap().color,
+            Some(parse_hex("#445566"))
+        );
         let _ = std::fs::remove_dir_all(repo);
     }
 

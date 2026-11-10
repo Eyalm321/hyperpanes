@@ -697,8 +697,9 @@ impl Keymap {
             .iter()
             .find(|b| {
                 (selection_active || !b.needs_selection)
-                    && self.effective(b.id, b.chord)
-                    .is_some_and(|c| c.matches(ctrl, alt, shift, key))
+                    && self
+                        .effective(b.id, b.chord)
+                        .is_some_and(|c| c.matches(ctrl, alt, shift, key))
             })
             .map(|b| b.command.clone())
     }
@@ -1071,12 +1072,10 @@ mod tests {
         // Every row has an id, a label + at least one chord chip, and starts un-overridden.
         // (The Ctrl+1..9 "Go to tab" rows ship unbound, so only they may lack chips.)
         assert!(rows.iter().all(|r| !r.id.is_empty() && !r.label.is_empty()));
-        assert!(rows
-            .iter()
-            .all(|r| !r.parts.is_empty()
-                || r.id.starts_with("tab.goto")
-                || r.id == "pane.toggleSelect"
-                || r.id == "tab.ungroup"));
+        assert!(rows.iter().all(|r| !r.parts.is_empty()
+            || r.id.starts_with("tab.goto")
+            || r.id == "pane.toggleSelect"
+            || r.id == "tab.ungroup"));
         assert!(rows.iter().all(|r| !r.overridden));
         // The palette row renders as Ctrl / Shift / P chips under General.
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
@@ -1200,7 +1199,9 @@ mod pane_group_key_tests {
         assert!(matches!(y(true), Some(Command::GroupSelection)));
         // Unbind Esc → clear never fires.
         km.overrides.insert("pane.clearSelection".into(), None);
-        assert!(km.match_chord_in(false, false, false, KeyTok::Escape, true).is_none());
+        assert!(km
+            .match_chord_in(false, false, false, KeyTok::Escape, true)
+            .is_none());
     }
 
     #[test]
@@ -1208,7 +1209,11 @@ mod pane_group_key_tests {
         let rows = Keymap::default_for_tests().rows();
         for id in ["pane.groupSelection", "pane.clearSelection"] {
             let r = rows.iter().find(|r| r.id == id).unwrap();
-            assert!(r.label.contains("(when 2+ panes are selected)"), "{}", r.label);
+            assert!(
+                r.label.contains("(when 2+ panes are selected)"),
+                "{}",
+                r.label
+            );
         }
         let ung = rows.iter().find(|r| r.id == "tab.ungroup").unwrap();
         assert!(ung.unbound);

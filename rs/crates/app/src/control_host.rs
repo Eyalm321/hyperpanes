@@ -1944,19 +1944,22 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let m = SessionManager::new(tx);
         for n in ["a", "b", "c"] {
-            st.adopt_pane(&m, crate::state::DetachedPane {
-                uid: n.into(),
-                title: n.into(),
-                subtitle: None,
-                pinned_accent: None,
-                show_frame: None,
-                show_dot: None,
-                font_px: 14.0,
-                spawn_command: None,
-                spawn_args: None,
-                spawn_shell: None,
-                spawn_env: None,
-            });
+            st.adopt_pane(
+                &m,
+                crate::state::DetachedPane {
+                    uid: n.into(),
+                    title: n.into(),
+                    subtitle: None,
+                    pinned_accent: None,
+                    show_frame: None,
+                    show_dot: None,
+                    font_px: 14.0,
+                    spawn_command: None,
+                    spawn_args: None,
+                    spawn_shell: None,
+                    spawn_env: None,
+                },
+            );
         }
         // Control pane ids are aliases for GUI uids.
         let resolve = |id: &str| id.trim_start_matches("ctl-").to_string();
@@ -1975,10 +1978,16 @@ mod tests {
         let g = &st.tabs[1];
         assert!(g.pane_group.is_some());
         assert_eq!(g.title.as_str(), "My group");
-        assert_eq!(g.ctl_id.as_deref(), Some("tab-uuid-1"), "the id the API returned resolves");
+        assert_eq!(
+            g.ctl_id.as_deref(),
+            Some("tab-uuid-1"),
+            "the id the API returned resolves"
+        );
         assert_eq!(resolve_tab_index(&st.tabs, "tab-uuid-1"), Some(1));
         // ungroup by that id returns the panes; the tab is gone.
-        let un = R::Ungroup { tab_id: "tab-uuid-1".into() };
+        let un = R::Ungroup {
+            tab_id: "tab-uuid-1".into(),
+        };
         assert!(apply_pane_group_request(&mut st, &m, 7, &resolve, &un));
         assert_eq!(st.tabs.len(), 1);
         assert_eq!(st.tabs[0].panes.len(), 3);

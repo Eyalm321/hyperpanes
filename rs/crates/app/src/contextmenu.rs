@@ -817,7 +817,10 @@ mod pane_group_menu_tests {
         assert_eq!(l[0], "2 panes selected");
         assert!(m.entries[0].disabled);
         assert_eq!(l[1], "Group 2 panes");
-        assert_eq!(m.entries[1].shortcut.as_str(), format!("{}+G", crate::keybindings::CTRL_LABEL));
+        assert_eq!(
+            m.entries[1].shortcut.as_str(),
+            format!("{}+G", crate::keybindings::CTRL_LABEL)
+        );
         assert!(matches!(m.commands[1], Some(Command::GroupSelectionAt(1))));
         assert_eq!(l[2], "Clear selection");
         assert_eq!(m.entries[2].shortcut.as_str(), "Esc");
