@@ -937,14 +937,21 @@ fn arm_inbox_nudge(shared: &Arc<Shared>, pane_id: &str, seq: u64) {
         loop {
             // Busy = mid-turn (a running command, or output within the idle threshold): typing
             // now would land in a live prompt, so wait for the pane to come to rest.
-            let busy = {
+            let (busy, form) = {
                 let m = shared.model.lock().unwrap();
                 match m.pane(&pane_id) {
                     None => return, // pane closed while we waited
-                    Some(p) => shared.compute_activity(p) == Activity::Busy,
+                    Some(p) => (
+                        shared.compute_activity(p) == Activity::Busy,
+                        nudge::nudge_form(p.meta.as_ref()),
+                    ),
                 }
             };
-            let step = shared.nudges.lock().unwrap().poll(&pane_id, busy, now_ms());
+            let step = shared
+                .nudges
+                .lock()
+                .unwrap()
+                .poll(&pane_id, busy, now_ms(), form);
             match step {
                 nudge::Step::Stop => return,
                 nudge::Step::Wait => {
