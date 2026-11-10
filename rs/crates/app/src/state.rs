@@ -1128,7 +1128,7 @@ pub struct State {
     /// Keyed by uid and carrying its own project ON PURPOSE, separate from `goal_orchestrators`:
     /// that map holds ONE uid per project (it is the router), so when two orchestrators exist for
     /// a project the second one's registration evicts the first — and a snapshot lookup through
-    /// the router silently dropped the evicted one's record. Seen live with two canora-sync
+    /// the router silently dropped the evicted one's record. Seen live with two myapp
     /// orchestrators.
     pub goal_orch_models: std::collections::HashMap<String, (String, [String; 3])>,
     /// Control-plane meta to stamp on panes once they appear in the read model — `(session uid,
@@ -6661,7 +6661,7 @@ mod goal_restore_tests {
     /// The exact shape of an orchestrator line saved by a pre-fix build (from a live workspace).
     const LEGACY_ORCH_CMD: &str = "claude --dangerously-skip-permissions \
         --append-system-prompt-file /usr/share/hyperpanes/resources/claude/goal-orchestrator/SKILL.md \
-        --model claude-opus-5[1m] --name goals-canora-sync \
+        --model claude-opus-5[1m] --name goals-myapp \
         --mcp-config /home/u/.local/state/hyperpanes/goals-mcp.json --strict-mcp-config \
         --settings /home/u/.local/state/hyperpanes/goals-settings.json";
 
@@ -6724,9 +6724,9 @@ mod goal_restore_tests {
     #[test]
     fn a_legacy_snapshot_is_recognised_and_its_model_unpinned() {
         let mut st = fresh();
-        st.projects = vec![project("/home/u/dev/canora-sync", "canora-sync")];
+        st.projects = vec![project("/home/user/dev/myapp", "myapp")];
         let spec = PaneSpec {
-            label: Some("canora-sync".to_string()),
+            label: Some("myapp".to_string()),
             cwd: Some("/home/u".to_string()),
             command: Some(LEGACY_ORCH_CMD.to_string()),
             ..Default::default()
@@ -6734,7 +6734,7 @@ mod goal_restore_tests {
         let (proj, models) = st
             .restored_goal_orchestrator(&spec)
             .expect("is an orchestrator");
-        assert_eq!(proj, "/home/u/dev/canora-sync");
+        assert_eq!(proj, "/home/user/dev/myapp");
         assert_eq!(
             models[0], "opus[1m]",
             "the dated --model must not survive a restore"
@@ -6748,15 +6748,15 @@ mod goal_restore_tests {
     #[test]
     fn a_legacy_snapshot_prefers_a_cwd_that_is_a_known_project() {
         let mut st = fresh();
-        st.projects = vec![project("/home/u/dev/canora-sync", "canora-sync")];
+        st.projects = vec![project("/home/user/dev/myapp", "myapp")];
         let spec = PaneSpec {
             label: Some("something else".to_string()),
-            cwd: Some("/home/u/dev/canora-sync".to_string()),
+            cwd: Some("/home/user/dev/myapp".to_string()),
             command: Some(LEGACY_ORCH_CMD.to_string()),
             ..Default::default()
         };
         let (proj, _) = st.restored_goal_orchestrator(&spec).unwrap();
-        assert_eq!(proj, "/home/u/dev/canora-sync");
+        assert_eq!(proj, "/home/user/dev/myapp");
     }
 
     #[test]
@@ -6770,7 +6770,7 @@ mod goal_restore_tests {
         ] {
             let spec = PaneSpec {
                 command: cmd.clone(),
-                cwd: Some("/home/u/dev/canora-sync".to_string()),
+                cwd: Some("/home/user/dev/myapp".to_string()),
                 ..Default::default()
             };
             assert!(st.restored_goal_orchestrator(&spec).is_none(), "{cmd:?}");
@@ -6784,7 +6784,7 @@ mod goal_restore_tests {
         let mut st = fresh();
         st.register_goal_orchestrator(
             "uid-1",
-            "/home/u/dev/canora-sync",
+            "/home/user/dev/myapp",
             [
                 "opus[1m]".to_string(),
                 "fable[1m]".to_string(),
@@ -6793,7 +6793,7 @@ mod goal_restore_tests {
         );
         assert_eq!(
             st.goal_orchestrators
-                .get("/home/u/dev/canora-sync")
+                .get("/home/user/dev/myapp")
                 .map(String::as_str),
             Some("uid-1")
         );
@@ -6804,7 +6804,7 @@ mod goal_restore_tests {
         assert_eq!(meta.get("role").map(String::as_str), Some("goals-orch"));
         assert_eq!(
             meta.get("project").map(String::as_str),
-            Some("/home/u/dev/canora-sync")
+            Some("/home/user/dev/myapp")
         );
         assert!(hyperpanes_core::control::nudge::NUDGED_ROLES.contains(&"goals-orch"));
 
@@ -6818,7 +6818,7 @@ mod goal_restore_tests {
             ..Default::default()
         };
         let restored = fresh().restored_goal_orchestrator(&spec).unwrap();
-        assert_eq!(restored.0, "/home/u/dev/canora-sync");
+        assert_eq!(restored.0, "/home/user/dev/myapp");
         assert_eq!(
             restored.1,
             [
@@ -6849,7 +6849,7 @@ mod goal_restore_tests {
         let mut st = fresh();
         let before = st.goal_account_cursor;
         let built = st.build_goal_orchestrator_launch(
-            "canora-sync",
+            "myapp",
             "#00aaff",
             "opus[1m]",
             "fable[1m]",
@@ -6862,7 +6862,7 @@ mod goal_restore_tests {
         );
         if let Some((cmd, env)) = built {
             assert!(cmd.contains("--model opus[1m]"), "{cmd}");
-            assert!(cmd.contains("--name goals-canora-sync"), "{cmd}");
+            assert!(cmd.contains("--name goals-myapp"), "{cmd}");
             assert_eq!(
                 env.get("ENABLE_TOOL_SEARCH").map(String::as_str),
                 Some("false"),
@@ -6894,12 +6894,12 @@ mod goal_restore_tests {
                 "sonnet[1m]".to_string(),
             ]
         };
-        st.register_goal_orchestrator("uid-old", "/home/u/dev/canora-sync", models());
-        st.register_goal_orchestrator("uid-new", "/home/u/dev/canora-sync", models());
+        st.register_goal_orchestrator("uid-old", "/home/user/dev/myapp", models());
+        st.register_goal_orchestrator("uid-new", "/home/user/dev/myapp", models());
         // The router routes to the newest.
         assert_eq!(
             st.goal_orchestrators
-                .get("/home/u/dev/canora-sync")
+                .get("/home/user/dev/myapp")
                 .map(String::as_str),
             Some("uid-new")
         );
@@ -6910,7 +6910,7 @@ mod goal_restore_tests {
                 .unwrap_or_else(|| panic!("{uid} lost its meta"));
             assert_eq!(
                 meta.get(GOAL_META_PROJECT).map(String::as_str),
-                Some("/home/u/dev/canora-sync")
+                Some("/home/user/dev/myapp")
             );
         }
     }

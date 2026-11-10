@@ -1,8 +1,7 @@
 //! Port of `src/main/ai/ollama-client.ts` — a minimal Ollama HTTP client via `reqwest`:
 //! per-request timeout, `clean_line` (80-char clamp), `normalize_endpoint`, and `ping` that
 //! NEVER errors (returns a bool, swallows failures). Mirror `ollama-client.test.ts`.
-//! (The user's Ollama lives at 192.168.0.11 / a gemma model — endpoint + model stay
-//! configurable.)
+//! (Ollama may run on another LAN host with any model: endpoint + model stay configurable.)
 //!
 //! No app-state coupling: construct with config, call methods. `summarize` returns
 //! `Err` on any failure (the caller owns retry/backoff); `ping` never errors.

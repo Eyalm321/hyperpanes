@@ -2,7 +2,7 @@
 
 Branch `fanout/integration` (base: merged main `e29d1dc`, all 7 Wave-1 tracks).
 Run 2026-06-11. Windows = this PC (Win 11), Linux = WSL2/WSLg (Ubuntu), macOS = Mac mini
-(Apple Silicon, ssh `admin@192.168.0.11`).
+(Apple Silicon, reached over ssh on the LAN).
 
 ## Part A — test suites (at branch head)
 
