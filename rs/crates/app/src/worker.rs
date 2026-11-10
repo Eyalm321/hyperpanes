@@ -1497,8 +1497,8 @@ mod tests {
     #[test]
     fn dials_a_specific_bind_address_not_loopback() {
         assert_eq!(
-            base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"100.120.216.17"}"#),
-            "http://100.120.216.17:41419"
+            base_from_control_json(r#"{"port":41419,"token":"t","bindAddress":"100.64.0.1"}"#),
+            "http://100.64.0.1:41419"
         );
     }
 

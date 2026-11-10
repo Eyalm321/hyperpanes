@@ -243,8 +243,8 @@ mod tests {
     #[test]
     fn pairing_url_shape() {
         assert_eq!(
-            pairing_url("100.71.2.9", 51888, "tok123"),
-            "hp://100.71.2.9:51888/?token=tok123&v=1"
+            pairing_url("100.64.0.1", 51888, "tok123"),
+            "hp://100.64.0.1:51888/?token=tok123&v=1"
         );
         // IPv6 hosts get bracketed so port parsing stays unambiguous.
         assert_eq!(
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn specific_bind_address_wins() {
-        assert_eq!(candidate_hosts(Some("100.71.2.9")), vec!["100.71.2.9"]);
+        assert_eq!(candidate_hosts(Some("100.64.0.1")), vec!["100.64.0.1"]);
         // Unspecified bind → discovery path (non-empty, never contains 0.0.0.0).
         let hosts = candidate_hosts(Some("0.0.0.0"));
         assert!(!hosts.is_empty());
@@ -280,6 +280,6 @@ mod tests {
 
     #[test]
     fn qr_renders() {
-        assert!(qr_text("hp://100.71.2.9:51888/?token=t&v=1").is_some());
+        assert!(qr_text("hp://100.64.0.1:51888/?token=t&v=1").is_some());
     }
 }

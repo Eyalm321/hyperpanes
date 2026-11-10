@@ -177,7 +177,7 @@ rotation) we're ahead of both. Imported the rest as persona edits (`SKILL/SPEC/I
 
 ## Live-org fixes (2026-07-24)
 
-Two failures found driving a real org (canora-sync, goals `gp6`/`gp7`) — both in the plumbing
+Two failures found driving a real org (one project, goals `gp6`/`gp7`) — both in the plumbing
 around the org, not the org itself:
 
 | Symptom | Root cause | Fix |

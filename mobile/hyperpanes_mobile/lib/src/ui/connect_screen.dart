@@ -204,7 +204,7 @@ class _ManualEntryDialogState extends State<_ManualEntryDialog> {
             controller: _hostCtl,
             decoration: const InputDecoration(
               labelText: 'Host (host:port or hp:// URL)',
-              hintText: '100.71.2.9:51888',
+              hintText: '100.64.0.1:51888',
             ),
             autocorrect: false,
           ),

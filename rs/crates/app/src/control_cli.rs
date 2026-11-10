@@ -122,8 +122,8 @@ mod tests {
     #[test]
     fn base_url_specific_bind_is_dialed_directly() {
         assert_eq!(
-            base_url(41419, Some("100.120.216.17")),
-            "http://100.120.216.17:41419"
+            base_url(41419, Some("100.64.0.1")),
+            "http://100.64.0.1:41419"
         );
         assert_eq!(base_url(41419, Some("fd7a::1")), "http://[fd7a::1]:41419");
     }

@@ -25,7 +25,7 @@ class HostPairing {
 
   String get displayName => name ?? '$host:$port';
 
-  /// Base for HTTP calls, e.g. `http://100.71.2.9:51888`.
+  /// Base for HTTP calls, e.g. `http://100.64.0.1:51888`.
   Uri get httpBase => Uri(scheme: 'http', host: host, port: port);
 
   /// The `/events` WebSocket URL (token as query param, mirroring control.json).

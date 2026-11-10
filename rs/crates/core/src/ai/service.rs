@@ -867,17 +867,17 @@ mod tests {
         let (mut svc, _meta) = build(&tp, Fake::ok("x"));
         svc.init();
         svc.configure(AiSettingsPatch {
-            endpoint: Some("http://192.168.0.11:11434".to_string()),
+            endpoint: Some("http://192.0.2.10:11434".to_string()),
             model: Some("gemma3:4b".to_string()),
             ..Default::default()
         });
         let st = svc.status();
-        assert_eq!(st.endpoint, "http://192.168.0.11:11434");
+        assert_eq!(st.endpoint, "http://192.0.2.10:11434");
         assert_eq!(st.model, "gemma3:4b");
 
         let (mut svc2, _m) = build(&tp, Fake::ok("x"));
         svc2.init();
-        assert_eq!(svc2.status().endpoint, "http://192.168.0.11:11434");
+        assert_eq!(svc2.status().endpoint, "http://192.0.2.10:11434");
     }
 
     #[tokio::test]
