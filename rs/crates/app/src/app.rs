@@ -111,6 +111,46 @@ fn close_keeps_sessions(is_daemon: bool, keep_alive: bool, survivors: usize) -> 
     is_daemon && keep_alive && survivors == 0
 }
 
+/// Flag every window closing (Quit): the reap then sees no survivors.
+fn mark_all_closing<'a>(flags: impl IntoIterator<Item = &'a Cell<bool>>) {
+    for f in flags {
+        f.set(true);
+    }
+}
+
+/// Split the windows' `closing` flags into (survivor count, indices of closing windows).
+/// With no survivors the closing set IS every window, so the one snapshot covers them all.
+fn reap_partition(closing: &[bool]) -> (usize, Vec<usize>) {
+    let idx: Vec<usize> = (0..closing.len()).filter(|&i| closing[i]).collect();
+    (closing.len() - idx.len(), idx)
+}
+
+/// Whether closing a window should first ask (the confirm overlay): only with the daemon
+/// backend + keep-alive (so Quit is a lossless alternative), for a window that is NOT the last
+/// one open, and that has at least one pane running a process.
+fn close_needs_confirm(
+    is_daemon: bool,
+    keep_alive: bool,
+    is_last_window: bool,
+    running_count: usize,
+) -> bool {
+    is_daemon && keep_alive && !is_last_window && running_count > 0
+}
+
+/// Whether a pane "runs a process": not exited AND (a program pane — spawned with an explicit
+/// command rather than a bare shell — OR OSC-133 liveness says a command is running). Shells
+/// that never emitted a prompt marker count as idle. Mirrors core's `activity_for`.
+pub(crate) fn runs_a_process(
+    exited: bool,
+    is_program: bool,
+    live: Option<&hyperpanes_core::session_manager::Liveness>,
+) -> bool {
+    if exited {
+        return false;
+    }
+    is_program || live.is_some_and(|l| l.marker_seen && (l.command_running || !l.prompt_ready))
+}
+
 /// Write the final window's live workspace snapshot to `last-workspace.json` — the "last
 /// session" a bare relaunch restores via core's `resolve_launch_workspace` fallback (#14:
 /// this is what carries per-pane zoom, layout, focus and cwds across a plain relaunch).
@@ -224,6 +264,8 @@ pub struct Window {
     pub seed: RefCell<PendingSeed>,
     /// Set when this window should be reaped (last pane closed, or detached away).
     pub closing: Cell<bool>,
+    /// Running-process count while the close-window confirm overlay is up (0 = no overlay).
+    pub close_confirm: Cell<usize>,
     /// Per-tab strip geometry (window-logical `x`, `width`), reported by the UI and used
     /// to hit-test a tab-strip drop / reorder caret. Index = tab order.
     /// When the tab bar is docked this is `(window-y, height)` per chip instead (see `tabdock`).
@@ -879,6 +921,7 @@ impl App {
             // Already seeded above (eagerly) — nothing pending for the pump to do.
             seed: RefCell::new(PendingSeed::Done),
             closing: Cell::new(false),
+            close_confirm: Cell::new(0),
             tab_geom: RefCell::new(Vec::new()),
             dock_drag: RefCell::new(None),
             tab_col: Cell::new((0.0, 0.0)),
@@ -959,6 +1002,24 @@ impl App {
         if self.run_remote_command(win, &cmd) {
             return;
         }
+        match cmd {
+            Command::QuitApp => {
+                self.quit_app();
+                return;
+            }
+            Command::CloseConfirm(a) => {
+                if win.close_confirm.get() > 0 {
+                    self.set_close_confirm(win, 0);
+                    match a {
+                        1 => win.closing.set(true),
+                        2 => self.quit_app(),
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
         let eff = {
             let mut st = win.state.borrow_mut();
             dispatch(&mut st, cmd, &self.mgr)
@@ -1034,7 +1095,41 @@ impl App {
     /// Flag `win` for reaping (its sessions are killed + the window dropped on the next
     /// tick — never mid-callback, so we don't drop a component while it's dispatching).
     fn close_window(&self, win: &Rc<Window>) {
-        win.closing.set(true);
+        let is_last = self
+            .windows
+            .borrow()
+            .iter()
+            .filter(|w| !w.closing.get())
+            .count()
+            <= 1;
+        let running = if is_last {
+            0
+        } else {
+            win.state.borrow().running_process_count(&self.mgr)
+        };
+        if close_needs_confirm(
+            self.mgr.is_daemon(),
+            crate::prefs::load().keep_alive,
+            is_last,
+            running,
+        ) {
+            self.set_close_confirm(win, running);
+        } else {
+            win.closing.set(true);
+        }
+    }
+
+    fn set_close_confirm(&self, win: &Rc<Window>, n: usize) {
+        win.close_confirm.set(n);
+        win.app.set_close_confirm(n as i32);
+        self.wake();
+    }
+
+    /// Quit the whole app: every window closes in the same tick, so the reap sees no
+    /// survivors (daemon + keep-alive → sessions kept, every window saved; otherwise sessions
+    /// end as a close does today).
+    fn quit_app(&self) {
+        mark_all_closing(self.windows.borrow().iter().map(|w| &w.closing));
     }
 
     // ---- the central pump (one shared 8 ms timer drives every window) ----
@@ -1296,7 +1391,8 @@ impl App {
         //    the last session (tabs, layout, focus, per-pane zoom — #14) via core's
         //    `resolve_launch_workspace` fallback.
         if windows.iter().any(|w| w.closing.get()) {
-            let will_survive = windows.iter().filter(|w| !w.closing.get()).count();
+            let flags: Vec<bool> = windows.iter().map(|w| w.closing.get()).collect();
+            let (will_survive, _) = reap_partition(&flags);
             let keep_sessions = close_keeps_sessions(
                 self.mgr.is_daemon(),
                 crate::prefs::load().keep_alive,
@@ -1928,6 +2024,16 @@ impl App {
             msg.alt,
             msg.shift
         ));
+        // The close-window confirm owns the keyboard: Enter = Quit (lossless default),
+        // Esc = Cancel; everything else is swallowed so nothing leaks to the shell.
+        if win.close_confirm.get() > 0 {
+            if crate::is_key(&msg.text, Key::Return) {
+                self.run_command(win, Command::CloseConfirm(2));
+            } else if crate::is_key(&msg.text, Key::Escape) {
+                self.run_command(win, Command::CloseConfirm(0));
+            }
+            return;
+        }
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
             let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
@@ -3372,6 +3478,7 @@ impl App {
         cb0!(on_overlay_dismiss, Command::CloseOverlay);
         cb0!(on_pref_done, Command::PrefsDone);
         cb_i32!(on_pref_confirm, Command::PrefsConfirm);
+        cb_i32!(on_close_confirm_resolve, Command::CloseConfirm);
 
         // ---- keybindings editor: rebind capture + reset (act on state directly) ----
         {
@@ -4063,6 +4170,7 @@ mod last_session_mode_tests {
 #[cfg(test)]
 mod multi_window_session_tests {
     use super::{close_keeps_sessions, session_file_of, session_groups_mut, single_window_file};
+    use super::{close_needs_confirm, mark_all_closing, reap_partition, runs_a_process};
     use hyperpanes_core::workspace::io::windows_of;
     use hyperpanes_core::workspace::model::{
         GroupSpec, PaneSpec, WindowBounds, WindowSpec, WorkspaceFile,
@@ -4151,6 +4259,69 @@ mod multi_window_session_tests {
             .map(|g| g.title.clone().unwrap())
             .collect();
         assert_eq!(titles, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn close_needs_confirm_truth_table() {
+        for d in [false, true] {
+            for k in [false, true] {
+                for l in [false, true] {
+                    for n in [0usize, 1, 3] {
+                        assert_eq!(
+                            close_needs_confirm(d, k, l, n),
+                            d && k && !l && n > 0,
+                            "d={d} k={k} l={l} n={n}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runs_a_process_truth_table() {
+        use hyperpanes_core::session_manager::Liveness;
+        let live = |marker_seen, command_running, prompt_ready| Liveness {
+            marker_seen,
+            command_running,
+            prompt_ready,
+            last_exit_code: None,
+        };
+        // exited never runs, whatever else is true
+        assert!(!runs_a_process(true, true, Some(&live(true, true, false))));
+        // program pane (spawn_command set) runs even with no liveness / idle prompt
+        assert!(runs_a_process(false, true, None));
+        assert!(runs_a_process(false, true, Some(&live(true, false, true))));
+        // bare shell without markers is idle
+        assert!(!runs_a_process(false, false, None));
+        assert!(!runs_a_process(
+            false,
+            false,
+            Some(&live(false, true, false))
+        ));
+        // bare shell with markers: running command or no prompt => busy; at prompt => idle
+        assert!(runs_a_process(false, false, Some(&live(true, true, false))));
+        assert!(runs_a_process(
+            false,
+            false,
+            Some(&live(true, false, false))
+        ));
+        assert!(!runs_a_process(
+            false,
+            false,
+            Some(&live(true, false, true))
+        ));
+    }
+
+    #[test]
+    fn quit_marks_all_windows_closing_and_snapshots_all() {
+        use std::cell::Cell;
+        let cells = [Cell::new(false), Cell::new(false), Cell::new(false)];
+        mark_all_closing(cells.iter());
+        let flags: Vec<bool> = cells.iter().map(|c| c.get()).collect();
+        assert_eq!(reap_partition(&flags), (0, vec![0, 1, 2]));
+        // a lone close leaves survivors and snapshots nothing extra
+        assert_eq!(reap_partition(&[false, true, false]), (2, vec![1]));
     }
 
     #[test]

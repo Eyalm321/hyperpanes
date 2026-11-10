@@ -2225,6 +2225,35 @@ impl State {
             .collect()
     }
 
+    /// How many panes in this window run a process (see `app::runs_a_process`). Counts every
+    /// tab incl. background ones, plus parked reminder panes and closed-tab-stack panes —
+    /// exactly the sessions that closing the window would end (`session_uids`).
+    pub fn running_process_count(&self, mgr: &SessionManager) -> usize {
+        let run = |uid: &str, program: bool| {
+            let live = mgr.liveness(uid);
+            crate::app::runs_a_process(live.is_none(), program, live.as_ref())
+        };
+        let panes = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .filter(|p| !crate::remote::is_remote_uid(&p.uid))
+            .filter(|p| run(&p.uid, p.spawn_command.is_some()))
+            .count();
+        let closed = self
+            .closed_tabs
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .filter(|p| run(&p.uid, p.spawn_command.is_some()))
+            .count();
+        let parked = self
+            .reminders
+            .iter()
+            .filter(|r| run(&r.pane.uid, r.pane.spawn_command.is_some()))
+            .count();
+        panes + closed + parked
+    }
+
     /// A session exited on its own — drop its pane wherever it lives. Returns
     /// `false` if that emptied the whole workspace (caller quits).
     pub fn pane_exited(&mut self, uid: &str, mgr: &SessionManager) -> bool {
