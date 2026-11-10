@@ -2990,9 +2990,25 @@ impl App {
             let id = win.id;
             win.app.on_ctx_move_tab(move |tab| {
                 if let Some(w) = app.window_by_id(id) {
-                    let target = w.state.borrow().ctx_target();
+                    let (target, kind) = {
+                        let st = w.state.borrow();
+                        (st.ctx_target(), st.ctx.as_ref().map(|c| c.kind))
+                    };
                     if let Some(t) = target {
-                        app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
+                        if kind == Some(crate::contextmenu::CtxKind::Tab) {
+                            // Tab menu's "Group Color ▸": `tab` is a project index (-1 = the
+                            // panes' own project).
+                            let proj = w
+                                .state
+                                .borrow()
+                                .projects
+                                .get(tab.max(0) as usize)
+                                .filter(|_| tab >= 0)
+                                .map(|p| p.id.clone());
+                            app.run_command(&w, Command::SetGroupColor(t, proj));
+                        } else {
+                            app.run_command(&w, Command::MovePaneToTab(t, tab as usize));
+                        }
                     }
                     app.run_command(&w, Command::CloseContext);
                 }

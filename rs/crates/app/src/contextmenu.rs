@@ -202,6 +202,59 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
         b.sep();
     }
 
+    // Multi-select header (t28, #96): right-clicking a SELECTED pane while a selection is
+    // active leads with the selection actions. Right-clicking never groups by itself — the
+    // rows only offer it.
+    if !in_taskbar
+        && state.selection_active()
+        && t.remote.is_none()
+        && t.panes.get(idx).is_some_and(|p| state.is_selected(&p.uid))
+    {
+        let n_sel = state.selection.len();
+        let group_sc = state
+            .keymap
+            .label_for("pane.groupSelection")
+            .unwrap_or_default();
+        let clear_sc = state
+            .keymap
+            .label_for("pane.clearSelection")
+            .unwrap_or_default();
+        b.row(
+            &format!("{n_sel} panes selected"),
+            "",
+            0,
+            false,
+            false,
+            true,
+            false,
+            sub::NONE,
+            None,
+        );
+        b.row(
+            &format!("Group {n_sel} panes"),
+            &group_sc,
+            0,
+            false,
+            false,
+            false,
+            false,
+            sub::NONE,
+            Some(Command::GroupSelectionAt(idx)),
+        );
+        b.row(
+            "Clear selection",
+            &clear_sc,
+            0,
+            false,
+            false,
+            false,
+            false,
+            sub::NONE,
+            Some(Command::ClearSelection),
+        );
+        b.sep();
+    }
+
     b.item("New Pane…", Command::OpenNewPane);
     b.item("Rename…", Command::BeginRenamePane(idx as i32));
     b.row(
@@ -363,6 +416,9 @@ pub fn pane_menu(state: &State, idx: usize, x: f32, y: f32, in_taskbar: bool) ->
             None,
         );
     }
+    if t.pane_group.is_some() && t.remote.is_none() {
+        b.item("Ungroup", Command::UngroupTab(state.active));
+    }
     b.sep();
     b.row(
         "Close Pane",
@@ -440,6 +496,27 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
         b.sep();
         b.item("Reconnect Remote Host", Command::RemoteReconnect(key));
         b.item("Disconnect Remote Host", Command::RemoteDisconnect(key));
+    }
+    if state
+        .tabs
+        .get(idx)
+        .is_some_and(|t| t.pane_group.is_some() && t.remote.is_none())
+    {
+        b.sep();
+        b.item("Ungroup", Command::UngroupTab(idx));
+        // Project-colour picker; the flyout rows are fed by `paneview` (reuses the
+        // Move-to-Tab list model — see `State::group_color_choices`).
+        b.row(
+            "Group Color",
+            "",
+            0,
+            false,
+            false,
+            false,
+            false,
+            sub::MOVE_TO_TAB,
+            None,
+        );
     }
     b.sep();
     b.item("Connect to Host…", Command::OpenConnectHost);
@@ -691,5 +768,113 @@ mod tests {
                 "{bad:?} must not parse"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pane_group_menu_tests {
+    use super::*;
+    use crate::state::DetachedPane;
+    use hyperpanes_core::session_manager::SessionManager;
+
+    fn det(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        }
+    }
+
+    fn three() -> State {
+        let mut st = State::new(crate::theme::load_font(1.0));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        for n in ["a", "b", "c"] {
+            st.adopt_pane(&m, det(n));
+        }
+        st
+    }
+
+    fn labels(m: &CtxMenu) -> Vec<String> {
+        m.entries.iter().map(|e| e.label.to_string()).collect()
+    }
+
+    #[test]
+    fn selected_pane_menu_leads_with_selection_rows() {
+        let mut st = three();
+        st.focus_pane(0);
+        st.toggle_select(1);
+        let m = pane_menu(&st, 1, 0.0, 0.0, false);
+        let l = labels(&m);
+        assert_eq!(l[0], "2 panes selected");
+        assert!(m.entries[0].disabled);
+        assert_eq!(l[1], "Group 2 panes");
+        assert_eq!(m.entries[1].shortcut.as_str(), format!("{}+G", crate::keybindings::CTRL_LABEL));
+        assert!(matches!(m.commands[1], Some(Command::GroupSelectionAt(1))));
+        assert_eq!(l[2], "Clear selection");
+        assert_eq!(m.entries[2].shortcut.as_str(), "Esc");
+        assert_eq!(m.entries[3].kind, -1, "separator before the normal menu");
+        assert_eq!(l[4], "New Pane…");
+    }
+
+    #[test]
+    fn unselected_pane_menu_is_the_normal_one() {
+        let mut st = three();
+        st.focus_pane(0);
+        st.toggle_select(1);
+        let m = pane_menu(&st, 2, 0.0, 0.0, false); // pane c is not selected
+        assert_eq!(labels(&m)[0], "New Pane…");
+    }
+
+    #[test]
+    fn right_click_unselected_clears_selection() {
+        let mut st = three();
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.open_pane_context(2, 0.0, 0.0);
+        assert!(st.selection.is_empty());
+        // right-clicking a selected one keeps it
+        st.focus_pane(0);
+        st.toggle_select(1);
+        st.open_pane_context(1, 0.0, 0.0);
+        assert!(st.selection_active());
+    }
+
+    #[test]
+    fn group_tab_menus_offer_ungroup_and_colour() {
+        let mut st = three();
+        st.tabs[0].pane_group = Some(crate::state::PaneGroup::default());
+        let pm = pane_menu(&st, 0, 0.0, 0.0, false);
+        assert!(labels(&pm).contains(&"Ungroup".to_string()));
+        let tm = tab_menu(&st, 0, 0.0, 0.0);
+        let l = labels(&tm);
+        assert!(l.contains(&"Ungroup".to_string()));
+        assert!(l.contains(&"Group Color".to_string()));
+        // ordinary tab: neither
+        st.tabs[0].pane_group = None;
+        assert!(!labels(&tab_menu(&st, 0, 0.0, 0.0)).contains(&"Ungroup".to_string()));
+        assert!(!labels(&pane_menu(&st, 0, 0.0, 0.0, false)).contains(&"Ungroup".to_string()));
+    }
+
+    #[test]
+    fn remote_tabs_never_show_group_rows() {
+        let mut st = three();
+        st.tabs[0].pane_group = Some(crate::state::PaneGroup::default());
+        st.tabs[0].remote = Some(crate::remote::RemoteTabInfo {
+            host_key: 1,
+            host_tab_id: "t".into(),
+            host_label: "h".into(),
+            base_title: "t".into(),
+        });
+        assert!(!labels(&tab_menu(&st, 0, 0.0, 0.0)).contains(&"Ungroup".to_string()));
+        assert!(!labels(&pane_menu(&st, 0, 0.0, 0.0, false)).contains(&"Ungroup".to_string()));
     }
 }

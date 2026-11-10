@@ -4344,6 +4344,11 @@ impl State {
     /// the focused pane or active tab.
     pub fn open_pane_context(&mut self, idx: usize, x: f32, y: f32) {
         if idx < self.active_tab().panes.len() {
+            // Right-clicking an UNSELECTED pane drops the selection first (t28, #96).
+            let uid = self.active_tab().panes[idx].uid.clone();
+            if !self.selection.iter().any(|u| *u == uid) {
+                self.clear_selection();
+            }
             self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, false));
             self.dirty = true;
         }
@@ -4367,6 +4372,7 @@ impl State {
     /// Open the tab-strip menu for tab `idx`, anchored at window-logical `(x, y)`.
     pub fn open_tab_context(&mut self, idx: usize, x: f32, y: f32) {
         if idx < self.tabs.len() {
+            self.clear_selection(); // any tab-strip action drops the pane selection
             self.ctx = Some(crate::contextmenu::tab_menu(self, idx, x, y));
             self.dirty = true;
         }
@@ -5131,6 +5137,19 @@ impl State {
                 }
             }
         }
+    }
+
+    /// The "Group Color ▸" flyout rows: `(label, project index or -1)`. The first row is
+    /// "Use project colour" (-1); then one row per known project.
+    pub fn group_color_choices(&self) -> Vec<(String, i32)> {
+        let mut v = vec![("Use project colour".to_string(), -1)];
+        v.extend(
+            self.projects
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.name.clone(), i as i32)),
+        );
+        v
     }
 
     /// Tab menu "Group Color": point group tab `ti` at project `project` (its colour), or — with

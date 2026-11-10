@@ -199,6 +199,8 @@ pub enum Command {
     ToggleFocusedSelection,
     /// Group the selected panes into a tab (Ctrl+G, guarded by an active selection).
     GroupSelection,
+    /// Group the selection with pane `0` (the right-clicked one) as the colour anchor.
+    GroupSelectionAt(usize),
     /// Drop the pane selection (Esc, guarded by an active selection).
     ClearSelection,
     /// Ungroup group tab `0` (tab/pane menus).
@@ -513,6 +515,9 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::GroupSelection => {
             let f = state.active_tab().focused;
             state.group_selection(Some(f), mgr);
+        }
+        Command::GroupSelectionAt(i) => {
+            state.group_selection(Some(i), mgr);
         }
         Command::ClearSelection => state.clear_selection(),
         Command::UngroupTab(i) => state.ungroup(i, mgr),

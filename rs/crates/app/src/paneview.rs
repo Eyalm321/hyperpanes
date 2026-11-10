@@ -1111,7 +1111,16 @@ pub fn resync(
                     .collect();
                 sync_model(&ui.ctx_layouts, layouts);
                 sync_model(&ui.ctx_swatches, Vec::new());
-                sync_model(&ui.ctx_tabs, Vec::new());
+                // "Group Color ▸" reuses the Move-to-Tab flyout list (label + idx).
+                let choices: Vec<CtxTab> = state
+                    .group_color_choices()
+                    .into_iter()
+                    .map(|(label, idx)| CtxTab {
+                        label: label.into(),
+                        idx,
+                    })
+                    .collect();
+                sync_model(&ui.ctx_tabs, choices);
             }
             CtxKind::App => {
                 // The application menu's Layout submenu: Automatic + the 5 presets, radio ✓ on
