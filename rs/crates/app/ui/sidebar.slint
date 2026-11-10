@@ -20,7 +20,7 @@
 // self-contained — no new app-level wiring.
 
 import { Theme } from "theme.slint";
-import { ProjectItem, LaneItem, WorktreeRow, ClaudeSessionItem, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
+import { ProjectItem, WorktreeRow, ClaudeSessionItem, HistoryUi, ReminderItem, RemindersAdapter } from "types.slint";
 
 // "+" quick-pane glyph (two crossed bars — font-independent). `bar` sets the cross size
 // (13px rail default; smaller for inline/submenu buttons like the PROJECTS-header ＋).
@@ -565,29 +565,6 @@ component ProjectRow inherits Rectangle {
             spacing: 1px;
             padding-bottom: 3px;
 
-            // ---- task lanes by state (#7): one dim-when-zero row per state ----
-            if root.proj.lanes.length > 0 : VerticalLayout {
-                spacing: 1px;
-                for l in root.proj.lanes : HorizontalLayout {
-                    padding-left: 26px;
-                    padding-right: 8px;
-                    height: 18px;
-                    Text {
-                        text: l.label;
-                        color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.subtext;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: l.count;
-                        color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.text;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
             // segmented bar — rendered only when the project has any history at all
             // (`has-history` is the UNFILTERED gate, so an unmatched query can't collapse
             // the bar and strand the user). Without history the body is just the worktrees.
@@ -762,7 +739,6 @@ export component SidebarRail inherits Rectangle {
     in property <[ProjectItem]> projects;
     // Task count of the work queues that map to no project ("" = hidden; see project_queue.rs).
     in property <string> other-queue-badge;
-    in property <[LaneItem]> other-lanes;
     in property <bool> projects-open: false;
     callback new-pane();
     callback open-new-pane();   // Shift+click → open the New Pane options dialog
@@ -1103,59 +1079,36 @@ export component SidebarRail inherits Rectangle {
                         }
                     }
                     // "Other queues": work queues that map to no project (#6); never dropped.
-                    if root.other-queue-badge != "" || root.other-lanes.length > 0 : VerticalLayout {
-                    HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            height: 24px;
-                            spacing: 6px;
-                            Text {
-                                text: "Other queues";
-                                color: Theme.subtext;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                Rectangle {
-                                    min-width: 18px;
-                                    height: 15px;
-                                    border-radius: 7px;
-                                    background: Theme.surface2;
-                                    HorizontalLayout {
-                                        padding-left: 5px;
-                                        padding-right: 5px;
-                                        Text {
-                                            text: root.other-queue-badge;
-                                            color: Theme.text;
-                                            font-size: 9px;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
+                    if root.other-queue-badge != "" : HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        height: 24px;
+                        spacing: 6px;
+                        Text {
+                            text: "Other queues";
+                            color: Theme.subtext;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                         }
-                        if root.other-lanes.length > 0 : VerticalLayout {
-                            spacing: 1px;
-                            for l in root.other-lanes : HorizontalLayout {
-                                padding-left: 18px;
-                                padding-right: 8px;
-                                height: 18px;
-                                Text {
-                                    text: l.label;
-                                    color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.subtext;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                Text {
-                                    text: l.count;
-                                    color: l.dim ? Theme.subtext.with-alpha(0.5) : Theme.text;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                min-width: 18px;
+                                height: 15px;
+                                border-radius: 7px;
+                                background: Theme.surface2;
+                                HorizontalLayout {
+                                    padding-left: 5px;
+                                    padding-right: 5px;
+                                    Text {
+                                        text: root.other-queue-badge;
+                                        color: Theme.text;
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }

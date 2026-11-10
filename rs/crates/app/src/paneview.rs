@@ -22,8 +22,7 @@ use crate::state::{Overlay, PaneState, State};
 use crate::theme;
 use crate::{
     AppWindow, ClaudeSessionItem, CtxTab, DividerItem, FramePaletteOption, HiRect, KeybindingItem,
-    LaneItem, LayoutOption, MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem,
-    WorktreeRow,
+    LayoutOption, MenuEntry, PaletteItem, PaneItem, PrefOption, ProjectItem, TabItem, WorktreeRow,
 };
 
 /// Thickness (logical px) of the draggable divider hit-area.
@@ -865,6 +864,7 @@ pub fn resync(
     app.set_prefs_confirm(state.prefs_confirm);
     app.set_pref_clickable(state.settings.clickable_paths);
     app.set_pref_copy_on_select(state.settings.copy_on_select);
+    app.set_pref_osc52_clipboard(state.settings.osc52_clipboard);
     app.set_pref_editor(state.settings.editor_command.clone().into());
 
     // sidebar / projects: the rail gating + flyout state + rows
@@ -941,7 +941,6 @@ pub fn resync(
                 has_history,
                 segment,
                 query: query.into(),
-                lanes: lane_model(state.project_lane_counts.get(&proj.id)),
                 queue_badge: crate::project_queue::badge_text(
                     state
                         .project_queue_counts
@@ -965,7 +964,6 @@ pub fn resync(
             .retain(|k, _| live.contains(k.as_str()));
     }
     sync_model(&ui.projects, projects);
-    app.set_other_lanes(lane_model(state.other_lane_counts.as_ref()));
     app.set_other_queue_badge(crate::project_queue::badge_text(state.other_queue_count).into());
 
     // ---- new-goal dialog: attached-image filenames ----
@@ -1390,17 +1388,4 @@ pub fn pump(
     }
 
     PumpResult { rendered, active }
-}
-
-/// Slint model for a project's task lanes (#7); empty = no lane block.
-fn lane_model(counts: Option<&hyperpanes_core::control::work::Counts>) -> ModelRc<LaneItem> {
-    let rows: Vec<LaneItem> = crate::project_queue::lane_rows(counts)
-        .into_iter()
-        .map(|r| LaneItem {
-            label: r.label.into(),
-            count: r.count.to_string().into(),
-            dim: r.dim,
-        })
-        .collect();
-    ModelRc::from(Rc::new(VecModel::from(rows)))
 }
