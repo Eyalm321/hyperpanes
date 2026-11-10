@@ -32,8 +32,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::command::{dispatch, set_layout_from_id, Command, Effect};
 use crate::drag::{self, DragKind, DragState, Hover};
 use crate::paneview::{self, Ui};
-use crate::tabdock;
 use crate::state::{DetachedPane, DetachedTab, EscOutcome, NewPaneOpts, Overlay, State};
+use crate::tabdock;
 use crate::{theme, window, AppWindow, KeyMsg};
 
 /// The GitHub releases page the NotifyOnly update flow (Linux/macOS) points the user at —
@@ -2191,7 +2191,12 @@ impl App {
 
             // Otherwise the pane area (area-relative: subtract the top bar, and the left
             // column when docked left).
-            let ax = lx - if fullscreen { 0.0 } else { tabdock::area_origin_x(dock, col) };
+            let origin_x = if fullscreen {
+                0.0
+            } else {
+                tabdock::area_origin_x(dock, col)
+            };
+            let ax = lx - origin_x;
             let ay = ly - if fullscreen { 0.0 } else { TOPBAR_H };
             let vertical = st.active_is_rows();
             for (j, p) in st.active_tab().panes.iter().enumerate() {
@@ -2278,7 +2283,12 @@ impl App {
             // Otherwise the pane area (area-relative: subtract the top bar and the left
             // column). Bind the pane hit out of a scoped borrow, then drop it before we build
             // the command.
-            let ax = lx - if fullscreen { 0.0 } else { tabdock::area_origin_x(dock, col) };
+            let origin_x = if fullscreen {
+                0.0
+            } else {
+                tabdock::area_origin_x(dock, col)
+            };
+            let ax = lx - origin_x;
             let ay = ly - if fullscreen { 0.0 } else { TOPBAR_H };
             let pane_hit = {
                 let st = win.state.borrow();

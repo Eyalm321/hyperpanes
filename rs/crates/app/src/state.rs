@@ -7500,7 +7500,8 @@ mod tab_dock_tests {
                 .filter(|&r| matches!(st.ctx_command(r), Some(Command::SetTabDock(_))))
                 .count();
             assert_eq!(n, 2);
-            assert!(!(0..40).any(|r| matches!(st.ctx_command(r), Some(Command::SetTabDock(d)) if d == cur)));
+            assert!(!(0..40)
+                .any(|r| matches!(st.ctx_command(r), Some(Command::SetTabDock(d)) if d == cur)));
         }
     }
 }
