@@ -656,6 +656,7 @@ impl Keymap {
     /// Find the command bound to a live modifier+key combo, consulting each binding's
     /// **effective** chord (override wins over default; an unbound binding never matches),
     /// first match in table order.
+    #[cfg_attr(not(test), allow(dead_code))] // the router uses `match_chord_in`
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
         self.match_chord_in(ctrl, alt, shift, key, false)
     }

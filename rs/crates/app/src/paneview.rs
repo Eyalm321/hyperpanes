@@ -240,6 +240,7 @@ pub(crate) fn group_a11y_label(title: &str, group: bool, project: Option<&str>) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pane_item(
     ps: &PaneState,
     focused: bool,
@@ -535,7 +536,7 @@ pub fn resync(
                     .pane_group
                     .as_ref()
                     .and_then(|g| g.color)
-                    .unwrap_or_else(|| theme::GROUP_NEUTRAL),
+                    .unwrap_or(theme::GROUP_NEUTRAL),
                 a11y_label: group_a11y_label(&t.title, t.pane_group.is_some(), project.as_deref())
                     .into(),
             }

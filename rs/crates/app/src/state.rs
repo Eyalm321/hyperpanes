@@ -4347,7 +4347,7 @@ impl State {
         if idx < self.active_tab().panes.len() {
             // Right-clicking an UNSELECTED pane drops the selection first (t28, #96).
             let uid = self.active_tab().panes[idx].uid.clone();
-            if !self.selection.iter().any(|u| *u == uid) {
+            if !self.selection.contains(&uid) {
                 self.clear_selection();
             }
             self.ctx = Some(crate::contextmenu::pane_menu(self, idx, x, y, false));
