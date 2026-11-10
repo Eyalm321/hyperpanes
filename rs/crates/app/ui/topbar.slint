@@ -64,6 +64,8 @@ component TabChip inherits Rectangle {
     in property <bool> active;
     in property <bool> editing;
     in property <bool> spring-hover: false;   // a dragged pane is hovering this tab
+    in property <bool> has-color: false;      // manual tab colour set
+    in property <color> tab-color;
     callback select();
     callback close();
     callback begin-rename();
@@ -101,6 +103,20 @@ component TabChip inherits Rectangle {
     accessible-label: root.title;
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
+
+    // Manual tab colour: a 10% tint behind the content + a 3px stripe on the top edge.
+    if root.has-color : Rectangle {
+        background: root.tab-color.with-alpha(0.10);
+        border-top-left-radius: 9px;
+        border-top-right-radius: 9px;
+    }
+    if root.has-color : Rectangle {
+        y: 0px;
+        height: 3px;
+        background: root.tab-color;
+        border-top-left-radius: 9px;
+        border-top-right-radius: 9px;
+    }
 
     ta := TouchArea {
         // The hand cursor over a tab is driven from Win32 (window.rs) so it's a real hand.
@@ -327,6 +343,8 @@ export component TopBar inherits Rectangle {
                     for tab[idx] in root.tabs : TabChip {
                         title: tab.title;
                         active: tab.active;
+                        has-color: tab.has-color;
+                        tab-color: tab.color;
                         editing: root.editing-tab == idx;
                         spring-hover: root.drop-tab-idx == idx;
                         select => { root.select-tab(idx); }

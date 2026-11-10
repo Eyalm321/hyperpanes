@@ -500,6 +500,8 @@ pub fn resync(
         .map(|(i, t)| TabItem {
             title: t.title.clone(),
             active: i == active,
+            has_color: t.color.is_some(),
+            color: t.color.unwrap_or_default(),
         })
         .collect();
     sync_model(&ui.tabs, tabs);

@@ -123,6 +123,9 @@ export struct PaneItem {
 export struct TabItem {
     title: string,
     active: bool,
+    // manual tab colour (control recolorTab / persisted); has-color=false → default chrome
+    has-color: bool,
+    color: color,
 }
 
 // A draggable resize seam (vertical column / horizontal row / main-stack main).

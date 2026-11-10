@@ -84,6 +84,8 @@ component VTabChip inherits Rectangle {
     in property <bool> active;
     in property <bool> editing;
     in property <bool> spring-hover: false;
+    in property <bool> has-color: false;     // manual tab colour set
+    in property <color> tab-color;
     in property <bool> bar-left: true;       // active bar on the edge facing the panes
     in property <bool> overflowing: false;   // list scrolls → plain wheel scrolls, Shift cycles
     callback select();
@@ -113,6 +115,17 @@ component VTabChip inherits Rectangle {
               : ((ta.has-hover || xa.has-hover) ? Theme.surface : transparent);
     border-width: root.spring-hover ? 2px : 0px;
     border-color: Theme.brand;
+
+    // Manual tab colour: a 10% tint + a 3px stripe on the chip's outer edge (opposite the
+    // 2px active bar, which sits on the edge selected by `bar-left`).
+    if root.has-color : Rectangle {
+        background: root.tab-color.with-alpha(0.10);
+    }
+    if root.has-color : Rectangle {
+        x: root.bar-left ? parent.width - 3px : 0px;
+        width: 3px;
+        background: root.tab-color;
+    }
 
     ta := TouchArea {
         clicked => { root.select(); }
@@ -308,6 +321,8 @@ export component TabColumn inherits Rectangle {
                     active: tab.active;
                     editing: root.editing-tab == idx;
                     spring-hover: root.drop-tab-idx == idx;
+                    has-color: tab.has-color;
+                    tab-color: tab.color;
                     bar-left: root.tab-dock == 1;
                     overflowing: root.overflowing;
                     select => { root.select-tab(idx); }
