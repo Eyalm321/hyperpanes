@@ -1483,7 +1483,14 @@ mod tests {
         );
         let spec = adopted_snapshot_spec(&c);
         assert_eq!(spec.command.as_deref(), Some("claude"));
-        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "abc-123", None, None);
+        let plan = crate::state::plan_claude_resume(
+            spec.command,
+            spec.args,
+            "abc-123",
+            None,
+            None,
+            &Default::default(),
+        );
         assert_eq!(plan.startup, None, "must not type a bare resume line");
         assert_eq!(plan.command.as_deref(), Some("claude"));
         assert_eq!(
@@ -1515,7 +1522,14 @@ mod tests {
             ]),
         );
         let spec = adopted_snapshot_spec(&c);
-        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "new-id", None, None);
+        let plan = crate::state::plan_claude_resume(
+            spec.command,
+            spec.args,
+            "new-id",
+            None,
+            None,
+            &Default::default(),
+        );
         assert_eq!(plan.startup, None);
         assert_eq!(plan.command.as_deref(), Some("claude"));
         assert_eq!(
@@ -1529,7 +1543,14 @@ mod tests {
     fn adopted_string_command_with_continue_is_stripped() {
         let c = model_pane(Some("claude --continue --model m"), None);
         let spec = adopted_snapshot_spec(&c);
-        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "new-id", None, None);
+        let plan = crate::state::plan_claude_resume(
+            spec.command,
+            spec.args,
+            "new-id",
+            None,
+            None,
+            &Default::default(),
+        );
         assert_eq!(plan.startup, None);
         assert_eq!(
             plan.command.as_deref(),
@@ -1587,10 +1608,126 @@ mod tests {
         let c = model_pane(Some("sh"), Some(vec!["-c", "echo hi"]));
         let spec = adopted_snapshot_spec(&c);
         assert_eq!(spec.command.as_deref(), Some("sh"));
-        let plan = crate::state::plan_claude_resume(spec.command, spec.args, "abc-123", None, None);
+        let plan = crate::state::plan_claude_resume(
+            spec.command,
+            spec.args,
+            "abc-123",
+            None,
+            None,
+            &Default::default(),
+        );
         assert_eq!(plan.startup, None);
         assert_eq!(plan.command.as_deref(), Some("sh"));
         assert_eq!(plan.args.unwrap(), ["-c", "echo hi"]);
+    }
+
+    /// #67: a control-spawned worker-runner pane (not a claude program) restores with its exact
+    /// argv and its filtered env, so it re-claims after a daemon-replacing restart. A claude
+    /// session marker (the resume id) never appends `--resume` to a non-claude program.
+    #[test]
+    fn control_worker_pane_restores_with_argv_env_and_no_resume() {
+        let mut c = model_pane(
+            Some("hyperpanes"),
+            Some(vec![
+                "worker",
+                "--queue",
+                "myapp-g1",
+                "--worktree",
+                "--base",
+                "main",
+                "--",
+                "sh",
+                "-c",
+                "echo hi",
+            ]),
+        );
+        let mut env = hyperpanes_core::session::spawn::EnvMap::new();
+        for (k, v) in [
+            ("HP_GOAL_PERSONA_DIR", "/opt/personas"),
+            ("CLAUDE_CONFIG_DIR", "/home/user/.claude-a"),
+            ("GH_TOKEN", "x"),
+        ] {
+            env.insert(k.to_string(), v.to_string());
+        }
+        c.env = Some(env);
+        let spec = adopted_snapshot_spec(&c);
+        let want_args = spec.args.clone().unwrap();
+        let plan = crate::state::plan_claude_resume(
+            spec.command.clone(),
+            spec.args.clone(),
+            "abc-123",
+            None,
+            None,
+            &hyperpanes_core::claude_panes::RecordedArgv::Absent,
+        );
+        assert_eq!(plan.startup, None);
+        assert_eq!(plan.command.as_deref(), Some("hyperpanes"));
+        let args = plan.args.unwrap();
+        assert_eq!(args, want_args, "same args, no --resume appended");
+        assert!(!args.iter().any(|a| a == "--resume"));
+        assert_eq!(args[..3], ["worker", "--queue", "myapp-g1"]);
+        let spawn = hyperpanes_core::workspace::env_persist::merge_restore_env(
+            spec.env.as_ref(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(spawn["HP_GOAL_PERSONA_DIR"], "/opt/personas");
+        assert_eq!(spawn["CLAUDE_CONFIG_DIR"], "/home/user/.claude-a");
+        assert!(!spawn.contains_key("GH_TOKEN"));
+    }
+
+    /// #68 regression: `claude --dangerously-skip-permissions --model opus` typed into a shell
+    /// pane restores with both flags (the base typed a bare `claude --resume`).
+    #[test]
+    fn shell_pane_restore_replays_typed_claude_flags() {
+        use hyperpanes_core::claude_panes::RecordedArgv;
+        let argv = RecordedArgv::Argv(
+            ["--dangerously-skip-permissions", "--model", "opus"]
+                .map(String::from)
+                .to_vec(),
+        );
+        let plan = crate::state::plan_claude_resume(
+            None,
+            None,
+            "abc-123",
+            Some("/home/user/dev/myapp"),
+            None,
+            &argv,
+        );
+        assert_eq!(
+            plan.startup.as_deref(),
+            Some(
+                "cd '/home/user/dev/myapp' && claude '--dangerously-skip-permissions' \
+                 '--model' 'opus' --resume abc-123\r"
+            )
+        );
+        // A recorded-but-unusable argv types a visible notice, then the bare line.
+        let plan = crate::state::plan_claude_resume(
+            None,
+            None,
+            "abc-123",
+            None,
+            None,
+            &RecordedArgv::Unavailable("secret".into()),
+        );
+        assert_eq!(
+            plan.startup.as_deref(),
+            Some(
+                "echo '[hyperpanes] resumed without the original claude flags (secret)'; \
+                 claude --resume abc-123\r"
+            )
+        );
+        // An old marker: the bare line, no notice.
+        let plan = crate::state::plan_claude_resume(
+            None,
+            None,
+            "abc-123",
+            None,
+            None,
+            &RecordedArgv::Absent,
+        );
+        assert_eq!(plan.startup.as_deref(), Some("claude --resume abc-123\r"));
     }
 
     fn pane(id: &str, uid: &str) -> PaneInfo {
