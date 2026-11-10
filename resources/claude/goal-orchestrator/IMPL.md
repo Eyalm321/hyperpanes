@@ -14,7 +14,10 @@ done.
 2. **Verify locally** before finishing: run the subtask's own check (build/test/lint as relevant).
    Fix until it passes.
 3. **Commit** your work on your worktree's branch with a clear message. Leave the branch for the
-   spec agent to integrate — do not push, do not merge to main.
+   spec agent to integrate — do not push, do not merge to main. **Commit before you exit.** The
+   runner deletes your worktree directory as soon as you exit, and it acks on exit 0 whether or not
+   you committed: uncommitted work is gone with no trace. Before your last line, run
+   `git log --oneline <base>..HEAD` and confirm your commit is there.
 4. **Narrate as you go.** Your pane renders your turn live (the runner is started with `--stream`
    against `--output-format stream-json`), so a short line before each phase — what you're about
    to do and why — is what the human sees. Silence for ten minutes reads as a wedged pane.
@@ -37,9 +40,9 @@ trade — one cheap round-trip buys an opus-grade decision without taking the bu
   (the API tolerates either spelling now, but only the exact id is guaranteed to be your queue).
 - Ask one tight, decidable question — propose your answer, don't write an essay:
   `send_message {to:"<advisor paneId>", from:"$HYPERPANES_PANE_ID", body:"<HP_TASK_ID>: <the fork,
-  the options, which you'd pick and why>"}`.
-- Poll for the reply: `read_messages {paneId:"$HYPERPANES_PANE_ID", after:<last seq>}` a few times;
-  when it answers, continue on sonnet with that guidance.
+  the options, which you'd pick and why>"}`, or the Control-API POST in "Checkpoints" below.
+- Poll for the reply with the inbox read from "Checkpoints" below, a few times; when it answers,
+  continue on sonnet with that guidance.
 - **Bounded, never hang.** One or two consults, not a conversation. If no reply comes in a
   reasonable window, act on your best judgment and **say so in your summary** (so the spec agent
   catches it at integration), or nack if it's truly unresolvable. A pending consult must never wedge
@@ -47,6 +50,40 @@ trade — one cheap round-trip buys an opus-grade decision without taking the bu
 
 Consulting is for *strategy*, not for anything a `read`/`grep`/build command would settle — do the
 cheap check first.
+
+## Checkpoints: read your inbox, because nothing is pushed to you
+
+You are one non-interactive `claude -p` turn. Nothing typed into your pane reaches you, and mail
+sent to your pane waits in your inbox until you read it. Your spec agent may correct the spec after
+you start, so read your inbox at every checkpoint: **before your first edit, before each later edit
+pass, and before you commit.** Keep a cursor `N`: start at 0, and after each read set it to the
+reply's `latestSeq`.
+
+- If `mcp__hyperpanes__read_messages` is directly callable, use it:
+  `read_messages {paneId:"<your pane id>", after:N}`. MCP arguments are not shell-expanded, so pass
+  the literal values of `$HYPERPANES_PANE_ID` and `$HP_TASK_ID` (`echo` them once), never the
+  `$NAME` text. If the hyperpanes tools show up only as
+  deferred (tool search), **don't call ToolSearch to load them**. Use the Control API instead.
+- Control API, with Bash (works whether or not the MCP tools are loaded):
+
+  ```sh
+  CJ="${HYPERPANES_CONTROL_FILE:-$HOME/.local/state/hyperpanes/control.json}"
+  PORT=$(jq -r .port "$CJ"); TOK=$(jq -r .token "$CJ")   # never echo $TOK, never set -x
+  # read: messages after cursor N
+  curl -s -H "Authorization: Bearer $TOK" \
+    "http://127.0.0.1:$PORT/panes/$HYPERPANES_PANE_ID/messages?after=$N"
+  # report: to your advisor (the advisor=<paneId> in your payload)
+  curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+    -d "{\"from\":\"$HYPERPANES_PANE_ID\",\"body\":\"$HP_TASK_ID: progress ...\"}" \
+    "http://127.0.0.1:$PORT/panes/<advisor paneId>/messages"
+  ```
+
+  If `control.json` has a specific `bindAddress` (not `0.0.0.0`, `::` or absent), use that host
+  instead of `127.0.0.1`.
+- Where a message from your advisor conflicts with the payload, the message wins. Apply it, and
+  name it (its `seq` and one line) in your commit message and your final summary, so the spec agent
+  can check that it landed.
+- An empty inbox means "no correction yet". It is not an instruction to stop or wait: carry on.
 
 ## Build outputs: use the warm cache, never /tmp
 
@@ -56,7 +93,9 @@ later tasks reuse warm. Put build outputs there, not in `/tmp`, which may be a s
 tmpfs where one cold build can break every agent on the machine. For Rust, the spawn command
 already sets `CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target`. Keep it (don't unset or
 override it), and look for binaries in `$CARGO_TARGET_DIR/debug/`, not `<worktree>/target/`.
-Never put a target dir inside the worktree, where a stray `git add` would commit it.
+Never put a target dir inside the worktree, where a stray `git add` would commit it, and never
+create an ad-hoc target dir of your own: `$HP_WORKTREE_CACHE_DIR` is the one the runner sizes and
+prunes.
 
 ## Booting a dev/test instance of hyperpanes
 

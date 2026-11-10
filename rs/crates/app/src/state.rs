@@ -358,6 +358,8 @@ fn goal_session_name(prefix: &str, project: &str) -> String {
 /// orchestrator persona and the inbox nudge read, and those are re-stamped at restore time from
 /// these — the snapshot records what we know, not what an agent happened to set.
 pub(crate) const GOAL_META_PROJECT: &str = "goals.project";
+pub(crate) const GOAL_META_PROJECT_NAME: &str = "goals.project_name";
+pub(crate) const GOAL_META_PROJECT_COLOR: &str = "goals.project_color";
 pub(crate) const GOAL_META_ORCH_MODEL: &str = "goals.orch_model";
 pub(crate) const GOAL_META_SPEC_MODEL: &str = "goals.spec_model";
 pub(crate) const GOAL_META_IMPL_MODEL: &str = "goals.impl_model";
@@ -525,6 +527,35 @@ fn write_goals_settings_config() -> Option<std::path::PathBuf> {
 /// unscoped side channel cannot bypass the control plane's capability scoping.
 fn write_goals_worker_settings_config() -> Option<std::path::PathBuf> {
     write_goals_settings_file("goals-worker-settings.json", GoalTier::Worker)
+}
+
+/// Resolve the `(name, colour)` a restored goal orchestrator is relaunched with.
+///
+/// In order: the project registry (current truth, so a rename wins), the values recorded when it
+/// was launched (covers a project that isn't in the registry), then the directory's basename with
+/// no colour (the app's default for an uncoloured project). An empty string is never a value.
+fn resolve_goal_identity(
+    registry: Option<(&str, &str)>,
+    recorded_name: Option<&str>,
+    recorded_color: Option<&str>,
+    project_path: &str,
+) -> (String, String) {
+    let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    let name = registry
+        .and_then(|(n, _)| non_empty(n))
+        .or_else(|| recorded_name.and_then(non_empty))
+        .or_else(|| {
+            std::path::Path::new(project_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(non_empty)
+        })
+        .unwrap_or_default();
+    let color = registry
+        .and_then(|(_, c)| non_empty(c))
+        .or_else(|| recorded_color.and_then(non_empty))
+        .unwrap_or_default();
+    (name, color)
 }
 
 #[cfg(test)]
@@ -1137,6 +1168,9 @@ pub struct State {
     /// the router silently dropped the evicted one's record. Seen live with two myapp
     /// orchestrators.
     pub goal_orch_models: std::collections::HashMap<String, (String, [String; 3])>,
+    /// Pane uid → the `(name, colour)` its orchestrator was launched with, so a restore for a
+    /// project that isn't in the registry can rebuild the same `--name` and project env.
+    pub goal_orch_identity: std::collections::HashMap<String, (String, String)>,
     /// Control-plane meta to stamp on panes once they appear in the read model — `(session uid,
     /// key → value)`. Drained by the App each tick into the control host, which applies it after
     /// its publish (a freshly restored pane is not in the model until then).
@@ -1294,6 +1328,7 @@ impl State {
             task_panel: None,
             goal_orchestrators: std::collections::HashMap::new(),
             goal_orch_models: std::collections::HashMap::new(),
+            goal_orch_identity: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
             env_persist_allow: Vec::new(),
             goal_draft_images: Vec::new(),
@@ -3870,6 +3905,7 @@ impl State {
                     impl_model.to_string(),
                 ],
             );
+            self.record_goal_identity(&uid, &proj_name, &proj_color);
             self.queue_pending_goal(uid, payload);
         }
         self.close_overlay();
@@ -3947,7 +3983,35 @@ impl State {
         meta.insert(GOAL_META_ORCH_MODEL.to_string(), orch.clone());
         meta.insert(GOAL_META_SPEC_MODEL.to_string(), spec.clone());
         meta.insert(GOAL_META_IMPL_MODEL.to_string(), implm.clone());
+        if let Some((name, color)) = self.goal_orch_identity.get(uid) {
+            meta.insert(GOAL_META_PROJECT_NAME.to_string(), name.clone());
+            meta.insert(GOAL_META_PROJECT_COLOR.to_string(), color.clone());
+        }
         Some(meta)
+    }
+
+    /// The `(name, colour)` to rebuild a restored orchestrator's launch with. See
+    /// [`resolve_goal_identity`]; this just gathers the registry entry and the recorded meta.
+    fn restored_goal_identity(&self, spec: &PaneSpec, project: &str) -> (String, String) {
+        let registry = self
+            .projects
+            .iter()
+            .find(|p| p.path == project)
+            .map(|p| (p.name.as_str(), p.color.as_str()));
+        let meta = spec.meta.as_ref();
+        let recorded = |key: &str| meta.and_then(|m| m.get(key)).map(String::as_str);
+        resolve_goal_identity(
+            registry,
+            recorded(GOAL_META_PROJECT_NAME),
+            recorded(GOAL_META_PROJECT_COLOR),
+            project,
+        )
+    }
+
+    /// Remember the `(name, colour)` pane `uid`'s orchestrator was launched with, for the snapshot.
+    fn record_goal_identity(&mut self, uid: &str, name: &str, color: &str) {
+        self.goal_orch_identity
+            .insert(uid.to_string(), (name.to_string(), color.to_string()));
     }
 
     /// Record pane `uid` as `project_path`'s goal orchestrator: route new goals for the project to
@@ -5481,13 +5545,8 @@ impl State {
         // is re-registered either way so new goals route to it and its control meta comes back.
         let restored_goal = self.restored_goal_orchestrator(spec);
         if let Some((project, models)) = &restored_goal {
+            let (name, color) = self.restored_goal_identity(spec, project);
             if !reattach {
-                let (name, color) = self
-                    .projects
-                    .iter()
-                    .find(|p| &p.path == project)
-                    .map(|p| (p.name.clone(), p.color.clone()))
-                    .unwrap_or_default();
                 if let Some((cmd, env)) = self.build_goal_orchestrator_launch(
                     &name,
                     &color,
@@ -5508,6 +5567,7 @@ impl State {
                 );
             }
             self.register_goal_orchestrator(&uid, project, models.clone());
+            self.record_goal_identity(&uid, &name, &color);
         }
         let mut startup = None;
         let mut config_dir_env: Option<String> = None;
@@ -7005,6 +7065,90 @@ mod goal_restore_tests {
                 "fable[1m]".to_string(),
                 "sonnet[1m]".to_string()
             ]
+        );
+    }
+
+    fn identity_spec(meta: &[(&str, &str)]) -> PaneSpec {
+        PaneSpec {
+            meta: Some(
+                meta.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unregistered_project_uses_recorded_identity() {
+        let st = fresh();
+        let spec = identity_spec(&[
+            (GOAL_META_PROJECT_NAME, "scratchapp"),
+            (GOAL_META_PROJECT_COLOR, "#112233"),
+        ]);
+        assert_eq!(
+            st.restored_goal_identity(&spec, "/home/user/dev/other"),
+            ("scratchapp".to_string(), "#112233".to_string())
+        );
+    }
+
+    #[test]
+    fn unregistered_old_snapshot_falls_back_to_basename() {
+        let st = fresh();
+        let spec = identity_spec(&[]);
+        assert_eq!(
+            st.restored_goal_identity(&spec, "/home/user/dev/scratchapp"),
+            ("scratchapp".to_string(), String::new())
+        );
+        // An empty recorded value is no value.
+        let spec = identity_spec(&[(GOAL_META_PROJECT_NAME, ""), (GOAL_META_PROJECT_COLOR, "")]);
+        assert_eq!(
+            st.restored_goal_identity(&spec, "/home/user/dev/scratchapp")
+                .0,
+            "scratchapp"
+        );
+    }
+
+    #[test]
+    fn registry_wins_over_recorded_identity() {
+        assert_eq!(
+            resolve_goal_identity(
+                Some(("renamed", "#aabbcc")),
+                Some("scratchapp"),
+                Some("#112233"),
+                "/home/user/dev/scratchapp"
+            ),
+            ("renamed".to_string(), "#aabbcc".to_string())
+        );
+        // A registry entry with an empty colour still lets the recorded colour through.
+        assert_eq!(
+            resolve_goal_identity(
+                Some(("renamed", "")),
+                Some("scratchapp"),
+                Some("#112233"),
+                "/home/user/dev/scratchapp"
+            ),
+            ("renamed".to_string(), "#112233".to_string())
+        );
+    }
+
+    #[test]
+    fn snapshot_meta_includes_recorded_identity() {
+        let mut st = fresh();
+        st.register_goal_orchestrator(
+            "uid-1",
+            "/home/user/dev/scratchapp",
+            ["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+        st.record_goal_identity("uid-1", "scratchapp", "#112233");
+        let meta = st.goal_snapshot_meta("uid-1").unwrap();
+        assert_eq!(
+            meta.get(GOAL_META_PROJECT_NAME).map(String::as_str),
+            Some("scratchapp")
+        );
+        assert_eq!(
+            meta.get(GOAL_META_PROJECT_COLOR).map(String::as_str),
+            Some("#112233")
         );
     }
 

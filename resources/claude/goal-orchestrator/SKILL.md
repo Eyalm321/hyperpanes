@@ -163,7 +163,12 @@ a `dependsOn` DAG so the queue gates claim order. The worktree fork point is alw
 `--worktree` refuses to run without `--base` (see `docs/worker-worktree-base.md`). Worktrees live on
 disk under the hyperpanes cache dir (not `/tmp`). The runner sweeps crashed runners' orphans at
 start, gives each task a warm build-cache slot (`HP_WORKTREE_CACHE_DIR`), and nacks a claim when
-the root is low on disk (see `docs/worker-worktree-disk.md`). The queue is durable and self-recovering (see the
+the root is low on disk (see `docs/worker-worktree-disk.md`). It also bounds those slots itself
+(hyperpanes#74: slot cap, cache budget, soft floor; `hyperpanes worker --prune-cache [--dry-run]` prunes on
+demand). Builds outside the runner are not covered. Any build you or a spec agent runs directly
+(verify, integrate) uses ONE target dir per goal, never one per branch. Check `df` before a cold
+build. Under 40G free, delete `<target>/*/incremental`; still under, report `blocked disk` instead
+of building. Delete the dir when the goal is done (SPEC.md section 3). The queue is durable and self-recovering (see the
 plan doc), so you don't babysit individual tasks — you watch goals and health.
 
 **Impl-agent pane budget:** fan-out is soft-capped at **16 worker panes** — the spec agent sets
@@ -189,6 +194,15 @@ and tell the spec agent to do the same in its `spawn_workers` command, e.g.:
 `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
 (worker panes are spawned by the app and don't inherit the spec agent's env, hence the `env` map;
 the `CARGO_TARGET_DIR` prefix points cargo at the per-task warm cache slot the runner exports)
+
+`--mcp-config` connects the server, but that does not make its tools callable. When the account
+enables tool search (`ENABLE_TOOL_SEARCH`, often set in the account's `settings.json` env, which
+beats the process env), every `mcp__hyperpanes__*` tool is deferred, and an impl agent must not
+call ToolSearch on its single `-p` turn. `"alwaysLoad": true` on the `hyperpanes` server entry in
+`goals-mcp.json` keeps that one server's tools directly callable while tool search stays on for
+everything else; check your `goals-mcp.json` has it. Without it, impl agents read their inbox and
+report over the Control API (IMPL.md "Checkpoints"). Nothing is pushed into an impl agent: a
+correction reaches it only when it polls at a checkpoint.
 
 ### If the `mcp__hyperpanes__*` tools won't load — drop to the Control API, don't reverse-engineer
 
