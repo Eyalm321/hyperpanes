@@ -12,6 +12,7 @@ use hyperpanes_core::layout::presets::{DividerKind, Layout};
 use hyperpanes_core::session_manager::SessionManager;
 
 use crate::state::{DetachedPane, DetachedTab, NewPaneOpts, ReminderOffset, Setting, State};
+use crate::tabdock::TabDock;
 use crate::theme;
 
 /// The `--model` ids for the goals-system model pickers, indexed by the New-goal dialog's model
@@ -106,6 +107,12 @@ pub enum Command {
     NextTab,
     /// Switch to the previous tab, wrapping around (Ctrl+Shift+Tab).
     PrevTab,
+    /// Dock the tab bar to a side (t25, #85).
+    SetTabDock(TabDock),
+    /// Top → right → left → top (the grip's accessible default action).
+    CycleTabDock,
+    /// Jump to tab N (1..=8), or the last tab (9).
+    SelectTabNumber(u8),
     BeginRename(i32),
     RenameTab(i32, String),
     /// Begin editing pane `0`'s label inline (double-click on its header).
@@ -410,6 +417,9 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         Command::SwitchTab(i) => state.switch_tab(i),
         Command::NextTab => state.cycle_tab(1),
         Command::PrevTab => state.cycle_tab(-1),
+        Command::SetTabDock(d) => state.set_tab_dock(d),
+        Command::CycleTabDock => state.set_tab_dock(state.tab_dock.cycle()),
+        Command::SelectTabNumber(n) => state.select_tab_number(n),
         Command::BeginRename(i) => state.begin_rename(i),
         Command::RenameTab(i, t) => state.rename_tab(i, &t),
         Command::BeginRenamePane(i) => state.begin_rename_pane(i),

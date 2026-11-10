@@ -32,6 +32,7 @@ use crate::glow::Glow;
 use crate::palette::{self, Entry};
 use crate::prefs::{self, Settings};
 use crate::sidebar::{self, Project};
+use crate::tabdock::TabDock;
 use crate::theme;
 
 /// Which Wave-2 overlay panel (if any) is mounted in the overlay slot (**Seam #3**).
@@ -1034,6 +1035,9 @@ pub struct State {
     pub active: usize,
     tab_seq: usize,
     pub fullscreen: bool,
+    /// Which edge this window's tab bar is docked to (t25, #85). Per window; persisted in
+    /// the session snapshot as `tabDock`.
+    pub tab_dock: TabDock,
     /// Index of the tab whose title is being edited inline (-1 = none).
     pub editing_tab: i32,
     /// Index (within the active tab) of the pane whose label is being edited inline
@@ -1286,6 +1290,7 @@ impl State {
             active: 0,
             tab_seq: 0,
             fullscreen: false,
+            tab_dock: TabDock::Top,
             editing_tab: -1,
             editing_pane: -1,
             last_blink: Instant::now(),
@@ -2319,6 +2324,25 @@ impl State {
             self.editing_tab = -1;
             self.dirty = true;
         }
+    }
+
+    /// Dock the tab bar to `dock` (no-op if unchanged).
+    pub fn set_tab_dock(&mut self, dock: TabDock) {
+        if self.tab_dock != dock {
+            self.tab_dock = dock;
+            self.dirty = true;
+        }
+    }
+
+    /// Ctrl+N: tabs `1..=8` jump to that tab if it exists; `9` is always the LAST tab.
+    pub fn select_tab_number(&mut self, n: u8) {
+        let count = self.tabs.len();
+        let idx = match n {
+            1..=8 if (n as usize) <= count => n as usize - 1,
+            9 if count > 0 => count - 1,
+            _ => return,
+        };
+        self.switch_tab(idx);
     }
 
     /// Move the active tab by `delta` (±1), wrapping around — the Ctrl+Tab / Ctrl+Shift+Tab
@@ -5245,6 +5269,7 @@ impl State {
         WorkspaceFile {
             groups: Some(groups),
             active: Some(active_out),
+            tab_dock: self.tab_dock.persisted(),
             ..Default::default()
         }
     }
@@ -5321,6 +5346,10 @@ impl State {
         let Some(win) = windows.into_iter().next() else {
             return;
         };
+        if win.tab_dock.is_some() {
+            self.tab_dock = TabDock::from_persisted(win.tab_dock.as_deref());
+            self.dirty = true;
+        }
         let first_new = self.tabs.len();
         let saved_active = win.active.map(|a| a as usize);
         // Contentless groups are skipped by `append_tab_from_group`, which shifts the

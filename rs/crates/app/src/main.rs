@@ -44,6 +44,7 @@ mod remote;
 mod remote_hosts;
 mod sidebar;
 mod state;
+mod tabdock;
 mod task_list;
 mod tetris;
 mod theme;
@@ -728,6 +729,12 @@ pub(crate) fn key_tok_from_text(text: &str, control: bool) -> Option<keybindings
     if is_key(text, Key::Escape) {
         return Some(KeyTok::Escape);
     }
+    if is_key(text, Key::PageUp) {
+        return Some(KeyTok::PageUp);
+    }
+    if is_key(text, Key::PageDown) {
+        return Some(KeyTok::PageDown);
+    }
     let c = text.chars().next()?;
     let u = c as u32;
     // Slint's NAMED MODIFIER keys are C0 control codepoints (key_codes.rs): Shift=U+0010,
@@ -1112,6 +1119,35 @@ mod tests {
                 matches!(cmd, Some(Command::PaletteOpen)),
                 "text {text:?} got {cmd:?}"
             );
+        }
+    }
+
+    #[test]
+    fn tab_cycle_chords_route_and_unbound_goto_reaches_the_pty() {
+        let km = keymap();
+        // Ctrl+Shift+Tab takes the ctrl+shift branch of on_key, which routes via route_chord.
+        assert!(matches!(
+            route_chord(&km, &msg("\t", true, false, true)),
+            Some(Command::PrevTab)
+        ));
+        assert!(matches!(
+            route_chord(&km, &msg("\t", true, false, false)),
+            Some(Command::NextTab)
+        ));
+        for (key, want_next) in [(Key::PageDown, true), (Key::PageUp, false)] {
+            let s: SharedString = key.into();
+            let cmd = route_chord(&km, &msg(&s, true, false, false));
+            assert!(
+                matches!(
+                    (&cmd, want_next),
+                    (Some(Command::NextTab), true) | (Some(Command::PrevTab), false)
+                ),
+                "{cmd:?}"
+            );
+        }
+        // Unbound by default → None → on_key falls through and the key reaches the pty.
+        for d in ["1", "2", "9"] {
+            assert!(route_chord(&km, &msg(d, true, false, false)).is_none());
         }
     }
 

@@ -479,6 +479,10 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
         Some(Command::ReopenClosedTab),
     );
     b.sep();
+    for (title, dock) in crate::tabdock::dock_choices(state.tab_dock) {
+        b.item(title, Command::SetTabDock(dock));
+    }
+    b.sep();
     b.row(
         "Layout",
         "",
