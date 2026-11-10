@@ -39,17 +39,15 @@ impl FreshEnvProvider for PlatformEnv {
 /// The provider body with the cache and capture timeout injected (a test seam;
 /// production passes the global cache and [`CAPTURE_TIMEOUT`]).
 fn fresh_env_via(cache: &EnvCache, process: EnvMap, timeout: Duration) -> EnvMap {
-    {
-        let shell = process
-            .get("SHELL")
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| "/bin/sh".to_string());
-        let fresh = cache.get_or_capture(&shell, || login_shell_env(&shell, timeout));
-        match fresh {
-            Some(fresh) => layer_process_only(fresh, process),
-            None => process,
-        }
+    let shell = process
+        .get("SHELL")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "/bin/sh".to_string());
+    let fresh = cache.get_or_capture(&shell, || login_shell_env(&shell, timeout));
+    match fresh {
+        Some(fresh) => layer_process_only(fresh, process),
+        None => process,
     }
 }
 
