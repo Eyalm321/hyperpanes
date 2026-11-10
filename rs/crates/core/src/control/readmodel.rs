@@ -848,7 +848,7 @@ mod tests {
         // Optionals omitted; activity present; key ORDER preserved (struct order, not sorted).
         assert_eq!(
             s,
-            r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#888888","status":"running","activity":"busy"}]}]}]}"##
+            r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#888888","status":"running","activity":"busy"}],"paneGroup":null}]}]}"##
         );
     }
 
