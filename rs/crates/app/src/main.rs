@@ -43,6 +43,8 @@ mod project_queue;
 mod remote;
 mod remote_hosts;
 mod sidebar;
+#[cfg(test)]
+mod tab_cursor_tests;
 mod state;
 mod task_list;
 mod tetris;
