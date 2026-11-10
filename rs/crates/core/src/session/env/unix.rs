@@ -32,17 +32,22 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl FreshEnvProvider for PlatformEnv {
     fn fresh_env_with_process(&self, process: EnvMap) -> EnvMap {
-        let shell = process
-            .get("SHELL")
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| "/bin/sh".to_string());
-        let fresh =
-            LOGIN_ENV_CACHE.get_or_capture(&shell, || login_shell_env(&shell, CAPTURE_TIMEOUT));
-        match fresh {
-            Some(fresh) => layer_process_only(fresh, process),
-            None => process,
-        }
+        fresh_env_via(&LOGIN_ENV_CACHE, process, CAPTURE_TIMEOUT)
+    }
+}
+
+/// The provider body with the cache and capture timeout injected (a test seam;
+/// production passes the global cache and [`CAPTURE_TIMEOUT`]).
+fn fresh_env_via(cache: &EnvCache, process: EnvMap, timeout: Duration) -> EnvMap {
+    let shell = process
+        .get("SHELL")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "/bin/sh".to_string());
+    let fresh = cache.get_or_capture(&shell, || login_shell_env(&shell, timeout));
+    match fresh {
+        Some(fresh) => layer_process_only(fresh, process),
+        None => process,
     }
 }
 
@@ -362,7 +367,13 @@ mod unix_tests {
             ("PATH", "/stale/bin"),
             ("HYPERPANES_PANE_ID", "p1"),
         ]);
-        let env = PlatformEnv.fresh_env_with_process(process.clone());
+        // Generous timeout + private cache (no cross-test state). Retry a few times:
+        // exec of a just-written script can transiently fail with ETXTBSY when another
+        // test thread forks while holding the write fd; the failure is then cached.
+        let env = (0..5)
+            .map(|_| fresh_env_via(&EnvCache::new(), process.clone(), Duration::from_secs(60)))
+            .find(|e| e.contains_key("FROM_LOGIN"))
+            .expect("fake login shell capture should succeed");
         assert_eq!(env.get("FROM_LOGIN").map(String::as_str), Some("1"));
         assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
         assert_eq!(
@@ -373,6 +384,9 @@ mod unix_tests {
 
         // A broken $SHELL → the process env passes through unchanged.
         let broken = map(&[("SHELL", "/no/such/shell"), ("PATH", "/stale/bin")]);
-        assert_eq!(PlatformEnv.fresh_env_with_process(broken.clone()), broken);
+        assert_eq!(
+            fresh_env_via(&EnvCache::new(), broken.clone(), Duration::from_secs(60)),
+            broken
+        );
     }
 }
