@@ -85,6 +85,15 @@ reply's `latestSeq`.
   can check that it landed.
 - An empty inbox means "no correction yet". It is not an instruction to stop or wait: carry on.
 
+## Running version vs. the release a fix shipped in
+
+Before relying on a hyperpanes fix (or reporting one as live), check the version actually running:
+`whoami` / `control_status` (the `app.version` / `version` field), or `$HYPERPANES_VERSION` in your
+pane as a fallback (it is fixed when the pane spawns, so the API wins after an upgrade). If it is
+older than the release the fix shipped in, say "fixed in vX, not installed (running vY)" in your
+summary and don't build on the fixed behavior; merged but not yet released is "merged, not
+released".
+
 ## Build outputs: use the warm cache, never /tmp
 
 Your worktree (`$HP_WORKTREE`) is on disk and is deleted when you exit. `HP_WORKTREE_CACHE_DIR`,

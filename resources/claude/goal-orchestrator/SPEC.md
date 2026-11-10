@@ -192,6 +192,12 @@ Then **exit** — you are per-goal; the orchestrator tears down your pane.
   the building.
 - Keep worktrees clean: land or discard each impl branch, no orphans.
 - Report up honestly — real evidence for `done`, real reasons for `blocked`/`failed`.
+- **Running version vs. the release a fix shipped in.** Before relying on a hyperpanes fix (or
+  reporting one as live), check the version actually running: `whoami` / `control_status` (the
+  `app.version` / `version` field), or `$HYPERPANES_VERSION` in a pane as a fallback (it is fixed
+  when the pane spawns, so the API wins after an upgrade). If it is older than the release the fix
+  shipped in, say "fixed in vX, not installed (running vY)" and don't assume the fixed behavior;
+  merged but not yet released is "merged, not released".
 - Booting a hyperpanes binary yourself (acceptance, a demo)? Same rule as IMPL.md "Booting a
   dev/test instance": all four of `HYPERPANES_CONTROL_FILE`, `XDG_STATE_HOME`, `XDG_DATA_HOME`
   and `XDG_CONFIG_HOME` under one scratch dir, or you can requeue live goals' claimed tasks.
