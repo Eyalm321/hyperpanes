@@ -120,8 +120,11 @@ fn is_secret_value(v: &str) -> bool {
     SECRET_VALUE_PREFIXES.iter().any(|p| v.starts_with(p)) || v.contains("-----BEGIN")
 }
 
+/// `PATH`, `LD_*`, `DYLD_*`, compared case-insensitively: Windows env keys are case-insensitive
+/// and the search path there is usually spelled `Path`.
 fn is_path_like(k: &str) -> bool {
-    k == "PATH" || k.starts_with("LD_") || k.starts_with("DYLD_")
+    let up = k.to_ascii_uppercase();
+    up == "PATH" || up.starts_with("LD_") || up.starts_with("DYLD_")
 }
 
 const DEFAULT_ALLOW: &[&str] = &[
@@ -274,6 +277,19 @@ mod tests {
         let (k, d) = persistable_env(&e, &Mode::All, &[]);
         assert_eq!(keys(&k), ["MY_VAR"]);
         assert_eq!(d, ["GH_TOKEN", "PATH"]);
+    }
+
+    #[test]
+    fn path_like_keys_match_case_insensitively() {
+        // Windows spells the search path `Path`; `all` must still drop it.
+        let e = env(&[
+            ("Path", "C:\\Windows"),
+            ("ld_preload", "/x.so"),
+            ("MY_VAR", "1"),
+        ]);
+        let (k, d) = persistable_env(&e, &Mode::All, &[]);
+        assert_eq!(keys(&k), ["MY_VAR"]);
+        assert_eq!(d, ["Path", "ld_preload"]);
     }
 
     #[test]
