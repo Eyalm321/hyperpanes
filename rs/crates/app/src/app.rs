@@ -1310,8 +1310,16 @@ impl App {
                 .filter(|w| w.closing.get())
                 .cloned()
                 .collect();
+            // No tab left anywhere (e.g. the last pane exited or was closed): write an empty
+            // session rather than nothing, so the last autosave (which still lists the panes
+            // the user just ended) is not restored on the next launch.
             let last_session = if will_survive == 0 {
-                self.session_snapshot(&closing)
+                Some(self.session_snapshot(&closing).unwrap_or_else(|| {
+                    hyperpanes_core::workspace::model::WorkspaceFile {
+                        windows: Some(Vec::new()),
+                        ..Default::default()
+                    }
+                }))
             } else {
                 None
             };
