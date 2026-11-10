@@ -5295,6 +5295,7 @@ impl State {
                     main_fraction: Some(t.main_fraction),
                     focused: Some(t.focused as u32),
                     zoomed: t.zoomed.map(|z| z as u32),
+                    pane_group: None,
                 }
             })
             .collect();

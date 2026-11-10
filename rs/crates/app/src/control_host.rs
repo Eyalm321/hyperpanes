@@ -1117,6 +1117,7 @@ impl ControlHost {
                     title,
                     layout,
                     panes,
+                    pane_group: None,
                 });
             }
             tree.push(WindowInfo {
@@ -1759,6 +1760,7 @@ mod tests {
                 title: "Tab 1".to_string(),
                 layout: "auto".to_string(),
                 panes,
+                pane_group: None,
             }],
         });
         m
