@@ -44,6 +44,7 @@ mod remote;
 mod remote_hosts;
 mod sidebar;
 mod state;
+mod task_list;
 mod tetris;
 mod theme;
 mod update;

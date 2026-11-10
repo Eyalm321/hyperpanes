@@ -11,6 +11,27 @@ export struct LaneItem {
     dim: bool,
 }
 
+// One task-list row (#8). `id` is the full task id (action key); `can-cancel` false shows
+// a disabled Cancel whose tooltip is `cancel-hint`.
+export struct TaskRowItem {
+    id: string,
+    id8: string,
+    title: string,
+    state: string,
+    attempts: string,
+    can-cancel: bool,
+    cancel-hint: string,
+}
+
+// The open task list under a project / "Other queues" row; `lane` -1 = closed.
+export struct TaskPanelItem {
+    lane: int,
+    rows: [TaskRowItem],
+    more: bool,
+    status: string,
+    status-ok: bool,
+}
+
 export struct PaneItem {
     surface: image,
     title: string,
@@ -202,6 +223,8 @@ export struct ProjectItem {
     queue-badge: string,
     // Task-state lanes (Queued/Running/Done/Failed/Dead); empty = no lane block (#7).
     lanes: [LaneItem],
+    // The open task list for this project (#8); lane -1 = closed.
+    panel: TaskPanelItem,
 }
 
 // ===== reminder panes (Track F) =====

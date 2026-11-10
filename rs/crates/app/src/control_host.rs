@@ -648,11 +648,36 @@ impl ControlHost {
         {
             let dirty = shared.take_queue_dirty();
             let since = self.queue_polled.get().map(|t| t.elapsed());
-            if crate::project_queue::queue_refresh_due(dirty, since) {
+            // An open task list (#8) with a queued action / page request refreshes right away.
+            let panel_wants = windows.iter().any(|w| {
+                w.state
+                    .borrow()
+                    .task_panel
+                    .as_ref()
+                    .is_some_and(|p| p.needs_refresh())
+            });
+            if crate::project_queue::queue_refresh_due(dirty, since) || panel_wants {
                 self.queue_polled.set(Some(std::time::Instant::now()));
                 let queues = shared.work.lock().map(|w| w.queues()).unwrap_or_default();
                 for w in windows {
                     let mut st = w.state.borrow_mut();
+                    // Task list (#8): run any pending purge/cancel and re-fetch the rows,
+                    // in-process (short SQLite ops; no HTTP hop).
+                    if st.task_panel.is_some() {
+                        let projects = st.projects.clone();
+                        let mut panel = st.task_panel.take().unwrap();
+                        if let Ok(mut work) = shared.work.lock() {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            // Re-read the overview so a purge/cancel is reflected immediately.
+                            let live = work.queues();
+                            panel.refresh(&mut work, &live, &projects, now);
+                        }
+                        st.task_panel = Some(panel);
+                        st.dirty = true;
+                    }
                     let counts = crate::project_queue::project_open_counts(&queues, &st.projects);
                     let other = crate::project_queue::other_open_count(&queues, &st.projects);
                     st.set_project_queue_counts(counts, other);

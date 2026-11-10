@@ -95,3 +95,12 @@ So the panel maps queue → project **by naming convention**: a project derives 
 from its `id` (or path), and the panel filters `GET /queues` / `GET /queues/{queue}/tasks` to
 that name. Formalizing this mapping (a stored `queue` field on `Project`, or a documented
 derivation rule) is the prerequisite that lets #6–#9 attribute work to the right project row.
+
+## Task list and actions (#8)
+
+Clicking a lane under a project (or "Other queues") opens that lane's tasks (id8, title,
+state, attempts), read in-process from the work queue in `seq`-cursor pages with "Show
+more". **Purge terminal** removes done/failed/dead tasks for the row's queues. **Cancel**
+nacks a claimed task with `requeue=false` (-> Failed). Queued tasks have no queue-side
+cancel verb, so their Cancel is disabled with a tooltip. Logic lives in
+`rs/crates/app/src/task_list.rs`; results show as a status line in the panel.
