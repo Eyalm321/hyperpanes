@@ -3456,6 +3456,7 @@ impl State {
     /// mutations use; the dirty signal is driven by [`crate::control_host::ControlHost::sync`].
     pub fn refresh_projects(&mut self) {
         self.projects = sidebar::list();
+        self.refresh_group_colors(); // a control-side recolour updates group tabs live
         self.dirty = true;
     }
 
