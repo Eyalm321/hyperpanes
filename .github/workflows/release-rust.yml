@@ -77,10 +77,11 @@ jobs:
 
       # Same dev-package list as test.yml (Slint/femtovg + font/window stack).
       - name: Install Linux build deps
+        timeout-minutes: 10
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
             libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config cmake clang
 
@@ -149,9 +150,10 @@ jobs:
 
       # test.yml dev-package list + libfuse2 (appimagetool runtime needs FUSE 2).
       - name: Install Linux build deps
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends \
             libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev pkg-config cmake clang \
             libfuse2
