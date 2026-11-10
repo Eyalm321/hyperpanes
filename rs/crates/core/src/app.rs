@@ -178,6 +178,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
             tabs: vec![TabInfo {
                 id: tab_id,
                 title: "Tab 1".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![],
             }],
@@ -208,6 +209,7 @@ fn seed_windows(shared: &Arc<Shared>, windows: Vec<WindowSpec>, start_id: i64) {
             tabs.push(TabInfo {
                 id: tab_id,
                 title,
+                color: None,
                 layout,
                 panes,
             });

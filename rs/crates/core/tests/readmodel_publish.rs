@@ -37,6 +37,7 @@ fn gui_window(panes: Vec<PaneInfo>) -> WindowInfo {
         tabs: vec![TabInfo {
             id: "1:0".to_string(),
             title: "Tab 1".to_string(),
+            color: None,
             layout: "auto".to_string(),
             panes,
         }],
@@ -133,6 +134,7 @@ fn carryover_rehomes_into_active_tab_and_never_duplicates() {
         TabInfo {
             id: "ctl-tab".to_string(),
             title: "grp".to_string(),
+            color: None,
             layout: "auto".to_string(),
             panes: vec![pane("ctl-a", "u-a")],
         },

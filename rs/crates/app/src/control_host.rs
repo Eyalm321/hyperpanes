@@ -1115,6 +1115,7 @@ impl ControlHost {
                 tabs.push(TabInfo {
                     id: tab_id,
                     title,
+                    color: None,
                     layout,
                     panes,
                 });
@@ -1757,6 +1758,7 @@ mod tests {
             tabs: vec![TabInfo {
                 id: "1:0".to_string(),
                 title: "Tab 1".to_string(),
+                color: None,
                 layout: "auto".to_string(),
                 panes,
             }],

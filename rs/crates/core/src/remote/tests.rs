@@ -153,6 +153,7 @@ impl Host {
             tabs: vec![TabInfo {
                 id: "t1".into(),
                 title: "Tab 1".into(),
+                color: None,
                 layout: "auto".into(),
                 panes: vec![],
             }],

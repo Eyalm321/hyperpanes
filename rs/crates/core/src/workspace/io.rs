@@ -255,6 +255,7 @@ pub fn windows_of(file: Option<&WorkspaceFile>) -> Vec<WindowSpec> {
             return vec![WindowSpec {
                 title: file.name.clone(),
                 groups: vec![GroupSpec {
+                    color: None,
                     title: file.name.clone(),
                     layout: file.layout.clone(),
                     panes: panes.clone(),
@@ -286,6 +287,7 @@ mod tests {
     fn windows_of_carries_tab_dock_from_top_level() {
         let from_groups = WorkspaceFile {
             groups: Some(vec![GroupSpec {
+                color: None,
                 panes: vec![pane_label("a")],
                 ..Default::default()
             }]),
@@ -333,6 +335,7 @@ mod tests {
             vec![WindowSpec {
                 title: Some("x".into()),
                 groups: vec![GroupSpec {
+                    color: None,
                     title: Some("x".into()),
                     layout: Some("grid".into()),
                     panes: vec![pane_label("a")],
@@ -346,6 +349,7 @@ mod tests {
     #[test]
     fn wraps_groups_as_one_window_of_tabs_carrying_active() {
         let groups = vec![GroupSpec {
+            color: None,
             title: Some("t1".into()),
             panes: vec![pane_label("a")],
             ..Default::default()
@@ -372,6 +376,7 @@ mod tests {
         let win = WindowSpec {
             title: Some("w".into()),
             groups: vec![GroupSpec {
+                color: None,
                 panes: vec![pane_label("a")],
                 ..Default::default()
             }],
@@ -615,6 +620,7 @@ mod tests {
         let base = if cfg!(windows) { "C:\\base" } else { "/base" };
         let ws = WorkspaceFile {
             groups: Some(vec![GroupSpec {
+                color: None,
                 panes: vec![PaneSpec {
                     cwd: Some("g".into()),
                     ..Default::default()
@@ -623,6 +629,7 @@ mod tests {
             }]),
             windows: Some(vec![WindowSpec {
                 groups: vec![GroupSpec {
+                    color: None,
                     panes: vec![PaneSpec {
                         cwd: Some("w".into()),
                         ..Default::default()
