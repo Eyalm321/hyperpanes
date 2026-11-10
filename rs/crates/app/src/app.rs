@@ -58,6 +58,130 @@ const TOPBAR_H: f32 = 32.0;
 /// `paneview.slint`. Used to show the open-hand cursor only over the handle, not the body.
 const HEADER_BAND: f32 = 26.0;
 
+/// Compose the session file from per-window specs: `windows[]` only (no top-level groups —
+/// an older single-window reader takes `windows[0]`, and old top-level-groups files still
+/// load via `windows_of`). Windows with no tabs are skipped; `None` when nothing is left.
+fn session_file_of(
+    mut windows: Vec<hyperpanes_core::workspace::model::WindowSpec>,
+) -> Option<hyperpanes_core::workspace::model::WorkspaceFile> {
+    windows.retain(|w| !w.groups.is_empty());
+    if windows.is_empty() {
+        return None;
+    }
+    Some(hyperpanes_core::workspace::model::WorkspaceFile {
+        windows: Some(windows),
+        ..Default::default()
+    })
+}
+
+/// Every tab group of a session file — top-level groups (old format) AND each window's.
+fn session_groups_mut(
+    file: &mut hyperpanes_core::workspace::model::WorkspaceFile,
+) -> Vec<&mut hyperpanes_core::workspace::model::GroupSpec> {
+    let mut out: Vec<&mut hyperpanes_core::workspace::model::GroupSpec> = Vec::new();
+    if let Some(g) = file.groups.as_mut() {
+        out.extend(g.iter_mut());
+    }
+    if let Some(ws) = file.windows.as_mut() {
+        for w in ws {
+            out.extend(w.groups.iter_mut());
+        }
+    }
+    out
+}
+
+/// A single-window file carrying `ws` (the seed for one restored OS window).
+fn single_window_file(
+    ws: &hyperpanes_core::workspace::model::WindowSpec,
+) -> hyperpanes_core::workspace::model::WorkspaceFile {
+    hyperpanes_core::workspace::model::WorkspaceFile {
+        name: ws.title.clone(),
+        groups: Some(ws.groups.clone()),
+        active: ws.active,
+        tab_dock: ws.tab_dock.clone(),
+        ..Default::default()
+    }
+}
+
+/// Whether closing windows must leave their sessions ALIVE (no `remote::kill`): only when the
+/// close takes the last window (`survivors == 0`), the backend is the daemon and keep-alive
+/// is on — i.e. exactly a Quit with keep-alive, which leaves the daemon running so a relaunch
+/// re-attaches. Any survivor, keep-alive off, or the in-process backend → kill as before.
+fn close_keeps_sessions(is_daemon: bool, keep_alive: bool, survivors: usize) -> bool {
+    is_daemon && keep_alive && survivors == 0
+}
+
+/// Flag every window closing (Quit): the reap then sees no survivors.
+fn mark_all_closing<'a>(flags: impl IntoIterator<Item = &'a Cell<bool>>) {
+    for f in flags {
+        f.set(true);
+    }
+}
+
+/// Split the windows' `closing` flags into (survivor count, indices of closing windows).
+/// With no survivors the closing set IS every window, so the one snapshot covers them all.
+fn reap_partition(closing: &[bool]) -> (usize, Vec<usize>) {
+    let idx: Vec<usize> = (0..closing.len()).filter(|&i| closing[i]).collect();
+    (closing.len() - idx.len(), idx)
+}
+
+/// Whether closing a window should first ask (the confirm overlay): only with the daemon
+/// backend + keep-alive (so Quit is a lossless alternative), for a window that is NOT the last
+/// one open, and that has at least one pane running a process.
+fn close_needs_confirm(
+    is_daemon: bool,
+    keep_alive: bool,
+    is_last_window: bool,
+    running_count: usize,
+) -> bool {
+    is_daemon && keep_alive && !is_last_window && running_count > 0
+}
+
+/// Fold one marker event into the per-uid liveness mirror (same transitions as core's
+/// in-process `apply_marker`). Non-marker events are ignored.
+fn apply_marker_event(
+    map: &mut std::collections::HashMap<String, hyperpanes_core::session_manager::Liveness>,
+    ev: &SessionEvent,
+) {
+    use hyperpanes_core::session_manager::{AgentLiveness as A, Liveness};
+    let (uid, running, ready, code) = match ev {
+        SessionEvent::CommandStart { uid } => (uid, true, false, None),
+        SessionEvent::CommandEnd { uid, code } => (uid, false, true, *code),
+        SessionEvent::PromptReady { uid } => (uid, false, true, None),
+        SessionEvent::AgentState { uid, state, code } => match state {
+            A::Busy => (uid, true, false, None),
+            A::AwaitingInput | A::Done | A::Error => (uid, false, true, *code),
+        },
+        _ => return,
+    };
+    let l = map.entry(uid.clone()).or_insert(Liveness {
+        prompt_ready: false,
+        command_running: false,
+        last_exit_code: None,
+        marker_seen: false,
+    });
+    l.marker_seen = true;
+    l.command_running = running;
+    l.prompt_ready = ready;
+    if code.is_some() {
+        l.last_exit_code = code;
+    }
+}
+
+/// Whether a pane "runs a process": not exited AND (a program pane — spawned with an explicit
+/// command rather than a bare shell — OR OSC-133 liveness says a command is running). Shells
+/// that never emitted a prompt marker count as idle. Mirrors core's `activity_for`.
+pub(crate) fn runs_a_process(
+    exited: bool,
+    is_program: bool,
+    live: Option<&hyperpanes_core::session_manager::Liveness>,
+) -> bool {
+    if exited {
+        return false;
+    }
+    is_program || live.is_some_and(|l| l.marker_seen && (l.command_running || !l.prompt_ready))
+}
+
 /// Write the final window's live workspace snapshot to `last-workspace.json` — the "last
 /// session" a bare relaunch restores via core's `resolve_launch_workspace` fallback (#14:
 /// this is what carries per-pane zoom, layout, focus and cwds across a plain relaunch).
@@ -171,6 +295,8 @@ pub struct Window {
     pub seed: RefCell<PendingSeed>,
     /// Set when this window should be reaped (last pane closed, or detached away).
     pub closing: Cell<bool>,
+    /// Running-process count while the close-window confirm overlay is up (0 = no overlay).
+    pub close_confirm: Cell<usize>,
     /// Per-tab strip geometry (window-logical `x`, `width`), reported by the UI and used
     /// to hit-test a tab-strip drop / reorder caret. Index = tab order.
     /// When the tab bar is docked this is `(window-y, height)` per chip instead (see `tabdock`).
@@ -238,6 +364,10 @@ pub struct App {
     /// hash fed to the engine and when, so we feed only on change and at most every
     /// [`AI_FEED_INTERVAL`].
     ai_feed: RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>>,
+    /// OSC-133 / agent-state marker liveness per session uid, mirrored from the event stream.
+    /// The daemon backend keeps no liveness mirror (`SessionManager::liveness` is `None` there),
+    /// so the close-window confirm reads this instead. Starts empty after a GUI relaunch.
+    markers: RefCell<std::collections::HashMap<String, hyperpanes_core::session_manager::Liveness>>,
     /// The embedded control HTTP+WS server host (default-OFF): publishes the live windows→
     /// tabs→panes tree into `core::control`'s read-model + applies inbound `/command`s to the
     /// GUI in-process, so the MCP / agent orchestration drives this process like Electron.
@@ -306,6 +436,7 @@ impl App {
             ai: crate::ai::AiBridge::spawn(),
             ai_ctx_sig: RefCell::new(std::collections::HashMap::new()),
             ai_feed: RefCell::new(std::collections::HashMap::new()),
+            markers: RefCell::new(std::collections::HashMap::new()),
             control,
             update: crate::update::Updater::new(),
             timer: RefCell::new(None),
@@ -327,11 +458,12 @@ impl App {
     /// (`HYPERPANES_PANE_ID`): the control host's alias for a control-spawned pane, the
     /// session uid itself for a GUI-native one — hence the lookup lives here, above both.
     fn embed_claude_sessions(&self, file: &mut hyperpanes_core::workspace::model::WorkspaceFile) {
+        self.embed_claude_groups(session_groups_mut(file));
+    }
+
+    /// [`Self::embed_claude_sessions`] for one window's tab groups.
+    fn embed_claude_groups(&self, groups: Vec<&mut hyperpanes_core::workspace::model::GroupSpec>) {
         use hyperpanes_core::claude_panes;
-        let groups = match file.groups.as_mut() {
-            Some(g) => g,
-            None => return,
-        };
         for g in groups {
             for p in &mut g.panes {
                 let Some(uid) = p.uid.as_deref() else {
@@ -563,6 +695,50 @@ impl App {
         }
     }
 
+    /// One window's snapshot: its tabs/active/dock (via `State::to_session_file_with`) plus
+    /// its OS geometry (logical px). Fields the platform can't report stay `None` (e.g. the
+    /// position on Wayland, which Slint reports as 0,0).
+    fn window_spec(&self, w: &Window) -> hyperpanes_core::workspace::model::WindowSpec {
+        use hyperpanes_core::workspace::model::{WindowBounds, WindowSpec};
+        let mut f = w
+            .state
+            .borrow()
+            .to_session_file_with(|u| self.control.meta_for_uid(u));
+        self.embed_claude_sessions(&mut f);
+        let win = w.app.window();
+        let scale = win.scale_factor().max(0.1);
+        let size = win.size();
+        let pos = win.position();
+        let mut b = WindowBounds::default();
+        if size.width > 0 && size.height > 0 {
+            b.width = Some((size.width as f32 / scale).round() as i64);
+            b.height = Some((size.height as f32 / scale).round() as i64);
+        }
+        if pos.x != 0 || pos.y != 0 {
+            b.x = Some((pos.x as f32 / scale).round() as i64);
+            b.y = Some((pos.y as f32 / scale).round() as i64);
+        }
+        if window::is_maximized(w.hwnd.get()) {
+            b.maximized = Some(true);
+        }
+        WindowSpec {
+            active: f.active,
+            groups: f.groups.take().unwrap_or_default(),
+            tab_dock: f.tab_dock.take(),
+            bounds: (b != WindowBounds::default()).then_some(b),
+            ..Default::default()
+        }
+    }
+
+    /// Session snapshot of `wins` (in order) as a multi-window file, or `None` when no
+    /// window has any tab (so callers never clobber a good save with an empty one).
+    fn session_snapshot(
+        &self,
+        wins: &[Rc<Window>],
+    ) -> Option<hyperpanes_core::workspace::model::WorkspaceFile> {
+        session_file_of(wins.iter().map(|w| self.window_spec(w)).collect())
+    }
+
     /// Execute a pending `restartApp` control command (flag set by the route; see
     /// `Shared::restart_app`): flush a final snapshot, spawn a detached relauncher of our
     /// own binary, optionally shut the session daemon down (scope "full" — every pane dies
@@ -573,12 +749,8 @@ impl App {
             return;
         }
         // Final snapshot NOW — don't rely on the last autosave tick being fresh.
-        if let Some(w) = self.windows.borrow().first() {
-            let mut f = w
-                .state
-                .borrow()
-                .to_session_file_with(|u| self.control.meta_for_uid(u));
-            self.embed_claude_sessions(&mut f);
+        let wins: Vec<Rc<Window>> = self.windows.borrow().clone();
+        if let Some(f) = self.session_snapshot(&wins) {
             persist_last_session(&f);
         }
         // Detached relauncher. It must outlive us AND escape our cgroup: `setsid` alone
@@ -639,8 +811,7 @@ impl App {
     /// Crash-recovery autosave (#2): periodically snapshot the current session to
     /// `last-workspace.json` so a crash — or any relaunch — restores the workspace as it was.
     /// Reuses the same writer + restore path as the clean-close save; throttled to a few seconds
-    /// and skipped when nothing changed. Snapshots the primary (first) window, matching the
-    /// single-window clean-close/restore behaviour. Cheap: the snapshot is structural (layout +
+    /// and skipped when nothing changed. Snapshots EVERY open window (`windows[]`). Cheap: the snapshot is structural (layout +
     /// cwd + labels + zoom), never scrollback. Called every tick; early-returns most of them.
     fn autosave_session(&self) {
         const EVERY: Duration = Duration::from_secs(4);
@@ -650,21 +821,12 @@ impl App {
                 return;
             }
         }
-        let file = match self.windows.borrow().first() {
-            Some(w) => {
-                let mut f = w
-                    .state
-                    .borrow()
-                    .to_session_file_with(|u| self.control.meta_for_uid(u));
-                self.embed_claude_sessions(&mut f);
-                f
-            }
-            None => return,
-        };
-        // Never clobber a good save with a transient empty snapshot (e.g. mid window-close).
-        if file.groups.as_deref().map_or(true, |g| g.is_empty()) {
+        let wins: Vec<Rc<Window>> = self.windows.borrow().clone();
+        // Never clobber a good save with a transient empty snapshot (e.g. mid window-close):
+        // `session_snapshot` yields None when no window has any tab.
+        let Some(file) = self.session_snapshot(&wins) else {
             return;
-        }
+        };
         let json = match serde_json::to_string(&file) {
             Ok(j) => j,
             Err(_) => return,
@@ -717,6 +879,34 @@ impl App {
     /// Realize a new OS window, wire its callbacks to act on its own state, show it, and
     /// register it. `seed` decides its first pane (empty shell, or a re-hosted session).
     pub fn spawn_window(self: &Rc<Self>, seed: PendingSeed) {
+        self.spawn_window_with_bounds(seed, None);
+    }
+
+    /// Restore a launch/session file: window 0 gets `windows[0]`, each further window spec
+    /// opens its own OS window (in order) with its saved bounds. A single-window (or
+    /// old-format top-level-groups) file behaves exactly as before.
+    pub fn spawn_restored(self: &Rc<Self>, file: hyperpanes_core::workspace::model::WorkspaceFile) {
+        let wins = hyperpanes_core::workspace::io::windows_of(Some(&file));
+        if wins.len() <= 1 {
+            let bounds = wins.first().and_then(|w| w.bounds.clone());
+            self.spawn_window_with_bounds(PendingSeed::Workspace(Box::new(file)), bounds);
+            return;
+        }
+        for ws in &wins {
+            self.spawn_window_with_bounds(
+                PendingSeed::Workspace(Box::new(single_window_file(ws))),
+                ws.bounds.clone(),
+            );
+        }
+    }
+
+    /// [`Self::spawn_window`] applying saved OS-window `bounds` (size, position, maximized)
+    /// where present; a window with a saved position skips the cascade offset.
+    fn spawn_window_with_bounds(
+        self: &Rc<Self>,
+        seed: PendingSeed,
+        bounds: Option<hyperpanes_core::workspace::model::WindowBounds>,
+    ) {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
 
@@ -767,6 +957,7 @@ impl App {
             // Already seeded above (eagerly) — nothing pending for the pump to do.
             seed: RefCell::new(PendingSeed::Done),
             closing: Cell::new(false),
+            close_confirm: Cell::new(0),
             tab_geom: RefCell::new(Vec::new()),
             dock_drag: RefCell::new(None),
             tab_col: Cell::new((0.0, 0.0)),
@@ -797,13 +988,43 @@ impl App {
         win.app
             .set_pref_keep_alive(win.state.borrow().settings.keep_alive);
         // Cascade additional windows so they don't land exactly on top of each other.
-        if id > 0 {
+        let saved_pos = bounds
+            .as_ref()
+            .is_some_and(|b| b.x.is_some() && b.y.is_some());
+        if let Some((x, y)) = bounds.as_ref().and_then(|b| b.x.zip(b.y)) {
+            win.app
+                .window()
+                .set_position(LogicalPosition::new(x as f32, y as f32));
+        }
+        if id > 0 && !saved_pos {
             let off = 36.0 * id as f32;
             win.app
                 .window()
                 .set_position(LogicalPosition::new(140.0 + off, 90.0 + off));
         }
         let _ = win.app.show();
+        // Saved size / maximized are applied AFTER the window is shown, on the next loop turn.
+        // The pane area reaches us only through the UI's `changed width/height` handlers, which
+        // never fire for an initial value: a window created at its saved size (and mapped at
+        // that size) would never lay out its panes. Shown at the default size first, the saved
+        // size is then a real change.
+        if let Some(b) = bounds.filter(|b| b.width.is_some() || b.maximized == Some(true)) {
+            let weak = win.app.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(0), move || {
+                let Some(a) = weak.upgrade() else {
+                    return;
+                };
+                if let (Some(w), Some(h)) = (b.width, b.height) {
+                    if w > 0 && h > 0 {
+                        a.window()
+                            .set_size(slint::LogicalSize::new(w as f32, h as f32));
+                    }
+                }
+                if b.maximized == Some(true) {
+                    a.window().set_maximized(true);
+                }
+            });
+        }
         self.windows.borrow_mut().push(win);
     }
 
@@ -826,6 +1047,24 @@ impl App {
         }
         if self.run_remote_command(win, &cmd) {
             return;
+        }
+        match cmd {
+            Command::QuitApp => {
+                self.quit_app();
+                return;
+            }
+            Command::CloseConfirm(a) => {
+                if win.close_confirm.get() > 0 {
+                    self.set_close_confirm(win, 0);
+                    match a {
+                        1 => win.closing.set(true),
+                        2 => self.quit_app(),
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            _ => {}
         }
         let eff = {
             let mut st = win.state.borrow_mut();
@@ -902,7 +1141,43 @@ impl App {
     /// Flag `win` for reaping (its sessions are killed + the window dropped on the next
     /// tick — never mid-callback, so we don't drop a component while it's dispatching).
     fn close_window(&self, win: &Rc<Window>) {
-        win.closing.set(true);
+        let is_last = self
+            .windows
+            .borrow()
+            .iter()
+            .filter(|w| !w.closing.get())
+            .count()
+            <= 1;
+        let running = if is_last {
+            0
+        } else {
+            win.state
+                .borrow()
+                .running_process_count(&self.mgr, &self.markers.borrow())
+        };
+        if close_needs_confirm(
+            self.mgr.is_daemon(),
+            crate::prefs::load().keep_alive,
+            is_last,
+            running,
+        ) {
+            self.set_close_confirm(win, running);
+        } else {
+            win.closing.set(true);
+        }
+    }
+
+    fn set_close_confirm(&self, win: &Rc<Window>, n: usize) {
+        win.close_confirm.set(n);
+        win.app.set_close_confirm(n as i32);
+        self.wake();
+    }
+
+    /// Quit the whole app: every window closes in the same tick, so the reap sees no
+    /// survivors (daemon + keep-alive → sessions kept, every window saved; otherwise sessions
+    /// end as a close does today).
+    fn quit_app(&self) {
+        mark_all_closing(self.windows.borrow().iter().map(|w| &w.closing));
     }
 
     // ---- the central pump (one shared 8 ms timer drives every window) ----
@@ -1164,16 +1439,37 @@ impl App {
         //    the last session (tabs, layout, focus, per-pane zoom — #14) via core's
         //    `resolve_launch_workspace` fallback.
         if windows.iter().any(|w| w.closing.get()) {
+            let flags: Vec<bool> = windows.iter().map(|w| w.closing.get()).collect();
+            let (will_survive, _) = reap_partition(&flags);
+            let keep_sessions = close_keeps_sessions(
+                self.mgr.is_daemon(),
+                crate::prefs::load().keep_alive,
+                will_survive,
+            );
+            // Snapshot BEFORE any session dies. With no survivors, the closing windows ARE
+            // every window that was open at the start of this reap, so one snapshot of them
+            // is the whole session; with survivors the autosave keeps the file fresh.
+            let closing: Vec<Rc<Window>> = windows
+                .iter()
+                .filter(|w| w.closing.get())
+                .cloned()
+                .collect();
+            // No tab left anywhere (e.g. the last pane exited or was closed): write an empty
+            // session rather than nothing, so the last autosave (which still lists the panes
+            // the user just ended) is not restored on the next launch.
+            let last_session = if will_survive == 0 {
+                Some(self.session_snapshot(&closing).unwrap_or_else(|| {
+                    hyperpanes_core::workspace::model::WorkspaceFile {
+                        windows: Some(Vec::new()),
+                        ..Default::default()
+                    }
+                }))
+            } else {
+                None
+            };
             let mut survivors = Vec::new();
-            let mut last_session = None;
             for w in self.windows.borrow().iter() {
                 if w.closing.get() {
-                    let mut f = w
-                        .state
-                        .borrow()
-                        .to_session_file_with(|u| self.control.meta_for_uid(u));
-                    self.embed_claude_sessions(&mut f);
-                    last_session = Some(f);
                     // Tell the AI engine to forget this window's panes, and drop its context sig.
                     self.ai.send(crate::ai::AiMsg::DropWindow {
                         window_id: w.id as i64,
@@ -1181,7 +1477,9 @@ impl App {
                     self.ai_ctx_sig.borrow_mut().remove(&w.id);
                     for uid in w.state.borrow().session_uids() {
                         self.ai_feed.borrow_mut().remove(&uid);
-                        crate::remote::kill(&self.mgr, &uid);
+                        if !keep_sessions {
+                            crate::remote::kill(&self.mgr, &uid);
+                        }
                     }
                     let _ = w.app.window().hide();
                 } else {
@@ -1366,6 +1664,7 @@ impl App {
                 fed
             }
             SessionEvent::Exit { uid, .. } => {
+                self.markers.borrow_mut().remove(&uid);
                 self.ai.send(crate::ai::AiMsg::Exit { uid: uid.clone() });
                 self.ai_feed.borrow_mut().remove(&uid);
                 if let Some(w) = find_window(windows, &uid) {
@@ -1379,10 +1678,14 @@ impl App {
             }
             // OSC-133 / agent-state liveness markers: consumed by the control server for
             // liveness, not relevant to the GUI render path. Ignore (0 bytes fed).
+            // Mirrored here only for the close-window confirm (`markers`).
             SessionEvent::CommandStart { .. }
             | SessionEvent::CommandEnd { .. }
             | SessionEvent::PromptReady { .. }
-            | SessionEvent::AgentState { .. } => 0,
+            | SessionEvent::AgentState { .. } => {
+                apply_marker_event(&mut self.markers.borrow_mut(), &ev);
+                0
+            }
             SessionEvent::Cwd { uid, cwd } => {
                 if let Some(w) = find_window(windows, &uid) {
                     let project = {
@@ -1774,6 +2077,16 @@ impl App {
             msg.alt,
             msg.shift
         ));
+        // The close-window confirm owns the keyboard: Enter = Quit (lossless default),
+        // Esc = Cancel; everything else is swallowed so nothing leaks to the shell.
+        if win.close_confirm.get() > 0 {
+            if crate::is_key(&msg.text, Key::Return) {
+                self.run_command(win, Command::CloseConfirm(2));
+            } else if crate::is_key(&msg.text, Key::Escape) {
+                self.run_command(win, Command::CloseConfirm(0));
+            }
+            return;
+        }
         // Ctrl+Shift is fully app-reserved: run the mapped command and ALWAYS swallow.
         if msg.control && msg.shift {
             let cmd = crate::route_chord(&win.state.borrow().keymap, &msg);
@@ -3218,6 +3531,7 @@ impl App {
         cb0!(on_overlay_dismiss, Command::CloseOverlay);
         cb0!(on_pref_done, Command::PrefsDone);
         cb_i32!(on_pref_confirm, Command::PrefsConfirm);
+        cb_i32!(on_close_confirm_resolve, Command::CloseConfirm);
 
         // ---- keybindings editor: rebind capture + reset (act on state directly) ----
         {
@@ -3903,5 +4217,202 @@ mod last_session_mode_tests {
         super::persist_last_session_to(&path, &file);
         assert_eq!(mode(&path), 0o600);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod multi_window_session_tests {
+    use super::{close_keeps_sessions, session_file_of, session_groups_mut, single_window_file};
+    use super::{close_needs_confirm, mark_all_closing, reap_partition, runs_a_process};
+    use hyperpanes_core::workspace::io::windows_of;
+    use hyperpanes_core::workspace::model::{
+        GroupSpec, PaneSpec, WindowBounds, WindowSpec, WorkspaceFile,
+    };
+
+    fn group(label: &str) -> GroupSpec {
+        GroupSpec {
+            title: Some(label.into()),
+            panes: vec![PaneSpec {
+                label: Some(label.into()),
+                uid: Some(format!("uid-{label}")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn win(labels: &[&str], active: u32, x: i64) -> WindowSpec {
+        WindowSpec {
+            active: Some(active),
+            groups: labels.iter().map(|l| group(l)).collect(),
+            bounds: Some(WindowBounds {
+                x: Some(x),
+                y: Some(x + 1),
+                width: Some(800),
+                height: Some(600),
+                maximized: Some(x > 100),
+                fullscreen: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn two_window_round_trip() {
+        let f = session_file_of(vec![win(&["a", "b"], 1, 10), win(&["c"], 0, 200)]).unwrap();
+        assert!(f.groups.is_none());
+        let json = serde_json::to_string(&f).unwrap();
+        let back: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let wins = windows_of(Some(&back));
+        assert_eq!(wins.len(), 2);
+        assert_eq!(wins[0].groups.len(), 2);
+        assert_eq!(wins[0].active, Some(1));
+        assert_eq!(wins[1].groups.len(), 1);
+        assert_eq!(wins[1].bounds.as_ref().unwrap().x, Some(200));
+        assert_eq!(wins[1].bounds.as_ref().unwrap().maximized, Some(true));
+        assert_eq!(wins[0].bounds.as_ref().unwrap().maximized, Some(false));
+    }
+
+    #[test]
+    fn empty_windows_skipped_and_none_when_all_empty() {
+        assert!(session_file_of(vec![WindowSpec::default()]).is_none());
+        let f = session_file_of(vec![WindowSpec::default(), win(&["a"], 0, 1)]).unwrap();
+        assert_eq!(f.windows.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn old_single_window_file_loads_as_one_window() {
+        let old = WorkspaceFile {
+            groups: Some(vec![group("x"), group("y")]),
+            active: Some(1),
+            ..Default::default()
+        };
+        let wins = windows_of(Some(&old));
+        assert_eq!(wins.len(), 1);
+        assert_eq!(wins[0].groups.len(), 2);
+        assert_eq!(wins[0].active, Some(1));
+    }
+
+    #[test]
+    fn older_reader_sees_window_zero() {
+        let f = session_file_of(vec![win(&["a", "b"], 1, 10), win(&["c"], 0, 20)]).unwrap();
+        let first = &windows_of(Some(&f))[0];
+        assert_eq!(first.groups[0].title.as_deref(), Some("a"));
+        // The per-window seed used on restore carries the same content.
+        let seed = single_window_file(first);
+        assert_eq!(windows_of(Some(&seed))[0].groups.len(), 2);
+        assert_eq!(windows_of(Some(&seed))[0].active, Some(1));
+    }
+
+    #[test]
+    fn embed_walk_covers_every_window() {
+        let mut f = session_file_of(vec![win(&["a", "b"], 0, 1), win(&["c"], 0, 2)]).unwrap();
+        let titles: Vec<_> = session_groups_mut(&mut f)
+            .iter()
+            .map(|g| g.title.clone().unwrap())
+            .collect();
+        assert_eq!(titles, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn marker_events_feed_the_daemon_liveness_mirror() {
+        use hyperpanes_core::session_manager::{AgentLiveness, SessionEvent};
+        let mut m = std::collections::HashMap::new();
+        let u = || "u1".to_string();
+        super::apply_marker_event(&mut m, &SessionEvent::CommandStart { uid: u() });
+        assert!(runs_a_process(false, false, m.get("u1")));
+        super::apply_marker_event(
+            &mut m,
+            &SessionEvent::CommandEnd {
+                uid: u(),
+                code: Some(0),
+            },
+        );
+        assert!(!runs_a_process(false, false, m.get("u1")));
+        super::apply_marker_event(
+            &mut m,
+            &SessionEvent::AgentState {
+                uid: u(),
+                state: AgentLiveness::Busy,
+                code: None,
+            },
+        );
+        assert!(runs_a_process(false, false, m.get("u1")));
+        super::apply_marker_event(&mut m, &SessionEvent::PromptReady { uid: u() });
+        assert!(!runs_a_process(false, false, m.get("u1")));
+        assert_eq!(m["u1"].last_exit_code, Some(0));
+    }
+
+    #[test]
+    fn close_needs_confirm_truth_table() {
+        for d in [false, true] {
+            for k in [false, true] {
+                for l in [false, true] {
+                    for n in [0usize, 1, 3] {
+                        assert_eq!(
+                            close_needs_confirm(d, k, l, n),
+                            d && k && !l && n > 0,
+                            "d={d} k={k} l={l} n={n}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runs_a_process_truth_table() {
+        use hyperpanes_core::session_manager::Liveness;
+        let live = |marker_seen, command_running, prompt_ready| Liveness {
+            marker_seen,
+            command_running,
+            prompt_ready,
+            last_exit_code: None,
+        };
+        // exited never runs, whatever else is true
+        assert!(!runs_a_process(true, true, Some(&live(true, true, false))));
+        // program pane (spawn_command set) runs even with no liveness / idle prompt
+        assert!(runs_a_process(false, true, None));
+        assert!(runs_a_process(false, true, Some(&live(true, false, true))));
+        // bare shell without markers is idle
+        assert!(!runs_a_process(false, false, None));
+        assert!(!runs_a_process(
+            false,
+            false,
+            Some(&live(false, true, false))
+        ));
+        // bare shell with markers: running command or no prompt => busy; at prompt => idle
+        assert!(runs_a_process(false, false, Some(&live(true, true, false))));
+        assert!(runs_a_process(
+            false,
+            false,
+            Some(&live(true, false, false))
+        ));
+        assert!(!runs_a_process(
+            false,
+            false,
+            Some(&live(true, false, true))
+        ));
+    }
+
+    #[test]
+    fn quit_marks_all_windows_closing_and_snapshots_all() {
+        use std::cell::Cell;
+        let cells = [Cell::new(false), Cell::new(false), Cell::new(false)];
+        mark_all_closing(cells.iter());
+        let flags: Vec<bool> = cells.iter().map(|c| c.get()).collect();
+        assert_eq!(reap_partition(&flags), (0, vec![0, 1, 2]));
+        // a lone close leaves survivors and snapshots nothing extra
+        assert_eq!(reap_partition(&[false, true, false]), (2, vec![1]));
+    }
+
+    #[test]
+    fn close_keeps_sessions_truth_table() {
+        assert!(close_keeps_sessions(true, true, 0));
+        assert!(!close_keeps_sessions(true, true, 1));
+        assert!(!close_keeps_sessions(true, true, 3));
+        assert!(!close_keeps_sessions(true, false, 0));
+        assert!(!close_keeps_sessions(false, true, 0));
+        assert!(!close_keeps_sessions(false, false, 0));
     }
 }

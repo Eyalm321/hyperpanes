@@ -248,6 +248,10 @@ pub enum Command {
     NewWindow,
     /// Re-host the focused pane in a new OS window (replay-primed, no PTY restart).
     MovePaneToNewWindow,
+    /// Quit the whole app: every window closes in the same tick (see `App::run_command`).
+    QuitApp,
+    /// The close-window confirm overlay: 0 = cancel · 1 = close this window · 2 = quit.
+    CloseConfirm(i32),
     // ---- Wave-2 overlays (Seam #3) ----
     /// Dismiss whatever overlay panel is open.
     CloseOverlay,
@@ -600,6 +604,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
         | Command::RemoteReconnect(_)
         | Command::RemoteDisconnect(_)
         | Command::RemoteForget(_) => {}
+        // Handled by `App::run_command` before dispatch (window-level); never reaches State.
+        Command::QuitApp | Command::CloseConfirm(_) => {}
     }
     Effect::None
 }

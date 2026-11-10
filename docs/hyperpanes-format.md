@@ -287,3 +287,35 @@ Both are validated against the read model, then **queued for the GUI app** to ap
 (`Shared::take_pane_group_requests`), since only the GUI can move panes across tabs. A headless
 server (no GUI) accepts and queues the request but never applies it. Scoped tokens need every
 pane (or the tab) in scope, like `recolorPane`.
+
+## Session file (`last-workspace.json`)
+
+The autosave / clean-close / `restartApp` snapshot lists EVERY open window under `windows[]`
+(window order, each with its tabs, `active`, `tabDock` and saved `bounds`; no top-level
+`groups`). Relaunch reopens each window and re-attaches panes by `uid` per window.
+Compatibility both ways: an older single-window reader takes `windows[0]`; an old file with
+top-level `groups` still loads as one window. Bounds are logical px; fields the platform
+can't report (e.g. position on Wayland) are omitted. "Open workspace…" loads only the first
+window of a file into the current window.
+
+Closing the LAST window with the daemon backend and keep-alive on behaves like Quit: the
+sessions are left running (not killed), the snapshot of all windows is saved, and the daemon
+stays up so a relaunch re-attaches. With other windows open, keep-alive off, or the
+in-process backend, a closing window's sessions are killed as before.
+
+"Quit Hyperpanes" (palette, `Ctrl/Cmd+Shift+Q`, `Cmd+Q` on macOS) closes every window at once:
+with the daemon backend and keep-alive on it keeps every session and saves every window;
+otherwise it ends the sessions like a close does. Closing a NON-last window ends its panes;
+with the daemon backend and keep-alive on, the app first asks (Cancel / Close window / Quit)
+when any of its panes runs a process.
+
+Each pane's control meta (`setMeta` / `openPane` `meta`) is saved in its `PaneSpec.meta` and
+re-applied to the pane after a relaunch, whether it was re-attached or re-spawned. Runtime-only
+keys (`hp.recovered`, `hp.env-dropped`, any key whose last segment ends in `state` or is
+`status` / `activity` / `liveness`) and secret-looking keys or values are not saved; at most
+64 keys, values up to 4 KiB. A self-healed pane keeps its last-known label and meta.
+
+"Runs a process" for the close prompt means a program pane (spawned with a command) or a shell
+whose shell-integration markers report a running command. Marker state is not carried across a
+GUI relaunch, so a command started in a shell before the relaunch counts as idle until the
+shell's next marker.

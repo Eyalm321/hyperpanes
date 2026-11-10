@@ -245,7 +245,13 @@ pub struct ControlHost {
     /// only after [`HEAL_DEBOUNCE`] so a transient mid-flight state (e.g. daemon re-attach
     /// during startup) is never misread as a lost pane.
     heal_pending: RefCell<HashMap<String, std::time::Instant>>,
+    /// Last-known `(label, meta)` per control-spawned session uid, refreshed every sync while the
+    /// read-model holds the pane. The self-heal restores it instead of a generic placeholder.
+    last_known: RefCell<HashMap<String, KnownIdentity>>,
 }
+
+/// A pane's last-known `(label, meta)`, kept for the self-heal.
+type KnownIdentity = (String, Option<BTreeMap<String, String>>);
 
 /// How long a live control-spawned session must stay untracked before the self-heal
 /// re-inserts its pane into the read-model.
@@ -282,6 +288,7 @@ impl ControlHost {
             prev_windows: RefCell::new(Vec::new()),
             talk_notice_shown: RefCell::new(HashSet::new()),
             heal_pending: RefCell::new(HashMap::new()),
+            last_known: RefCell::new(HashMap::new()),
         };
         if host.enabled.get() {
             host.start(mgr);
@@ -628,6 +635,7 @@ impl ControlHost {
 
             // 0. Self-heal: re-insert any live control-spawned session that lost its pane.
             let healed = self.heal_lost_panes(&mut model, windows, mgr);
+            self.remember_panes(&model);
 
             // 1. Snapshot the read-model (it may have been mutated off-thread by a `/command`).
             let (cur, cur_active, focus_uid) = self.snapshot_model(&model, windows);
@@ -795,14 +803,13 @@ impl ControlHost {
             let Some(wid) = model.first_window_id() else {
                 continue;
             };
-            let mut meta = BTreeMap::new();
-            meta.insert("hp.recovered".to_string(), "1".to_string());
+            let (label, meta) = healed_identity(self.last_known.borrow().get(&uid));
             let inserted = model.insert_pane(
                 wid,
                 PaneInfo {
                     id: pane_id.clone(),
                     session_uid: uid.clone(),
-                    label: "recovered".to_string(),
+                    label,
                     subtitle: None,
                     // A healed pane's prior talk state died with its read-model entry, and
                     // talk is off by default — a pane that started speaking on its own after
@@ -827,6 +834,23 @@ impl ControlHost {
             }
         }
         healed
+    }
+
+    /// Record each control-spawned pane's label + meta as the model currently has them (see
+    /// `last_known`). Entries for sessions that no longer have a control alias are dropped.
+    fn remember_panes(&self, model: &ReadModel) {
+        let ids = self.pane_ids.borrow();
+        let mut known = self.last_known.borrow_mut();
+        known.retain(|uid, _| ids.contains_key(uid));
+        for (uid, pane_id) in ids.iter() {
+            if let Some(p) = model.pane(pane_id) {
+                let mut meta = p.meta.clone();
+                if let Some(m) = meta.as_mut() {
+                    m.remove("hp.recovered");
+                }
+                known.insert(uid.clone(), (p.label.clone(), meta));
+            }
+        }
     }
 
     /// Read every pane the read-model currently holds (keyed by session uid), each GUI window's
@@ -1387,6 +1411,17 @@ fn gui_uid_for_pane_id(
 /// GUI (including its kept-alive off-layout buffers) knows the uid. GUI-native panes are
 /// excluded structurally — their alias entry is `uid == pane_id`. Pure, so it is unit-testable
 /// without a Slint window. Returns `(uid, pane_id)` pairs.
+/// The label + meta a self-healed pane comes back with: the last-known pair when there is one,
+/// else the generic placeholder; always marked `hp.recovered` (a runtime key, never persisted).
+fn healed_identity(known: Option<&KnownIdentity>) -> (String, BTreeMap<String, String>) {
+    let (label, mut meta) = match known {
+        Some((l, m)) => (l.clone(), m.clone().unwrap_or_default()),
+        None => ("recovered".to_string(), BTreeMap::new()),
+    };
+    meta.insert("hp.recovered".to_string(), "1".to_string());
+    (label, meta)
+}
+
 fn lost_control_panes(
     pane_ids: &HashMap<String, String>,
     model: &ReadModel,
@@ -2186,5 +2221,20 @@ mod tests {
         let model = model_with(vec![pane("ctl-1", "u-old")]);
         let lost = lost_control_panes(&ids, &model, &HashSet::new(), &|_| true);
         assert!(lost.is_empty(), "unexpected heal targets: {lost:?}");
+    }
+
+    #[test]
+    fn healed_pane_keeps_last_known_label_and_meta() {
+        let known = (
+            "build-bot".to_string(),
+            Some(BTreeMap::from([("role".to_string(), "worker".to_string())])),
+        );
+        let (label, meta) = healed_identity(Some(&known));
+        assert_eq!(label, "build-bot");
+        assert_eq!(meta["role"], "worker");
+        assert_eq!(meta["hp.recovered"], "1");
+        let (label, meta) = healed_identity(None);
+        assert_eq!(label, "recovered");
+        assert_eq!(meta.len(), 1);
     }
 }

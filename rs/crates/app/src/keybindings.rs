@@ -282,6 +282,16 @@ pub fn default_bindings() -> Vec<Binding> {
             "Command palette",
             Command::PaletteOpen,
         ),
+        b(
+            "app.quit",
+            true,
+            false,
+            true,
+            Char('q'),
+            "General",
+            "Quit Hyperpanes",
+            Command::QuitApp,
+        ),
         // Tabs
         b(
             "tab.new",
@@ -534,6 +544,18 @@ pub fn default_bindings() -> Vec<Binding> {
             Command::FontReset,
         ),
     ]
+    .into_iter()
+    // macOS: the platform-standard Cmd+Q also quits (the `ctrl` slot IS Cmd there). Elsewhere a
+    // bare Ctrl+Q belongs to the terminal (XON), so it is not bound.
+    .chain(cfg!(target_os = "macos").then(|| Binding {
+        id: "app.quitCmdQ",
+        chord: Some(Chord::new(true, false, false, Char('q'))),
+        category: "General",
+        label: "Quit Hyperpanes (Cmd+Q)",
+        command: Command::QuitApp,
+        needs_selection: false,
+    }))
+    .collect()
 }
 
 /// The default keymap built once and reused. [`default_bindings`] allocates a `Vec` of 16
@@ -937,6 +959,27 @@ mod tests {
         assert!(km
             .match_chord(true, false, true, KeyTok::Char('-'))
             .is_none());
+    }
+
+    #[test]
+    fn quit_chord_resolves_by_default_and_is_rebindable() {
+        let km = empty_keymap();
+        assert!(matches!(
+            km.match_chord(true, false, true, KeyTok::Char('q')),
+            Some(Command::QuitApp)
+        ));
+        let mut km = empty_keymap();
+        km.overrides.insert(
+            "app.quit".into(),
+            Some(Chord::new(true, false, false, KeyTok::Char('j'))),
+        );
+        assert!(km
+            .match_chord(true, false, true, KeyTok::Char('q'))
+            .is_none());
+        assert!(matches!(
+            km.match_chord(true, false, false, KeyTok::Char('j')),
+            Some(Command::QuitApp)
+        ));
     }
 
     #[test]

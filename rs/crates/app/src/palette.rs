@@ -165,6 +165,13 @@ pub fn build(state: &State) -> Vec<Entry> {
         Command::NewWindow,
     ));
 
+    cmds.push(Entry::new(
+        "Quit Hyperpanes",
+        "Close every window; terminals keep running in the background when keep-alive is on",
+        "exit close quit all windows",
+        Command::QuitApp,
+    ));
+
     // ---- remote attach ----
     cmds.push(Entry::new(
         "Connect to host…",

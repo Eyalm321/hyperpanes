@@ -3,4 +3,5 @@
 pub mod env_persist;
 pub mod io;
 pub mod launch;
+pub mod meta_persist;
 pub mod model;

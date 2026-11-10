@@ -743,6 +743,17 @@ pub struct PrefsDraft {
     pub show_dot: bool,
 }
 
+/// Merge a pane's persistable control meta with its goal snapshot meta (goal keys win).
+/// `None` when both are empty.
+fn merge_snapshot_meta(
+    control: Option<std::collections::BTreeMap<String, String>>,
+    goal: Option<std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut out = control.unwrap_or_default();
+    out.extend(goal.unwrap_or_default());
+    (!out.is_empty()).then_some(out)
+}
+
 impl PrefsDraft {
     /// Snapshot the appearance subset of `s`.
     fn from_settings(s: &Settings) -> Self {
@@ -2212,6 +2223,41 @@ impl State {
             // Parked reminder panes also keep their sessions alive — kill them on close too.
             .chain(self.reminders.iter().map(|r| r.pane.uid.clone()))
             .collect()
+    }
+
+    /// How many panes in this window run a process (see `app::runs_a_process`). Counts every
+    /// tab incl. background ones, plus parked reminder panes and closed-tab-stack panes —
+    /// exactly the sessions that closing the window would end (`session_uids`).
+    /// `markers` is the App's event-fed liveness mirror, used when the backend keeps none (the
+    /// daemon). Exited = the session manager no longer knows the uid.
+    pub fn running_process_count(
+        &self,
+        mgr: &SessionManager,
+        markers: &std::collections::HashMap<String, hyperpanes_core::session_manager::Liveness>,
+    ) -> usize {
+        let run = |uid: &str, program: bool| {
+            let live = mgr.liveness(uid).or_else(|| markers.get(uid).copied());
+            crate::app::runs_a_process(!mgr.has(uid), program, live.as_ref())
+        };
+        let panes = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .filter(|p| !crate::remote::is_remote_uid(&p.uid))
+            .filter(|p| run(&p.uid, p.spawn_command.is_some()))
+            .count();
+        let closed = self
+            .closed_tabs
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .filter(|p| run(&p.uid, p.spawn_command.is_some()))
+            .count();
+        let parked = self
+            .reminders
+            .iter()
+            .filter(|r| run(&r.pane.uid, r.pane.spawn_command.is_some()))
+            .count();
+        panes + closed + parked
     }
 
     /// A session exited on its own — drop its pane wherever it lives. Returns
@@ -5782,8 +5828,14 @@ impl State {
                             cwd: p.cwd.clone(),
                             font_size: (px != base).then_some(px),
                             uid: Some(p.uid.clone()),
-                            // A goal orchestrator records what restore needs to rebuild it.
-                            meta: self.goal_snapshot_meta(&p.uid),
+                            // Control meta (identity keys; runtime/state/secret keys filtered),
+                            // with a goal orchestrator's rebuild keys winning on a clash.
+                            meta: merge_snapshot_meta(
+                                pane_meta(&p.uid).as_ref().and_then(
+                                    hyperpanes_core::workspace::meta_persist::persistable_meta,
+                                ),
+                                self.goal_snapshot_meta(&p.uid),
+                            ),
                             ..Default::default()
                         }
                     })
@@ -5880,7 +5932,8 @@ impl State {
 
     /// Load a parsed workspace file: append a tab per group of its first window and switch to
     /// the first appended tab. Each pane re-spawns from its spec (label/color/cwd/command/
-    /// shell). Shared by [`Self::open_workspace`].
+    /// shell). Shared by [`Self::open_workspace`]. Only `windows[0]` is loaded into THIS window;
+    /// further windows of a multi-window file are opened at launch by `App::spawn_restored`.
     pub fn load_workspace(&mut self, file: WorkspaceFile, mgr: &SessionManager) {
         let windows = windows_of(Some(&file));
         let Some(win) = windows.into_iter().next() else {
@@ -6005,6 +6058,21 @@ impl State {
         self.tabs.push(tab);
     }
 
+    /// Queue the control meta a snapshot recorded for a restored pane. Re-filtered (the file is
+    /// user-editable); `claude.*` and `goals.*` have their own restore handling and are skipped.
+    fn queue_restored_meta(&mut self, uid: &str, spec: &PaneSpec) {
+        let Some(m) = spec.meta.as_ref() else {
+            return;
+        };
+        let Some(mut meta) = hyperpanes_core::workspace::meta_persist::persistable_meta(m) else {
+            return;
+        };
+        meta.retain(|k, _| !k.starts_with("claude.") && !k.starts_with("goals."));
+        if !meta.is_empty() {
+            self.pending_pane_meta.push((uid.to_string(), meta));
+        }
+    }
+
     /// Tell the user what a restored pane could not get back: one warning line, plus pane meta
     /// `hp.env-dropped` (names only, capped) queued for the control plane.
     fn note_env_dropped(&mut self, uid: &str, spec: &PaneSpec) {
@@ -6066,6 +6134,10 @@ impl State {
             (true, Some(u)) => u.clone(),
             _ => mgr.fresh_uid(),
         };
+
+        // Re-apply the persisted control meta (re-attached or re-spawned alike), queued before
+        // any goal-orchestrator meta below so the latter wins on a clash.
+        self.queue_restored_meta(&uid, spec);
 
         // ---- Claude conversation resume (the dead-session fallback) ----
         // The snapshot carries the pane's live conversation id as meta (claude_panes::META_KEY,
@@ -7979,6 +8051,77 @@ mod env_persist_tests {
         // A workspace template (Save dialog) never carries env.
         let tpl = serde_json::to_string(&st.to_workspace_file()).unwrap();
         assert!(!tpl.contains("env") && !tpl.contains("MYTOOL"), "{tpl}");
+    }
+
+    fn meta_of(p: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        p.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_carries_control_meta_and_restore_requeues_it() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        st.adopt_pane(&mgr(), det_with_env("33333333-uuid", &[]));
+        let snap = st.to_session_file_with(|_| {
+            Some(meta_of(&[
+                ("role", "worker"),
+                ("parent", "p1"),
+                ("hp.recovered", "1"),
+                ("runState", "busy"),
+                ("api_token", "zzz"),
+            ]))
+        });
+        let pane = &snap.groups.as_ref().unwrap()[0].panes[0];
+        assert_eq!(
+            pane.meta.as_ref().unwrap(),
+            &meta_of(&[("role", "worker"), ("parent", "p1")])
+        );
+
+        // Re-spawn restore (in-process backend): the meta is queued as control meta.
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let mut st2 = fresh();
+        st2.load_workspace(back, &mgr());
+        let uid = st2.active_tab().panes[0].uid.clone();
+        assert!(st2.pending_pane_meta.iter().any(|(u, m)| *u == uid
+            && m.get("role").map(String::as_str) == Some("worker")
+            && m.get("parent").map(String::as_str) == Some("p1")));
+    }
+
+    #[test]
+    fn restored_meta_is_refiltered_and_skips_owned_namespaces() {
+        let mut st = fresh();
+        let spec = PaneSpec {
+            meta: Some(meta_of(&[
+                ("role", "x"),
+                ("claude.session", "abc"),
+                ("goals.project", "/p"),
+                ("hp.recovered", "1"),
+                ("password", "p"),
+            ])),
+            ..Default::default()
+        };
+        // Same entry point for re-attached and re-spawned panes.
+        st.queue_restored_meta("u-1", &spec);
+        assert_eq!(st.pending_pane_meta.len(), 1);
+        assert_eq!(st.pending_pane_meta[0].1, meta_of(&[("role", "x")]));
+    }
+
+    #[test]
+    fn goal_meta_wins_over_control_meta_in_snapshot() {
+        let merged = merge_snapshot_meta(
+            Some(meta_of(&[("role", "a"), ("goals.project", "old")])),
+            Some(meta_of(&[("goals.project", "new")])),
+        )
+        .unwrap();
+        assert_eq!(merged["goals.project"], "new");
+        assert_eq!(merged["role"], "a");
+        assert!(merge_snapshot_meta(None, None).is_none());
     }
 
     #[test]
