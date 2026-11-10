@@ -17,6 +17,8 @@ export global Theme {
     out property <color> accent: #89b4fa;     // --hp-accent
     out property <color> danger: #e5484d;     // window close hover
     out property <color> scrim: #0000008c;
+    // multi-select outline / badge (t28): distinct from the accent focus ring and project frames
+    out property <color> selection: #fab387;
 
     // ---- aliases kept for the rest of the UI (paneview/app) ----
     out property <color> brand: self.accent;
@@ -24,4 +26,44 @@ export global Theme {
     out property <color> ink-dim: self.subtext;
     out property <color> ink-faint: self.faint;
     out property <color> hover: self.surface2;
+}
+
+// Pane-group glyph for tab chips (t28): three stacked rounded squares — DRAWN geometry (Slint
+// has no font fallback for symbols). Sized 12x12.
+export component GroupGlyph inherits Rectangle {
+    in property <color> ink: Theme.subtext;
+    width: 12px;
+    height: 12px;
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.ink;
+        stroke-width: 1.2px;
+        fill: transparent;
+        commands: "M 1.5 1.5 L 7 1.5 L 7 7 L 1.5 7 Z M 5 5 L 10.5 5 L 10.5 10.5 L 5 10.5 Z";
+    }
+}
+
+// The multi-select hint chip at the end of the tab strip / column (t28).
+export component SelectionHint inherits Rectangle {
+    in property <int> count: 0;
+    height: 20px;
+    border-radius: 10px;
+    background: Theme.selection.with-alpha(0.16);
+    border-width: 1px;
+    border-color: Theme.selection.with-alpha(0.55);
+    accessible-role: text;
+    accessible-label: root.count + " panes selected";
+    accessible-description: "Ctrl+G groups the selected panes, Escape clears the selection";
+    min-width: lbl.preferred-width + 16px;
+    lbl := Text {
+        x: 8px;
+        text: root.count + " selected · Ctrl+G group · Esc clear";
+        color: Theme.selection;
+        font-size: 10px;
+        vertical-alignment: center;
+        height: parent.height;
+    }
 }

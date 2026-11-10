@@ -6,7 +6,7 @@
 // Chrome-style (active tab adopts the pane-area background so it reads connected);
 // window controls sit flush in the right corner.
 
-import { Theme } from "theme.slint";
+import { Theme, GroupGlyph, SelectionHint } from "theme.slint";
 import { TabItem, LayoutOption } from "types.slint";
 import { PlusIcon, CloseIcon, GripHandle } from "tabdock.slint";
 
@@ -64,6 +64,9 @@ component TabChip inherits Rectangle {
     in property <bool> active;
     in property <bool> editing;
     in property <bool> spring-hover: false;   // a dragged pane is hovering this tab
+    in property <bool> group: false;          // pane-group tab (t28)
+    in property <color> group-color: Theme.subtext;
+    in property <string> a11y-label: "";
     callback select();
     callback close();
     callback begin-rename();
@@ -98,9 +101,22 @@ component TabChip inherits Rectangle {
     border-width: root.spring-hover ? 2px : (root.active ? 1px : 0px);
     border-color: root.spring-hover ? Theme.brand : Theme.border;
     accessible-role: tab;
-    accessible-label: root.title;
+    accessible-label: root.a11y-label != "" ? root.a11y-label : root.title;
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
+
+    // pane-group tint + 3px leading-edge stripe (drawn under the TouchArea)
+    if root.group : Rectangle {
+        background: root.group-color.with-alpha(0.10);
+        border-top-left-radius: 9px;
+        border-top-right-radius: 9px;
+    }
+    if root.group : Rectangle {
+        x: 0px;
+        width: 3px;
+        background: root.group-color;
+        border-top-left-radius: 9px;
+    }
 
     ta := TouchArea {
         // The hand cursor over a tab is driven from Win32 (window.rs) so it's a real hand.
@@ -128,6 +144,11 @@ component TabChip inherits Rectangle {
         padding-left: 12px;
         padding-right: 6px;
         spacing: 6px;
+
+        if root.group : VerticalLayout {
+            alignment: center;
+            GroupGlyph { ink: root.group-color; }
+        }
 
         Text {
             text: root.title;
@@ -213,6 +234,7 @@ export component TopBar inherits Rectangle {
     // ---- tab bar dock (t25): grip + dock state; chips are hidden while docked ----
     in property <int> tab-dock: 0;
     in property <bool> dock-dragging: false;
+    in property <int> selection-count: 0;   // multi-select hint chip (t28), 0/≥2
     in property <int> dock-target: -1;
     callback dock-drag-begin(length, length);
     callback dock-drag-move(length, length);
@@ -327,6 +349,9 @@ export component TopBar inherits Rectangle {
                     for tab[idx] in root.tabs : TabChip {
                         title: tab.title;
                         active: tab.active;
+                        group: tab.group;
+                        group-color: tab.group-color;
+                        a11y-label: tab.a11y-label;
                         editing: root.editing-tab == idx;
                         spring-hover: root.drop-tab-idx == idx;
                         select => { root.select-tab(idx); }
@@ -360,6 +385,12 @@ export component TopBar inherits Rectangle {
                                 }
                             }
                         }
+                    }
+
+                    // multi-select hint chip (t28): visible only while 2+ panes are selected
+                    if root.selection-count >= 2 : VerticalLayout {
+                        alignment: center;
+                        SelectionHint { count: root.selection-count; }
                     }
                 }
 

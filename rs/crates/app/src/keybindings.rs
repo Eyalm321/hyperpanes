@@ -219,6 +219,9 @@ pub struct Binding {
     /// Human label — surfaced by the Preferences keybindings list.
     pub label: &'static str,
     pub command: Command,
+    /// A guarded binding only fires while a pane selection (2+ panes) is active; otherwise the
+    /// key falls through to the pty untouched (Ctrl+G = BEL, Esc = 0x1b).
+    pub needs_selection: bool,
 }
 
 /// Category headings, in the order the Preferences keybindings list shows them (an exact
@@ -238,6 +241,16 @@ pub fn default_bindings() -> Vec<Binding> {
         category,
         label,
         command,
+        needs_selection: false,
+    };
+    // A guarded binding: fires only while a pane selection is active (see `Binding`).
+    let g = |id, ctrl, alt, shift, key, category, label, command| Binding {
+        id,
+        chord: Some(Chord::new(ctrl, alt, shift, key)),
+        category,
+        label,
+        command,
+        needs_selection: true,
     };
     // A binding that ships with no chord: the user binds one in Preferences → Keybindings.
     let u = |id, label, command| Binding {
@@ -246,6 +259,16 @@ pub fn default_bindings() -> Vec<Binding> {
         category: "Tabs",
         label,
         command,
+        needs_selection: false,
+    };
+    // Same, in the Panes category.
+    let up = |id, label, command| Binding {
+        id,
+        chord: None,
+        category: "Panes",
+        label,
+        command,
+        needs_selection: false,
     };
     vec![
         // General
@@ -451,6 +474,34 @@ pub fn default_bindings() -> Vec<Binding> {
             "Copy selection",
             Command::CopyFocused,
         ),
+        // Multi-select + groups (t28, #96). The two chorded rows are GUARDED: with no selection
+        // they never match, so Ctrl+G (BEL) / Esc reach the program in the pane unchanged.
+        g(
+            "pane.groupSelection",
+            true,
+            false,
+            false,
+            Char('g'),
+            "Panes",
+            "Group selected panes (when 2+ panes are selected)",
+            Command::GroupSelection,
+        ),
+        g(
+            "pane.clearSelection",
+            false,
+            false,
+            false,
+            Escape,
+            "Panes",
+            "Clear pane selection (when 2+ panes are selected)",
+            Command::ClearSelection,
+        ),
+        up(
+            "pane.toggleSelect",
+            "Toggle selection of focused pane",
+            Command::ToggleFocusedSelection,
+        ),
+        u("tab.ungroup", "Ungroup tab", Command::UngroupActive),
         // Zoom (font)
         b(
             "zoom.in",
@@ -605,8 +656,22 @@ impl Keymap {
     /// Find the command bound to a live modifier+key combo, consulting each binding's
     /// **effective** chord (override wins over default; an unbound binding never matches),
     /// first match in table order.
+    #[cfg_attr(not(test), allow(dead_code))] // the router uses `match_chord_in`
     pub fn match_chord(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
-        if let Some(cmd) = self.match_exact(ctrl, alt, shift, key) {
+        self.match_chord_in(ctrl, alt, shift, key, false)
+    }
+
+    /// [`Self::match_chord`] with the selection state: guarded bindings
+    /// ([`Binding::needs_selection`]) only match while `selection_active`.
+    pub fn match_chord_in(
+        &self,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        key: KeyTok,
+        selection_active: bool,
+    ) -> Option<Command> {
+        if let Some(cmd) = self.match_exact(ctrl, alt, shift, key, selection_active) {
             return Some(cmd);
         }
         // On layouts where "+" needs Shift, the zoom-in chord arrives as Ctrl+Shift+= (or
@@ -614,19 +679,28 @@ impl Keymap {
         // the default Ctrl+= zoom-in still fires, without making every binding Shift-insensitive.
         // The exact pass runs first, so a real binding on Ctrl+Shift+= would still win.
         if shift && key == KeyTok::Char('=') {
-            return self.match_exact(ctrl, alt, false, key);
+            return self.match_exact(ctrl, alt, false, key, selection_active);
         }
         None
     }
 
     /// The command whose **effective** chord equals this exact combo (override-first, first match
     /// in table order). The exact half of [`Self::match_chord`].
-    fn match_exact(&self, ctrl: bool, alt: bool, shift: bool, key: KeyTok) -> Option<Command> {
+    fn match_exact(
+        &self,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        key: KeyTok,
+        selection_active: bool,
+    ) -> Option<Command> {
         bindings()
             .iter()
             .find(|b| {
-                self.effective(b.id, b.chord)
-                    .is_some_and(|c| c.matches(ctrl, alt, shift, key))
+                (selection_active || !b.needs_selection)
+                    && self
+                        .effective(b.id, b.chord)
+                        .is_some_and(|c| c.matches(ctrl, alt, shift, key))
             })
             .map(|b| b.command.clone())
     }
@@ -999,9 +1073,10 @@ mod tests {
         // Every row has an id, a label + at least one chord chip, and starts un-overridden.
         // (The Ctrl+1..9 "Go to tab" rows ship unbound, so only they may lack chips.)
         assert!(rows.iter().all(|r| !r.id.is_empty() && !r.label.is_empty()));
-        assert!(rows
-            .iter()
-            .all(|r| !r.parts.is_empty() || r.id.starts_with("tab.goto")));
+        assert!(rows.iter().all(|r| !r.parts.is_empty()
+            || r.id.starts_with("tab.goto")
+            || r.id == "pane.toggleSelect"
+            || r.id == "tab.ungroup"));
         assert!(rows.iter().all(|r| !r.overridden));
         // The palette row renders as Ctrl / Shift / P chips under General.
         let palette = rows.iter().find(|r| r.id == "palette.toggle").unwrap();
@@ -1101,5 +1176,47 @@ mod tests {
         assert!(km
             .match_chord(false, false, false, KeyTok::Char('t'))
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod pane_group_key_tests {
+    use super::*;
+
+    #[test]
+    fn guarded_bindings_need_selection_and_stay_rebindable() {
+        let mut km = Keymap::default_for_tests();
+        let g = |km: &Keymap, sel| km.match_chord_in(true, false, false, KeyTok::Char('g'), sel);
+        assert!(g(&km, false).is_none());
+        assert!(matches!(g(&km, true), Some(Command::GroupSelection)));
+        // Rebind to Ctrl+Y: the new chord is guarded too, the old one is free.
+        km.overrides.insert(
+            "pane.groupSelection".into(),
+            Some(Chord::new(true, false, false, KeyTok::Char('y'))),
+        );
+        assert!(g(&km, true).is_none());
+        let y = |sel| km.match_chord_in(true, false, false, KeyTok::Char('y'), sel);
+        assert!(y(false).is_none());
+        assert!(matches!(y(true), Some(Command::GroupSelection)));
+        // Unbind Esc → clear never fires.
+        km.overrides.insert("pane.clearSelection".into(), None);
+        assert!(km
+            .match_chord_in(false, false, false, KeyTok::Escape, true)
+            .is_none());
+    }
+
+    #[test]
+    fn preferences_labels_the_guard() {
+        let rows = Keymap::default_for_tests().rows();
+        for id in ["pane.groupSelection", "pane.clearSelection"] {
+            let r = rows.iter().find(|r| r.id == id).unwrap();
+            assert!(
+                r.label.contains("(when 2+ panes are selected)"),
+                "{}",
+                r.label
+            );
+        }
+        let ung = rows.iter().find(|r| r.id == "tab.ungroup").unwrap();
+        assert!(ung.unbound);
     }
 }
