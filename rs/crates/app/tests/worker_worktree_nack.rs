@@ -139,7 +139,18 @@ fn plant_stale_branch(repo: &Path, queue: &str, id8: &str) {
 }
 
 fn run_worker(repo: &Path, control: &Path, extra: &[&str], child: &[&str]) -> std::process::Output {
+    run_worker_env(repo, control, extra, child, &[])
+}
+
+fn run_worker_env(
+    repo: &Path,
+    control: &Path,
+    extra: &[&str],
+    child: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_hyperpanes"))
+        .envs(env.iter().copied())
         .current_dir(repo)
         .env("HYPERPANES_CONTROL_FILE", control)
         // Never pollute ~/.cache; CI runners may have <10G free.
@@ -234,7 +245,12 @@ fn worktree_failure_nack_is_retryable_and_worker_continues() {
         &repo,
         &control,
         &["--nack-delay", "250"],
-        &["sh", "-c", "touch ran-here"],
+        // A healthy task's result is a commit (#86): an exit 0 without one would be failed.
+        &[
+            "sh",
+            "-c",
+            "touch ran-here && git add -A && git -c user.name=t -c user.email=t@t commit -qm work",
+        ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -268,4 +284,92 @@ fn worktree_failure_nack_is_retryable_and_worker_continues() {
     );
 
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// #86: an exit-0 task that committed nothing is FAILED (requeue:false), never acked, and its
+/// uncommitted work is saved as an owner-only patch named in the queue-visible reason.
+#[test]
+fn empty_exit0_result_fails_without_requeue_and_saves_patch() {
+    let (port, records) = start_mock_queue(vec![claim_with("emptyc00-0000-0000")]);
+    let (repo, control) = scratch("c", port);
+
+    let out = run_worker(
+        &repo,
+        &control,
+        &[],
+        &["sh", "-c", "echo precious > lost.txt"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "worker exits clean: {stderr}");
+
+    let recs = records.lock().unwrap().clone();
+    assert!(
+        !recs.iter().any(|(p, _)| p.ends_with("/ack")),
+        "an empty result must not ack: {recs:?}\nstderr: {stderr}"
+    );
+    let (_, body) = recs
+        .iter()
+        .find(|(p, _)| p.ends_with("/nack") && p.contains("emptyc00"))
+        .unwrap_or_else(|| panic!("empty result not nacked: {recs:?}\nstderr: {stderr}"));
+    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(v["requeue"], serde_json::json!(false), "{body}");
+    let reason = v["error"].as_str().unwrap();
+    assert!(
+        reason.starts_with("no commit on worker/q/emptyc00 beyond base ")
+            && reason.contains("(child exited 0); uncommitted changes saved to "),
+        "{reason}"
+    );
+    let patch = PathBuf::from(reason.rsplit("saved to ").next().unwrap());
+    assert!(
+        patch.starts_with(repo.parent().unwrap().join("wtroot")),
+        "patch under the worktree root: {}",
+        patch.display()
+    );
+    let content = std::fs::read_to_string(&patch).unwrap();
+    assert!(
+        content.contains("lost.txt") && content.contains("+precious"),
+        "{content}"
+    );
+    // The contents never reach the runner's output: only the path.
+    assert!(
+        !stderr.contains("precious"),
+        "patch contents leaked: {stderr}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&patch).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// #86: `--allow-empty-result` (and its env) keep the old ack for queues whose tasks produce
+/// no commit by design.
+#[test]
+fn allow_empty_result_flag_and_env_ack_an_empty_exit0() {
+    for (tag, flag, env) in [
+        ("d", &["--allow-empty-result"][..], &[][..]),
+        (
+            "e",
+            &[][..],
+            &[("HYPERPANES_WORKER_ALLOW_EMPTY_RESULT", "1")][..],
+        ),
+    ] {
+        let id = format!("allow{tag}00-0000-0000");
+        let (port, records) = start_mock_queue(vec![claim_with(&id)]);
+        let (repo, control) = scratch(tag, port);
+        let out = run_worker_env(&repo, &control, flag, &["true"], env);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "worker exits clean: {stderr}");
+        let recs = records.lock().unwrap().clone();
+        assert!(
+            recs.iter()
+                .any(|(p, _)| p.ends_with("/ack") && p.contains(&id[..8])),
+            "[{tag}] empty result acked with the opt-in: {recs:?}\nstderr: {stderr}"
+        );
+        assert!(!recs.iter().any(|(p, _)| p.ends_with("/nack")), "{recs:?}");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
 }

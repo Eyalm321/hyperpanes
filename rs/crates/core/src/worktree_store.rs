@@ -14,6 +14,7 @@
 //!   cache/slot-<k>/       build-cache slot k (reused warm across tasks)
 //!   cache/slot-<k>.lock   its lock; mtime = last release (the "last used" stamp)
 //!   cache/slot-<k>.size   last measured on-disk bytes (fresh iff mtime >= the lock's)
+//!   evidence/<name>.patch uncommitted work saved from a task worktree before removal (#86)
 //! ```
 //!
 //! Liveness is decided by `flock`, never by pid: a lock that can be taken means its owner (and
@@ -56,6 +57,9 @@ pub const SOFT_FREE_FS_DIVISOR: u64 = 10;
 
 /// A lone `*.lock` (no dir) older than this is debris.
 const LONE_LOCK_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+/// How long a saved evidence patch (`evidence/*.patch`) is kept before the startup sweep deletes
+/// it: the same 14 days as the cache-slot age GC.
+pub const EVIDENCE_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 3600);
 /// A cache slot unused for this long is reclaimed.
 const SLOT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 3600);
 
@@ -362,8 +366,10 @@ impl Drop for TaskLock {
 pub struct SweptOrphan {
     pub path: PathBuf,
     pub branch: String,
-    /// Lines of `git status --porcelain` at removal time (uncommitted work that was discarded).
+    /// Lines of `git status --porcelain` at removal time (uncommitted work in the orphan).
     pub dirty_lines: usize,
+    /// Where that uncommitted work was saved before removal (`None` = clean, or the save failed).
+    pub patch: Option<PathBuf>,
 }
 
 /// What a [`sweep`] did.
@@ -373,6 +379,8 @@ pub struct SweepReport {
     pub kept_live: Vec<PathBuf>,
     pub gc_slots: Vec<PathBuf>,
     pub removed_locks: Vec<PathBuf>,
+    /// Evidence patches older than [`EVIDENCE_MAX_AGE`] that were deleted.
+    pub gc_evidence: Vec<PathBuf>,
 }
 
 enum LockState {
@@ -417,7 +425,13 @@ fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
 /// Reclaim orphans under one repo-key dir; see the module docs for the layout. `repo_dir` is any
 /// working dir of the owning repo (git commands run there).
 pub fn sweep(repo_dir: &Path, key_dir: &Path) -> SweepReport {
-    sweep_with(repo_dir, key_dir, LONE_LOCK_MAX_AGE, SLOT_MAX_AGE)
+    sweep_with(
+        repo_dir,
+        key_dir,
+        LONE_LOCK_MAX_AGE,
+        SLOT_MAX_AGE,
+        EVIDENCE_MAX_AGE,
+    )
 }
 
 fn sweep_with(
@@ -425,6 +439,7 @@ fn sweep_with(
     key_dir: &Path,
     lone_lock_max_age: Duration,
     slot_max_age: Duration,
+    evidence_max_age: Duration,
 ) -> SweepReport {
     let mut rep = SweepReport::default();
     let wt = key_dir.join("wt");
@@ -455,6 +470,14 @@ fn sweep_with(
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
             let branch = git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+            // Save the orphan's uncommitted work before it is removed (#86): no silent loss.
+            let patch = if dirty_lines > 0 {
+                save_uncommitted(dir, &evidence_path(key_dir, &name))
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
             let removed = Command::new("git")
                 .arg("-C")
                 .arg(repo_dir)
@@ -474,6 +497,7 @@ fn sweep_with(
                 path: dir.clone(),
                 branch,
                 dirty_lines,
+                patch,
             });
         }
         // Lone lock files (no dir) that are free and stale.
@@ -524,7 +548,139 @@ fn sweep_with(
             }
         }
     }
+
+    // Evidence GC: saved patches are kept EVIDENCE_MAX_AGE, then deleted.
+    if let Ok(rd) = std::fs::read_dir(key_dir.join(EVIDENCE_DIR)) {
+        for p in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+            if p.extension().is_some_and(|e| e == "patch")
+                && p.is_file()
+                && age(&p).is_some_and(|a| a > evidence_max_age)
+                && std::fs::remove_file(&p).is_ok()
+            {
+                rep.gc_evidence.push(p);
+            }
+        }
+    }
     rep
+}
+
+// ───────────────────────── task result evidence (#86) ─────────────────────────
+
+/// Sub-dir of a repo-key dir holding saved uncommitted-work patches.
+pub const EVIDENCE_DIR: &str = "evidence";
+
+/// `<key_dir>/evidence/<name>.patch`, where `<name>` is the task worktree's dir name
+/// (`<queue>-<id8>-<pid>`), so a patch maps back to its task and run.
+pub fn evidence_path(key_dir: &Path, name: &str) -> PathBuf {
+    key_dir.join(EVIDENCE_DIR).join(format!("{name}.patch"))
+}
+
+/// Commits on `branch` beyond `base_sha` (`git rev-list --count <base_sha>..<branch>`), run in
+/// `dir` (any worktree of the repo). `base_sha` must be the exact sha the task was forked from,
+/// never a moving ref, or a base that advanced mid-task would hide (or invent) commits.
+pub fn commits_beyond(dir: &Path, base_sha: &str, branch: &str) -> Result<u64, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-list", "--count"])
+        .arg(format!("{base_sha}..refs/heads/{branch}"))
+        .output()
+        .map_err(|e| format!("git rev-list: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rev-list {base_sha}..{branch}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.trim()
+        .parse()
+        .map_err(|_| format!("git rev-list: unexpected output '{}'", s.trim()))
+}
+
+/// Save a worktree's uncommitted work (tracked changes AND untracked, non-ignored files) to
+/// `dest` as a binary-safe patch against its HEAD, applicable with `git apply`. `Ok(None)` when
+/// the tree is clean (nothing written). Stages everything into the worktree's own index to do
+/// it (never a commit: the branch and HEAD are untouched), so call it only on a worktree that is
+/// about to be removed. A patch can hold anything the agent left lying around (a stray, un-ignored
+/// `.env`), so on unix the evidence dir is created `0700` and the patch `0600`, and callers log
+/// only its path, never its contents.
+pub fn save_uncommitted(worktree: &Path, dest: &Path) -> Result<Option<PathBuf>, String> {
+    let status = git_out(worktree, &["status", "--porcelain"])
+        .ok_or_else(|| format!("git status failed in {}", worktree.display()))?;
+    if status.is_empty() {
+        return Ok(None);
+    }
+    let added = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["add", "-A"])
+        .output()
+        .map_err(|e| format!("git add -A: {e}"))?;
+    if !added.status.success() {
+        return Err(format!(
+            "git add -A: {}",
+            String::from_utf8_lossy(&added.stderr).trim()
+        ));
+    }
+    let diff = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["diff", "--cached", "--binary", "HEAD"])
+        .output()
+        .map_err(|e| format!("git diff: {e}"))?;
+    if !diff.status.success() {
+        return Err(format!(
+            "git diff --cached: {}",
+            String::from_utf8_lossy(&diff.stderr).trim()
+        ));
+    }
+    if diff.stdout.is_empty() {
+        return Ok(None);
+    }
+    if let Some(parent) = dest.parent() {
+        create_private_dir(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    write_private(dest, &diff.stdout)
+        .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+    Ok(Some(dest.to_path_buf()))
+}
+
+/// `create_dir_all`, with the leaf forced to owner-only (`0700`) on unix even if it pre-existed.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Write `bytes` to `path`, owner-only (`0600`) on unix.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut o = OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        o.mode(0o600);
+        let mut f = o.open(path)?;
+        // `mode` only applies on create; a pre-existing file is tightened too.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        o.open(path)?.write_all(bytes)
+    }
 }
 
 // ───────────────────────── cache slots ─────────────────────────
@@ -1430,6 +1586,14 @@ mod tests {
         let o = rep.swept.iter().find(|s| s.path == orphan).unwrap();
         assert_eq!(o.dirty_lines, 1);
         assert_eq!(o.branch, "b/orphan");
+        // Its uncommitted work was saved before removal (#86); the clean orphan saved nothing.
+        let patch = o.patch.as_ref().expect("dirty orphan saved a patch");
+        assert_eq!(patch, &evidence_path(&kd, "orphan"));
+        assert!(std::fs::read_to_string(patch)
+            .unwrap()
+            .contains("dirty.txt"));
+        let n = rep.swept.iter().find(|s| s.path == nolock).unwrap();
+        assert_eq!(n.patch, None);
         let list = git(&r, &["worktree", "list"]);
         assert!(!list.contains("orphan"), "{list}");
         // The branch survives the sweep.
@@ -2135,5 +2299,100 @@ mod tests {
         assert_eq!(resolve_size_setting(None, None, "E", 7), Ok(7));
         let e = resolve_size_setting(None, Some("lots".into()), "MY_VAR", 1).unwrap_err();
         assert!(e.starts_with("MY_VAR:"), "{e}");
+    }
+
+    #[test]
+    fn save_uncommitted_captures_tracked_and_untracked_skips_ignored() {
+        let r = repo("evid");
+        std::fs::write(r.join("a.txt"), "one\n").unwrap();
+        std::fs::write(r.join(".gitignore"), "target/\n").unwrap();
+        git(&r, &["add", "-A"]);
+        git(&r, &["commit", "-m", "base"]);
+        let dest = scratch("evidkd").join("evidence/t.patch");
+
+        // Clean tree → nothing written.
+        assert_eq!(save_uncommitted(&r, &dest), Ok(None));
+        assert!(!dest.exists());
+
+        // Tracked edit + new untracked file + ignored build output.
+        std::fs::write(r.join("a.txt"), "two\n").unwrap();
+        std::fs::write(r.join("new.txt"), "fresh\n").unwrap();
+        std::fs::create_dir_all(r.join("target")).unwrap();
+        std::fs::write(r.join("target/blob"), "huge").unwrap();
+        assert_eq!(save_uncommitted(&r, &dest), Ok(Some(dest.clone())));
+        let patch = std::fs::read_to_string(&dest).unwrap();
+        assert!(patch.contains("+two"), "{patch}");
+        assert!(
+            patch.contains("new.txt") && patch.contains("+fresh"),
+            "{patch}"
+        );
+        assert!(
+            !patch.contains("target/blob"),
+            "ignored files stay out: {patch}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dest), 0o600, "patch is owner-only");
+            assert_eq!(
+                mode(dest.parent().unwrap()),
+                0o700,
+                "evidence dir is owner-only"
+            );
+        }
+        // Saving never commits: HEAD is unchanged.
+        assert_eq!(git(&r, &["rev-list", "--count", "HEAD"]), "2");
+
+        // The patch round-trips: a clean checkout of the base applies it.
+        git(&r, &["reset", "--hard", "HEAD"]);
+        git(&r, &["clean", "-fd"]);
+        git(&r, &["apply", dest.to_str().unwrap()]);
+        assert_eq!(std::fs::read_to_string(r.join("a.txt")).unwrap(), "two\n");
+        assert_eq!(
+            std::fs::read_to_string(r.join("new.txt")).unwrap(),
+            "fresh\n"
+        );
+        let _ = std::fs::remove_dir_all(&r);
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn commits_beyond_counts_from_the_pinned_base_sha() {
+        let r = repo("beyond");
+        let base = git(&r, &["rev-parse", "HEAD"]);
+        git(&r, &["checkout", "-b", "worker/q/t"]);
+        assert_eq!(commits_beyond(&r, &base, "worker/q/t"), Ok(0));
+        git(&r, &["commit", "--allow-empty", "-m", "work"]);
+        assert_eq!(commits_beyond(&r, &base, "worker/q/t"), Ok(1));
+        // main moving on later doesn't matter: the count is against the pinned sha.
+        git(&r, &["checkout", "main"]);
+        git(&r, &["commit", "--allow-empty", "-m", "advance"]);
+        assert_eq!(commits_beyond(&r, &base, "worker/q/t"), Ok(1));
+        assert!(commits_beyond(&r, &base, "no/such/branch").is_err());
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn sweep_gcs_old_evidence_only() {
+        let r = repo("evgc");
+        let kd = scratch("evgckd");
+        let old = evidence_path(&kd, "old");
+        let fresh = evidence_path(&kd, "fresh");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "x").unwrap();
+        std::fs::write(&fresh, "x").unwrap();
+        File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - EVIDENCE_MAX_AGE - Duration::from_secs(3600))
+            .unwrap();
+        let rep = sweep(&r, &kd);
+        assert_eq!(rep.gc_evidence, vec![old.clone()]);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        let _ = std::fs::remove_dir_all(&r);
+        let _ = std::fs::remove_dir_all(&kd);
     }
 }

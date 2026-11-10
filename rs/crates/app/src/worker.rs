@@ -4,7 +4,7 @@
 //! ```text
 //! hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>] \
 //!   [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>] \
-//!   [--retry-window <secs>] [--nack-delay <ms>] \
+//!   [--allow-empty-result] [--retry-window <secs>] [--nack-delay <ms>] \
 //!   [--stream] [--log-dir <dir>] [--linger <secs>] -- <cmd> [args...]
 //! ```
 //!
@@ -28,6 +28,13 @@
 //! persona's business: e.g. `CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target`). Before each
 //! worktree the runner requires `--min-free <size>` (env `HYPERPANES_WORKTREE_MIN_FREE`, default
 //! 10GiB, 0 disables) free on the root's filesystem, else it nacks the task and stops.
+//! A `--worktree` task's result is its commits (#86): exit 0 with NO commit on the task branch
+//! beyond the exact base sha it forked from is not done — the task is failed (nack,
+//! requeue=false) with `no commit on <branch> beyond base <sha>`. Before the worktree is removed,
+//! any uncommitted work (tracked + untracked, non-ignored) is saved as a patch under
+//! `<root>/<repo-key>/evidence/` (kept 14 days) and named in the reason, on every exit path.
+//! `--allow-empty-result` (env `HYPERPANES_WORKER_ALLOW_EMPTY_RESULT=1`) acks an empty exit 0
+//! for queues whose tasks legitimately produce no commit (read-only checks, reports).
 //! `--retry-window <secs>` keeps
 //! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
 //! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
@@ -96,6 +103,10 @@ pub struct WorkerArgs {
     pub cache_max_size: Option<u64>,
     /// `--soft-free <size>` (overrides `HYPERPANES_WORKTREE_SOFT_FREE`); `Some(0)` = off.
     pub soft_free: Option<u64>,
+    /// `--allow-empty-result`: with `--worktree`, ack an exit-0 task even when its branch has no
+    /// commit beyond the base (read-only checks, reports). Off = such a task fails (#86). The
+    /// env `HYPERPANES_WORKER_ALLOW_EMPTY_RESULT` turns it on too (resolved in `WtStore::init`).
+    pub allow_empty_result: bool,
     /// `--prune-cache`: one-shot cache prune of the worktree root; needs no queue or control plane.
     pub prune_cache: bool,
     /// `--dry-run` (with `--prune-cache`): print the plan, delete nothing.
@@ -187,6 +198,7 @@ pub fn parse_args_with(
     let mut soft_free_arg: Option<String> = None;
     let mut prune_cache = false;
     let mut dry_run = false;
+    let mut allow_empty_result = false;
     let mut child: Vec<String> = Vec::new();
     let mut i = 2;
     while i < argv.len() {
@@ -264,6 +276,10 @@ pub fn parse_args_with(
             }
             "--prune-cache" => {
                 prune_cache = true;
+                i += 1;
+            }
+            "--allow-empty-result" => {
+                allow_empty_result = true;
                 i += 1;
             }
             "--dry-run" => {
@@ -408,6 +424,7 @@ pub fn parse_args_with(
         slot_max_size,
         cache_max_size,
         soft_free,
+        allow_empty_result,
         prune_cache,
         dry_run,
         stream,
@@ -518,7 +535,7 @@ pub fn run(argv: &[String]) -> Result<(), Box<dyn Error>> {
         Ok(a) => a,
         Err(e) => {
             eprintln!("hyperpanes worker: {e}");
-            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>] [--slot-max-size <size>] [--cache-max-size <size>] [--soft-free <size>]] -- <cmd> [args...]");
+            eprintln!("usage: hyperpanes worker --queue <name> [--worker <id>] [--worktree --base <ref> [--worktree-root <dir>] [--min-free <size>] [--max-cache-slots <n>] [--slot-max-size <size>] [--cache-max-size <size>] [--soft-free <size>] [--allow-empty-result]] -- <cmd> [args...]");
             eprintln!("       hyperpanes worker --prune-cache [--dry-run] [--worktree-root <dir>] [--slot-max-size <size>] [--cache-max-size <size>] [--soft-free <size>]");
             return Err(e.into());
         }
@@ -726,6 +743,7 @@ fn drain(
                             task.fencing_token,
                             &reason,
                             Some(nack_delay_ms.unwrap_or(60_000)),
+                            true,
                         )?;
                         eprintln!(
                             "[{worker}] !! nacked {} (attempt {}/{}) → {state}",
@@ -753,7 +771,14 @@ fn drain(
                     let reason = format!("worktree create failed (base {fork_base}): {e}");
                     eprintln!("[{worker}] !! {reason}");
                     eprintln!("[{worker}] !! child NOT run — refusing to execute without the requested isolation");
-                    let state = nack(ctl, &task.id, task.fencing_token, &reason, nack_delay_ms)?;
+                    let state = nack(
+                        ctl,
+                        &task.id,
+                        task.fencing_token,
+                        &reason,
+                        nack_delay_ms,
+                        true,
+                    )?;
                     eprintln!(
                         "[{worker}] !! nacked {} (attempt {}/{}) → {state}",
                         short(&task.id),
@@ -813,7 +838,11 @@ fn drain(
             cache_dir.as_deref(),
             worker,
             out,
-        );
+        )
+        .map_err(|e| e.to_string());
+        // Inspect the task's result BEFORE the worktree goes (#86): count its commits against the
+        // pinned fork sha and save any uncommitted work as an evidence patch.
+        let settled = wt.as_ref().map(Worktree::settle);
         // Measure + enforce the per-slot cap while still holding the slot's flock, then stamp
         // last-used and write the size sidecar before unlocking.
         if let (Some(s), Some(st)) = (slot, store) {
@@ -823,22 +852,38 @@ fn drain(
             let _ = std::fs::remove_dir_all(dir);
         }
         if let Some(w) = wt {
-            w.remove();
+            if settled.as_ref().is_some_and(|s| s.patch.is_err()) {
+                // Couldn't save the uncommitted work: keep the dir for the next startup sweep
+                // (which retries the save) rather than delete the only copy.
+                eprintln!(
+                    "[{worker}] !! kept worktree {} (evidence save failed)",
+                    w.path.display()
+                );
+                w.release_keep();
+            } else {
+                w.remove();
+            }
         }
 
-        match outcome {
-            Ok(true) => {
+        let allow_empty = store.is_some_and(|st| st.allow_empty_result);
+        match verdict(&outcome, settled.as_ref(), allow_empty) {
+            Verdict::Ack { warn } => {
+                if let Some(w) = warn {
+                    eprintln!("[{worker}] warn: {w}");
+                }
                 ack(ctl, &task.id, task.fencing_token)?;
                 done += 1;
                 eprintln!("[{worker}] << acked  {}", short(&task.id));
             }
-            other => {
-                let reason = match other {
-                    Ok(false) => "child exited non-zero".to_string(),
-                    Err(e) => e.to_string(),
-                    Ok(true) => unreachable!(),
-                };
-                let state = nack(ctl, &task.id, task.fencing_token, &reason, nack_delay_ms)?;
+            Verdict::Nack { requeue, reason } => {
+                let state = nack(
+                    ctl,
+                    &task.id,
+                    task.fencing_token,
+                    &reason,
+                    nack_delay_ms,
+                    requeue,
+                )?;
                 eprintln!(
                     "[{worker}] !! nacked {} (attempt {}/{}) → {state} ({reason})",
                     short(&task.id),
@@ -1167,15 +1212,17 @@ fn ack(ctl: &Control, id: &str, fence: u64) -> Result<(), Box<dyn Error>> {
 }
 
 /// Nack a failed task. Returns the resulting queue state: `queued` (will retry) | `failed` |
-/// `dead` (retries exhausted). `delay_ms` overrides the backoff when set (#13).
+/// `dead` (retries exhausted). `delay_ms` overrides the backoff when set (#13); `requeue: false`
+/// fails the task outright (no retry), e.g. an empty result that a retry wouldn't fix (#86).
 fn nack(
     ctl: &Control,
     id: &str,
     fence: u64,
     error: &str,
     delay_ms: Option<i64>,
+    requeue: bool,
 ) -> Result<String, Box<dyn Error>> {
-    let mut body = serde_json::json!({ "fencingToken": fence, "error": error });
+    let mut body = serde_json::json!({ "fencingToken": fence, "error": error, "requeue": requeue });
     if let Some(d) = delay_ms {
         body["delayMs"] = serde_json::json!(d);
     }
@@ -1372,6 +1419,98 @@ fn validate_base(base: &str) -> Result<(), Box<dyn Error>> {
     Err(format!("--base {base}: does not resolve to a commit in {cwd} — pass a branch, tag, or sha that exists there").into())
 }
 
+/// What a finished `--worktree` task left behind, read before its worktree is removed (#86).
+#[derive(Debug)]
+struct Settled {
+    branch: String,
+    /// The exact sha the worktree was forked from (never the moving `--base` ref).
+    fork_sha: String,
+    /// `git rev-list --count <fork_sha>..<branch>`.
+    commits: Result<u64, String>,
+    /// Uncommitted work saved as a patch: `Ok(None)` = clean tree, `Err` = save failed.
+    patch: Result<Option<PathBuf>, String>,
+}
+
+/// The ack/nack decision for one finished task.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Ack { warn: Option<String> },
+    Nack { requeue: bool, reason: String },
+}
+
+/// Decide ack vs nack from the child's exit and (with `--worktree`) what it left behind. Pure,
+/// so every branch is unit-testable without a control server.
+///
+/// - exit 0, ≥1 commit beyond the fork sha → ack (warn if uncommitted work was also left).
+/// - exit 0, 0 commits → fail outright (`requeue: false`): re-running a task that reported
+///   success but committed nothing just repeats it. `allow_empty` keeps the old ack.
+/// - exit 0, commit count unknown → retryable nack: never ack what we couldn't verify.
+/// - non-zero / runner error → the usual retryable nack.
+///
+/// Every nack reason names the saved evidence patch, if any.
+fn verdict(
+    outcome: &Result<bool, String>,
+    settled: Option<&Settled>,
+    allow_empty: bool,
+) -> Verdict {
+    let evidence = match settled.map(|s| &s.patch) {
+        Some(Ok(Some(p))) => format!("; uncommitted changes saved to {}", p.display()),
+        Some(Ok(None)) => String::new(),
+        Some(Err(e)) => format!("; saving uncommitted changes failed ({e}), worktree kept"),
+        None => String::new(),
+    };
+    match outcome {
+        Ok(true) => {
+            let Some(s) = settled else {
+                return Verdict::Ack { warn: None };
+            };
+            let sha12 = &s.fork_sha[..12.min(s.fork_sha.len())];
+            match &s.commits {
+                Ok(0) if !allow_empty => Verdict::Nack {
+                    requeue: false,
+                    reason: format!(
+                        "no commit on {} beyond base {sha12} (child exited 0){}",
+                        s.branch,
+                        if evidence.is_empty() {
+                            "; worktree was clean, nothing saved".to_string()
+                        } else {
+                            evidence
+                        }
+                    ),
+                },
+                Ok(_) => Verdict::Ack {
+                    warn: (!evidence.is_empty())
+                        .then(|| format!("task left uncommitted work{evidence}")),
+                },
+                Err(e) => Verdict::Nack {
+                    requeue: true,
+                    reason: format!("cannot verify commits on {}: {e}{evidence}", s.branch),
+                },
+            }
+        }
+        Ok(false) => Verdict::Nack {
+            requeue: true,
+            reason: format!("child exited non-zero{evidence}"),
+        },
+        Err(e) => Verdict::Nack {
+            requeue: true,
+            reason: format!("{e}{evidence}"),
+        },
+    }
+}
+
+/// `HYPERPANES_WORKER_ALLOW_EMPTY_RESULT`: any of `1`/`true`/`yes`/`on` (case-insensitive).
+const ALLOW_EMPTY_ENV: &str = "HYPERPANES_WORKER_ALLOW_EMPTY_RESULT";
+
+fn env_truthy(v: Option<&str>) -> bool {
+    v.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 /// Everything the runner needs about where worktrees live, resolved once at startup.
 #[derive(Clone, Debug)]
 struct WtStore {
@@ -1384,6 +1523,8 @@ struct WtStore {
     max_slots: usize,
     /// Per-slot size cap, root-wide budget and soft free floor (each 0 = off).
     policy: worktree_store::CachePolicy,
+    /// Ack an exit-0 task with no commit (`--allow-empty-result` / its env); off by default.
+    allow_empty_result: bool,
 }
 
 impl WtStore {
@@ -1449,11 +1590,24 @@ impl WtStore {
         );
         for o in &rep.swept {
             eprintln!(
-                "worker: swept orphan worktree {} (branch {}, {} uncommitted path(s) discarded)",
+                "worker: swept orphan worktree {} (branch {}, {} uncommitted path(s){})",
                 o.path.display(),
                 if o.branch.is_empty() { "?" } else { &o.branch },
-                o.dirty_lines
+                o.dirty_lines,
+                match &o.patch {
+                    Some(p) => format!(" saved to {}", p.display()),
+                    None if o.dirty_lines > 0 => " discarded".to_string(),
+                    None => String::new(),
+                }
             );
+        }
+        for p in &rep.gc_evidence {
+            eprintln!("worker: deleted expired evidence patch {}", p.display());
+        }
+        let allow_empty_result =
+            args.allow_empty_result || env_truthy(std::env::var(ALLOW_EMPTY_ENV).ok().as_deref());
+        if allow_empty_result {
+            eprintln!("worker: --allow-empty-result: an exit-0 task with no commit is acked");
         }
         for p in &rep.gc_slots {
             eprintln!("worker: reclaimed unused cache slot {}", p.display());
@@ -1471,6 +1625,7 @@ impl WtStore {
             min_free,
             max_slots,
             policy,
+            allow_empty_result,
         })
     }
 }
@@ -1495,6 +1650,13 @@ struct Worktree {
     /// The repo the worktree was created from — `remove()` must run git there, not in whatever
     /// the process cwd is by then.
     repo: PathBuf,
+    /// `<root>/<repo-key>`: evidence patches go under it.
+    key_dir: PathBuf,
+    /// The task branch, `worker/<queue>/<id8>`.
+    branch: String,
+    /// The exact commit the worktree was forked from, resolved at creation (#86): the result
+    /// check counts commits against THIS, not the `--base` ref, which may advance mid-task.
+    fork_sha: String,
     /// Owner lock; dropped (lock file removed) by `remove()`.
     lock: TaskLock,
 }
@@ -1602,12 +1764,50 @@ impl Worktree {
                 }
             }
         }
-        eprintln!("  [worktree] {} @ {branch} (base {base})", path.display());
+        let fork_sha = Command::new("git")
+            .current_dir(&path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .ok_or_else(|| format!("worktree {}: cannot resolve its HEAD", path.display()))?;
+        eprintln!(
+            "  [worktree] {} @ {branch} (base {base} = {})",
+            path.display(),
+            &fork_sha[..12.min(fork_sha.len())]
+        );
         Ok(Self {
             path,
             repo: repo.to_path_buf(),
+            key_dir: key_dir.to_path_buf(),
+            branch,
+            fork_sha,
             lock,
         })
+    }
+
+    /// Read the task's result before removal (#86): commits beyond the fork sha, and any
+    /// uncommitted work saved to `<key_dir>/evidence/<name>.patch`.
+    fn settle(&self) -> Settled {
+        // Count FIRST: the save below stages into this worktree's index (it never commits).
+        let commits = worktree_store::commits_beyond(&self.path, &self.fork_sha, &self.branch);
+        let patch = worktree_store::save_uncommitted(
+            &self.path,
+            &worktree_store::evidence_path(&self.key_dir, self.lock.name()),
+        );
+        Settled {
+            branch: self.branch.clone(),
+            fork_sha: self.fork_sha.clone(),
+            commits,
+            patch,
+        }
+    }
+
+    /// Release the owner lock but leave the worktree dir: the next startup sweep sees a free
+    /// lock, retries saving its uncommitted work, then removes it.
+    fn release_keep(self) {
+        drop(self.lock);
     }
 
     /// `git worktree remove --force`, then anything git left behind, then release the owner lock.
@@ -2106,6 +2306,11 @@ mod tests {
         repo
     }
 
+    /// The path [`scratch_repo`] uses for `tag`, without (re)creating it.
+    fn scratch_repo_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("hp-base-test-{tag}-{}", std::process::id()))
+    }
+
     /// Scratch key dir (the disk-backed worktree store) beside the scratch repo.
     fn kd(repo: &Path) -> PathBuf {
         PathBuf::from(format!("{}-kd", repo.display()))
@@ -2308,5 +2513,209 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(kd(&repo));
+    }
+
+    // ── #86: an exit-0 task with no commit is not done; uncommitted work is saved first ──
+
+    /// Fork a task worktree off `main`, let `work` play the child inside it, then settle it the
+    /// way `drain` does and decide. Returns the verdict, the settled result, and whether the
+    /// worktree dir is gone afterwards.
+    fn run_task(
+        tag: &str,
+        exit_ok: bool,
+        allow_empty: bool,
+        work: impl FnOnce(&Path),
+    ) -> (Verdict, Settled, PathBuf) {
+        let repo = scratch_repo(tag);
+        let wt = Worktree::create_in(&repo, &kd(&repo), "q", "eeee0000", "main").unwrap();
+        assert_eq!(wt.fork_sha, git(&repo, &["rev-parse", "main"]));
+        work(&wt.path);
+        let settled = wt.settle();
+        let path = wt.path.clone();
+        wt.remove();
+        assert!(!path.exists(), "worktree removed after settle");
+        let v = verdict(&Ok(exit_ok), Some(&settled), allow_empty);
+        (v, settled, repo)
+    }
+
+    fn cleanup(repo: &Path) {
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(kd(repo));
+    }
+
+    #[test]
+    fn committed_result_acks() {
+        let (v, s, repo) = run_task("res-commit", true, false, |wt| {
+            std::fs::write(wt.join("f.txt"), "done\n").unwrap();
+            git(wt, &["add", "-A"]);
+            git(wt, &["commit", "-m", "work"]);
+        });
+        assert_eq!(v, Verdict::Ack { warn: None });
+        assert_eq!(s.commits, Ok(1));
+        assert_eq!(s.patch, Ok(None));
+        // The commit survives on the branch.
+        git(&repo, &["rev-parse", "--verify", "worker/q/eeee0000"]);
+        cleanup(&repo);
+    }
+
+    #[test]
+    fn exit0_no_commit_dirty_fails_with_reason_and_saves_patch() {
+        let (v, s, repo) = run_task("res-dirty", true, false, |wt| {
+            std::fs::write(wt.join("lost.txt"), "precious\n").unwrap();
+        });
+        let patch = s.patch.clone().unwrap().expect("a patch was saved");
+        assert!(
+            patch.starts_with(kd(&repo).join("evidence")),
+            "{}",
+            patch.display()
+        );
+        let body = std::fs::read_to_string(&patch).unwrap();
+        assert!(
+            body.contains("lost.txt") && body.contains("+precious"),
+            "{body}"
+        );
+        let sha12 = &git(&repo, &["rev-parse", "main"])[..12];
+        assert_eq!(
+            v,
+            Verdict::Nack {
+                requeue: false,
+                reason: format!(
+                    "no commit on worker/q/eeee0000 beyond base {sha12} (child exited 0); \
+                     uncommitted changes saved to {}",
+                    patch.display()
+                ),
+            }
+        );
+        cleanup(&repo);
+    }
+
+    #[test]
+    fn exit0_no_commit_clean_fails_without_patch() {
+        let (v, s, repo) = run_task("res-clean", true, false, |_| {});
+        assert_eq!(s.patch, Ok(None));
+        let Verdict::Nack { requeue, reason } = v else {
+            panic!("an empty result must not ack: {v:?}");
+        };
+        assert!(!requeue);
+        assert!(
+            reason.starts_with("no commit on worker/q/eeee0000 beyond base ")
+                && reason.ends_with("(child exited 0); worktree was clean, nothing saved"),
+            "{reason}"
+        );
+        assert!(!kd(&repo).join("evidence").exists());
+        cleanup(&repo);
+    }
+
+    #[test]
+    fn allow_empty_result_acks_an_empty_exit0() {
+        let (v, _, repo) = run_task("res-allow", true, true, |_| {});
+        assert_eq!(v, Verdict::Ack { warn: None });
+        cleanup(&repo);
+    }
+
+    #[test]
+    fn nonzero_dirty_nacks_for_retry_and_saves_patch() {
+        let (v, s, repo) = run_task("res-fail", false, false, |wt| {
+            std::fs::write(wt.join("half.txt"), "wip\n").unwrap();
+        });
+        let patch = s.patch.unwrap().expect("a patch was saved");
+        assert!(std::fs::read_to_string(&patch)
+            .unwrap()
+            .contains("half.txt"));
+        assert_eq!(
+            v,
+            Verdict::Nack {
+                requeue: true,
+                reason: format!(
+                    "child exited non-zero; uncommitted changes saved to {}",
+                    patch.display()
+                ),
+            }
+        );
+        cleanup(&repo);
+    }
+
+    #[test]
+    fn commit_check_uses_the_pinned_fork_sha_not_the_moving_base() {
+        // `main` advancing mid-task (a dependent wave's base) must not count as task commits.
+        let (v, s, repo) = run_task("res-moving", true, false, |_| {
+            let repo = scratch_repo_path("res-moving");
+            git(&repo, &["checkout", "main"]);
+            git(&repo, &["commit", "--allow-empty", "-m", "advance"]);
+        });
+        assert_eq!(s.commits, Ok(0));
+        assert!(matches!(v, Verdict::Nack { requeue: false, .. }), "{v:?}");
+        cleanup(&repo);
+    }
+
+    #[test]
+    fn verdict_edges() {
+        let s = |commits, patch| Settled {
+            branch: "b".into(),
+            fork_sha: "0123456789abcdef".into(),
+            commits,
+            patch,
+        };
+        // No worktree → the old exit-code-only behaviour.
+        assert_eq!(verdict(&Ok(true), None, false), Verdict::Ack { warn: None });
+        // Committed but also left dirty work → ack, with a warning naming the patch.
+        let v = verdict(
+            &Ok(true),
+            Some(&s(Ok(2), Ok(Some("/e/p.patch".into())))),
+            false,
+        );
+        assert_eq!(
+            v,
+            Verdict::Ack {
+                warn: Some(
+                    "task left uncommitted work; uncommitted changes saved to /e/p.patch".into()
+                )
+            }
+        );
+        // Unverifiable commit count → retryable nack, never an ack.
+        let v = verdict(&Ok(true), Some(&s(Err("boom".into()), Ok(None))), true);
+        assert_eq!(
+            v,
+            Verdict::Nack {
+                requeue: true,
+                reason: "cannot verify commits on b: boom".into()
+            }
+        );
+        // Runner error keeps its text, plus the evidence.
+        let v = verdict(
+            &Err("lease lost".into()),
+            Some(&s(Ok(0), Ok(Some("/p".into())))),
+            false,
+        );
+        assert_eq!(
+            v,
+            Verdict::Nack {
+                requeue: true,
+                reason: "lease lost; uncommitted changes saved to /p".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_allow_empty_result_flag_and_env() {
+        let a = parse_args(&argv(&["hp", "worker", "--queue", "q", "--", "true"])).unwrap();
+        assert!(!a.allow_empty_result, "default off");
+        let a = parse_args(&argv(&[
+            "hp",
+            "worker",
+            "--queue",
+            "q",
+            "--allow-empty-result",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert!(a.allow_empty_result);
+        for t in ["1", "true", "YES", " on "] {
+            assert!(env_truthy(Some(t)), "{t}");
+        }
+        for f in [None, Some(""), Some("0"), Some("false"), Some("no")] {
+            assert!(!env_truthy(f), "{f:?}");
+        }
     }
 }

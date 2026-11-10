@@ -167,6 +167,9 @@ fn worker_cmd(e: &Env, root_env: &Path, min_free: &str, extra: &[&str], child: &
         .env("HYPERPANES_WORKTREE_SLOT_MAX", "0")
         .env("HYPERPANES_WORKTREE_CACHE_MAX", "0")
         .env("HYPERPANES_WORKTREE_SOFT_FREE", "0")
+        // These children only write markers (no commit); the #86 empty-result check would fail
+        // them. Results are covered in worker_worktree_nack.rs; here only placement matters.
+        .env("HYPERPANES_WORKER_ALLOW_EMPTY_RESULT", "1")
         .args([
             "worker",
             "--queue",
