@@ -6634,7 +6634,6 @@ mod session_file_tests {
         // Seed a pane from a command-bearing spec (the restore path stores the spawn spec).
         let seed = WorkspaceFile {
             groups: Some(vec![GroupSpec {
-                color: None,
                 panes: vec![PaneSpec {
                     command: Some("claude".into()),
                     args: Some(vec!["--model".into(), "opus".into()]),
@@ -6700,7 +6699,6 @@ mod session_file_tests {
         );
         let snap = WorkspaceFile {
             groups: Some(vec![GroupSpec {
-                color: None,
                 panes: vec![PaneSpec {
                     // A recorded uid from a "previous run" — on the in-process backend it can't
                     // be alive (the prior GUI's PTYs are gone), so it must be ignored for restore.
@@ -6801,7 +6799,6 @@ mod session_file_tests {
         st.adopt_pane(&m, det("keep", 14.0));
         let file = WorkspaceFile {
             groups: Some(vec![GroupSpec {
-                color: None,
                 panes: vec![],
                 ..Default::default()
             }]),
@@ -7531,7 +7528,6 @@ mod tab_dock_tests {
     fn seed_with(dock: Option<&str>) -> WorkspaceFile {
         WorkspaceFile {
             groups: Some(vec![GroupSpec {
-                color: None,
                 panes: vec![PaneSpec {
                     command: Some("sh".into()),
                     ..Default::default()

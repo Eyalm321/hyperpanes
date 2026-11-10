@@ -421,7 +421,6 @@ pub fn parse_cli_with(argv: &[String], exists_fn: impl Fn(&str) -> bool) -> Pars
                 .tabs
                 .into_iter()
                 .map(|t| GroupSpec {
-                    color: None,
                     title: t.title,
                     layout: t.layout,
                     panes: t.panes,
@@ -754,13 +753,11 @@ mod tests {
                 title: None,
                 groups: vec![
                     GroupSpec {
-                        color: None,
                         title: Some("app".into()),
                         panes: vec![pane("a", "a")],
                         ..Default::default()
                     },
                     GroupSpec {
-                        color: None,
                         title: Some("logs".into()),
                         panes: vec![pane("b", "b")],
                         ..Default::default()
@@ -784,7 +781,6 @@ mod tests {
                 WindowSpec {
                     title: Some("one".into()),
                     groups: vec![GroupSpec {
-                        color: None,
                         layout: Some("grid".into()),
                         panes: vec![pane("a", "a")],
                         ..Default::default()
@@ -794,7 +790,6 @@ mod tests {
                 WindowSpec {
                     title: Some("two".into()),
                     groups: vec![GroupSpec {
-                        color: None,
                         panes: vec![pane("b", "b")],
                         ..Default::default()
                     }],
@@ -812,7 +807,6 @@ mod tests {
             r.workspace.unwrap().windows.unwrap(),
             vec![WindowSpec {
                 groups: vec![GroupSpec {
-                    color: None,
                     panes: vec![pane("only", "only")],
                     ..Default::default()
                 }],

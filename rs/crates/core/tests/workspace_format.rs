@@ -190,7 +190,6 @@ fn windows_of_normalises_each_round_tripped_shape_identically() {
         },
         WorkspaceFile {
             groups: Some(vec![GroupSpec {
-                color: None,
                 panes: vec![PaneSpec {
                     label: Some("b".into()),
                     ..Default::default()

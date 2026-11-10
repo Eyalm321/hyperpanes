@@ -2,11 +2,10 @@
 //! POST /command mutates the central `readmodel` directly and returns `{ok, result}`
 //! SYNCHRONOUSLY (the set_meta echo race is now structurally impossible). Commands:
 //! newPane (→ returns new paneId) / closePane / setLayout / renameTab / recolorTab / renamePane /
-//! recolorPane / setMeta /
-//! focusPane / openTab(attach) / restartPane / readScreen / recoverPane. PRESERVE the response
-//! shapes + status mapping byte-for-byte: 500 on action error, 404 window-not-found, 400
-//! missing-type/target, 403 scope error. `readScreen` serializes the central `alacritty_terminal`
-//! Term via `session::screen` (`SessionManager::render_screen`).
+//! recolorPane / setMeta / focusPane / openTab(attach) / restartPane / readScreen / recoverPane.
+//! PRESERVE the response shapes + status mapping byte-for-byte: 500 on action error, 404
+//! window-not-found, 400 missing-type/target, 403 scope error. `readScreen` serializes the
+//! central `alacritty_terminal` Term via `session::screen` (`SessionManager::render_screen`).
 //!
 //! `recoverPane` is the agent-pane API-error recovery contract documented in
 //! `docs/agent-recovery.md`, built on the pure detection/classification/repair logic in
