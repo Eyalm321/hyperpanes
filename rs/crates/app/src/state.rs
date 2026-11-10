@@ -7356,3 +7356,151 @@ mod env_persist_tests {
         assert!(pane.env_dropped.is_none());
     }
 }
+
+#[cfg(test)]
+mod tab_dock_tests {
+    use super::*;
+    use crate::command::{dispatch, Command};
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+
+    fn with_tabs(n: usize) -> State {
+        let mut st = fresh();
+        while st.tabs.len() < n {
+            let t = st.fresh_tab();
+            st.tabs.push(t);
+        }
+        st
+    }
+
+    fn seed_with(dock: Option<&str>) -> WorkspaceFile {
+        WorkspaceFile {
+            groups: Some(vec![GroupSpec {
+                panes: vec![PaneSpec {
+                    command: Some("sh".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            tab_dock: dock.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_is_top_and_commands_set_dirty() {
+        let mut st = fresh();
+        let m = mgr();
+        assert_eq!(st.tab_dock, TabDock::Top);
+        st.dirty = false;
+        dispatch(&mut st, Command::SetTabDock(TabDock::Left), &m);
+        assert_eq!(st.tab_dock, TabDock::Left);
+        assert!(st.dirty);
+        st.dirty = false;
+        dispatch(&mut st, Command::CycleTabDock, &m);
+        assert_eq!(st.tab_dock, TabDock::Top);
+        assert!(st.dirty);
+        dispatch(&mut st, Command::CycleTabDock, &m);
+        assert_eq!(st.tab_dock, TabDock::Right);
+    }
+
+    #[test]
+    fn session_snapshot_round_trips_both_sides_and_top_writes_nothing() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        for (dock, text) in [(TabDock::Right, "right"), (TabDock::Left, "left")] {
+            let mut st = fresh();
+            st.load_workspace(seed_with(None), &mgr());
+            st.tab_dock = dock;
+            let snap = st.to_session_file();
+            assert_eq!(snap.tab_dock.as_deref(), Some(text));
+            let json = serde_json::to_string(&snap).unwrap();
+            assert!(json.contains(&format!("\"tabDock\":\"{text}\"")));
+            let mut st2 = fresh();
+            st2.load_workspace(snap, &mgr());
+            assert_eq!(st2.tab_dock, dock);
+        }
+        let mut st = fresh();
+        st.load_workspace(seed_with(None), &mgr());
+        let snap = st.to_session_file();
+        assert_eq!(snap.tab_dock, None);
+        assert!(!serde_json::to_string(&snap).unwrap().contains("tabDock"));
+        // A file without the field leaves the current side unchanged.
+        let mut st = fresh();
+        st.tab_dock = TabDock::Left;
+        st.load_workspace(seed_with(None), &mgr());
+        assert_eq!(st.tab_dock, TabDock::Left);
+        // An unknown value means top.
+        st.load_workspace(seed_with(Some("bottom")), &mgr());
+        assert_eq!(st.tab_dock, TabDock::Top);
+    }
+
+    #[test]
+    fn workspace_template_never_writes_tab_dock() {
+        let mut st = fresh();
+        st.tab_dock = TabDock::Right;
+        let f = st.to_workspace_file();
+        assert_eq!(f.tab_dock, None);
+        assert!(!serde_json::to_string(&f).unwrap().contains("tabDock"));
+    }
+
+    #[test]
+    fn select_tab_number_jumps_and_nine_is_last() {
+        let mut st = with_tabs(4);
+        st.select_tab_number(3);
+        assert_eq!(st.active, 2);
+        st.select_tab_number(9);
+        assert_eq!(st.active, 3);
+        st.select_tab_number(1);
+        assert_eq!(st.active, 0);
+        // A tab number past the end is a no-op.
+        st.select_tab_number(8);
+        assert_eq!(st.active, 0);
+        let m = mgr();
+        dispatch(&mut st, Command::SelectTabNumber(9), &m);
+        assert_eq!(st.active, 3);
+    }
+
+    #[test]
+    fn cycle_tab_wraps_both_ways() {
+        let mut st = with_tabs(3);
+        st.cycle_tab(-1);
+        assert_eq!(st.active, 2);
+        st.cycle_tab(1);
+        assert_eq!(st.active, 0);
+        st.cycle_tab(1);
+        assert_eq!(st.active, 1);
+    }
+
+    #[test]
+    fn palette_and_tab_menu_offer_only_the_other_positions() {
+        for cur in [TabDock::Top, TabDock::Right, TabDock::Left] {
+            let mut st = fresh();
+            st.tab_dock = cur;
+            let docks: Vec<TabDock> = crate::palette::build(&st)
+                .into_iter()
+                .filter_map(|e| match e.command {
+                    Command::SetTabDock(d) => Some(d),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(docks.len(), 2);
+            assert!(!docks.contains(&cur));
+            st.open_tab_context(0, 10.0, 10.0);
+            let n = (0..40)
+                .filter(|&r| matches!(st.ctx_command(r), Some(Command::SetTabDock(_))))
+                .count();
+            assert_eq!(n, 2);
+            assert!(!(0..40).any(|r| matches!(st.ctx_command(r), Some(Command::SetTabDock(d)) if d == cur)));
+        }
+    }
+}
