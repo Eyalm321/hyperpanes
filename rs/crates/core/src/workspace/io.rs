@@ -244,6 +244,7 @@ pub fn windows_of(file: Option<&WorkspaceFile>) -> Vec<WindowSpec> {
                 title: file.name.clone(),
                 active: file.active,
                 groups: groups.clone(),
+                tab_dock: file.tab_dock.clone(),
                 ..Default::default()
             }];
         }
@@ -259,6 +260,7 @@ pub fn windows_of(file: Option<&WorkspaceFile>) -> Vec<WindowSpec> {
                     panes: panes.clone(),
                     ..Default::default()
                 }],
+                tab_dock: file.tab_dock.clone(),
                 ..Default::default()
             }];
         }
@@ -279,6 +281,31 @@ mod tests {
     }
 
     // ---- describe('windowsOf') ----
+
+    #[test]
+    fn windows_of_carries_tab_dock_from_top_level() {
+        let from_groups = WorkspaceFile {
+            groups: Some(vec![GroupSpec {
+                panes: vec![pane_label("a")],
+                ..Default::default()
+            }]),
+            tab_dock: Some("right".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            windows_of(Some(&from_groups))[0].tab_dock.as_deref(),
+            Some("right")
+        );
+        let from_panes = WorkspaceFile {
+            panes: Some(vec![pane_label("a")]),
+            tab_dock: Some("left".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            windows_of(Some(&from_panes))[0].tab_dock.as_deref(),
+            Some("left")
+        );
+    }
 
     #[test]
     fn returns_empty_for_null_or_contentless() {

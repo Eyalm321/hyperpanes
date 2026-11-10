@@ -68,7 +68,9 @@ fn kitchen_sink() -> WorkspaceFile {
                 fullscreen: Some(true),
             }),
             groups: vec![group],
+            tab_dock: Some("left".into()),
         }]),
+        tab_dock: Some("right".into()),
     }
 }
 
