@@ -61,6 +61,18 @@ Now:
   [`worker-worktree-disk.md`](worker-worktree-disk.md), which also covers where worktrees live
   (a disk-backed root, no longer `/tmp`), the orphan sweep, and the shared build cache.
 
+## An exit 0 with no commit fails the task
+
+The commit check uses the base too. When the child exits, the runner counts the task branch's
+commits beyond the exact sha the worktree was forked from (resolved at creation, so a `--base`
+branch that advances mid-task doesn't skew it). Zero commits on an exit 0 is not a result: the
+task is **failed** (`requeue: false`) with
+`no commit on worker/<queue>/<id8> beyond base <sha12> (child exited 0)`. Any uncommitted work is
+saved first as an evidence patch, and its path goes in the reason. `--allow-empty-result` (env
+`HYPERPANES_WORKER_ALLOW_EMPTY_RESULT=1`) restores the ack for queues whose tasks legitimately
+produce no commit. Details, patch location and retention are in
+[`worker-worktree-disk.md`](worker-worktree-disk.md#task-results-and-evidence-patches).
+
 ## Migration
 
 - Bare runner invocations: add the flag —

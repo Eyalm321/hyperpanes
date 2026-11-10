@@ -230,6 +230,12 @@ The native runner can run each claimed task in a throwaway git worktree on a fre
   (`~/.cache` on Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows), not the
   system temp dir. Override it with `--worktree-root <dir>` or `HYPERPANES_WORKTREE_ROOT`, or
   through `spawn_workers`' `env`.
+- **Result check.** An exit 0 with no commit on the task branch beyond its fork sha **fails**
+  the task (`requeue: false`) instead of acking it. Uncommitted work is saved as an evidence
+  patch under `<root>/<repo>-<hash8>/evidence/` (kept 14 days) before the worktree is removed,
+  and that happens on every exit path. `--allow-empty-result` /
+  `HYPERPANES_WORKER_ALLOW_EMPTY_RESULT=1` acks empty results for read-only queues. See
+  [`worker-worktree-disk.md`](worker-worktree-disk.md#task-results-and-evidence-patches).
 - **Cleanup.** A finished task's worktree is removed and its branch kept. Every worktree has an
   OS file lock held by its runner (and by the task's child on unix), so a runner that starts
   sweeps the orphans of crashed runners for its repo, then runs `git worktree prune`.

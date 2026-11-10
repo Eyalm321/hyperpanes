@@ -284,6 +284,11 @@ fn goals_mcp_config_json(control_json_path: &str) -> String {
                 "type": "stdio",
                 "command": "npx",
                 "args": ["-y", "hyperpanes-mcp"],
+                // Keep this one server's tools directly callable while tool search stays on for
+                // everything else. With tool search on (often set in an account's settings.json
+                // env), MCP tools are deferred, and a `claude -p` impl agent must not ToolSearch
+                // on its single turn, so without this it never sees read_messages/send_message.
+                "alwaysLoad": true,
                 "env": {
                     "HYPERPANES_ALLOW_INPUT": "1",
                     "HYPERPANES_CONTROL_FILE": control_json_path,
@@ -570,6 +575,7 @@ mod goals_mcp_config_tests {
         let hyperpanes = &parsed["mcpServers"]["hyperpanes"];
         assert_eq!(hyperpanes["command"], "npx");
         assert_eq!(hyperpanes["env"]["HYPERPANES_CONTROL_FILE"], control_path);
+        assert_eq!(hyperpanes["alwaysLoad"], true);
         assert!(json.contains(control_path));
         assert!(json.contains("hyperpanes"));
     }
