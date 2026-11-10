@@ -12,8 +12,6 @@ pub enum TabDock {
     Left,
 }
 
-/// Width of a docked tab column, in logical px.
-pub const DOCK_COLUMN_W: f32 = 176.0;
 /// Width of the LEFT/RIGHT drop zones measured from the window edge.
 pub const DOCK_EDGE_ZONE: f32 = 160.0;
 /// Height of the top bar (the TOP drop zone is `y < TOP_ZONE`).
@@ -30,6 +28,7 @@ impl TabDock {
         }
     }
 
+    #[cfg(test)]
     pub fn from_i32(v: i32) -> Option<TabDock> {
         match v {
             0 => Some(TabDock::Top),

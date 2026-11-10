@@ -730,7 +730,9 @@ mod tests {
         let mut km = empty_keymap();
         for n in 1..=9 {
             let ch = char::from_digit(n, 10).unwrap();
-            assert!(km.match_chord(true, false, false, KeyTok::Char(ch)).is_none());
+            assert!(km
+                .match_chord(true, false, false, KeyTok::Char(ch))
+                .is_none());
         }
         let row = |km: &Keymap| km.rows().into_iter().find(|r| r.id == "tab.goto1").unwrap();
         assert!(row(&km).unbound);
@@ -749,7 +751,9 @@ mod tests {
         assert!(!row(&km).unbound);
         // Reset returns it to unbound.
         km.overrides.remove("tab.goto1");
-        assert!(km.match_chord(true, false, false, KeyTok::Char('1')).is_none());
+        assert!(km
+            .match_chord(true, false, false, KeyTok::Char('1'))
+            .is_none());
         assert!(row(&km).unbound);
         // Ctrl+9 maps to the "last tab" command when bound.
         let nine = bindings().iter().find(|b| b.id == "tab.goto9").unwrap();
@@ -776,7 +780,10 @@ mod tests {
     fn page_keys_can_be_captured_for_a_rebind() {
         // The rebind capture path is `key_tok_from_text` → `Keymap::set`.
         use slint::platform::Key;
-        for (k, tok) in [(Key::PageUp, KeyTok::PageUp), (Key::PageDown, KeyTok::PageDown)] {
+        for (k, tok) in [
+            (Key::PageUp, KeyTok::PageUp),
+            (Key::PageDown, KeyTok::PageDown),
+        ] {
             let s: slint::SharedString = k.into();
             assert_eq!(crate::key_tok_from_text(&s, true), Some(tok));
         }
