@@ -914,10 +914,11 @@ fn do_restart(shared: &Arc<Shared>, pane_id: &str, attempt: u32, max: u32, code:
                 p.args.clone(),
                 p.command.clone(),
                 p.cwd.clone(),
+                p.meta.clone(),
             )
         })
     };
-    let Some((shell, args, command, cwd)) = recipe else {
+    let Some((shell, args, command, cwd, meta)) = recipe else {
         return; // pane closed during backoff — drop the restart
     };
     let new_uid = uuid::Uuid::new_v4().to_string();
@@ -927,7 +928,7 @@ fn do_restart(shared: &Arc<Shared>, pane_id: &str, attempt: u32, max: u32, code:
         args,
         command,
         cwd,
-        env: None,
+        env: crate::session_manager::stamp_unattended(None, meta.as_ref()),
         cols: None,
         rows: None,
         pane_id: Some(pane_id.to_string()),

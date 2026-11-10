@@ -66,6 +66,7 @@ const RUNTIME_KEYS: &[&str] = &[
     "HP_QUEUE",
     "HP_WORKTREE_CACHE_DIR",
     "HYPERPANES_VERSION",
+    "HYPERPANES_UNATTENDED",
 ];
 
 fn is_runtime_key(k: &str) -> bool {
@@ -241,18 +242,25 @@ mod tests {
 
     #[test]
     fn running_version_is_never_persisted() {
-        let e = env(&[("HYPERPANES_VERSION", "1.2.3"), ("EDITOR", "vim")]);
+        let e = env(&[
+            ("HYPERPANES_VERSION", "1.2.3"),
+            ("HYPERPANES_UNATTENDED", "1"),
+            ("EDITOR", "vim"),
+        ]);
         for mode in [
             Mode::Default,
             Mode::All,
-            Mode::Keys(vec!["HYPERPANES_VERSION".into(), "EDITOR".into()]),
+            Mode::Keys(vec![
+                "HYPERPANES_VERSION".into(),
+                "HYPERPANES_UNATTENDED".into(),
+                "EDITOR".into(),
+            ]),
         ] {
             let (kept, dropped) = persistable_env(&e, &mode, &[]);
-            assert!(!kept.contains_key("HYPERPANES_VERSION"), "{mode:?}");
-            assert!(
-                dropped.iter().any(|k| k == "HYPERPANES_VERSION"),
-                "{mode:?}"
-            );
+            for k in ["HYPERPANES_VERSION", "HYPERPANES_UNATTENDED"] {
+                assert!(!kept.contains_key(k), "{k} {mode:?}");
+                assert!(dropped.iter().any(|d| d == k), "{k} {mode:?}");
+            }
         }
     }
 
