@@ -63,9 +63,20 @@ const HEADER_BAND: f32 = 26.0;
 /// Best-effort: a failed write must never block quit.
 fn persist_last_session(file: &hyperpanes_core::workspace::model::WorkspaceFile) {
     use hyperpanes_core::persistence::paths;
+    persist_last_session_to(&paths::last_workspace_json(), file);
+}
+
+/// [`persist_last_session`] to an explicit `path`. The file carries per-pane spawn env, so it is
+/// written owner-only (0600 on Unix): `write_atomic_private` creates each fresh temp file 0600
+/// and renames it over the target, so a pre-existing 0644 file is fixed on its next write.
+fn persist_last_session_to(
+    path: &std::path::Path,
+    file: &hyperpanes_core::workspace::model::WorkspaceFile,
+) {
+    use hyperpanes_core::persistence::paths;
     match serde_json::to_string_pretty(file) {
         Ok(json) => {
-            if let Err(e) = paths::write_atomic(&paths::last_workspace_json(), json.as_bytes()) {
+            if let Err(e) = paths::write_atomic_private(path, json.as_bytes()) {
                 crate::dbg_log(&format!("last-session save failed: {e}"));
             }
         }
@@ -542,7 +553,10 @@ impl App {
         }
         // Final snapshot NOW — don't rely on the last autosave tick being fresh.
         if let Some(w) = self.windows.borrow().first() {
-            let mut f = w.state.borrow().to_session_file();
+            let mut f = w
+                .state
+                .borrow()
+                .to_session_file_with(|u| self.control.meta_for_uid(u));
             self.embed_claude_sessions(&mut f);
             persist_last_session(&f);
         }
@@ -617,7 +631,10 @@ impl App {
         }
         let file = match self.windows.borrow().first() {
             Some(w) => {
-                let mut f = w.state.borrow().to_session_file();
+                let mut f = w
+                    .state
+                    .borrow()
+                    .to_session_file_with(|u| self.control.meta_for_uid(u));
                 self.embed_claude_sessions(&mut f);
                 f
             }
@@ -1116,7 +1133,10 @@ impl App {
             let mut last_session = None;
             for w in self.windows.borrow().iter() {
                 if w.closing.get() {
-                    let mut f = w.state.borrow().to_session_file();
+                    let mut f = w
+                        .state
+                        .borrow()
+                        .to_session_file_with(|u| self.control.meta_for_uid(u));
                     self.embed_claude_sessions(&mut f);
                     last_session = Some(f);
                     // Tell the AI engine to forget this window's panes, and drop its context sig.
@@ -3686,5 +3706,25 @@ mod relaunch_tests {
     fn relaunch_exe_strips_only_a_trailing_suffix() {
         let exe = std::path::Path::new("/opt/a (deleted) dir/myapp");
         assert_eq!(relaunch_exe(exe, |_| true), exe.to_path_buf());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod last_session_mode_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn last_session_file_is_0600_even_over_an_existing_0644_file() {
+        let dir = std::env::temp_dir().join(format!("hp_last_session_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("last-workspace.json");
+        let file = hyperpanes_core::workspace::model::WorkspaceFile::default();
+        super::persist_last_session_to(&path, &file);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::persist_last_session_to(&path, &file);
+        assert_eq!(mode(&path), 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

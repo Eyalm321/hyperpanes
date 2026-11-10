@@ -38,6 +38,8 @@ fn kitchen_sink() -> WorkspaceFile {
         ])),
         uid: Some("pane-3".into()),
         talk: Some(true),
+        env: Some(BTreeMap::from([("MY_VAR".to_string(), "1".to_string())])),
+        env_dropped: Some(vec!["MY_SECRET".to_string()]),
     };
     let group = GroupSpec {
         title: Some("build".into()),

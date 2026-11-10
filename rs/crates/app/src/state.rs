@@ -82,6 +82,9 @@ pub struct DetachedPane {
     pub spawn_command: Option<String>,
     pub spawn_args: Option<Vec<String>>,
     pub spawn_shell: Option<String>,
+    /// The explicit spawn env, carried across a re-host so the relaunch snapshot can still
+    /// persist it (see `hyperpanes_core::workspace::env_persist`).
+    pub spawn_env: Option<hyperpanes_core::session::spawn::EnvMap>,
 }
 
 /// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
@@ -1143,6 +1146,10 @@ pub struct State {
     /// `--resume`d orchestrator never starts again. Without the role the inbox nudge never fires,
     /// so a spec agent reporting back is never heard — the goal org goes silent.
     pub pending_pane_meta: Vec<(String, std::collections::BTreeMap<String, String>)>,
+    /// Extra key patterns (`*` = prefix) added to the default spawn-env persistence allow-list
+    /// (`hyperpanes_core::workspace::env_persist`). Empty by default; see
+    /// [`State::set_env_persist_allow`].
+    env_persist_allow: Vec<String>,
     /// Goals system: images attached to the in-progress New-goal dialog, held as file
     /// paths (clipboard images are captured to temp PNGs) until submit, when their paths are
     /// written into the goal prompt. Cleared on open and on submit.
@@ -1288,6 +1295,7 @@ impl State {
             goal_orchestrators: std::collections::HashMap::new(),
             goal_orch_models: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
+            env_persist_allow: Vec::new(),
             goal_draft_images: Vec::new(),
             goal_text: String::new(),
             goal_field: 0,
@@ -1851,6 +1859,7 @@ impl State {
                 spawn_command: ps.spawn_command,
                 spawn_args: ps.spawn_args,
                 spawn_shell: ps.spawn_shell,
+                spawn_env: ps.env,
             },
             alive,
         ))
@@ -1914,7 +1923,7 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
-            env: None,
+            env: det.spawn_env,
             // A re-hosted session: its original spawn shell isn't tracked across the detach,
             // so the badge stays hidden ("") rather than guessing.
             shell_label: String::new(),
@@ -1986,6 +1995,7 @@ impl State {
                 spawn_command: ps.spawn_command,
                 spawn_args: ps.spawn_args,
                 spawn_shell: ps.spawn_shell,
+                spawn_env: ps.env,
             },
             alive,
         ))
@@ -4665,6 +4675,7 @@ impl State {
             spawn_command: ps.spawn_command,
             spawn_args: ps.spawn_args,
             spawn_shell: ps.spawn_shell,
+            spawn_env: ps.env,
         })
     }
 
@@ -4723,7 +4734,7 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
-            env: None,
+            env: det.spawn_env,
             // A re-hosted session: its original spawn shell isn't tracked across the detach,
             // so the badge stays hidden ("") rather than guessing.
             shell_label: String::new(),
@@ -4899,6 +4910,7 @@ impl State {
                 spawn_command: p.spawn_command,
                 spawn_args: p.spawn_args,
                 spawn_shell: p.spawn_shell,
+                spawn_env: p.env,
             })
             .collect();
         Some((
@@ -5088,7 +5100,25 @@ impl State {
     ///     re-attach payoff in `docs/session-daemon-plan.md`).
     /// Per-pane zoom (#14): exactly like the workspace path, a pane whose terminal font
     /// differs from the base size records `font_size`, so zoom survives a plain relaunch.
+    #[cfg_attr(not(test), allow(dead_code))] // the app uses `to_session_file_with`
     pub fn to_session_file(&self) -> WorkspaceFile {
+        self.to_session_file_with(|_| None)
+    }
+
+    /// Extend the default spawn-env persistence allow-list with extra key patterns (`*` =
+    /// prefix), so an embedding build can persist its own variables without changing the core
+    /// policy module.
+    #[allow(dead_code)] // embedder hook; no in-tree caller by design
+    pub fn set_env_persist_allow(&mut self, patterns: Vec<String>) {
+        self.env_persist_allow = patterns;
+    }
+
+    /// [`Self::to_session_file`], where `pane_meta(uid)` supplies a pane's control meta so its
+    /// `hp.persist-env` mode is honoured (the meta lives in the control host, not here).
+    pub fn to_session_file_with(
+        &self,
+        pane_meta: impl Fn(&str) -> Option<std::collections::BTreeMap<String, String>>,
+    ) -> WorkspaceFile {
         let base = self.settings.font_px.round() as u32;
         // A 0-pane tab can exist transiently while the window is closing (the emptied
         // last tab is left in place — `take_pane_in`), and this snapshot is taken exactly
@@ -5111,8 +5141,11 @@ impl State {
                     .iter()
                     .map(|p| {
                         let px = p.font_px.round() as u32;
+                        let (env, env_dropped) = self.persisted_env_of(p, &pane_meta(&p.uid));
                         PaneSpec {
                             label: Some(p.title.to_string()),
+                            env,
+                            env_dropped,
                             color: p.pinned_accent.map(color_hex),
                             // The original program (command/args/shell) so restore re-runs it
                             // instead of a default shell — and the live session uid so a future
@@ -5149,6 +5182,30 @@ impl State {
             active: Some(active_out),
             ..Default::default()
         }
+    }
+
+    /// The filtered spawn env + dropped key names the relaunch snapshot records for `p`. Only
+    /// the pane's explicit spawn env is considered; see `env_persist`.
+    fn persisted_env_of(
+        &self,
+        p: &PaneState,
+        meta: &Option<std::collections::BTreeMap<String, String>>,
+    ) -> (
+        Option<std::collections::BTreeMap<String, String>>,
+        Option<Vec<String>>,
+    ) {
+        use hyperpanes_core::workspace::env_persist::{persist_mode, persistable_env};
+        let Some(e) = p.env.as_ref().filter(|e| !e.is_empty()) else {
+            return (None, None);
+        };
+        let e: std::collections::BTreeMap<String, String> =
+            e.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let (kept, dropped) =
+            persistable_env(&e, &persist_mode(meta.as_ref()), &self.env_persist_allow);
+        (
+            (!kept.is_empty()).then_some(kept),
+            (!dropped.is_empty()).then_some(dropped),
+        )
     }
 
     /// "Save workspace…": pick a destination via the native save dialog and write the active
@@ -5309,6 +5366,25 @@ impl State {
         self.tabs.push(tab);
     }
 
+    /// Tell the user what a restored pane could not get back: one warning line, plus pane meta
+    /// `hp.env-dropped` (names only, capped) queued for the control plane.
+    fn note_env_dropped(&mut self, uid: &str, spec: &PaneSpec) {
+        use hyperpanes_core::workspace::env_persist::{dropped_meta_value, META_ENV_DROPPED};
+        let Some(dropped) = spec.env_dropped.as_ref().filter(|d| !d.is_empty()) else {
+            return;
+        };
+        eprintln!(
+            "[hyperpanes] restored pane '{}': env not persisted: {}",
+            spec.label.as_deref().unwrap_or(""),
+            dropped.join(", ")
+        );
+        if let Some(v) = dropped_meta_value(dropped) {
+            let mut meta = std::collections::BTreeMap::new();
+            meta.insert(META_ENV_DROPPED.to_string(), v);
+            self.pending_pane_meta.push((uid.to_string(), meta));
+        }
+    }
+
     /// Spawn a pane from a `PaneSpec` (its command/args/cwd/shell), returning the `PaneState`.
     /// A spec with a `color` is treated like a project pane (tinted: frame + dot on, accent
     /// pinned); a colorless spec is a clean pane coloured by slot.
@@ -5393,7 +5469,8 @@ impl State {
         let mut spawn_command = spec.command.clone();
         let mut spawn_args = spec.args.clone();
         let mut spawn_cwd = spec.cwd.clone();
-        let mut spawn_env: Option<hyperpanes_core::session::spawn::EnvMap> = None;
+        // Overlay layers atop the persisted env (merged below): the rebuilt orchestrator env.
+        let mut goal_env: Option<hyperpanes_core::session::spawn::EnvMap> = None;
         // ---- Goal orchestrator: rebuild the launch, don't replay it ----
         // The saved command froze every flag at first launch: a dated `--model` that never tracks
         // a new generation, and none of the spawn env (persona dir, settings, account list,
@@ -5420,7 +5497,7 @@ impl State {
                 ) {
                     spawn_command = Some(cmd);
                     spawn_args = None;
-                    spawn_env = Some(env);
+                    goal_env = Some(env);
                 }
             }
             if self.goal_orchestrators.contains_key(project) {
@@ -5432,6 +5509,7 @@ impl State {
             self.register_goal_orchestrator(&uid, project, models.clone());
         }
         let mut startup = None;
+        let mut config_dir_env: Option<String> = None;
         if let Some(id) = &resume_id {
             let r = plan_claude_resume(
                 spawn_command.take(),
@@ -5446,12 +5524,15 @@ impl State {
             if let Some(c) = r.cwd {
                 spawn_cwd = Some(c);
             }
-            if let Some(dir) = r.config_dir_env {
-                spawn_env
-                    .get_or_insert_with(Default::default)
-                    .insert("CLAUDE_CONFIG_DIR".to_string(), dir);
-            }
+            config_dir_env = r.config_dir_env;
         }
+        // Spawn env layers: persisted base < rebuilt goal env < the conversation's account.
+        let spawn_env = hyperpanes_core::workspace::env_persist::merge_restore_env(
+            spec.env.as_ref(),
+            goal_env.as_ref(),
+            config_dir_env.as_deref(),
+        );
+        self.note_env_dropped(&uid, spec);
 
         let mut pane = TerminalPane::new(
             cols as usize,
@@ -5534,7 +5615,11 @@ impl State {
             font,
             font_dirty: false,
             cwd: None,
-            env: None,
+            // The persisted base env, so the next relaunch snapshot keeps it.
+            env: spec
+                .env
+                .as_ref()
+                .map(|e| e.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
             // The resolved shell program → its short header badge (computed once here).
             shell_label: shell_label(&shell_path),
             // Carry the spawned program forward so a later relaunch snapshot still records it
@@ -6027,6 +6112,7 @@ mod dictation_tests {
             spawn_command: None,
             spawn_args: None,
             spawn_shell: None,
+            spawn_env: None,
         }
     }
 
@@ -6147,6 +6233,7 @@ mod spawn_cells_tests {
             spawn_command: None,
             spawn_args: None,
             spawn_shell: None,
+            spawn_env: None,
         }
     }
 
@@ -6232,6 +6319,7 @@ mod session_file_tests {
             spawn_command: None,
             spawn_args: None,
             spawn_shell: None,
+            spawn_env: None,
         }
     }
 
@@ -6570,6 +6658,7 @@ mod reminder_tests {
             spawn_command: None,
             spawn_args: None,
             spawn_shell: None,
+            spawn_env: None,
         }
     }
 
@@ -7001,5 +7090,94 @@ mod goal_restore_tests {
                 Some("/home/user/dev/myapp")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod env_persist_tests {
+    use super::*;
+
+    fn fresh() -> State {
+        State::new(theme::load_font(1.0))
+    }
+    fn mgr() -> SessionManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        SessionManager::new(tx)
+    }
+    fn det_with_env(uid: &str, env: &[(&str, &str)]) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            title: "p".into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: Some("sh".into()),
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: Some(
+                env.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn snapshot_round_trips_env_and_template_omits_it() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        st.set_env_persist_allow(vec!["MYTOOL_*".into()]);
+        st.adopt_pane(
+            &mgr(),
+            det_with_env(
+                "11111111-uuid",
+                &[("MYTOOL_TEAM", "core"), ("GH_TOKEN", "x"), ("FOO", "1")],
+            ),
+        );
+        let snap = st.to_session_file();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(
+            json.contains("\"envDropped\":[\"FOO\",\"GH_TOKEN\"]"),
+            "{json}"
+        );
+        assert!(
+            !json.contains("\"x\""),
+            "values of dropped keys never recorded"
+        );
+        let back: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let pane = &back.groups.as_ref().unwrap()[0].panes[0];
+        assert_eq!(pane.env.as_ref().unwrap()["MYTOOL_TEAM"], "core");
+        assert_eq!(pane.env_dropped.as_ref().unwrap().len(), 2);
+
+        // Restore: the persisted env is the pane's base env again.
+        let mut st2 = fresh();
+        st2.load_workspace(back, &mgr());
+        let env = st2.active_tab().panes[0].env.as_ref().unwrap();
+        assert_eq!(env["MYTOOL_TEAM"], "core");
+        assert!(st2
+            .pending_pane_meta
+            .iter()
+            .any(|(_, m)| m.get("hp.env-dropped").map(String::as_str) == Some("FOO,GH_TOKEN")));
+
+        // A workspace template (Save dialog) never carries env.
+        let tpl = serde_json::to_string(&st.to_workspace_file()).unwrap();
+        assert!(!tpl.contains("env") && !tpl.contains("MYTOOL"), "{tpl}");
+    }
+
+    #[test]
+    fn persist_mode_meta_is_honoured() {
+        let mut st = fresh();
+        st.adopt_pane(&mgr(), det_with_env("22222222-uuid", &[("FOO", "1")]));
+        let none = st.to_session_file_with(|_| {
+            Some([("hp.persist-env".to_string(), "FOO".to_string())].into())
+        });
+        let pane = &none.groups.unwrap()[0].panes[0];
+        assert_eq!(pane.env.as_ref().unwrap()["FOO"], "1");
+        assert!(pane.env_dropped.is_none());
     }
 }

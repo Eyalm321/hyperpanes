@@ -122,6 +122,32 @@ On GUI launch with a live daemon:
    → This requires the autosave snapshot to also record each pane's **session uid** (and ideally its
    spawn command, already noted as a gap in the crash-recovery work) so restore can match.
 
+### Spawn env across a restore (#66)
+
+A re-spawned pane needs its explicit spawn env (`pane.env`), so the snapshot records it as
+`PaneSpec.env`, with the withheld key names (never values) in `envDropped`. Only the pane's
+explicit spawn env is ever considered, never the inherited process environment, and it is
+filtered by `core::workspace::env_persist::persistable_env`, in this order:
+
+1. Runtime-owned keys (`HYPERPANES_PANE_ID`, `HYPERPANES_CONTROL_FILE`, `HP_TASK_*`,
+   `HP_FENCING_TOKEN`, `HP_QUEUE`, `HP_WORKTREE_CACHE_DIR`) are always dropped.
+2. Secret-looking keys (`TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, `AUTH`, ... as whole
+   underscore-separated words) are always dropped.
+3. Secret-looking values (`sk-`, `ghp_`, `github_pat_`, `AKIA`, `-----BEGIN`, ...) are always dropped.
+4. `PATH`, `LD_*` and `DYLD_*` are kept only when listed explicitly.
+
+The pane meta `hp.persist-env` picks the mode: absent/`default` keeps an allow-list (`HP_*`,
+`HYPERPANES_*`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_*`, `ENABLE_TOOL_SEARCH`, `CARGO_TARGET_DIR`,
+`CARGO_BUILD_JOBS`, `RUST_LOG`, `RUST_BACKTRACE`, `LANG`, `LC_*`, `TMPDIR`); `none` keeps nothing;
+`all` keeps everything rules 1-4 left; `K1,K2,...` keeps exactly those keys (minus rules 1-3).
+An embedder can add allow-list prefixes with `State::set_env_persist_allow`.
+
+On restore the persisted env is the base layer of the spawn env; a rebuilt launch env overrides it
+key by key, and the conversation's `CLAUDE_CONFIG_DIR` overrides that. A pane that lost keys logs
+`restored pane '<label>': env not persisted: ...` and gets pane meta `hp.env-dropped` (at most 20
+names, then `…(+N)`). Saved workspace templates never carry `env`/`envDropped`. The snapshot file
+(`last-workspace.json`) is written 0600 on Unix.
+
 ## Windows
 
 - Transport: named pipe (`\\.\pipe\hyperpanesd-<salt>`), the sibling already sketched in
