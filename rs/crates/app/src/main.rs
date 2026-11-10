@@ -278,8 +278,12 @@ USAGE:
     hyperpanes                    Launch the GUI (resumes the last session, or a workspace
                                    file / -c command passed on the command line)
     hyperpanes worker --queue <name> [--worker <id>] [--count N] [--worktree --base <committish>]
-                       [--retry-window <secs>] [--nack-delay <ms>] -- <cmd> [args...]
-                                   Drain a work queue by running <cmd> per claimed task
+                       [--allow-empty-result] [--retry-window <secs>] [--nack-delay <ms>]
+                       -- <cmd> [args...]
+                                   Drain a work queue by running <cmd> per claimed task. With
+                                   --worktree, an exit 0 with no commit fails the task (and
+                                   uncommitted work is saved as a patch) unless
+                                   --allow-empty-result
     hyperpanes pair [--device <label>] [--ttl <30d|12h|90m|<ms>>]
                                    Mint a per-device token and print pairing URLs + a QR code
     hyperpanes devices             List paired mobile devices

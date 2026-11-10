@@ -49,7 +49,7 @@ exit $rc'
 
 cd "$REPO"
 HYPERPANES_CONTROL_FILE="$CF" "$BIN" worker --queue "$QUEUE" --worktree --base "$BASE" \
-  --worktree-root "$ROOT" --min-free 0 -- sh -c "$child"
+  --worktree-root "$ROOT" --min-free 0 --allow-empty-result -- sh -c "$child"
 
 cat "$OUT/results.txt"
 echo "warm build recompiled (task 2):"; grep "^ *Compiling" "$OUT/build-2.log" | sed 's/^ */  /'
