@@ -209,6 +209,18 @@ pub fn default_data_dir() -> PathBuf {
     }
 }
 
+/// [`config_dir`] as it resolves with NO override env var (see [`default_state_dir`]).
+pub fn default_config_dir() -> PathBuf {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        default_user_data_dir()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        home_dir().join(".config").join(PRODUCT_NAME)
+    }
+}
+
 /// [`user_data_dir`] ignoring the `APPDATA` override: the Roaming known folder itself.
 #[cfg(windows)]
 fn default_user_data_dir() -> PathBuf {

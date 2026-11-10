@@ -535,6 +535,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pane→conversation marker is written reliably — backing claude-resume and the goals
     // system's marker-gated delivery without the user hand-editing settings.json. Only touches
     // existing Claude config dirs; a missing bundled hook or any write error is a silent no-op.
+    // An isolated instance or a cargo dev build never registers (the entry would outlive its
+    // scratch tree, #92); `HYPERPANES_CLAUDE_HOOK=1|0` overrides. See `claude_hook`.
     if let Some(hook) = hyperpanes_core::claude_hook::bundled_hook_path() {
         hyperpanes_core::claude_hook::ensure_registered(&hook);
     }
