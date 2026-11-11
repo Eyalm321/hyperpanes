@@ -54,6 +54,20 @@ environment (only `HOME`, `PATH` and `TMPDIR`), so `DEVELOPER_DIR` never reaches
 `xcrun --show-sdk-path --sdk iphoneos` they call. The job therefore puts a two-line `xcrun`
 wrapper first on `PATH` (in `$RUNNER_TEMP`) that re-adds it. Hosted runners skip all of this.
 
+Give a runner the `xcode` label only once it can build. A runner with the label needs full
+Xcode at `/Applications/Xcode.app`, with the license accepted and first launch done, AND
+the iOS platform component, not just `Xcode.app`. Copying `Xcode.app` to a host doesn't
+bring the platform, and without it `xcodebuild` finds no "Any iOS Device" destination
+("iOS 26.2 is not installed"). Install it with Xcode > Settings > Components, or:
+
+```
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  xcodebuild -downloadPlatform iOS -architectureVariant arm64
+```
+
+That needs no Apple ID, but plan for about 12 GB of disk: about 8 GB for the platform
+image and about 4 GB for the simulator cache CoreSimulator builds afterwards.
+
 The app's iOS plugins resolve through Swift Package Manager, so the build doesn't need
 CocoaPods. On a self-hosted runner `subosito/flutter-action` keeps the Flutter SDK in the
 runner's tool cache (`_work/_tool/flutter/<channel>-<version>-<arch>`, about 4 GB with the iOS
