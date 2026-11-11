@@ -10,10 +10,20 @@
 //! `goals-orch` / `spec`, or an explicit `hp.nudge=on` meta), we wait for the pane to go quiet
 //! and then type ONE short line into it telling it to read its inbox. Rules that keep this from
 //! becoming a footgun:
-//!   • **Never mid-turn** — only when the pane's activity is not `Busy`, so we never inject into
-//!     a running command or a half-typed prompt.
+//!   • **Never mid-turn, never lost** — only when the pane's activity is not `Busy`, so we never
+//!     inject into a running command or a half-typed prompt. However long the turn runs, the
+//!     waiter keeps watching until the pane is idle (or closes), so a pending batch always ends in
+//!     exactly one nudge: for a goals orchestrator it is the only wake a relay gets.
 //!   • **Coalesced** — a burst of messages produces one nudge naming the whole seq range; only
-//!     one waiter task per pane is ever in flight.
+//!     one waiter task per pane is ever in flight. The settle slides: the nudge waits until no
+//!     new message arrived for [`SETTLE_MS`] (capped at [`MAX_SETTLE_MS`] after the first), so
+//!     relays chained a few seconds apart still cost one nudge.
+//!   • **Read-aware** — a read of the pane's inbox (`GET /panes/:id/messages`, which MCP
+//!     `read_messages` and the messages resource both use) drops every pending message it
+//!     returned ([`NudgeLedger::mark_read`]), and a waiter with nothing unread left types nothing.
+//!     So a pane woken another way (a sender's own typed wake) that reads its mail is never
+//!     nudged for it afterwards. The ledger cannot tell who read: any reader of the pane's
+//!     inbox, such as a parent peeking at a child's, counts as the pane having read it.
 //!   • **Rate-limited** — at most one nudge per pane per [`MIN_INTERVAL_MS`], so a chatty wave of
 //!     impl agents can't turn into a typing storm.
 //!   • **Opt-out** — `hp.nudge=off` meta on the pane, or `HYPERPANES_MSG_NUDGE=0` in the app's
@@ -42,13 +52,15 @@ pub const NUDGE_META_KEY: &str = "hp.nudge";
 /// Never nudge the same pane more often than this, however much mail arrives.
 pub const MIN_INTERVAL_MS: i64 = 60_000;
 
-/// How long a waiter re-checks the pane's activity before it gives up (the pane stayed busy the
-/// whole time). The pending count survives — the next message re-arms a fresh waiter.
-pub const MAX_WAIT_MS: i64 = 30 * 60_000;
+/// Settle window: a nudge is typed only once no new message arrived for this long. Lets a burst
+/// of sibling reports coalesce into one nudge, and keeps us from typing the instant a pane's own
+/// turn ends. It slides with each arrival, up to [`MAX_SETTLE_MS`]. Long enough for a lead's
+/// chained relays (one CLI run each, seconds apart on a loaded machine) to land as one batch.
+pub const SETTLE_MS: u64 = 8_000;
 
-/// Settle window before the first delivery attempt: lets a burst of sibling reports coalesce into
-/// one nudge, and keeps us from typing the instant a pane's own turn ends.
-pub const SETTLE_MS: u64 = 3_000;
+/// A steady stream of mail can hold the sliding settle open this long after the first message
+/// of the batch, no longer, so a chatty sender cannot starve the nudge.
+pub const MAX_SETTLE_MS: i64 = 30_000;
 
 /// How often a waiter re-checks whether the pane went quiet.
 pub const POLL_MS: u64 = 2_000;
@@ -119,14 +131,16 @@ pub fn nudge_text(pane_id: &str, pending: usize, first_seq: u64, form: NudgeForm
 /// One pane's nudge bookkeeping.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct PaneNudge {
-    /// Unread-since-last-nudge count (what the nudge line reports).
-    pending: usize,
-    /// Seq of the first message in the pending batch — the read cursor we hand the agent.
-    first_seq: u64,
+    /// Seqs of the messages that arrived since the last nudge and that no read has returned
+    /// yet. Their count is what the nudge line reports; the lowest is the read cursor (minus
+    /// one) we hand the agent.
+    pending: Vec<u64>,
     /// A waiter task is in flight for this pane (so a burst spawns exactly one).
     waiting: bool,
-    /// When the current waiter armed, for the [`MAX_WAIT_MS`] give-up.
+    /// When the current waiter armed, for the [`MAX_SETTLE_MS`] cap.
     armed_at_ms: i64,
+    /// When the newest pending message arrived, for the sliding [`SETTLE_MS`].
+    last_arrival_ms: i64,
     /// When we last typed into this pane, for [`MIN_INTERVAL_MS`].
     last_sent_ms: Option<i64>,
 }
@@ -134,11 +148,11 @@ struct PaneNudge {
 /// What a waiter should do on this poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Pane is busy / rate-limited — check again later.
+    /// Pane is busy, rate-limited or still settling — check again later, however long it takes.
     Wait,
     /// Type this line into the pane; the waiter is done afterwards.
     Send(String),
-    /// Nothing pending, or the waiter hit [`MAX_WAIT_MS`]; the waiter is done.
+    /// Nothing unread is pending (never armed, or a read returned it all); the waiter is done.
     Stop,
 }
 
@@ -158,10 +172,8 @@ impl NudgeLedger {
     /// (no other waiter is in flight for this pane).
     pub fn arm(&mut self, pane_id: &str, seq: u64, now_ms: i64) -> bool {
         let e = self.panes.entry(pane_id.to_string()).or_default();
-        if e.pending == 0 {
-            e.first_seq = seq;
-        }
-        e.pending += 1;
+        e.pending.push(seq);
+        e.last_arrival_ms = now_ms;
         if e.waiting {
             return false;
         }
@@ -170,34 +182,47 @@ impl NudgeLedger {
         true
     }
 
+    /// A read of `pane_id`'s inbox handed the reader every message up to `through_seq`: those
+    /// are no longer unread, so drop them from the pending batch. A waiter left with nothing
+    /// pending stops at its next poll without typing; one with newer mail nudges for that only.
+    pub fn mark_read(&mut self, pane_id: &str, through_seq: u64) {
+        if let Some(e) = self.panes.get_mut(pane_id) {
+            e.pending.retain(|&seq| seq > through_seq);
+        }
+    }
+
+    /// How many messages are pending (unread, not yet nudged for) for `pane_id`.
+    pub fn pending(&self, pane_id: &str) -> usize {
+        self.panes.get(pane_id).map_or(0, |e| e.pending.len())
+    }
+
     /// One waiter poll. `busy` is the pane's live activity (true ⇒ mid-turn, never type).
     /// `form` picks the wording. On [`Step::Send`] the pending batch is consumed and the waiter retires.
     pub fn poll(&mut self, pane_id: &str, busy: bool, now_ms: i64, form: NudgeForm) -> Step {
         let Some(e) = self.panes.get_mut(pane_id) else {
             return Step::Stop;
         };
-        if e.pending == 0 {
+        // Nothing unread left (never armed, or a read returned it all): type nothing.
+        let Some(&first_seq) = e.pending.iter().min() else {
             e.waiting = false;
             return Step::Stop;
-        }
+        };
         let rate_limited = e.last_sent_ms.is_some_and(|t| now_ms - t < MIN_INTERVAL_MS);
-        if busy || rate_limited {
-            if now_ms - e.armed_at_ms >= MAX_WAIT_MS {
-                // Give up this round; the pending batch stays, so the next message re-arms.
-                e.waiting = false;
-                return Step::Stop;
-            }
+        let settling =
+            now_ms - e.last_arrival_ms < SETTLE_MS as i64 && now_ms - e.armed_at_ms < MAX_SETTLE_MS;
+        // No give-up: a waiter that stopped while the pane was busy left its batch for the NEXT
+        // message to re-arm, so a turn longer than the old 30-minute cap lost the relay (t39).
+        if busy || rate_limited || settling {
             return Step::Wait;
         }
-        let text = nudge_text(pane_id, e.pending, e.first_seq, form);
-        e.pending = 0;
-        e.first_seq = 0;
+        let text = nudge_text(pane_id, e.pending.len(), first_seq, form);
+        e.pending.clear();
         e.waiting = false;
         e.last_sent_ms = Some(now_ms);
         Step::Send(text)
     }
 
-    /// Forget a pane (on close), so a closed pane's counters don't leak.
+    /// Forget a pane (closed, or its process exited), so its counters don't leak.
     pub fn drop_pane(&mut self, pane_id: &str) {
         self.panes.remove(pane_id);
     }
@@ -268,7 +293,8 @@ mod tests {
         assert!(l.arm("p1", 10, 0)); // first message spawns the waiter
         assert!(!l.arm("p1", 11, 100)); // burst rides along
         assert!(!l.arm("p1", 12, 200));
-        let text = match l.poll("p1", false, 5_000, NudgeForm::Mcp) {
+        let settled = 200 + SETTLE_MS as i64;
+        let text = match l.poll("p1", false, settled, NudgeForm::Mcp) {
             Step::Send(t) => t,
             other => panic!("expected Send, got {other:?}"),
         };
@@ -276,37 +302,152 @@ mod tests {
         // Cursor is first_seq - 1, so read_messages returns exactly the batch.
         assert!(text.contains("after:9"), "{text}");
         // Batch consumed; the waiter retires.
-        assert_eq!(l.poll("p1", false, 6_000, NudgeForm::Mcp), Step::Stop);
+        assert_eq!(
+            l.poll("p1", false, settled + 1_000, NudgeForm::Mcp),
+            Step::Stop
+        );
     }
 
+    // t39: the nudge is the only wake a goals orchestrator gets for a relay, so a batch that lands
+    // mid-turn must be announced once the pane goes idle, however long the turn ran. It used to
+    // give up after 30 minutes busy and leave the batch for the next message to re-arm.
     #[test]
-    fn never_types_into_a_busy_pane_and_gives_up_after_the_max_wait() {
+    fn a_batch_that_lands_mid_turn_is_nudged_once_when_the_pane_goes_idle_however_long_the_turn() {
+        const HOUR: i64 = 60 * 60_000;
         let mut l = NudgeLedger::new();
-        l.arm("p1", 1, 0);
+        assert!(l.arm("p1", 1, 0));
         assert_eq!(l.poll("p1", true, 1_000, NudgeForm::Mcp), Step::Wait);
-        assert_eq!(l.poll("p1", true, MAX_WAIT_MS, NudgeForm::Mcp), Step::Stop);
-        // The message is still pending — a later arrival re-arms a fresh waiter.
-        assert!(l.arm("p1", 2, MAX_WAIT_MS + 1));
-        match l.poll("p1", false, MAX_WAIT_MS + 2, NudgeForm::Mcp) {
-            Step::Send(t) => assert!(t.contains("2 new messages"), "{t}"),
+        // Busy far past the old 30-minute cap: still waiting, never typing, never retiring.
+        for t in [30 * 60_000, HOUR, 3 * HOUR] {
+            assert_eq!(l.poll("p1", true, t, NudgeForm::Mcp), Step::Wait, "at {t}");
+        }
+        assert!(
+            !l.arm("p1", 2, 3 * HOUR),
+            "the same waiter is still in flight"
+        );
+        // The pane goes idle: exactly one nudge, naming both messages.
+        let idle = 3 * HOUR + SETTLE_MS as i64;
+        match l.poll("p1", false, idle, NudgeForm::Mcp) {
+            Step::Send(t) => {
+                assert!(t.contains("2 new messages"), "{t}");
+                assert!(t.contains("after:0"), "{t}");
+            }
             other => panic!("expected Send, got {other:?}"),
         }
+        assert_eq!(
+            l.poll("p1", false, idle + 2_000, NudgeForm::Mcp),
+            Step::Stop
+        );
+        assert_eq!(l.pending("p1"), 0);
     }
 
     #[test]
     fn rate_limits_a_chatty_wave_to_one_nudge_per_interval() {
         let mut l = NudgeLedger::new();
+        let settle = SETTLE_MS as i64;
         l.arm("p1", 1, 0);
         assert!(matches!(
-            l.poll("p1", false, 0, NudgeForm::Mcp),
+            l.poll("p1", false, settle, NudgeForm::Mcp),
             Step::Send(_)
         ));
-        l.arm("p1", 2, 10);
-        assert_eq!(l.poll("p1", false, 10, NudgeForm::Mcp), Step::Wait); // too soon
+        l.arm("p1", 2, settle + 10);
+        // Too soon after the last nudge, even once the new message has settled.
+        assert_eq!(
+            l.poll("p1", false, 2 * settle + 10, NudgeForm::Mcp),
+            Step::Wait
+        );
         assert!(matches!(
-            l.poll("p1", false, MIN_INTERVAL_MS + 10, NudgeForm::Mcp),
+            l.poll("p1", false, settle + MIN_INTERVAL_MS + 10, NudgeForm::Mcp),
             Step::Send(_)
         ));
+    }
+
+    #[test]
+    fn the_settle_slides_with_each_arrival_up_to_the_cap() {
+        let settle = SETTLE_MS as i64;
+        let mut l = NudgeLedger::new();
+        assert!(l.arm("p1", 1, 0));
+        assert!(!l.arm("p1", 2, 4_600)); // a relay a slow CLI run behind the first
+        assert_eq!(l.poll("p1", false, settle, NudgeForm::Mcp), Step::Wait);
+        match l.poll("p1", false, 4_600 + settle, NudgeForm::Mcp) {
+            Step::Send(t) => assert!(t.contains("2 new messages"), "{t}"),
+            other => panic!("expected Send, got {other:?}"),
+        }
+        // A steady stream holds the settle open only until MAX_SETTLE_MS after the first.
+        let mut l = NudgeLedger::new();
+        let mut t = 0;
+        let mut seq = 1;
+        while t <= MAX_SETTLE_MS {
+            l.arm("p1", seq, t);
+            seq += 1;
+            t += 2_000;
+        }
+        assert_eq!(
+            l.poll("p1", false, MAX_SETTLE_MS - 1, NudgeForm::Mcp),
+            Step::Wait
+        );
+        assert!(matches!(
+            l.poll("p1", false, MAX_SETTLE_MS, NudgeForm::Mcp),
+            Step::Send(_)
+        ));
+    }
+
+    // t39: the receiver read its mail during the turn another wake started, so the nudge
+    // waiting for it to go idle must not fire for messages it already has.
+    #[test]
+    fn a_read_of_everything_pending_retires_the_waiter_without_typing() {
+        let mut l = NudgeLedger::new();
+        assert!(l.arm("p1", 3, 0));
+        l.arm("p1", 4, 100);
+        l.arm("p1", 5, 200);
+        assert_eq!(l.poll("p1", true, 5_000, NudgeForm::Mcp), Step::Wait); // mid-turn
+        l.mark_read("p1", 5);
+        assert_eq!(l.pending("p1"), 0);
+        assert_eq!(l.poll("p1", false, 7_000, NudgeForm::Mcp), Step::Stop);
+        // The waiter retired, so the next message arms a fresh one.
+        assert!(l.arm("p1", 6, 8_000));
+    }
+
+    #[test]
+    fn a_partial_read_leaves_a_nudge_for_the_unread_rest_only() {
+        let mut l = NudgeLedger::new();
+        l.arm("p1", 3, 0);
+        l.arm("p1", 4, 0);
+        l.arm("p1", 5, 0);
+        l.mark_read("p1", 4);
+        match l.poll("p1", false, SETTLE_MS as i64, NudgeForm::Mcp) {
+            Step::Send(t) => {
+                assert!(t.contains("1 new message."), "{t}");
+                assert!(t.contains("after:4"), "{t}");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mail_that_lands_after_a_read_is_nudged_alone() {
+        let mut l = NudgeLedger::new();
+        assert!(l.arm("p1", 3, 0));
+        l.mark_read("p1", 3);
+        assert!(!l.arm("p1", 7, 100), "the first waiter is still in flight");
+        match l.poll("p1", false, 100 + SETTLE_MS as i64, NudgeForm::Mcp) {
+            Step::Send(t) => {
+                assert!(t.contains("1 new message."), "{t}");
+                assert!(t.contains("after:6"), "{t}");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mark_read_ignores_unknown_panes_and_older_cursors() {
+        let mut l = NudgeLedger::new();
+        l.mark_read("nobody", 10); // no entry, no panic
+        assert_eq!(l.pending("nobody"), 0);
+        l.arm("p1", 8, 0);
+        l.arm("p1", 9, 0);
+        l.mark_read("p1", 7); // a cursor below the batch reads none of it
+        assert_eq!(l.pending("p1"), 2);
     }
 
     #[test]
