@@ -1161,7 +1161,23 @@ pub fn resync(
                     })
                     .collect();
                 sync_model(&ui.ctx_layouts, layouts);
-                sync_model(&ui.ctx_swatches, Vec::new());
+                // "Tab Color ▸": the frame palette's slots; the ring marks the slot matching
+                // the tab's manual colour, the "no color" chip rings when it has none.
+                // (`ctx_frame` doubles as "has a manual colour" for this flyout.)
+                let slots = theme::frame_palette(state.settings.frame_palette);
+                let swatches: Vec<Color> = slots
+                    .iter()
+                    .map(|(r, g, b)| Color::from_rgb_u8(*r, *g, *b))
+                    .collect();
+                let manual = state.tabs.get(c.target).and_then(|t| t.color);
+                let cur_swatch = manual
+                    .and_then(|m| swatches.iter().position(|s| *s == m))
+                    .map(|i| i as i32)
+                    .unwrap_or(-1);
+                sync_model(&ui.ctx_swatches, swatches);
+                app.set_ctx_frame(manual.is_some());
+                app.set_ctx_dot(false);
+                app.set_ctx_cur_swatch(cur_swatch);
                 // "Group Color ▸" reuses the Move-to-Tab flyout list (label + idx).
                 let choices: Vec<CtxTab> = state
                     .group_color_choices()

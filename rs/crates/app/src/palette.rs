@@ -113,6 +113,27 @@ pub fn build(state: &State) -> Vec<Entry> {
         ));
     }
 
+    // ---- tab colour (#108): the tab menu's "Tab Color" swatches, keyboard-reachable ----
+    for (i, (r, g, b)) in theme::frame_palette(state.settings.frame_palette)
+        .iter()
+        .enumerate()
+    {
+        cmds.push(Entry::new(
+            &format!("Tab color: #{r:02x}{g:02x}{b:02x}"),
+            "Colour the current tab (frame palette swatch)",
+            "tab colour color stripe tint swatch",
+            Command::SetTabColorSwatch(state.active, i),
+        ));
+    }
+    if state.active_tab().color.is_some() {
+        cmds.push(Entry::new(
+            "Clear tab color",
+            "Remove the current tab's manual colour",
+            "tab colour color clear reset none",
+            Command::ClearTabColor(state.active),
+        ));
+    }
+
     // ---- pane selection + groups (t28, #96) ----
     cmds.push(Entry::new(
         "Toggle selection of focused pane",
@@ -334,6 +355,21 @@ pub fn filter(entries: &[Entry], query: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_offers_tab_color_swatches_and_clear_when_coloured() {
+        let mut st = State::new(theme::load_font(1.0));
+        let n = |st: &State, pfx: &str| {
+            build(st)
+                .iter()
+                .filter(|e| e.title.starts_with(pfx))
+                .count()
+        };
+        assert_eq!(n(&st, "Tab color: #"), 8);
+        assert_eq!(n(&st, "Clear tab color"), 0);
+        st.set_tab_color_swatch(st.active, 1);
+        assert_eq!(n(&st, "Clear tab color"), 1);
+    }
 
     #[test]
     fn empty_query_scores_zero() {

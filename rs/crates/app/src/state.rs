@@ -2351,6 +2351,15 @@ impl State {
         }
     }
 
+    /// Tab menu "Tab Color": set tab `idx`'s manual colour to swatch `swatch` of the current
+    /// frame palette (the same palette as the pane "Change Color" picker). Out-of-range is a no-op.
+    pub fn set_tab_color_swatch(&mut self, idx: usize, swatch: usize) {
+        let colors = theme::frame_palette(self.settings.frame_palette);
+        if let Some((r, g, b)) = colors.get(swatch).copied() {
+            self.set_tab_color(idx, Some(Color::from_rgb_u8(r, g, b)));
+        }
+    }
+
     pub fn set_layout(&mut self, layout: Layout) {
         let t = self.active_tab_mut();
         if t.layout != layout {
@@ -7110,6 +7119,46 @@ mod session_file_tests {
         assert!(!st.dirty);
     }
 
+    /// #108: the tab menu's "Tab Color" pick sets the manual colour from the frame palette
+    /// (dirty, survives a snapshot round trip); Clear drops it.
+    #[test]
+    fn tab_color_menu_pick_sets_manual_colour_and_round_trips() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        let m = mgr();
+        st.adopt_pane(&m, det("a", 14.0));
+        let (r, g, b) = theme::frame_palette(st.settings.frame_palette)[2];
+        let want = Color::from_rgb_u8(r, g, b);
+        st.dirty = false;
+        crate::command::dispatch(
+            &mut st,
+            crate::command::Command::SetTabColorSwatch(0, 2),
+            &m,
+        );
+        assert_eq!(st.tabs[0].color, Some(want));
+        assert!(st.dirty);
+        // out-of-range swatch is a no-op
+        crate::command::dispatch(
+            &mut st,
+            crate::command::Command::SetTabColorSwatch(0, 999),
+            &m,
+        );
+        assert_eq!(st.tabs[0].color, Some(want));
+
+        let mut st2 = fresh();
+        st2.load_workspace(st.to_session_file(), &m);
+        let t = st2.tabs.iter().find(|t| !t.panes.is_empty()).unwrap();
+        assert_eq!(t.color, Some(want));
+
+        st.dirty = false;
+        crate::command::dispatch(&mut st, crate::command::Command::ClearTabColor(0), &m);
+        assert_eq!(st.tabs[0].color, None);
+        assert!(st.dirty);
+    }
+
     #[test]
     fn tab_color_survives_detach_and_reattach() {
         let mut st = fresh();
@@ -8595,6 +8644,23 @@ mod pane_group_tests {
             stripe(&st, 1),
             Some(group_c),
             "clearing shows the group colour again"
+        );
+        // #108: the same via the tab menu's Tab Color pick + Clear.
+        crate::command::dispatch(
+            &mut st,
+            crate::command::Command::SetTabColorSwatch(1, 0),
+            &m,
+        );
+        assert_ne!(
+            stripe(&st, 1),
+            Some(group_c),
+            "menu pick overrides the group colour"
+        );
+        crate::command::dispatch(&mut st, crate::command::Command::ClearTabColor(1), &m);
+        assert_eq!(
+            stripe(&st, 1),
+            Some(group_c),
+            "menu Clear restores the group colour"
         );
         // A group with no project colour falls back to neutral; an ordinary tab has no stripe
         // unless it has a manual colour.
