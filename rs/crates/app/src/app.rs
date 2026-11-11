@@ -3269,9 +3269,19 @@ impl App {
                     // `run_command` (which takes `state.borrow_mut()`) double-borrows the RefCell
                     // and panics — in edition 2021 the `if let Some(_) = …borrow()…` temporary
                     // lives for the whole arm (see the `on_ctx_pick` pattern above).
-                    let target = w.state.borrow().ctx_target();
+                    let (target, kind) = {
+                        let st = w.state.borrow();
+                        (st.ctx_target(), st.ctx.as_ref().map(|c| c.kind))
+                    };
                     if let Some(t) = target {
-                        app.run_command(&w, Command::RecolorPane(t, sw as usize));
+                        if kind == Some(crate::contextmenu::CtxKind::Tab) {
+                            // Tab menu "Tab Color ▸": a pick sets the manual tab colour and
+                            // dismisses (nothing else in that flyout to tweak).
+                            app.run_command(&w, Command::SetTabColorSwatch(t, sw as usize));
+                            app.run_command(&w, Command::CloseContext);
+                        } else {
+                            app.run_command(&w, Command::RecolorPane(t, sw as usize));
+                        }
                     }
                 }
             });
@@ -3281,10 +3291,19 @@ impl App {
             let id = win.id;
             win.app.on_ctx_swatch_none(move || {
                 if let Some(w) = app.window_by_id(id) {
-                    let target = w.state.borrow().ctx_target();
+                    let (target, kind) = {
+                        let st = w.state.borrow();
+                        (st.ctx_target(), st.ctx.as_ref().map(|c| c.kind))
+                    };
                     if let Some(t) = target {
-                        app.run_command(&w, Command::SetPaneFrame(t, false));
-                        app.run_command(&w, Command::SetPaneDot(t, false));
+                        if kind == Some(crate::contextmenu::CtxKind::Tab) {
+                            // "Tab Color ▸" Clear: drop the manual colour (group colour shows).
+                            app.run_command(&w, Command::ClearTabColor(t));
+                            app.run_command(&w, Command::CloseContext);
+                        } else {
+                            app.run_command(&w, Command::SetPaneFrame(t, false));
+                            app.run_command(&w, Command::SetPaneDot(t, false));
+                        }
                     }
                 }
             });

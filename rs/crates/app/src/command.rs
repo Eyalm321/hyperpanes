@@ -209,6 +209,10 @@ pub enum Command {
     UngroupActive,
     /// Recolour group tab `0` to project `1` (`None` = follow the panes' own project).
     SetGroupColor(usize, Option<String>),
+    /// Set tab `0`'s manual colour to swatch `1` of the frame palette (tab menu "Tab Color").
+    SetTabColorSwatch(usize, usize),
+    /// Clear tab `0`'s manual colour (a group tab falls back to its group colour).
+    ClearTabColor(usize),
     /// Move pane `0` into a brand-new tab (disabled when its tab has <2 panes).
     MovePaneToNewTab(usize),
     /// Move pane `0` into existing tab `1`.
@@ -530,6 +534,8 @@ pub fn dispatch(state: &mut State, cmd: Command, mgr: &SessionManager) -> Effect
             state.ungroup(a, mgr);
         }
         Command::SetGroupColor(i, proj) => state.set_group_color(i, proj),
+        Command::SetTabColorSwatch(i, sw) => state.set_tab_color_swatch(i, sw),
+        Command::ClearTabColor(i) => state.set_tab_color(i, None),
         Command::MovePaneToNewTab(i) => state.move_pane_to_new_tab(i, mgr),
         Command::MovePaneToTab(i, t) => state.move_pane_to_tab(i, t, mgr),
         // ---- tab context-menu actions ----

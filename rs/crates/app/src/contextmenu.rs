@@ -6,7 +6,7 @@
 //! [`open_tab_context`](crate::state::State::open_tab_context)), so every label, gating flag and
 //! checkmark reflects the live state at open time — exactly like the renderer's pure builders.
 //! The rows are pushed into Slint models by the resync ([`crate::paneview`]); a click maps back
-//! to the [`Command`] stored alongside each row (submenus — Change Color / Move to Tab / Layout —
+//! to the [`Command`] stored alongside each row (submenus — Change Color / Tab Color / Move to Tab / Layout —
 //! carry their own payload and are resolved in the controller against the menu's target).
 
 use slint::SharedString;
@@ -32,6 +32,8 @@ pub mod sub {
     pub const MOVE_TO_TAB: i32 = 3;
     pub const LAYOUT: i32 = 4;
     pub const REMINDER: i32 = 5;
+    /// The tab menu's "Tab Color" swatch flyout (palette chips + a "no color" Clear chip).
+    pub const TAB_COLOR: i32 = 6;
 }
 
 /// `pick(int)` rows at/above this base are not row indices: the Reminder flyout's Custom
@@ -465,6 +467,19 @@ pub fn tab_menu(state: &State, idx: usize, x: f32, y: f32) -> CtxMenu {
         Some(Command::NewTab),
     );
     b.item("Rename…", Command::BeginRename(idx as i32));
+    // Manual tab colour (the `recolorTab` state): swatches fed by `paneview`, picks resolved
+    // against the menu target in the controller (`on_ctx_swatch` / `on_ctx_swatch_none`).
+    b.row(
+        "Tab Color",
+        "",
+        0,
+        false,
+        false,
+        false,
+        false,
+        sub::TAB_COLOR,
+        None,
+    );
     let remote_key = state
         .tabs
         .get(idx)
@@ -865,6 +880,21 @@ mod pane_group_menu_tests {
         st.tabs[0].pane_group = None;
         assert!(!labels(&tab_menu(&st, 0, 0.0, 0.0)).contains(&"Ungroup".to_string()));
         assert!(!labels(&pane_menu(&st, 0, 0.0, 0.0, false)).contains(&"Ungroup".to_string()));
+    }
+
+    #[test]
+    fn tab_menu_offers_tab_color_on_plain_and_group_tabs() {
+        let mut st = three();
+        let tc = |st: &State| {
+            let m = tab_menu(st, 0, 0.0, 0.0);
+            let i = labels(&m).iter().position(|l| l == "Tab Color");
+            i.map(|i| (m.entries[i].kind, m.commands[i].is_none()))
+        };
+        assert_eq!(tc(&st), Some((sub::TAB_COLOR, true)), "plain tab");
+        st.tabs[0].pane_group = Some(crate::state::PaneGroup::default());
+        assert_eq!(tc(&st), Some((sub::TAB_COLOR, true)), "group tab");
+        // the group tab keeps its Group Color row alongside
+        assert!(labels(&tab_menu(&st, 0, 0.0, 0.0)).contains(&"Group Color".to_string()));
     }
 
     #[test]
