@@ -22,7 +22,8 @@ The reply now carries `{ ok, seq, epoch, nudged }`.
 - **Settle.** The nudge waits until no new message has arrived for 8 s, capped at 30 s after
   the first one. Relays a lead chains a few seconds apart therefore cost one nudge that names
   them all.
-- **Never mid-turn.** It also waits for the pane to be idle.
+- **Never mid-turn, never lost.** It also waits for the pane to be idle, however long the turn
+  runs. A pending message always ends in exactly one nudge once the pane is idle.
 - **Read-aware.** A `GET /panes/{id}/messages` read drops every pending message it returned.
   MCP `read_messages` and the `messages` resource both make that read. A pane woken some other
   way that reads its mail before going idle is not nudged for it afterwards. Mail that arrives

@@ -989,16 +989,22 @@ fn arm_inbox_nudge(shared: &Arc<Shared>, pane_id: &str, seq: u64) {
         tokio::time::sleep(Duration::from_millis(nudge::SETTLE_MS)).await;
         loop {
             // Busy = mid-turn (a running command, or output within the idle threshold): typing
-            // now would land in a live prompt, so wait for the pane to come to rest.
-            let (busy, form) = {
+            // now would land in a live prompt, so wait for the pane to come to rest, however long
+            // that takes (the ledger never gives up on a pending batch). A pane that closed or
+            // exited meanwhile can read nothing: forget its counters and retire the waiter.
+            let watched = {
                 let m = shared.model.lock().unwrap();
                 match m.pane(&pane_id) {
-                    None => return, // pane closed while we waited
-                    Some(p) => (
+                    Some(p) if p.status != PaneStatus::Exited => Some((
                         shared.compute_activity(p) == Activity::Busy,
                         nudge::nudge_form(p.meta.as_ref()),
-                    ),
+                    )),
+                    _ => None,
                 }
+            };
+            let Some((busy, form)) = watched else {
+                shared.nudges.lock().unwrap().drop_pane(&pane_id);
+                return;
             };
             let step = shared
                 .nudges
