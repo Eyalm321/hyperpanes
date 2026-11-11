@@ -4,7 +4,7 @@ name: Release (Rust native)
 # three desktop OSes and attach every artifact to ONE GitHub Release:
 #   * windows-latest → rs/packaging/build-installer.ps1      → rs/packaging/dist/*-setup.exe
 #   * ubuntu-latest  → rs/packaging/{appimage,deb,rpm}.sh <version> → rs/packaging/out/hyperpanes-<version>{.AppImage,.deb,.rpm}
-#   * macos-latest   → rs/packaging/macos/bundle.sh <version> → rs/packaging/out/hyperpanes-<version>.dmg
+#   * macOS (mini or macos-latest, see mac-route.yml) → rs/packaging/macos/bundle.sh <version> → rs/packaging/out/hyperpanes-<version>.dmg
 # (script paths/argv per docs/ports-seams.md §3 — <version> arrives WITHOUT the `v`.)
 #
 # Topology: version → test (3-OS gate) → release (created ONCE) → 3 parallel build jobs
@@ -31,6 +31,15 @@ permissions:
   contents: write # create the release and upload the artifacts
 
 jobs:
+  # Where the macOS test legs + DMG build run: see mac-route.yml.
+  route:
+    uses: ./.github/workflows/mac-route.yml
+    secrets:
+      MAC_RUNNERS_TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}
+
+  # build-ios stays on macos-latest: `flutter build ios` needs full Xcode, which the
+  # self-hosted minis do not have (Command Line Tools only).
+
   # Single source of truth for the version/tag pair used by every job below.
   version:
     runs-on: ubuntu-latest
@@ -58,7 +67,8 @@ jobs:
   # two test-owning workspaces (`rs` core + `rs/crates/terminal-widget`).
   test:
     name: test (${{ matrix.workspace }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: route
+    runs-on: ${{ matrix.os != 'macos-latest' && matrix.os || fromJSON(matrix.workspace == 'rs' && needs.route.outputs.rs || needs.route.outputs.tw) }}
     strategy:
       fail-fast: false
       matrix:
@@ -187,8 +197,10 @@ jobs:
             rs/packaging/out/*.deb rs/packaging/out/*.rpm --clobber
 
   build-macos:
-    needs: [version, release]
-    runs-on: macos-latest
+    needs: [version, release, route]
+    # bundle.sh is unsigned and uses only stock macOS tools (sips/iconutil/hdiutil/plutil),
+    # so a self-hosted mini builds the same DMG as macos-latest.
+    runs-on: ${{ fromJSON(needs.route.outputs.app) }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:

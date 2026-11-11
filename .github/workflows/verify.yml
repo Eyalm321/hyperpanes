@@ -44,15 +44,24 @@ permissions:
   contents: read
 
 jobs:
+  # Where the macOS legs run (self-hosted minis, or macos-latest): see mac-route.yml.
+  route:
+    uses: ./.github/workflows/mac-route.yml
+    secrets:
+      MAC_RUNNERS_TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}
+
   # HARD test gate: cargo test must pass on every OS × test-owning workspace.
   test:
     name: test (${{ matrix.ws }}, ${{ matrix.os }})
+    needs: route
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         ws: [rs, rs/crates/terminal-widget]
-    runs-on: ${{ matrix.os }}
+    # The matrix value stays `macos-latest` so check names never change; the actual runner
+    # comes from the route job (rs prefers mac-mini-16, terminal-widget mac-mini-8).
+    runs-on: ${{ matrix.os != 'macos-latest' && matrix.os || fromJSON(matrix.ws == 'rs' && needs.route.outputs.rs || needs.route.outputs.tw) }}
     timeout-minutes: 45
     defaults:
       run:
