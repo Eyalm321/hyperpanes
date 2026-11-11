@@ -680,8 +680,9 @@ fn build_screen_body(
         .output_bytes(uid)
         .map(|b| b as i64)
         .unwrap_or(0);
-    match shared.sessions.render_screen(uid) {
-        Some(full) => {
+    match shared.sessions.render_screen_read(uid) {
+        Some(read) => {
+            let full = read.text;
             // Prompt detection runs on the FULL screen so a clipping `tail` can't hide a blocked
             // prompt above the tail window.
             let awaiting = detect_awaiting_input(&full);
@@ -696,6 +697,9 @@ fn build_screen_body(
                 "output": text,
                 "cursor": cursor,
                 "awaitingInput": awaiting,
+                // The Claude-Code-style prompt box, or null: `kind` says whether its text was
+                // typed or is the agent's own faint suggestion (never someone's input).
+                "inputLine": read.input_line,
             })
         }
         None => {
@@ -833,6 +837,10 @@ struct MessagesOut {
     messages: Vec<crate::control::inbox::PaneMessage>,
     dropped: usize,
     latest_seq: u64,
+    /// This inbox lifetime's id; it changes when the app restarts (the inbox is in-memory).
+    epoch: u64,
+    /// The `after` cursor was from an earlier lifetime: `messages` is the whole backlog.
+    reset: bool,
 }
 
 async fn messages_get(
@@ -856,10 +864,13 @@ async fn messages_get(
         .map(|a| a as u64)
         .unwrap_or(0);
     let inbox = shared.inbox.lock().unwrap();
+    let read = inbox.read_cursor(&id, after);
     let out = MessagesOut {
-        messages: inbox.read(&id, after),
+        messages: read.messages,
         dropped: inbox.dropped_count(&id),
         latest_seq: inbox.latest_seq(&id),
+        epoch: inbox.epoch(),
+        reset: read.reset,
         pane_id: id,
     };
     ok_json(out)
@@ -889,16 +900,27 @@ async fn messages_post(
         .to_string();
     let msg_body = match b.get("body").and_then(Value::as_str) {
         Some(s) => s.to_string(),
-        None => return jstatus(400, json!({ "error": "expected { from?, body: string }" })),
+        None => {
+            return jstatus(
+                400,
+                json!({ "error": "expected { from?, body: string, nudge?: boolean }" }),
+            )
+        }
     };
-    let msg = shared
-        .inbox
-        .lock()
-        .unwrap()
-        .post(&id, &from, &msg_body, now_ms());
+    // `nudge:false` stores the message without typing the inbox nudge into the pane: for a
+    // sender that already wakes the receiver its own way, so one send costs the receiver one
+    // turn, not two. Anything but an explicit `false` keeps the default (nudge).
+    let nudge = !matches!(b.get("nudge"), Some(Value::Bool(false)));
+    let (msg, epoch) = {
+        let mut inbox = shared.inbox.lock().unwrap();
+        let msg = inbox.post(&id, &from, &msg_body, now_ms());
+        (msg, inbox.epoch())
+    };
     // Wake an opted-in agent pane (goals org): the durable read stays the source of truth, but a
     // TUI agent parked at its prompt would never perform that read on its own.
-    arm_inbox_nudge(&shared, &id, msg.seq);
+    if nudge {
+        arm_inbox_nudge(&shared, &id, msg.seq);
+    }
     // Nudge live, in-scope clients (the durable read remains the source of truth).
     let coords = shared.model.lock().unwrap().coords_of(&id);
     shared.events.broadcast_for_pane(
@@ -910,7 +932,10 @@ async fn messages_post(
             body: msg_body,
         },
     );
-    jstatus(200, json!({ "ok": true, "seq": msg.seq }))
+    jstatus(
+        200,
+        json!({ "ok": true, "seq": msg.seq, "epoch": epoch, "nudged": nudge }),
+    )
 }
 
 /// Whether inbox nudges are enabled at all — `HYPERPANES_MSG_NUDGE=0` (or `false`/`off`) in the
@@ -2565,7 +2590,11 @@ mod golden {
             .send()
             .await
             .unwrap();
-        assert_eq!(post.text().await.unwrap(), r#"{"ok":true,"seq":1}"#);
+        let post: serde_json::Value = post.json().await.unwrap();
+        assert_eq!(post["ok"], serde_json::json!(true));
+        assert_eq!(post["seq"], serde_json::json!(1));
+        assert_eq!(post["nudged"], serde_json::json!(true));
+        assert!(post["epoch"].as_u64().is_some_and(|e| e > 0));
         let get: serde_json::Value = client()
             .get(format!("{}/panes/p1/messages", s.base))
             .header("authorization", format!("Bearer {}", s.token))
@@ -2585,6 +2614,110 @@ mod golden {
         assert_eq!(m["from"], serde_json::json!("mgr"));
         assert_eq!(m["body"], serde_json::json!("go"));
         assert!(m["ts"].is_number());
+    }
+
+    /// A goals-org pane (role goals-orch): a post normally arms the inbox nudge.
+    fn orch_pane(id: &str, uid: &str) -> PaneInfo {
+        let mut p = pane(id, uid);
+        p.meta = Some(
+            [("role".to_string(), "goals-orch".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        p
+    }
+
+    async fn post_message(s: &Server, pane: &str, body: &str) -> serde_json::Value {
+        client()
+            .post(format!("{}/panes/{pane}/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    // t36: a sender that wakes the receiver itself posts with nudge:false, so one
+    // relay costs the receiver one turn. The message is still stored for read_messages.
+    #[tokio::test]
+    async fn messages_post_with_nudge_false_stores_but_does_not_arm_the_nudge() {
+        if !super::nudges_enabled() {
+            return; // HYPERPANES_MSG_NUDGE=0 in this environment: nothing to tell apart
+        }
+        let s = boot(true).await;
+        {
+            let mut m = s.shared.model.lock().unwrap();
+            m.insert_pane(1, orch_pane("quiet", "u1"));
+            m.insert_pane(1, orch_pane("loud", "u2"));
+        }
+        let quiet = post_message(
+            &s,
+            "quiet",
+            r#"{"from":"lead","body":"relay","nudge":false}"#,
+        )
+        .await;
+        assert_eq!(quiet["nudged"], serde_json::json!(false));
+        let loud = post_message(&s, "loud", r#"{"from":"lead","body":"relay"}"#).await;
+        assert_eq!(loud["nudged"], serde_json::json!(true));
+        {
+            let mut ledger = s.shared.nudges.lock().unwrap();
+            // `arm` answers true only when no waiter is in flight for that pane.
+            assert!(
+                ledger.arm("quiet", 99, 0),
+                "nudge:false must not arm a waiter"
+            );
+            assert!(!ledger.arm("loud", 99, 0), "the default post arms a waiter");
+        }
+        let get: serde_json::Value = client()
+            .get(format!("{}/panes/quiet/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(get["messages"][0]["body"], serde_json::json!("relay"));
+    }
+
+    // t36: the inbox is in-memory, so after an app restart a reader's old cursor (after:48) is
+    // past every seq. It must get the backlog back flagged reset, not an empty list.
+    #[tokio::test]
+    async fn messages_get_with_a_stale_cursor_returns_everything_flagged_reset() {
+        let s = boot(true).await;
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("p1", "u1"));
+        post_message(&s, "p1", r#"{"from":"lead","body":"T36 goal"}"#).await;
+        let read = |after: u64| {
+            let url = format!("{}/panes/p1/messages?after={after}", s.base);
+            let token = s.token.clone();
+            async move {
+                client()
+                    .get(url)
+                    .header("authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+        let stale = read(48).await;
+        assert_eq!(stale["reset"], serde_json::json!(true));
+        assert_eq!(stale["messages"][0]["body"], serde_json::json!("T36 goal"));
+        assert_eq!(stale["latestSeq"], serde_json::json!(1));
+        let current = read(1).await;
+        assert_eq!(current["reset"], serde_json::json!(false));
+        assert_eq!(current["messages"], serde_json::json!([]));
+        assert_eq!(current["epoch"], stale["epoch"]);
     }
 
     /// The two pane-id spellings in the wild (`pane-<uuid>` from the app, bare `<uuid>` from the
