@@ -17,6 +17,19 @@ with `read_messages`, but nothing is typed. One send then costs the receiver one
 Only an explicit JSON `false` turns the nudge off. Any other value, or no field, keeps it on.
 The reply now carries `{ ok, seq, epoch, nudged }`.
 
+### When the nudge is typed, and when it is dropped
+
+- **Settle.** The nudge waits until no new message has arrived for 8 s, capped at 30 s after
+  the first one. Relays a lead chains a few seconds apart therefore cost one nudge that names
+  them all.
+- **Never mid-turn.** It also waits for the pane to be idle.
+- **Read-aware.** A `GET /panes/{id}/messages` read drops every pending message it returned.
+  MCP `read_messages` and the `messages` resource both make that read. A pane woken some other
+  way that reads its mail before going idle is not nudged for it afterwards. Mail that arrives
+  after the read is still nudged.
+- **Limit: any reader counts.** The control API cannot tell who made the read, so a read of
+  pane P's inbox by another pane also counts as P having read it.
+
 ## `GET /panes/{id}/messages` — `epoch` and `reset`
 
 The inbox is in memory in the GUI process. Every app start, including a GUI-only restart

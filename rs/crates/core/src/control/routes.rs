@@ -863,16 +863,28 @@ async fn messages_get(
         .filter(|&a| a > 0)
         .map(|a| a as u64)
         .unwrap_or(0);
-    let inbox = shared.inbox.lock().unwrap();
-    let read = inbox.read_cursor(&id, after);
-    let out = MessagesOut {
-        messages: read.messages,
-        dropped: inbox.dropped_count(&id),
-        latest_seq: inbox.latest_seq(&id),
-        epoch: inbox.epoch(),
-        reset: read.reset,
-        pane_id: id,
+    let out = {
+        let inbox = shared.inbox.lock().unwrap();
+        let read = inbox.read_cursor(&id, after);
+        MessagesOut {
+            messages: read.messages,
+            dropped: inbox.dropped_count(&id),
+            latest_seq: inbox.latest_seq(&id),
+            epoch: inbox.epoch(),
+            reset: read.reset,
+            pane_id: id,
+        }
     };
+    // The reader now holds every message up to the newest one returned (or up to its own cursor
+    // when nothing newer was there): a pending inbox nudge for those would wake the pane for mail
+    // it already has (t39). The inbox lock is released first; the ledger lock is never nested.
+    let cursor = if out.reset { 0 } else { after };
+    let through = out.messages.last().map_or(cursor, |m| m.seq.max(cursor));
+    shared
+        .nudges
+        .lock()
+        .unwrap()
+        .mark_read(&out.pane_id, through);
     ok_json(out)
 }
 
@@ -2682,6 +2694,71 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(get["messages"][0]["body"], serde_json::json!("relay"));
+    }
+
+    // t39: three relays land for an orchestrator, and it reads them during the turn some other
+    // wake started. The nudge still waiting for it to go idle must not fire for that mail.
+    #[tokio::test]
+    async fn messages_get_drops_the_pending_nudge_for_what_it_returned() {
+        if !super::nudges_enabled() {
+            return; // HYPERPANES_MSG_NUDGE=0 in this environment: nothing is ever armed
+        }
+        let s = boot(true).await;
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, orch_pane("orch", "u1"));
+        for body in ["T37", "T38", "note"] {
+            let post = format!(r#"{{"from":"lead","body":"{body}"}}"#);
+            assert_eq!(
+                post_message(&s, "orch", &post).await["nudged"],
+                serde_json::json!(true)
+            );
+        }
+        assert_eq!(s.shared.nudges.lock().unwrap().pending("orch"), 3);
+        let read = |after: u64| {
+            let url = format!("{}/panes/orch/messages?after={after}", s.base);
+            let token = s.token.clone();
+            async move {
+                client()
+                    .get(url)
+                    .header("authorization", format!("Bearer {token}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+        let got = read(0).await;
+        assert_eq!(got["messages"].as_array().map(Vec::len), Some(3));
+        assert_eq!(s.shared.nudges.lock().unwrap().pending("orch"), 0);
+        // Once the pane goes idle the waiter finds nothing unread and types nothing.
+        let later = super::now_ms() + 60_000;
+        assert_eq!(
+            s.shared.nudges.lock().unwrap().poll(
+                "orch",
+                false,
+                later,
+                super::nudge::NudgeForm::Mcp
+            ),
+            super::nudge::Step::Stop
+        );
+        // New mail after the read is pending again. A read at the newest cursor (an empty reply:
+        // the reader already holds seq 4) clears it too.
+        post_message(&s, "orch", r#"{"from":"lead","body":"late"}"#).await;
+        assert_eq!(s.shared.nudges.lock().unwrap().pending("orch"), 1);
+        let empty = read(4).await;
+        assert_eq!(empty["messages"], serde_json::json!([]));
+        assert_eq!(empty["reset"], serde_json::json!(false));
+        assert_eq!(s.shared.nudges.lock().unwrap().pending("orch"), 0);
+        // A stale cursor (an earlier inbox lifetime) gets the backlog back and counts as a read.
+        post_message(&s, "orch", r#"{"from":"lead","body":"after restart"}"#).await;
+        let stale = read(48).await;
+        assert_eq!(stale["reset"], serde_json::json!(true));
+        assert_eq!(s.shared.nudges.lock().unwrap().pending("orch"), 0);
     }
 
     // t36: the inbox is in-memory, so after an app restart a reader's old cursor (after:48) is
