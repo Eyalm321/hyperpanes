@@ -5,11 +5,11 @@ GitHub-hosted `macos-latest` when the minis can't or mustn't be used.
 
 | runner        | labels                                          | preferred for                                |
 |---------------|-------------------------------------------------|----------------------------------------------|
-| `mac-mini-16` | `self-hosted, macOS, ARM64, mac-mini-16`        | `rs` tests, release DMG build                |
+| `mac-mini-16` | `self-hosted, macOS, ARM64, mac-mini-16, xcode` | `rs` tests, release DMG build                |
 | `mac-mini-8`  | `self-hosted, macOS, ARM64, mac-mini-8, xcode`  | `rs/crates/terminal-widget` tests, iOS build |
 
-Either mini may take any macOS job except the iOS build, which needs full Xcode and so
-runs only on a runner labelled `xcode` (today: `mac-mini-8`).
+Either mini may take any macOS job. Both have full Xcode in `/Applications/Xcode.app` and
+carry the label `xcode`. The iOS build runs only on runners with that label.
 
 ## Routing
 
@@ -27,8 +27,11 @@ Matrix values stay `macos-latest`, so check names don't change. The route job:
 4. otherwise pins a job to its preferred mini when that mini is online and idle. If it's busy
    or offline, the job gets the generic `[self-hosted, macOS, ARM64]` label. If neither mini
    is online, the job goes to `macos-latest`.
-5. output `ios` is `[self-hosted, macOS, ARM64, xcode]` while any runner labelled `xcode` is
-   online, busy or not (the job waits for it), and `macos-latest` otherwise.
+5. routes the iOS build (output `ios`) among runners labelled `xcode` only. It pins the job
+   to an idle one, `mac-mini-8` first, so that in a release it runs beside the DMG build on
+   `mac-mini-16`. If every `xcode` runner is busy, the job gets the generic
+   `[self-hosted, macOS, ARM64, xcode]` label and waits for whichever frees up first. If none
+   is online, it goes to `macos-latest`.
 
 ## iOS build
 
@@ -45,11 +48,11 @@ One build runs per ref; a newer push cancels the running one. A release upload i
 cancelled.
 
 On a self-hosted runner the job sets `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`,
-because `xcode-select` on the mini still points at the Command Line Tools and switching it
-needs sudo. Dart native-asset build hooks run with a scrubbed environment (only `HOME`,
-`PATH` and `TMPDIR`), so `DEVELOPER_DIR` never reaches the `xcrun --show-sdk-path --sdk
-iphoneos` they call. The job therefore puts a two-line `xcrun` wrapper first on `PATH`
-(in `$RUNNER_TEMP`) that re-adds it. Hosted runners skip all of this.
+so it doesn't depend on `xcode-select`, which on a mini may still point at the Command Line
+Tools (switching it needs sudo). Dart native-asset build hooks run with a scrubbed
+environment (only `HOME`, `PATH` and `TMPDIR`), so `DEVELOPER_DIR` never reaches the
+`xcrun --show-sdk-path --sdk iphoneos` they call. The job therefore puts a two-line `xcrun`
+wrapper first on `PATH` (in `$RUNNER_TEMP`) that re-adds it. Hosted runners skip all of this.
 
 The app's iOS plugins resolve through Swift Package Manager, so the build doesn't need
 CocoaPods. On a self-hosted runner `subosito/flutter-action` keeps the Flutter SDK in the

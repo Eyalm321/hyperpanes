@@ -6,15 +6,16 @@ name: mac-route
 # Two self-hosted Mac minis are registered on this repo, each with labels
 # [self-hosted, macOS, ARM64, <name>]:
 #   * mac-mini-16 — the bigger one; heavy `rs` tests and the release app build prefer it
-#   * mac-mini-8  — terminal-widget tests prefer it; it also has full Xcode and carries the
-#                   extra label `xcode`
+#   * mac-mini-8  — terminal-widget tests and the iOS build prefer it
+# A mini with full Xcode also carries the label `xcode`.
 # Either may take any macOS job: if the preferred mini is offline or busy, the job goes to
 # the generic [self-hosted, macOS, ARM64] label so whichever mini is free picks it up.
 #
 # The iOS build (ios-build.yml) is different: `flutter build ios` needs full Xcode, so it
-# only runs on a runner labelled `xcode`. When one is online it gets
-# [self-hosted, macOS, ARM64, xcode] even if that runner is busy (the job waits in its
-# queue). When none is online it gets macos-latest.
+# only runs on a runner labelled `xcode`. It is pinned to an idle `xcode` mini (mac-mini-8
+# first, since mac-mini-16 takes the release app build), else it gets the generic
+# [self-hosted, macOS, ARM64, xcode] label when any `xcode` runner is online, busy or not
+# (the job waits in its queue). When none is online it gets macos-latest.
 #
 # GitHub has no native "fall back to a hosted runner" for self-hosted labels, so this job
 # checks runner status first and emits "macos-latest" when it must not, or cannot, use the
@@ -49,7 +50,7 @@ on:
         description: runs-on JSON for the release app build (prefers mac-mini-16)
         value: ${{ jobs.route.outputs.app }}
       ios:
-        description: runs-on JSON for the iOS build (needs a runner labelled xcode)
+        description: runs-on JSON for the iOS build (runners labelled xcode; prefers mac-mini-8)
         value: ${{ jobs.route.outputs.ios }}
     secrets:
       MAC_RUNNERS_TOKEN:
@@ -105,16 +106,22 @@ jobs:
           }
           s16=$(state mac-mini-16) || s16=offline
           s8=$(state mac-mini-8) || s8=offline
-          # Online runners labelled xcode (busy or idle).
-          nx=$(jq '[.runners[] | select(.status == "online" and any(.labels[]; .name == "xcode"))] | length' <<<"$runners") || nx=0
-          echo "mac-mini-16=$s16 mac-mini-8=$s8 xcode-online=$nx"
+          # Runners labelled xcode: how many are online, and the idle one to pin
+          # (mac-mini-8 first).
+          xq='.runners[] | select(.status == "online" and any(.labels[]?; .name == "xcode"))'
+          nx=$(jq "[$xq] | length" <<<"$runners") || nx=0
+          xidle=$(jq -r "[$xq | select(.busy | not) | .name]
+            | sort_by(if . == \"mac-mini-8\" then 0 else 1 end) | .[0] // empty" <<<"$runners") || xidle=
+          echo "mac-mini-16=$s16 mac-mini-8=$s8 xcode-online=$nx xcode-idle=${xidle:-none}"
           [[ "$s16" != offline || "$s8" != offline ]] || hosted_all "no mini online"
 
           generic='["self-hosted","macOS","ARM64"]'
           # pick <preferred-name> <its state>: pin to it when idle, else any online mini.
           pick() { if [[ "$2" == idle ]]; then echo "[\"self-hosted\",\"macOS\",\"ARM64\",\"$1\"]"; else echo "$generic"; fi; }
           rs=$(pick mac-mini-16 "$s16"); tw=$(pick mac-mini-8 "$s8"); app=$(pick mac-mini-16 "$s16")
-          ios=$hosted; [[ "$nx" -gt 0 ]] && ios='["self-hosted","macOS","ARM64","xcode"]'
+          if [[ -n "$xidle" ]]; then ios="[\"self-hosted\",\"macOS\",\"ARM64\",\"xcode\",\"$xidle\"]"
+          elif [[ "$nx" -gt 0 ]]; then ios='["self-hosted","macOS","ARM64","xcode"]'
+          else ios=$hosted; fi
           echo "rs=$rs tw=$tw app=$app ios=$ios"
           emit "$rs" "$tw" "$app" "$ios"
 
