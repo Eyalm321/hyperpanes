@@ -375,6 +375,11 @@ impl DaemonSessionManager {
     /// Serialize the pane's current screen — a bounded `RenderScreen`/`Screen` round-trip
     /// (off the hot path). `None` on an unknown uid, a gone session, or a timeout.
     pub fn render_screen(&self, uid: &str) -> Option<String> {
+        self.render_screen_read(uid).map(|r| r.text)
+    }
+
+    /// The same round-trip, keeping the reply's prompt box (`None` from an older daemon).
+    pub fn render_screen_read(&self, uid: &str) -> Option<crate::session::screen::ScreenRead> {
         let want_uid = uid.to_string();
         let reply = self.request(
             ClientMsg::RenderScreen {
@@ -383,7 +388,9 @@ impl DaemonSessionManager {
             move |m| matches!(m, DaemonMsg::Screen { uid: u, .. } if *u == want_uid),
         )?;
         match reply {
-            DaemonMsg::Screen { text, .. } => text,
+            DaemonMsg::Screen {
+                text, input_line, ..
+            } => text.map(|text| crate::session::screen::ScreenRead { text, input_line }),
             _ => None,
         }
     }
@@ -823,6 +830,9 @@ impl DaemonSessionManager {
     pub fn render_screen(&self, _uid: &str) -> Option<String> {
         unreachable!("daemon backend is unix-only")
     }
+    pub fn render_screen_read(&self, _uid: &str) -> Option<crate::session::screen::ScreenRead> {
+        unreachable!("daemon backend is unix-only")
+    }
     pub fn write(&self, _uid: &str, _data: &str) {
         unreachable!("daemon backend is unix-only")
     }
@@ -1184,8 +1194,28 @@ mod tests {
             "render_screen should round-trip the screen incl. the marker"
         );
 
+        // t36: the prompt-box classification crosses the daemon socket. printf draws a rule
+        // row, a `❯` row with faint text and a closing rule — Claude Code's ghost suggestion box.
+        mgr.write(
+            "p1",
+            "printf '\\342\\224\\200\\342\\224\\200\\n\\342\\235\\257 \\033[2mGHOST_HINT\\033[22m\\n\\342\\224\\200\\342\\224\\200\\n'\n",
+        );
+        let ghost = wait_until(Dur::from_secs(5), || {
+            mgr.render_screen_read("p1").is_some_and(|r| {
+                r.input_line.as_ref().is_some_and(|l| {
+                    l.text == "GHOST_HINT"
+                        && l.kind == crate::session::screen::InputLineKind::Suggestion
+                })
+            })
+        });
+        assert!(
+            ghost,
+            "render_screen_read should carry the faint box as a suggestion"
+        );
+
         // An unknown uid renders to None (gone session / never existed).
         assert_eq!(mgr.render_screen("nope"), None);
+        assert_eq!(mgr.render_screen_read("nope"), None);
 
         mgr.kill("p1");
         assert!(!mgr.has("p1"), "kill drops the shadow synchronously");

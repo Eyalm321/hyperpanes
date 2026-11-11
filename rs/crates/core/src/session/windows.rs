@@ -367,8 +367,17 @@ impl Daemon {
                 self.cwds.lock().unwrap().clear();
             }
             ClientMsg::RenderScreen { uid } => {
-                let text = self.registry.render_screen(&uid);
-                let _ = pc.write_msg(&DaemonMsg::Screen { uid, text }).await;
+                let (text, input_line) = match self.registry.render_screen_read(&uid) {
+                    Some(r) => (Some(r.text), r.input_line),
+                    None => (None, None),
+                };
+                let _ = pc
+                    .write_msg(&DaemonMsg::Screen {
+                        uid,
+                        text,
+                        input_line,
+                    })
+                    .await;
             }
             ClientMsg::Ping => {
                 let _ = pc.write_msg(&DaemonMsg::Pong).await;

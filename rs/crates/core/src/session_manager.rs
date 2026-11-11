@@ -437,10 +437,16 @@ impl SessionRegistry {
     /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
     /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`).
     pub fn render_screen(&self, uid: &str) -> Option<String> {
+        self.render_screen_read(uid).map(|r| r.text)
+    }
+
+    /// [`render_screen`](Self::render_screen) plus the prompt-box classification
+    /// ([`crate::session::screen::InputLine`]), from the same synced grid.
+    pub fn render_screen_read(&self, uid: &str) -> Option<crate::session::screen::ScreenRead> {
         let map = self.sessions.lock().unwrap();
         map.get(uid).map(|s| {
             s.shared.sync_screen();
-            s.shared.screen.lock().unwrap().render()
+            s.shared.screen.lock().unwrap().render_read()
         })
     }
 
@@ -825,6 +831,15 @@ impl SessionManager {
         match self {
             SessionManager::InProcess(r) => r.render_screen(uid),
             SessionManager::Daemon(d) => d.render_screen(uid),
+        }
+    }
+
+    /// The screen text plus the prompt box ([`crate::session::screen::InputLine`]). Against a
+    /// daemon that predates the field, `input_line` is `None` (the text still comes back).
+    pub fn render_screen_read(&self, uid: &str) -> Option<crate::session::screen::ScreenRead> {
+        match self {
+            SessionManager::InProcess(r) => r.render_screen_read(uid),
+            SessionManager::Daemon(d) => d.render_screen_read(uid),
         }
     }
 

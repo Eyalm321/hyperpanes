@@ -185,7 +185,15 @@ pub enum DaemonMsg {
     Replay { uid: String, data: String },
     /// Reply to [`ClientMsg::RenderScreen`]: the serialized screen, or `None` if the
     /// session is gone.
-    Screen { uid: String, text: Option<String> },
+    ///
+    /// `input_line` was added without a protocol bump: it is optional on the wire, so an older
+    /// daemon's reply decodes with `None` and an older client ignores the extra field.
+    Screen {
+        uid: String,
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_line: Option<crate::session::screen::InputLine>,
+    },
     /// A streamed live session event (Data / Cwd / Exit) for any session this connection
     /// has attached to (or all, per the daemon's broadcast policy).
     Event(SessionEvent),
@@ -392,6 +400,15 @@ mod tests {
             DaemonMsg::Screen {
                 uid: "s1".into(),
                 text: Some("clean screen".into()),
+                input_line: None,
+            },
+            DaemonMsg::Screen {
+                uid: "s1".into(),
+                text: Some("clean screen".into()),
+                input_line: Some(crate::session::screen::InputLine {
+                    text: "ghost".into(),
+                    kind: crate::session::screen::InputLineKind::Suggestion,
+                }),
             },
             DaemonMsg::Event(SessionEvent::Data {
                 uid: "s1".into(),
@@ -520,5 +537,46 @@ mod tests {
         let mut r = Cursor::new(buf);
         let err = read_frame::<_, ClientMsg>(&mut r).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    // t36: `input_line` rides on `Screen` without a protocol bump. Both directions must hold:
+    // an older daemon's reply (no field) decodes, and an older client ignores the new field.
+    #[test]
+    fn screen_reply_input_line_is_wire_compatible_both_ways() {
+        let old_reply = r#"{"Screen":{"uid":"s1","text":"t"}}"#;
+        let decoded: DaemonMsg = serde_json::from_str(old_reply).unwrap();
+        assert_eq!(
+            decoded,
+            DaemonMsg::Screen {
+                uid: "s1".into(),
+                text: Some("t".into()),
+                input_line: None,
+            }
+        );
+        // A None field is not written at all, so an old client sees the exact old shape.
+        let none = serde_json::to_string(&decoded).unwrap();
+        assert_eq!(none, old_reply);
+        // An old client's view of a new reply: the same enum minus the field.
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        enum OldDaemonMsg {
+            Screen { uid: String, text: Option<String> },
+        }
+        let new_reply = serde_json::to_string(&DaemonMsg::Screen {
+            uid: "s1".into(),
+            text: Some("t".into()),
+            input_line: Some(crate::session::screen::InputLine {
+                text: "x".into(),
+                kind: crate::session::screen::InputLineKind::Typed,
+            }),
+        })
+        .unwrap();
+        let old: OldDaemonMsg = serde_json::from_str(&new_reply).unwrap();
+        assert_eq!(
+            old,
+            OldDaemonMsg::Screen {
+                uid: "s1".into(),
+                text: Some("t".into())
+            }
+        );
     }
 }
