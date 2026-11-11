@@ -37,9 +37,6 @@ jobs:
     secrets:
       MAC_RUNNERS_TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}
 
-  # build-ios stays on macos-latest: `flutter build ios` needs full Xcode, which the
-  # self-hosted minis do not have (Command Line Tools only).
-
   # Single source of truth for the version/tag pair used by every job below.
   version:
     runs-on: ubuntu-latest
@@ -277,35 +274,17 @@ jobs:
           gh release upload "${{ needs.version.outputs.tag }}" \
             "hyperpanes-mobile-${{ needs.version.outputs.version }}.apk" --clobber
 
-  # iOS — UNSIGNED (no Apple team on CI): the zipped Runner.app installs via Xcode or
-  # a re-signing sideloader (AltStore/Sideloadly). A signed IPA needs local Xcode.
+  # iOS — UNSIGNED (no Apple team on CI). The build lives in ios-build.yml, which also
+  # runs by hand (workflow_dispatch) and on iOS-relevant PRs, so a release runs the exact
+  # steps those runs prove. It routes itself (mac-route.yml `ios`): the Xcode mini when
+  # one is online, else macos-latest. Same zip name, attached with --clobber.
   build-ios:
     needs: [version, release, test-mobile]
-    runs-on: macos-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-    defaults:
-      run:
-        working-directory: mobile/hyperpanes_mobile
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: Build iOS app (no codesign)
-        run: |
-          flutter pub get
-          flutter build ios --release --no-codesign \
-            --build-name "${{ needs.version.outputs.version }}" \
-            --build-number "${{ github.run_number }}"
-
-      - name: Zip + upload Runner.app to release
-        run: |
-          shopt -s failglob
-          cd build/ios/iphoneos
-          zip -qry "hyperpanes-mobile-ios-${{ needs.version.outputs.version }}-unsigned.zip" Runner.app
-          gh release upload "${{ needs.version.outputs.tag }}" \
-            "hyperpanes-mobile-ios-${{ needs.version.outputs.version }}-unsigned.zip" --clobber
+    uses: ./.github/workflows/ios-build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      build-number: ${{ github.run_number }}
+      upload: true
+      tag: ${{ needs.version.outputs.tag }}
+    secrets:
+      MAC_RUNNERS_TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}

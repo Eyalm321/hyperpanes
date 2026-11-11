@@ -3,17 +3,19 @@
 macOS CI jobs run on two self-hosted Mac minis registered on this repo, and fall back to
 GitHub-hosted `macos-latest` when the minis can't or mustn't be used.
 
-| runner        | labels                                        | preferred for                     |
-|---------------|-----------------------------------------------|-----------------------------------|
-| `mac-mini-16` | `self-hosted, macOS, ARM64, mac-mini-16`      | `rs` tests, release DMG build     |
-| `mac-mini-8`  | `self-hosted, macOS, ARM64, mac-mini-8`       | `rs/crates/terminal-widget` tests |
+| runner        | labels                                          | preferred for                                |
+|---------------|-------------------------------------------------|----------------------------------------------|
+| `mac-mini-16` | `self-hosted, macOS, ARM64, mac-mini-16`        | `rs` tests, release DMG build                |
+| `mac-mini-8`  | `self-hosted, macOS, ARM64, mac-mini-8, xcode`  | `rs/crates/terminal-widget` tests, iOS build |
 
-Either mini may take any macOS job.
+Either mini may take any macOS job except the iOS build, which needs full Xcode and so
+runs only on a runner labelled `xcode` (today: `mac-mini-8`).
 
 ## Routing
 
-`.github/workflows/mac-route.yml` is a reusable workflow. `test.yml`, `verify.yml` and
-`release-rust.yml` call it as job `route` and set each macOS job's `runs-on` from its output.
+`.github/workflows/mac-route.yml` is a reusable workflow. `test.yml`, `verify.yml`,
+`release-rust.yml` and `ios-build.yml` call it as job `route` and set each macOS job's
+`runs-on` from its output.
 Matrix values stay `macos-latest`, so check names don't change. The route job:
 
 1. sends everything to `macos-latest` when repo variable `MAC_RUNNERS` is `off` (kill switch);
@@ -25,9 +27,34 @@ Matrix values stay `macos-latest`, so check names don't change. The route job:
 4. otherwise pins a job to its preferred mini when that mini is online and idle. If it's busy
    or offline, the job gets the generic `[self-hosted, macOS, ARM64]` label. If neither mini
    is online, the job goes to `macos-latest`.
+5. output `ios` is `[self-hosted, macOS, ARM64, xcode]` while any runner labelled `xcode` is
+   online, busy or not (the job waits for it), and `macos-latest` otherwise.
 
-`build-ios` always stays on `macos-latest`: `flutter build ios` needs full Xcode, and the minis
-have only the Command Line Tools.
+## iOS build
+
+`.github/workflows/ios-build.yml` holds the only copy of the iOS build (`flutter build ios
+--release --no-codesign`, then the zipped `Runner.app`). It runs:
+
+- from `release-rust.yml` job `build-ios` (`upload: true`): attaches
+  `hyperpanes-mobile-ios-<version>-unsigned.zip` to the release, as before;
+- by hand (`workflow_dispatch`): builds, no upload;
+- on pull requests that touch `mobile/hyperpanes_mobile/{lib,ios}/**`, its `pubspec.*`,
+  `ios-build.yml` or `mac-route.yml`: builds, no upload.
+
+One build runs per ref; a newer push cancels the running one. A release upload is never
+cancelled.
+
+On a self-hosted runner the job sets `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`,
+because `xcode-select` on the mini still points at the Command Line Tools and switching it
+needs sudo. Dart native-asset build hooks run with a scrubbed environment (only `HOME`,
+`PATH` and `TMPDIR`), so `DEVELOPER_DIR` never reaches the `xcrun --show-sdk-path --sdk
+iphoneos` they call. The job therefore puts a two-line `xcrun` wrapper first on `PATH`
+(in `$RUNNER_TEMP`) that re-adds it. Hosted runners skip all of this.
+
+The app's iOS plugins resolve through Swift Package Manager, so the build doesn't need
+CocoaPods. On a self-hosted runner `subosito/flutter-action` keeps the Flutter SDK in the
+runner's tool cache (`_work/_tool/flutter/<channel>-<version>-<arch>`, about 4 GB with the iOS
+engine artifacts) and skips its `actions/cache` round trip.
 
 ## Owner setup
 
@@ -59,6 +86,22 @@ The hook is `scripts/ci/mac-runner-cleanup-hook.sh`. It runs before and after ev
 - wipes the cargo registry `src` and `cache` once they pass `REG_CAP_GB`;
 - wipes every `target` dir when free disk falls below `FLOOR_GB`;
 - removes runner `_diag` logs older than 7 days.
+
+For the iOS build it also:
+
+- keeps only the newest Flutter SDK in `_work/_tool/flutter` (each new stable release adds
+  a ~4 GB directory);
+- wipes the pub cache (`$PUB_CACHE`, default `~/.pub-cache`) once it passes `PUB_CAP_GB`
+  (default 3);
+- wipes Xcode DerivedData built from CI checkouts once those dirs pass `DD_CAP_GB`
+  (default 3). It picks them by the `WorkspacePath` in each dir's `info.plist`, so other
+  projects on the host are never touched;
+- wipes the CocoaPods download cache once it passes `PODS_CAP_GB` (default 2). Nothing uses
+  it today; it's there in case a future plugin needs CocoaPods.
+
+Below `FLOOR_GB` it wipes those caches too, along with Xcode's shared `ModuleCache.noindex`
+and `CompilationCache.noindex`. The Flutter SDK lives under `_work`, so it counts toward
+`WORK_CAP_GB`, but the cap never deletes it: it just leaves less room for checkouts.
 
 It logs to `_diag/cleanup-hook.log` and never fails a job.
 

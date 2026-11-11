@@ -1,0 +1,127 @@
+name: ios-build
+
+# Unsigned iOS build of the Flutter client (mobile/hyperpanes_mobile): `flutter build ios
+# --release --no-codesign`, then Runner.app zipped. One copy of these steps serves every
+# caller, so a manual or PR run proves the exact path a release takes:
+#   * release-rust.yml calls it (workflow_call, upload: true) and the zip is attached to
+#     the release;
+#   * workflow_dispatch builds without uploading;
+#   * pull_request builds without uploading, only when iOS-relevant files change.
+#
+# UNSIGNED (no Apple team on CI): the zipped Runner.app installs via Xcode or a re-signing
+# sideloader (AltStore/Sideloadly). A signed IPA needs local Xcode.
+#
+# Where it runs: mac-route.yml's `ios` output. That is a self-hosted mini labelled `xcode`
+# when one is online and the code is trusted (same guards as every macOS job: fork PRs and
+# untrusted events always get macos-latest), else macos-latest. See docs/mac-runners.md.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to stamp as --build-name (semver, no leading v)
+        type: string
+        required: true
+      build-number:
+        description: --build-number
+        type: string
+        required: true
+      upload:
+        description: Attach the zip to release `tag`
+        type: boolean
+        default: false
+      tag:
+        description: Release tag to upload into (needs upload)
+        type: string
+        default: ''
+    secrets:
+      MAC_RUNNERS_TOKEN:
+        required: false
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - mobile/hyperpanes_mobile/lib/**
+      - mobile/hyperpanes_mobile/ios/**
+      - mobile/hyperpanes_mobile/pubspec.yaml
+      - mobile/hyperpanes_mobile/pubspec.lock
+      - .github/workflows/ios-build.yml
+      - .github/workflows/mac-route.yml
+
+jobs:
+  route:
+    uses: ./.github/workflows/mac-route.yml
+    secrets:
+      MAC_RUNNERS_TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}
+
+  build:
+    needs: route
+    runs-on: ${{ fromJSON(needs.route.outputs.ios) }}
+    # Only the upload step uses the token: GH_TOKEN is set on that step alone, and the
+    # checkout does not persist it. Release calls need write to attach the zip.
+    permissions:
+      contents: write
+    # One build per ref: a new push cancels the running build instead of queueing behind
+    # it on the single Xcode mini. A release upload is never cancelled.
+    concurrency:
+      group: ios-build-${{ github.ref }}
+      cancel-in-progress: ${{ !inputs.upload }}
+    env:
+      ZIP: hyperpanes-mobile-ios-${{ inputs.version || 'dev' }}-unsigned.zip
+    defaults:
+      run:
+        working-directory: mobile/hyperpanes_mobile
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Self-hosted mini: full Xcode is installed but xcode-select points at the Command
+      # Line Tools (switching it needs sudo), so DEVELOPER_DIR selects Xcode for this job.
+      # Dart native-asset build hooks run with a scrubbed environment (HOME, PATH, TMPDIR),
+      # so DEVELOPER_DIR never reaches the `xcrun --show-sdk-path` they call and they find
+      # no iOS SDK. A tiny `xcrun` on PATH puts it back. Hosted runners skip this step.
+      - name: Select Xcode (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          dev=/Applications/Xcode.app/Contents/Developer
+          [[ -d "$dev" ]] || { echo "::error::no Xcode at $dev on this runner"; exit 1; }
+          shim="$RUNNER_TEMP/xcrun-shim"
+          mkdir -p "$shim"
+          printf '#!/bin/sh\nDEVELOPER_DIR=%s exec /usr/bin/xcrun "$@"\n' "$dev" > "$shim/xcrun"
+          chmod +x "$shim/xcrun"
+          echo "$shim" >> "$GITHUB_PATH"
+          echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
+
+      # A self-hosted runner keeps the SDK in its tool cache between jobs, so the
+      # actions/cache round trip only helps hosted runners.
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Build iOS app (no codesign)
+        env:
+          BUILD_NAME: ${{ inputs.version }}
+          BUILD_NUMBER: ${{ inputs.build-number || github.run_number }}
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign \
+            ${BUILD_NAME:+--build-name "$BUILD_NAME"} \
+            --build-number "$BUILD_NUMBER"
+
+      - name: Zip Runner.app
+        working-directory: mobile/hyperpanes_mobile/build/ios/iphoneos
+        run: |
+          zip -qry "$ZIP" Runner.app
+          ls -l "$ZIP"
+
+      - name: Upload zip to release
+        if: inputs.upload
+        working-directory: mobile/hyperpanes_mobile/build/ios/iphoneos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ -n "$TAG" ]] || { echo "::error::upload needs a tag"; exit 1; }
+          gh release upload "$TAG" "$ZIP" --clobber
