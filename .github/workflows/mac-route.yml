@@ -1,0 +1,113 @@
+name: mac-route
+
+# Reusable routing job: decides where every macOS job runs. Callers (test.yml, verify.yml,
+# release-rust.yml) `needs:` it and pick one output with fromJSON() in `runs-on:`.
+#
+# Two self-hosted Mac minis are registered on this repo, each with labels
+# [self-hosted, macOS, ARM64, <name>]:
+#   * mac-mini-16 — the bigger one; heavy `rs` tests and the release app build prefer it
+#   * mac-mini-8  — terminal-widget tests prefer it
+# Either may take any macOS job: if the preferred mini is offline or busy, the job goes to
+# the generic [self-hosted, macOS, ARM64] label so whichever mini is free picks it up.
+#
+# GitHub has no native "fall back to a hosted runner" for self-hosted labels, so this job
+# checks runner status first and emits "macos-latest" when it must not, or cannot, use the
+# minis. It emits "macos-latest" when:
+#   * the repo variable MAC_RUNNERS is "off" (manual kill switch),
+#   * the code is not trusted to run on the minis (public-repo guard, below),
+#   * the MAC_RUNNERS_TOKEN secret is absent, or the runner API call fails,
+#   * neither mini is online.
+#
+# Public-repo guard: only code from THIS repo may run on the minis. Trusted events are
+# `push` (branches and tags), `workflow_dispatch`, and a `pull_request` whose head repo is
+# this repo. Fork PRs and `merge_group` (the merge queue can carry approved fork code)
+# always get macos-latest. Fork PRs never see secrets anyway, so the token check is a
+# second guard on top of this one.
+#
+# GITHUB_TOKEN cannot list self-hosted runners. MAC_RUNNERS_TOKEN is a fine-grained PAT
+# scoped to this repo only, with "Administration: read-only" and nothing else.
+#
+# Every output is a JSON value (a string or a label array), always set: the step writes
+# the hosted fallback first and the job cannot fail, so callers never get an empty value.
+
+on:
+  workflow_call:
+    outputs:
+      rs:
+        description: runs-on JSON for heavy rs jobs (prefers mac-mini-16)
+        value: ${{ jobs.route.outputs.rs }}
+      tw:
+        description: runs-on JSON for terminal-widget jobs (prefers mac-mini-8)
+        value: ${{ jobs.route.outputs.tw }}
+      app:
+        description: runs-on JSON for the release app build (prefers mac-mini-16)
+        value: ${{ jobs.route.outputs.app }}
+    secrets:
+      MAC_RUNNERS_TOKEN:
+        required: false
+
+permissions: {}
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rs: ${{ steps.pick.outputs.rs || steps.fallback.outputs.rs }}
+      tw: ${{ steps.pick.outputs.tw || steps.fallback.outputs.tw }}
+      app: ${{ steps.pick.outputs.app || steps.fallback.outputs.app }}
+    steps:
+      - name: Pick macOS runners
+        id: pick
+        continue-on-error: true
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}
+          SWITCH: ${{ vars.MAC_RUNNERS }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -uo pipefail
+          hosted='"macos-latest"'
+          emit() { printf 'rs=%s\ntw=%s\napp=%s\n' "$1" "$2" "$3" >> "$GITHUB_OUTPUT"; }
+          hosted_all() { echo "macOS jobs -> macos-latest: $1"; emit "$hosted" "$hosted" "$hosted"; exit 0; }
+
+          if [[ "${SWITCH,,}" == "off" ]]; then hosted_all "MAC_RUNNERS=off"; fi
+          case "$EVENT" in
+            push|workflow_dispatch) ;;
+            pull_request) [[ "$HEAD_REPO" == "$REPO" ]] || hosted_all "fork PR ($HEAD_REPO)" ;;
+            *) hosted_all "untrusted event $EVENT" ;;
+          esac
+          [[ -n "$TOKEN" ]] || hosted_all "MAC_RUNNERS_TOKEN not set"
+
+          if ! runners=$(curl -fsS --max-time 20 \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/actions/runners?per_page=100"); then
+            hosted_all "runner API call failed"
+          fi
+          # state <name> -> idle | busy | offline
+          state() {
+            jq -r --arg n "$1" '[.runners[] | select(.name == $n)][0]
+              | if . == null or .status != "online" then "offline"
+                elif .busy then "busy" else "idle" end' <<<"$runners"
+          }
+          s16=$(state mac-mini-16) || s16=offline
+          s8=$(state mac-mini-8) || s8=offline
+          echo "mac-mini-16=$s16 mac-mini-8=$s8"
+          [[ "$s16" != offline || "$s8" != offline ]] || hosted_all "no mini online"
+
+          generic='["self-hosted","macOS","ARM64"]'
+          # pick <preferred-name> <its state>: pin to it when idle, else any online mini.
+          pick() { if [[ "$2" == idle ]]; then echo "[\"self-hosted\",\"macOS\",\"ARM64\",\"$1\"]"; else echo "$generic"; fi; }
+          rs=$(pick mac-mini-16 "$s16"); tw=$(pick mac-mini-8 "$s8"); app=$(pick mac-mini-16 "$s16")
+          echo "rs=$rs tw=$tw app=$app"
+          emit "$rs" "$tw" "$app"
+
+      # Safety net: if the step above died before writing its outputs, fall back to hosted.
+      - name: Fallback outputs
+        if: steps.pick.outcome != 'success' || steps.pick.outputs.rs == ''
+        id: fallback
+        shell: bash
+        run: printf 'rs="macos-latest"\ntw="macos-latest"\napp="macos-latest"\n' >> "$GITHUB_OUTPUT"

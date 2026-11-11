@@ -40,9 +40,18 @@ permissions:
   contents: read
 
 jobs:
+  # Where the macOS legs run (self-hosted minis, or macos-latest): see mac-route.yml.
+  route:
+    uses: ./.github/workflows/mac-route.yml
+    secrets:
+      MAC_RUNNERS_TOKEN: ${{ secrets.MAC_RUNNERS_TOKEN }}
+
   test:
     name: test (${{ matrix.workspace }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    needs: route
+    # The matrix value stays `macos-latest` so check names never change; the actual runner
+    # comes from the route job (rs prefers mac-mini-16, terminal-widget mac-mini-8).
+    runs-on: ${{ matrix.os != 'macos-latest' && matrix.os || fromJSON(matrix.workspace == 'rs' && needs.route.outputs.rs || needs.route.outputs.tw) }}
     strategy:
       fail-fast: false
       matrix:
