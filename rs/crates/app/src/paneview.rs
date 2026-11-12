@@ -1670,6 +1670,11 @@ mod tab_status_tests {
 
     #[test]
     fn ui_tab_status_matches_state_tab_status() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mgr = SessionManager::new(tx);
         // Tab 0: one busy (recent output) + one idle (old output). Tab 1: all idle.
