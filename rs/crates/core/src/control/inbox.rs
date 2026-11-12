@@ -152,6 +152,12 @@ impl MessageInbox {
                 let (p, c) = d?;
                 inbox.dropped.insert(p, c as usize);
             }
+            // Aliases age out with the mail: past MAX_AGE_MS nothing addressed to the old id is
+            // retained, and a sender still using an id that old is better off with a 404.
+            conn.execute(
+                "DELETE FROM aliases WHERE ts<?1",
+                [now_ms.saturating_sub(MAX_AGE_MS)],
+            )?;
             let mut st = conn.prepare("SELECT old_id,new_id FROM aliases")?;
             for a in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
                 let (o, n) = a?;
@@ -563,6 +569,19 @@ mod tests {
         b.post("p", "x", "latest", 3 * MAX_AGE_MS);
         let bodies: Vec<_> = b.read("p", 0).into_iter().map(|m| m.body).collect();
         assert_eq!(bodies, vec!["latest"]);
+    }
+
+    #[test]
+    fn aliases_age_out_on_reopen() {
+        let path = scratch("alias-age");
+        {
+            let mut a = MessageInbox::open(&path, 0).unwrap();
+            assert!(a.register_alias("old", "new", 0));
+            assert!(a.register_alias("fresh", "new2", MAX_AGE_MS));
+        }
+        let b = MessageInbox::open(&path, MAX_AGE_MS + 1).unwrap();
+        assert!(b.aliases().get("old").is_none());
+        assert_eq!(b.aliases().get("fresh").map(String::as_str), Some("new2"));
     }
 
     #[test]
