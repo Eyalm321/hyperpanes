@@ -311,7 +311,18 @@ pane (or the tab) in scope, like `recolorPane`.
   happens.
 - `newPane` accepts `"pane":{"project":"…","projectTab":true,…}`: the new pane opens straight in
   that project's tab (reused or created, as above) instead of the caller's tab. It is opt-in.
-  Without `projectTab`, `project` still only defaults the cwd and colour.
+  Without `projectTab`, `project` still only defaults the cwd and colour. When the window already
+  has the project's tab, the pane is spawned directly into it. Otherwise the GUI creates the tab
+  and moves the pane in on the same tick it adopts it, so it never shows in the active tab.
+- `newPane` accepts a top-level `"tabId":"…"` (a tab id from `/state`): the new pane is spawned
+  directly into that existing tab instead of the window's active tab, and the active tab doesn't
+  change. `windowId` is optional with `tabId`, and must be the tab's own window when given. A
+  tab-scoped token may spawn into its own tab this way even when that tab isn't active. `tabId`
+  and `pane.projectTab` can't be combined. Errors: `400` (no such tab, a non-string `tabId`, a
+  `windowId` that isn't the tab's window, or `tabId` together with `projectTab`), `403` (the tab
+  is out of a scoped token's scope).
+- To put a new pane in another tab, use `tabId` or `projectTab`. Don't `newPane` and then
+  `movePane`: the pane sits in the active tab until the move lands.
 - `newPane` keeps `pane.subtitle` (the header's second line). It used to be dropped. The session
   snapshot records it, so it survives a restart.
 

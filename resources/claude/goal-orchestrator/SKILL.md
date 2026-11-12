@@ -61,7 +61,10 @@ For each goal you're given (free text):
    `project:"<project name or id>"` to `open_pane` (that defaults the cwd AND the project frame
    color from the registry) plus `projectTab:true`, so the pane opens in the project's own tab
    (one tab per project, named and colored from the registry, reused when it exists) instead of
-   whatever tab is active (an app without `projectTab` ignores it). Set `label` = the project
+   whatever tab is active (an app without `projectTab` ignores it). To place a pane in one
+   specific existing tab instead, pass `tabId:<that tab's id from list_panes>`. **Never open a
+   pane and then `move_pane` it into place**: until the move lands, the pane sits in the active
+   tab, which is usually someone else's, and the owner sees it flash there. Set `label` = the project
    name (`$HP_GOAL_PROJECT_NAME` in your env;
    `$HP_GOAL_PROJECT_COLOR` has the hex if you need an explicit `color`), and set the pane's
    subtitle to its task — `rename_pane {paneId, label:<project name>, subtitle:"<goal one-liner>"}`.
@@ -106,7 +109,8 @@ Do not accept a spec agent's `done` on its word. Gate it:
   work queue and require exit 0. Or run it yourself if cheap.
 - **File/artifact criterion** — verify presence/shape via `read_pane` on a quick shell, or the
   control API `fs/read`.
-- **Rubric criterion** — spawn a short-lived judge pane (`open_pane` running
+- **Rubric criterion** — spawn a short-lived judge pane (`open_pane` with `project` +
+  `projectTab:true` like every pane you spawn, running
   `claude --dangerously-skip-permissions -p "<rubric>\n<evidence>"`, must exit 0 iff satisfied),
   then `close_pane` it.
 - **Running version vs. the release a fix shipped in.** Before relying on a hyperpanes fix (or
@@ -200,7 +204,7 @@ the whole repo **per agent** because every agent sits in its own worktree, so a 
 repo cost tens of GB. Goal agents run on hyperpanes tools + the built-ins only. The app already
 appends both flags on your own spawn; pass them down the same way when you spawn a spec agent,
 and tell the spec agent to do the same in its `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
+`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, project:"<project name>", projectTab:true, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
 (worker panes are spawned by the app and don't inherit the spec agent's env, hence the `env` map;
 the `CARGO_TARGET_DIR` prefix points cargo at the per-task warm cache slot the runner exports)
 
