@@ -270,6 +270,12 @@ pub fn work_db() -> PathBuf {
     data_dir().join("work.db")
 }
 
+/// The durable per-pane message inbox (SQLite/WAL) behind `/panes/{id}/messages`, plus the
+/// pane-id alias table. Opened only by the instance that owns `work.db`.
+pub fn messages_db() -> PathBuf {
+    data_dir().join("messages.db")
+}
+
 /// The Claude-account registry (goals system account rotation): the list of `CLAUDE_CONFIG_DIR`s
 /// to rotate agents across. Optional — absent falls back to discovery (see
 /// [`crate::claude_accounts::load`]). Durable user data → [`data_dir`].

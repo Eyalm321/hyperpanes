@@ -378,7 +378,8 @@ impl ControlHost {
         shared.set_runtime(self.runtime.clone());
         // Back the work queue with the durable on-disk DB and recover in-flight tasks left by
         // workers that died with the previous session.
-        shared.attach_durable_work_queue();
+        let work_attach = shared.attach_durable_work_queue();
+        shared.attach_durable_inbox(&work_attach);
         // Remote-access bind (mobile client): re-read the settings file so an edit takes
         // effect on the next Enabled toggle without an app restart.
         {

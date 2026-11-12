@@ -67,6 +67,9 @@ pub struct Shared {
     /// Which queue `work` is: a [`WorkQueueMode`] as `u8`, set by
     /// [`attach_durable_work_queue`](Self::attach_durable_work_queue), reported on `/health`.
     work_mode: AtomicU8,
+    /// Which inbox this is: an [`InboxMode`] as `u8`, set by
+    /// [`attach_durable_inbox_at`](Self::attach_durable_inbox_at), reported on `/health`.
+    inbox_mode: AtomicU8,
     pub events: EventHub,
     /// Phase-5 auto-restart supervisor: per-pane policy + retry ledger. Default-empty ⇒
     /// every `Exit` runs the legacy path until a pane opts in via `hp.supervise` meta.
@@ -161,6 +164,28 @@ impl WorkQueueMode {
     }
 }
 
+/// Which message inbox an instance runs — `/health`'s additive `inbox` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InboxMode {
+    /// The in-memory inbox (never attached, or the store would not open).
+    Memory = 0,
+    /// The on-disk `messages.db`, owned by this instance.
+    Durable = 1,
+    /// Another live instance owns the data dir; this one stays in-memory.
+    Refused = 2,
+}
+
+impl InboxMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InboxMode::Memory => "memory",
+            InboxMode::Durable => "durable",
+            InboxMode::Refused => "refused",
+        }
+    }
+}
+
 /// What [`Shared::attach_durable_work_queue`] did.
 #[derive(Debug)]
 pub enum WorkAttach {
@@ -212,6 +237,7 @@ impl Shared {
             locks: Mutex::new(PaneLocks::new()),
             work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
             work_mode: AtomicU8::new(WorkQueueMode::Memory as u8),
+            inbox_mode: AtomicU8::new(InboxMode::Memory as u8),
             events: EventHub::new(),
             supervisor: Mutex::new(Supervisor::new()),
             sessions,
@@ -420,6 +446,69 @@ impl Shared {
                 WorkAttach::OpenFailed(e.to_string())
             }
         }
+    }
+
+    /// Back the pane inbox with the durable `messages.db` at
+    /// [`paths::messages_db`](crate::persistence::paths::messages_db). Call right after
+    /// [`attach_durable_work_queue`](Self::attach_durable_work_queue) with its result: the
+    /// inbox is only attached by the instance that owns `work.db`.
+    pub fn attach_durable_inbox(&self, work: &WorkAttach) -> InboxMode {
+        self.attach_durable_inbox_at(&crate::persistence::paths::messages_db(), work)
+    }
+
+    /// [`attach_durable_inbox`](Self::attach_durable_inbox) against an explicit path. Only a
+    /// [`WorkAttach::Durable`] owner attaches; a refused instance reports `refused` and an
+    /// owner whose store fails to open stays in-memory. Never fatal.
+    pub fn attach_durable_inbox_at(&self, path: &std::path::Path, work: &WorkAttach) -> InboxMode {
+        let mode = match work {
+            WorkAttach::Refused(_) => InboxMode::Refused,
+            WorkAttach::OpenFailed(_) => InboxMode::Memory,
+            WorkAttach::Durable { .. } => {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                match crate::control::inbox::MessageInbox::open(path, now_ms()) {
+                    Ok(inbox) => {
+                        let aliases = inbox.aliases().clone();
+                        *self.inbox.lock().unwrap() = inbox;
+                        self.model.lock().unwrap().set_aliases(aliases);
+                        InboxMode::Durable
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[inbox] could not open durable inbox at {} ({e}); staying in-memory",
+                            path.display()
+                        );
+                        InboxMode::Memory
+                    }
+                }
+            }
+        };
+        self.inbox_mode.store(mode as u8, Ordering::SeqCst);
+        mode
+    }
+
+    /// Which inbox this instance runs (reported on `/health` as `inbox`).
+    pub fn inbox_mode(&self) -> InboxMode {
+        match self.inbox_mode.load(Ordering::SeqCst) {
+            x if x == InboxMode::Durable as u8 => InboxMode::Durable,
+            x if x == InboxMode::Refused as u8 => InboxMode::Refused,
+            _ => InboxMode::Memory,
+        }
+    }
+
+    /// Record that pane `old` is now `new` (a restored pane re-spawned under a new id): the
+    /// stored mail is re-keyed, and every pane route accepts `old` and lands on the live pane.
+    pub fn register_pane_alias(&self, old: &str, new: &str) -> bool {
+        let aliases = {
+            let mut inbox = self.inbox.lock().unwrap();
+            if !inbox.register_alias(old, new, now_ms()) {
+                return false;
+            }
+            inbox.aliases().clone()
+        };
+        self.model.lock().unwrap().set_aliases(aliases);
+        true
     }
 
     /// Which queue this instance runs (reported on `/health` as `workQueue`).
