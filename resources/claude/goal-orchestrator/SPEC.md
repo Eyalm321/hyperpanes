@@ -61,7 +61,7 @@ prompt wedges the pane).
   and re-enqueue a corrected payload, or hand-apply the change at integration. Never assume a sent
   correction landed. Check the diff, and the `seq` the agent names in its commit message.
 - `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
-  project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
+  project: $HP_GOAL_PROJECT_NAME, projectTab:true, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
   split on newlines>, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <your
   values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"}
   claude --dangerously-skip-permissions --mcp-config
@@ -115,9 +115,11 @@ prompt wedges the pane).
     finishes first, never a 17th pane). This is a soft budget you enforce yourself — keep the
     workspace legible and the machine within a sane pane count.
   - **Pane identity:** worker panes wear the project's colors too — pass
-    `project: $HP_GOAL_PROJECT_NAME` and `subtitle:"<goal id>: <one-liner>"` to `spawn_workers`
-    (the app resolves the default cwd + frame color from the project registry; explicit `cwd`/
-    `color` still win if you pass them) — `rename_pane` is no longer needed for worker identity,
+    `project: $HP_GOAL_PROJECT_NAME`, `projectTab: true` and `subtitle:"<goal id>: <one-liner>"`
+    to `spawn_workers` (the app resolves the default cwd + frame color from the project registry;
+    explicit `cwd`/`color` still win if you pass them; `projectTab` opens the workers in the
+    project's own tab, reused or created, instead of the active one, and an app without it
+    ignores it) — `rename_pane` is no longer needed for worker identity,
     so a glance at the workspace reads project → task. `spawn_workers` also stamps every worker
     pane with default org meta (role="worker", task="queue:<q>", `parent` = your pane), so an impl
     agent's `send_to_parent` reaches you out of the box — no manual `set_meta` step; a caller
