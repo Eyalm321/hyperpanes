@@ -280,12 +280,39 @@ pub fn load() -> Settings {
 fn desktop_prefers_reduced_motion() -> bool {
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("gsettings")
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        // Time-boxed: a wedged gsettings/dconf must never stall startup.
+        let Ok(mut child) = Command::new("gsettings")
             .args(["get", "org.gnome.desktop.interface", "enable-animations"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "false")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut out = String::new();
+                    if let Some(mut so) = child.stdout.take() {
+                        let _ = so.read_to_string(&mut out);
+                    }
+                    return status.success() && out.trim() == "false";
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {

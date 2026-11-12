@@ -525,6 +525,9 @@ pub fn tab_status_for(tab: &crate::state::Tab, mgr: &SessionManager) -> TabStatu
     )
 }
 
+/// How often the pump resamples the tab-chip statuses.
+const TAB_STATUS_EVERY: Duration = Duration::from_millis(200);
+
 /// Dot-animation phase (which of the 3 dots is raised) at `elapsed`.
 fn dot_phase(elapsed: Duration) -> i32 {
     ((elapsed.as_millis() / 280) % 3) as i32
@@ -1364,21 +1367,28 @@ pub fn pump(
     // Recompute each tab's working flag every tick (cheap) and only touch the model when a
     // value changed. The dot phase is Rust-driven at ~3.5 Hz and only while some tab is
     // working (and motion isn't reduced), so an all-idle app never redraws for it.
+    // NOT "active": the dots step at ~3.5 Hz, well inside the ~31 Hz idle cadence, so a busy
+    // tab must not pin the pump to the fast cadence (a marker-busy agent can sit silent for
+    // minutes). The status itself is resampled every ~200 ms, not every 8 ms tick.
     {
-        let mut any_working = false;
-        if ui.tabs.row_count() == state.tabs.len() {
+        let now = Instant::now();
+        if now.duration_since(state.tab_status_at) >= TAB_STATUS_EVERY
+            && ui.tabs.row_count() == state.tabs.len()
+        {
+            state.tab_status_at = now;
+            let mut any = false;
             for (i, t) in state.tabs.iter().enumerate() {
                 let w = tab_status_for(t, mgr) == TabStatus::Working;
-                any_working |= w;
+                any |= w;
                 let mut row = ui.tabs.row_data(i).unwrap();
                 if row.working != w {
                     row.working = w;
                     ui.tabs.set_row_data(i, row);
                 }
             }
+            state.tab_any_working = any;
         }
-        let phase = if any_working && !state.settings.reduce_motion {
-            active = true;
+        let phase = if state.tab_any_working && !state.settings.reduce_motion {
             dot_phase(state.tab_dot_epoch.elapsed())
         } else {
             0

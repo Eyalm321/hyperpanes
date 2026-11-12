@@ -1306,6 +1306,10 @@ pub struct State {
     pub preview_glow: Glow,
     /// Epoch of the tab-status dot animation (phase = elapsed / 280 ms mod 3).
     pub tab_dot_epoch: Instant,
+    /// When the pump last resampled the tab-chip statuses (throttle).
+    pub tab_status_at: Instant,
+    /// Whether any tab was working at the last resample (drives the dot phase).
+    pub tab_any_working: bool,
     /// The self-playing Tetris shown in the preview pane (ambient animation).
     pub preview_tetris: crate::tetris::Tetris,
     /// When the Tetris last advanced a frame (it steps on a fixed cadence, not every tick).
@@ -1537,6 +1541,8 @@ impl State {
             preview_surface: Image::default(),
             preview_glow: Glow::new(0x9E37_79B9_7F4A_7C15),
             tab_dot_epoch: Instant::now(),
+            tab_status_at: Instant::now(),
+            tab_any_working: false,
             preview_tetris: crate::tetris::Tetris::new(0x5DEE_CE2F_1234_ABCD),
             preview_tetris_last: Instant::now(),
             // Seed the rail's badge with the remembered projects up front (so the count
