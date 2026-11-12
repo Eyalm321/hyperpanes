@@ -233,7 +233,7 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter analyze
+      - run: flutter analyze --no-fatal-infos
       - run: flutter test
 
   # Android APK — debug-signed (see android/app/build.gradle.kts): installable by

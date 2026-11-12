@@ -187,6 +187,8 @@ struct HealthOut {
     /// no boot recovery, no reaper on the DB) or `"memory"` (never attached / open failed).
     /// Deliberately no paths or pids — `/health` is unauthenticated.
     work_queue: &'static str,
+    /// Additive: `durable` | `memory` | `refused` — which pane inbox this instance runs.
+    inbox: &'static str,
     /// Additive: optional sanitized build label; omitted when unset (public app).
     #[serde(skip_serializing_if = "Option::is_none")]
     build: Option<String>,
@@ -200,6 +202,7 @@ async fn health(State(shared): State<Arc<Shared>>) -> Response {
         version: shared.version.clone(),
         allow_input: shared.allow_input(),
         work_queue: shared.work_queue_mode().as_str(),
+        inbox: shared.inbox_mode().as_str(),
         build: shared.build(),
     })
 }
@@ -837,7 +840,8 @@ struct MessagesOut {
     messages: Vec<crate::control::inbox::PaneMessage>,
     dropped: usize,
     latest_seq: u64,
-    /// This inbox lifetime's id; it changes when the app restarts (the inbox is in-memory).
+    /// This inbox's id. Stable across restarts for a durable inbox (it lives with the DB);
+    /// an in-memory inbox mints a new one each app start.
     epoch: u64,
     /// The `after` cursor was from an earlier lifetime: `messages` is the whole backlog.
     reset: bool,
@@ -2412,7 +2416,7 @@ mod golden {
         assert_eq!(
             body,
             format!(
-                r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true,"workQueue":"memory"}}"#
+                r#"{{"ok":true,"app":"hyperpanes","pid":{pid},"version":"0.1.8","allowInput":true,"workQueue":"memory","inbox":"memory"}}"#
             )
         );
     }
@@ -2480,7 +2484,9 @@ mod golden {
             .text()
             .await
             .unwrap();
-        assert!(h.ends_with(r#""workQueue":"memory","build":"private build, abc1234"}"#));
+        assert!(h.ends_with(
+            r#""workQueue":"memory","inbox":"memory","build":"private build, abc1234"}"#
+        ));
     }
 
     #[tokio::test]
@@ -2767,7 +2773,7 @@ mod golden {
         assert_eq!(s.shared.nudges.lock().unwrap().pending("orch"), 0);
     }
 
-    // t36: the inbox is in-memory, so after an app restart a reader's old cursor (after:48) is
+    // t36: an in-memory inbox restarts at seq 1, so after an app restart a reader's old cursor (after:48) is
     // past every seq. It must get the backlog back flagged reset, not an empty list.
     #[tokio::test]
     async fn messages_get_with_a_stale_cursor_returns_everything_flagged_reset() {
@@ -2801,6 +2807,106 @@ mod golden {
         assert_eq!(current["reset"], serde_json::json!(false));
         assert_eq!(current["messages"], serde_json::json!([]));
         assert_eq!(current["epoch"], stale["epoch"]);
+    }
+
+    /// od2-A: after a full restore a pane has a new id. Mail posted to the OLD id once the alias
+    /// is registered must land on the live pane and be readable under its new id.
+    #[tokio::test]
+    async fn mail_to_an_old_pane_id_lands_on_the_aliased_live_pane() {
+        let s = boot(true).await;
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_pane(1, pane("pane-new", "u9"));
+        assert!(s.shared.register_pane_alias("pane-old", "pane-new"));
+        assert!(!s.shared.register_pane_alias("pane-x", "pane-x"));
+        for old in ["pane-old", "old"] {
+            let post = client()
+                .post(format!("{}/panes/{old}/messages", s.base))
+                .header("authorization", format!("Bearer {}", s.token))
+                .header("content-type", "application/json")
+                .body(r#"{"from":"impl","body":"via old id"}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(post.status().as_u16(), 200, "{old}");
+        }
+        let get: serde_json::Value = client()
+            .get(format!("{}/panes/pane-new/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(get["paneId"], serde_json::json!("pane-new"));
+        assert_eq!(get["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(get["messages"][0]["body"], serde_json::json!("via old id"));
+        // an unaliased unknown id still 404s
+        let miss = client()
+            .get(format!("{}/panes/pane-nope/messages", s.base))
+            .header("authorization", format!("Bearer {}", s.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(miss.status().as_u16(), 404);
+    }
+
+    /// od2-A: the durable inbox attaches only for a work.db owner; mail and aliases survive a
+    /// fresh `Shared` over the same file; `resolve_pane_id` resolves an old id.
+    #[tokio::test]
+    async fn durable_inbox_attach_modes_and_survival() {
+        use crate::control::server::{InboxMode, WorkAttach};
+        let dir = std::env::temp_dir().join(format!("hp-inbox-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("messages.db");
+        let owner = WorkAttach::Durable {
+            recovered: 0,
+            kept: 0,
+        };
+        {
+            let s = boot(true).await;
+            assert_eq!(s.shared.inbox_mode(), InboxMode::Memory);
+            // a non-owner whose work queue never opened stays in-memory and writes nothing
+            let failed = WorkAttach::OpenFailed("x".into());
+            assert_eq!(
+                s.shared.attach_durable_inbox_at(&db, &failed),
+                InboxMode::Memory
+            );
+            assert!(!db.exists());
+            // an owner whose store cannot open (a directory) stays in-memory
+            assert_eq!(
+                s.shared.attach_durable_inbox_at(&dir, &owner),
+                InboxMode::Memory
+            );
+            assert_eq!(
+                s.shared.attach_durable_inbox_at(&db, &owner),
+                InboxMode::Durable
+            );
+            s.shared.inbox.lock().unwrap().post(
+                "pane-old",
+                "lead",
+                "kept",
+                crate::control::server::now_ms(),
+            );
+            assert!(s.shared.register_pane_alias("pane-old", "pane-new"));
+        }
+        let s = boot(true).await;
+        assert_eq!(
+            s.shared.attach_durable_inbox_at(&db, &owner),
+            InboxMode::Durable
+        );
+        assert_eq!(s.shared.inbox.lock().unwrap().read("pane-new", 0).len(), 1);
+        let mut m = s.shared.model.lock().unwrap();
+        m.insert_pane(1, pane("pane-new", "u7"));
+        assert_eq!(m.resolve_pane_id("old").as_deref(), Some("pane-new"));
+        assert_eq!(m.resolve_pane_id("pane-old").as_deref(), Some("pane-new"));
+        assert_eq!(m.resolve_pane_id("pane-zzz"), None);
+        drop(m);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The two pane-id spellings in the wild (`pane-<uuid>` from the app, bare `<uuid>` from the

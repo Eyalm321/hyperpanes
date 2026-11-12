@@ -447,6 +447,30 @@ pub(crate) enum GoalTier {
     Worker,
 }
 
+/// The executable a worker's `inbox-hook` command should run: `$APPIMAGE` when set (the
+/// AppImage mount path dies with the process), else the current exe.
+fn inbox_hook_exe() -> Option<String> {
+    std::env::var("APPIMAGE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|p| strip_deleted_suffix(&p.to_string_lossy()).to_string())
+        })
+}
+
+/// Linux reports an exe that was replaced on disk (a package upgrade under a running app) as
+/// `<path> (deleted)`. The path itself names the upgraded binary, which is the one to run.
+fn strip_deleted_suffix(path: &str) -> &str {
+    path.strip_suffix(" (deleted)").unwrap_or(path)
+}
+
+/// POSIX single-quote `s` for a hook command line.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Build the contents of a goal settings blob.
 ///
 /// Carries three things, and each is load-bearing for an unattended pane:
@@ -461,6 +485,10 @@ pub(crate) enum GoalTier {
 ///   expires after `dialogExpiry` (5 min default) and the sender is told it lapsed. Opting in is
 ///   what makes agent-to-agent messaging reach a goal pane at all.
 /// * `permissions.deny` on the worker tier — see [`GoalTier::Worker`] below.
+/// * `hooks` on the worker tier — `PostToolUse` + `UserPromptSubmit` running
+///   `<exe> inbox-hook`. The user's own hooks live in their own settings sources and Claude
+///   MERGES those with `--settings`, so nothing is copied from or clobbers them. This file is
+///   generated: never hand-edit a live one.
 ///
 /// Deliberately nothing else: no model / effort / outputStyle keys leak in from the user's
 /// settings, so a goal pane's behaviour is a function of its persona and flags, not of whatever
@@ -486,6 +514,22 @@ fn goals_settings_json(status_line: Option<&serde_json::Value>, tier: GoalTier) 
             "permissions".to_string(),
             serde_json::json!({ "deny": ["SendMessage", "ListAgents"] }),
         );
+        // Mid-task inbox delivery: after each tool call (and on prompt submit) `inbox-hook`
+        // prints new control-plane mail as additionalContext. Omitted if the exe is unknown.
+        if let Some(exe) = inbox_hook_exe() {
+            let entry = serde_json::json!([{
+                "type": "command",
+                "command": format!("{} inbox-hook", shell_quote(&exe)),
+                "timeout": 2
+            }]);
+            root.insert(
+                "hooks".to_string(),
+                serde_json::json!({
+                    "PostToolUse": [{ "matcher": "*", "hooks": entry.clone() }],
+                    "UserPromptSubmit": [{ "hooks": entry }],
+                }),
+            );
+        }
     }
     serde_json::Value::Object(root).to_string()
 }
@@ -646,6 +690,44 @@ mod goals_mcp_config_tests {
             coord.get("permissions").is_none(),
             "coordinators keep the tools — they are what coordinates across panes"
         );
+    }
+
+    #[test]
+    fn worker_settings_carry_the_inbox_hook_and_coordinator_does_not() {
+        let worker: serde_json::Value =
+            serde_json::from_str(&super::goals_settings_json(None, super::GoalTier::Worker))
+                .unwrap();
+        let exe = super::inbox_hook_exe().expect("test process has an exe");
+        let want = format!("{} inbox-hook", super::shell_quote(&exe));
+        let post = &worker["hooks"]["PostToolUse"][0];
+        assert_eq!(post["matcher"], "*");
+        assert_eq!(post["hooks"][0]["type"], "command");
+        assert_eq!(post["hooks"][0]["command"], want.as_str());
+        assert_eq!(post["hooks"][0]["timeout"], 2);
+        let ups = &worker["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        assert_eq!(ups["command"], want.as_str());
+        assert!(worker["crossSessionInbound"] == "accept");
+
+        let coord: serde_json::Value = serde_json::from_str(&super::goals_settings_json(
+            None,
+            super::GoalTier::Coordinator,
+        ))
+        .unwrap();
+        assert!(coord.get("hooks").is_none());
+    }
+
+    #[test]
+    fn inbox_hook_exe_ignores_the_deleted_marker_of_an_upgraded_binary() {
+        assert_eq!(
+            super::strip_deleted_suffix("/usr/bin/hyperpanes (deleted)"),
+            "/usr/bin/hyperpanes"
+        );
+        assert_eq!(super::strip_deleted_suffix("/opt/hp"), "/opt/hp");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(super::shell_quote("/a b/it's"), "'/a b/it'\\''s'");
     }
 
     #[test]
@@ -1271,6 +1353,12 @@ pub struct State {
     /// `--resume`d orchestrator never starts again. Without the role the inbox nudge never fires,
     /// so a spec agent reporting back is never heard — the goal org goes silent.
     pub pending_pane_meta: Vec<(String, std::collections::BTreeMap<String, String>)>,
+    /// `(old external pane id, new pane id)` for panes a full restore re-spawned under a new uid;
+    /// drained by the app tick into the control host, which registers the pane-id aliases.
+    pub pending_pane_aliases: Vec<(String, String)>,
+    /// The pre-restore uid → external-id map (`control_pane_ids.json`), loaded once on the
+    /// first re-spawn that needs it.
+    restore_old_ids: Option<std::collections::HashMap<String, String>>,
     /// Extra key patterns (`*` = prefix) added to the default spawn-env persistence allow-list
     /// (`hyperpanes_core::workspace::env_persist`). Empty by default; see
     /// [`State::set_env_persist_allow`].
@@ -1425,6 +1513,8 @@ impl State {
             goal_orch_models: std::collections::HashMap::new(),
             goal_orch_identity: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
+            pending_pane_aliases: Vec::new(),
+            restore_old_ids: None,
             env_persist_allow: Vec::new(),
             goal_draft_images: Vec::new(),
             goal_text: String::new(),
@@ -6143,6 +6233,23 @@ impl State {
             (true, Some(u)) => u.clone(),
             _ => mgr.fresh_uid(),
         };
+
+        // A re-spawn under a different uid changes the pane's id: remember old → new so mail and
+        // routes addressed to the old id still reach it.
+        if !reattach {
+            if let Some(old_uid) = spec.uid.as_deref().filter(|u| *u != uid) {
+                let old_ids = self.restore_old_ids.get_or_insert_with(|| {
+                    std::fs::read_to_string(
+                        hyperpanes_core::persistence::paths::control_pane_ids_json(),
+                    )
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or_default()
+                });
+                let old = crate::control_host::old_external_id(old_uid, old_ids);
+                self.pending_pane_aliases.push((old, uid.clone()));
+            }
+        }
 
         // Re-apply the persisted control meta (re-attached or re-spawned alike), queued before
         // any goal-orchestrator meta below so the latter wins on a clash.
