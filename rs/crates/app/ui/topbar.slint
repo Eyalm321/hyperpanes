@@ -69,6 +69,9 @@ component TabChip inherits Rectangle {
     in property <bool> group: false;          // pane-group tab (t28)
     in property <color> group-color: Theme.subtext;
     in property <string> a11y-label: "";
+    in property <bool> working: false;        // any pane busy → dots; else IDLE
+    in property <int> dot-phase: 0;           // which of the 3 dots is raised (0..2)
+    in property <bool> reduce-motion: false;  // static equal dots
     callback select();
     callback close();
     callback begin-rename();
@@ -103,7 +106,7 @@ component TabChip inherits Rectangle {
     border-width: root.spring-hover ? 2px : (root.active ? 1px : 0px);
     border-color: root.spring-hover ? Theme.brand : Theme.border;
     accessible-role: tab;
-    accessible-label: root.a11y-label != "" ? root.a11y-label : root.title;
+    accessible-label: (root.a11y-label != "" ? root.a11y-label : root.title) + (root.working ? ", working" : ", idle");
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
 
@@ -162,6 +165,35 @@ component TabChip inherits Rectangle {
             horizontal-stretch: 1;
             overflow: elide;
             visible: !root.editing;
+        }
+
+        // status slot — fixed width in both states so the chip never jumps
+        Rectangle {
+            width: 26px;
+            visible: !root.editing;
+            if root.working : HorizontalLayout {
+                alignment: center;
+                spacing: 2px;
+                for i in 3 : VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        property <bool> lit: root.reduce-motion || root.dot-phase == i;
+                        width: 4px;
+                        height: 4px;
+                        border-radius: 2px;
+                        background: Theme.accent;
+                        opacity: self.lit ? 1.0 : 0.4;
+                    }
+                }
+            }
+            if !root.working : Text {
+                text: "IDLE";
+                color: Theme.subtext;
+                font-size: 9px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
 
         // close affordance: hidden until hover/active (Electron behaviour)
@@ -226,6 +258,8 @@ export component TopBar inherits Rectangle {
     in property <bool> macos: false;
     in property <[TabItem]> tabs;
     in property <int> editing-tab: -1;
+    in property <int> tab-dot-phase: 0;
+    in property <bool> reduce-motion: false;
     in property <[LayoutOption]> layouts;
     in property <bool> zoomed: false;
     in property <bool> fullscreen: false;
@@ -358,6 +392,9 @@ export component TopBar inherits Rectangle {
                         group: tab.group;
                         group-color: tab.group-color;
                         a11y-label: tab.a11y-label;
+                        working: tab.working;
+                        dot-phase: root.tab-dot-phase;
+                        reduce-motion: root.reduce-motion;
                         editing: root.editing-tab == idx;
                         spring-hover: root.drop-tab-idx == idx;
                         select => { root.select-tab(idx); }

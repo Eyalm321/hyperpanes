@@ -115,6 +115,8 @@ export component AppWindow inherits Window {
     in property <string> pref-kb-conflict: "";
     in property <bool> pref-clickable: true;
     in property <bool> pref-copy-on-select: false;
+    in property <bool> pref-reduce-motion: false;
+    in property <int> tab-dot-phase: 0;
     in property <bool> pref-osc52-clipboard: true;
     in property <string> pref-editor: "";
     in property <int> pref-fontpx: 14;
@@ -309,6 +311,8 @@ export component AppWindow inherits Window {
             macos: root.macos;
             tabs: root.tabs;
             editing-tab: root.editing-tab;
+            tab-dot-phase: root.tab-dot-phase;
+            reduce-motion: root.pref-reduce-motion;
             layouts: root.layouts;
             zoomed: root.zoomed;
             fullscreen: root.fullscreen;
@@ -665,6 +669,7 @@ export component AppWindow inherits Window {
             show-dot: root.pref-dot;
             clickable-paths: root.pref-clickable;
             copy-on-select: root.pref-copy-on-select;
+            reduce-motion: root.pref-reduce-motion;
             osc52-clipboard: root.pref-osc52-clipboard;
             editor-command: root.pref-editor;
             prefs-confirm: root.prefs-confirm;

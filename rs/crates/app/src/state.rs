@@ -166,6 +166,8 @@ pub enum Setting {
     CopyOnSelect(bool),
     /// Allow programs in panes to set the system clipboard via OSC 52 (write-only).
     Osc52Clipboard(bool),
+    /// Toggle reduced motion (static tab-status dots).
+    ReduceMotion(bool),
     /// Set the editor-command template used to open clicked paths ("" = auto).
     EditorCommand(String),
     /// Toggle the idle-glow (AI-pane quiescence glow).
@@ -1302,6 +1304,8 @@ pub struct State {
     /// Animates the idle-glow demo on the AI-features preview (always "idle" so the chosen
     /// effect plays continuously while Preferences is open).
     pub preview_glow: Glow,
+    /// Epoch of the tab-status dot animation (phase = elapsed / 280 ms mod 3).
+    pub tab_dot_epoch: Instant,
     /// The self-playing Tetris shown in the preview pane (ambient animation).
     pub preview_tetris: crate::tetris::Tetris,
     /// When the Tetris last advanced a frame (it steps on a fixed cadence, not every tick).
@@ -1532,6 +1536,7 @@ impl State {
             preview_cursor: false,
             preview_surface: Image::default(),
             preview_glow: Glow::new(0x9E37_79B9_7F4A_7C15),
+            tab_dot_epoch: Instant::now(),
             preview_tetris: crate::tetris::Tetris::new(0x5DEE_CE2F_1234_ABCD),
             preview_tetris_last: Instant::now(),
             // Seed the rail's badge with the remembered projects up front (so the count
@@ -3320,6 +3325,7 @@ impl State {
             | Setting::ClickablePaths(_)
             | Setting::CopyOnSelect(_)
             | Setting::Osc52Clipboard(_)
+            | Setting::ReduceMotion(_)
             | Setting::EditorCommand(_)
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
@@ -3443,6 +3449,7 @@ impl State {
             Setting::ClickablePaths(on) => self.settings.clickable_paths = on,
             Setting::CopyOnSelect(on) => self.settings.copy_on_select = on,
             Setting::Osc52Clipboard(on) => self.settings.osc52_clipboard = on,
+            Setting::ReduceMotion(on) => self.settings.reduce_motion = on,
             Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
             Setting::IdleAlert(on) => self.settings.idle_alert = on,
             Setting::IdleEffect(idx) => {

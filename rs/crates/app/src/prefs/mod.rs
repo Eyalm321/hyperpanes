@@ -191,6 +191,9 @@ pub struct Settings {
     /// (`ESC ] 52 ; c ; <base64> BEL`, e.g. a TUI's copy shortcut — also over ssh). ON by
     /// default, like most terminals. Write-only: OSC 52 *reads* are never answered.
     pub osc52_clipboard: bool,
+    /// Reduced motion: the tab-status dots stay static instead of animating. When the key was
+    /// never saved, [`load`] seeds it from the desktop's animation setting (Linux/GNOME).
+    pub reduce_motion: bool,
 }
 
 impl Default for Settings {
@@ -214,6 +217,7 @@ impl Default for Settings {
             copy_on_select: false,
             keep_alive: true,
             osc52_clipboard: true,
+            reduce_motion: false,
         }
     }
 }
@@ -256,9 +260,37 @@ pub fn resolve_or_default(font: &str) -> String {
 pub fn load() -> Settings {
     let path = paths::user_data_dir().join("native-settings.json");
     let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Settings::default();
+        return Settings {
+            reduce_motion: desktop_prefers_reduced_motion(),
+            ..Settings::default()
+        };
     };
-    serde_json::from_str::<Settings>(&raw).unwrap_or_default()
+    let mut s = serde_json::from_str::<Settings>(&raw).unwrap_or_default();
+    // Never saved → seed from the desktop's animation preference (once, at startup).
+    let has_key = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .is_some_and(|v| v.get("reduceMotion").is_some());
+    if !has_key {
+        s.reduce_motion = desktop_prefers_reduced_motion();
+    }
+    s
+}
+
+/// Best-effort: the GNOME `enable-animations` switch is off. Linux only; errors → false.
+fn desktop_prefers_reduced_motion() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "false")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 /// Persist `settings` atomically. Errors are swallowed (a settings write failing must
@@ -354,6 +386,7 @@ mod tests {
             copy_on_select: true,
             keep_alive: false,      // non-default (defaults to true)
             osc52_clipboard: false, // non-default (defaults to true)
+            reduce_motion: true,    // non-default (defaults to false)
         }
     }
 

@@ -135,6 +135,8 @@ export struct TabItem {
     group: bool,
     group-color: color,
     a11y-label: string,
+    // any pane in the tab is busy (the shared core tab_status) → animated dots, else IDLE
+    working: bool,
 }
 
 // A draggable resize seam (vertical column / horizontal row / main-stack main).

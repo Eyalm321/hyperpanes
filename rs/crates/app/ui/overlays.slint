@@ -500,6 +500,7 @@ export component OverlayLayer inherits Rectangle {
     in property <bool> show-dot: true;
     in property <bool> clickable-paths: true;
     in property <bool> copy-on-select: false;
+    in property <bool> reduce-motion: false;
     in property <bool> osc52-clipboard: true;
     in property <string> editor-command: "";
     in property <bool> prefs-confirm: false;  // showing the unsaved-changes prompt
@@ -842,6 +843,13 @@ export component OverlayLayer inherits Rectangle {
                 options: root.shells;
                 current-label: root.shell-label;
                 selected(id) => { root.pref-action(5, id); }
+            }
+
+            // ---- reduce motion: static tab-status dots ----
+            PrefToggle {
+                label: "Reduce motion";
+                on: root.reduce-motion;
+                toggled(v) => { root.pref-action(23, v ? 1 : 0); }
             }
 
             // ---- copy on select (WT-coupled: off = modal right-click; on = right-click

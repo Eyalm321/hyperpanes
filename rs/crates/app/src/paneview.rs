@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use hyperpanes_core::layout::presets::{
     compute_tiles, effective_layout, DividerKind, Layout, Orientation,
 };
+use hyperpanes_core::control::readmodel::{tab_status, PaneStatus, TabStatus};
+use hyperpanes_core::control::server::{activity_for, IDLE_THRESHOLD_MS};
 use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
 
@@ -508,6 +510,26 @@ fn build_dividers(state: &State, area: (f32, f32)) -> Vec<DividerItem> {
         .collect()
 }
 
+/// The tab-chip status: the SAME computation `/state` `tabs[].status` uses — core
+/// [`tab_status`] over each pane's [`activity_for`] (the single liveness source), with the
+/// status the read model publishes for local panes (`Running`). Remote tabs never enter the
+/// read model, so they are always `Idle` here too.
+pub fn tab_status_for(tab: &crate::state::Tab, mgr: &SessionManager) -> TabStatus {
+    if tab.remote.is_some() {
+        return TabStatus::Idle;
+    }
+    tab_status(
+        tab.panes
+            .iter()
+            .map(|p| activity_for(mgr, IDLE_THRESHOLD_MS, &p.uid, PaneStatus::Running)),
+    )
+}
+
+/// Dot-animation phase (which of the 3 dots is raised) at `elapsed`.
+fn dot_phase(elapsed: Duration) -> i32 {
+    ((elapsed.as_millis() / 280) % 3) as i32
+}
+
 /// Rebuild every UI model + scalar from `State` (the resync step). Called when
 /// `state.dirty` is set.
 pub fn resync(
@@ -549,6 +571,7 @@ pub fn resync(
                 group_color: stripe.unwrap_or(theme::GROUP_NEUTRAL),
                 a11y_label: group_a11y_label(&t.title, t.pane_group.is_some(), project.as_deref())
                     .into(),
+                working: tab_status_for(t, mgr) == TabStatus::Working,
             }
         })
         .collect();
@@ -916,6 +939,7 @@ pub fn resync(
     app.set_prefs_confirm(state.prefs_confirm);
     app.set_pref_clickable(state.settings.clickable_paths);
     app.set_pref_copy_on_select(state.settings.copy_on_select);
+    app.set_pref_reduce_motion(state.settings.reduce_motion);
     app.set_pref_osc52_clipboard(state.settings.osc52_clipboard);
     app.set_pref_editor(state.settings.editor_command.clone().into());
 
@@ -1336,6 +1360,34 @@ pub fn pump(
         app.set_pref_preview_glow(a);
     }
 
+    // ---- live tab-status chips: flip without a structural change ----
+    // Recompute each tab's working flag every tick (cheap) and only touch the model when a
+    // value changed. The dot phase is Rust-driven at ~3.5 Hz and only while some tab is
+    // working (and motion isn't reduced), so an all-idle app never redraws for it.
+    {
+        let mut any_working = false;
+        if ui.tabs.row_count() == state.tabs.len() {
+            for (i, t) in state.tabs.iter().enumerate() {
+                let w = tab_status_for(t, mgr) == TabStatus::Working;
+                any_working |= w;
+                let mut row = ui.tabs.row_data(i).unwrap();
+                if row.working != w {
+                    row.working = w;
+                    ui.tabs.set_row_data(i, row);
+                }
+            }
+        }
+        let phase = if any_working && !state.settings.reduce_motion {
+            active = true;
+            dot_phase(state.tab_dot_epoch.elapsed())
+        } else {
+            0
+        };
+        if app.get_tab_dot_phase() != phase {
+            app.set_tab_dot_phase(phase);
+        }
+    }
+
     // ---- idle-glow inputs (read once per tick) ----
     let idle_on = state.settings.idle_alert;
     let idle_effect = crate::glow::IdleEffect::from_token(&state.settings.idle_effect);
@@ -1534,5 +1586,117 @@ fn panel_item(panel: Option<&crate::task_list::TaskPanel>) -> TaskPanelItem {
         more: p.more,
         status: p.status.as_str().into(),
         status_ok: p.status_ok,
+    }
+}
+
+#[cfg(test)]
+mod tab_status_tests {
+    use super::*;
+    use crate::state::DetachedPane;
+    use hyperpanes_core::control::readmodel::{PaneInfo, ReadModel, TabInfo, WindowInfo};
+    use hyperpanes_core::session_manager::SpawnOptions;
+
+    fn spawn(mgr: &SessionManager, uid: &str, age_ms: i64) {
+        mgr.create(SpawnOptions {
+            uid: uid.into(),
+            command: Some("sleep".into()),
+            args: Some(vec!["30".into()]),
+            ..Default::default()
+        })
+        .expect("spawn sleep");
+        let t = hyperpanes_core::control::server::now_ms() - age_ms;
+        mgr.set_last_output_at_for_test(uid, t as u64);
+    }
+
+    fn detached(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            replay_answered: false,
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        }
+    }
+
+    /// Build the read model the way `control_host::publish` does for the local tabs.
+    fn model_for(st: &State) -> ReadModel {
+        let mut m = ReadModel::new();
+        let tabs = st
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ti, t)| TabInfo {
+                id: format!("1:{ti}"),
+                title: t.title.to_string(),
+                color: None,
+                layout: "auto".into(),
+                panes: t
+                    .panes
+                    .iter()
+                    .map(|p| PaneInfo {
+                        id: p.uid.clone(),
+                        session_uid: p.uid.clone(),
+                        label: p.title.to_string(),
+                        subtitle: None,
+                        talk: false,
+                        env: None,
+                        color: "#888888".into(),
+                        command: None,
+                        args: None,
+                        cwd: None,
+                        shell: None,
+                        status: PaneStatus::Running,
+                        exit_code: None,
+                        meta: None,
+                    })
+                    .collect(),
+                pane_group: None,
+            })
+            .collect();
+        m.add_window(WindowInfo {
+            window_id: 1,
+            active_tab_id: Some("1:0".into()),
+            tabs,
+        });
+        m
+    }
+
+    #[test]
+    fn ui_tab_status_matches_state_tab_status() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mgr = SessionManager::new(tx);
+        // Tab 0: one busy (recent output) + one idle (old output). Tab 1: all idle.
+        spawn(&mgr, "ts-busy", 100);
+        spawn(&mgr, "ts-idle", 60_000);
+        spawn(&mgr, "ts-idle2", 60_000);
+        let mut st = State::new(theme::load_font(1.0));
+        st.adopt_pane(&mgr, detached("ts-busy"));
+        st.adopt_pane(&mgr, detached("ts-idle"));
+        st.tabs.push(crate::state::Tab::new_for_test("t2".into()));
+        st.switch_tab(1);
+        st.adopt_pane(&mgr, detached("ts-idle2"));
+
+        let model = model_for(&st);
+        let out = model.state_for_scope(None, &|p| {
+            activity_for(&mgr, IDLE_THRESHOLD_MS, &p.session_uid, p.status)
+        });
+        let api: Vec<&str> = out.windows[0].tabs.iter().map(|t| t.status).collect();
+        let ui: Vec<&str> = st
+            .tabs
+            .iter()
+            .map(|t| tab_status_for(t, &mgr).as_str())
+            .collect();
+        assert_eq!(ui, api);
+        assert_eq!(api, vec!["working", "idle"]);
+        for uid in ["ts-busy", "ts-idle", "ts-idle2"] {
+            mgr.kill(uid);
+        }
     }
 }

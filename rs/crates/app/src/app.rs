@@ -3877,6 +3877,7 @@ impl App {
                     6 => crate::state::Setting::ClickablePaths(arg != 0),
                     21 => crate::state::Setting::CopyOnSelect(arg != 0),
                     22 => crate::state::Setting::Osc52Clipboard(arg != 0),
+                    23 => crate::state::Setting::ReduceMotion(arg != 0),
                     // idle-glow settings — apply immediately (not drafted).
                     10 => crate::state::Setting::IdleAlert(arg != 0),
                     11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),
