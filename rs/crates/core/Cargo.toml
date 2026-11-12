@@ -39,6 +39,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # TcpStream, NO tls feature (no native-tls/openssl; wss is intentionally unsupported — the
 # transport security story is the network layer, see docs/mobile-client-plan.md).
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+# Control-API remote endpoints (#131): resolve a configured interface name (e.g. a VPN
+# interface) to its addresses, cross-platform. Pinned exactly; audited with cargo-audit.
+if-addrs = "=0.15.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
