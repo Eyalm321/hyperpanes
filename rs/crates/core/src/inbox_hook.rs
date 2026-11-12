@@ -170,13 +170,16 @@ fn truncate_utf8(s: &mut String, max: usize) {
     s.truncate(cut);
 }
 
-/// Build the context text for `msgs`, capped at [`MAX_TEXT_BYTES`].
-fn format_text(msgs: &[Value]) -> String {
+/// Build the context text for `msgs`, capped at [`MAX_TEXT_BYTES`]. Also returns the seq of the
+/// last message delivered WHOLE, so a truncated tail is re-delivered on the next run instead of
+/// being skipped (`None` when even the first message had to be cut).
+fn format_text(msgs: &[Value]) -> (String, Option<u64>) {
     let mut text = format!(
         "[hyperpanes inbox] {} new message(s) for your pane — a message from your advisor overrides your payload where they conflict; name its seq in your commit:",
         msgs.len()
     );
-    let note = "\n[... truncated]";
+    let note = "\n[... truncated; the rest arrives after your next tool call]";
+    let mut whole: Option<u64> = None;
     for m in msgs {
         let seq = m.get("seq").and_then(Value::as_u64).unwrap_or(0);
         let from = m.get("from").and_then(Value::as_str).unwrap_or("?");
@@ -188,11 +191,12 @@ fn format_text(msgs: &[Value]) -> String {
             truncate_utf8(&mut part, room);
             text.push_str(&part);
             text.push_str(note);
-            return text;
+            return (text, whole);
         }
         text.push_str(&line);
+        whole = Some(seq);
     }
-    text
+    (text, whole)
 }
 
 /// One hook run. `env` reads environment variables, `stdin` is the Claude hook JSON,
@@ -239,12 +243,16 @@ pub fn run(
     if msgs.is_empty() {
         return None;
     }
-    let latest = msgs
-        .iter()
-        .filter_map(|m| m.get("seq").and_then(Value::as_u64))
-        .max()
-        .or_else(|| reply.get("latestSeq").and_then(Value::as_u64))?;
-    let text = format_text(msgs);
+    let (text, whole) = format_text(msgs);
+    // Advance only past what was delivered whole. A single message bigger than the cap is
+    // delivered cut and then skipped (otherwise it would repeat on every tool call).
+    let latest = match whole {
+        Some(seq) => seq,
+        None => msgs
+            .first()
+            .and_then(|m| m.get("seq").and_then(Value::as_u64))
+            .or_else(|| reply.get("latestSeq").and_then(Value::as_u64))?,
+    };
     let json = serde_json::json!({
         "hookSpecificOutput": { "hookEventName": event, "additionalContext": text }
     })
@@ -472,7 +480,25 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(t.len() <= MAX_TEXT_BYTES);
-        assert!(t.ends_with("[... truncated]"));
+        assert!(t.contains("[... truncated"));
+        // A lone oversized message is delivered cut and then skipped, never repeated forever.
+        assert_eq!(out.cursor.seq, 1);
+    }
+
+    #[test]
+    fn a_truncated_tail_is_redelivered_next_run() {
+        let d = tmp("trunc-tail");
+        let half = "y".repeat(MAX_TEXT_BYTES / 2);
+        let body = serde_json::json!({"messages":[
+            {"seq":4,"from":"a","body":half},
+            {"seq":5,"from":"a","body":half},
+            {"seq":6,"from":"a","body":"small"}
+        ],"latestSeq":6,"epoch":"e","reset":false})
+        .to_string();
+        let (port, _) = serve(vec![body], Duration::ZERO);
+        let out = go(&d, port, "{}").unwrap();
+        // #4 fit whole, #5 was cut: the cursor stops at 4 so #5 and #6 come back next time.
+        assert_eq!(out.cursor.seq, 4);
     }
 
     #[test]

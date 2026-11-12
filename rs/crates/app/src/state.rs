@@ -456,8 +456,14 @@ fn inbox_hook_exe() -> Option<String> {
         .or_else(|| {
             std::env::current_exe()
                 .ok()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|p| strip_deleted_suffix(&p.to_string_lossy()).to_string())
         })
+}
+
+/// Linux reports an exe that was replaced on disk (a package upgrade under a running app) as
+/// `<path> (deleted)`. The path itself names the upgraded binary, which is the one to run.
+fn strip_deleted_suffix(path: &str) -> &str {
+    path.strip_suffix(" (deleted)").unwrap_or(path)
 }
 
 /// POSIX single-quote `s` for a hook command line.
@@ -708,6 +714,15 @@ mod goals_mcp_config_tests {
         ))
         .unwrap();
         assert!(coord.get("hooks").is_none());
+    }
+
+    #[test]
+    fn inbox_hook_exe_ignores_the_deleted_marker_of_an_upgraded_binary() {
+        assert_eq!(
+            super::strip_deleted_suffix("/usr/bin/hyperpanes (deleted)"),
+            "/usr/bin/hyperpanes"
+        );
+        assert_eq!(super::strip_deleted_suffix("/opt/hp"), "/opt/hp");
     }
 
     #[test]
