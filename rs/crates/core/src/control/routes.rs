@@ -2886,11 +2886,12 @@ mod golden {
                 s.shared.attach_durable_inbox_at(&db, &owner),
                 InboxMode::Durable
             );
-            s.shared
-                .inbox
-                .lock()
-                .unwrap()
-                .post("pane-old", "lead", "kept", 1);
+            s.shared.inbox.lock().unwrap().post(
+                "pane-old",
+                "lead",
+                "kept",
+                crate::control::server::now_ms(),
+            );
             assert!(s.shared.register_pane_alias("pane-old", "pane-new"));
         }
         let s = boot(true).await;
