@@ -5,11 +5,11 @@
 
 use std::time::{Duration, Instant};
 
+use hyperpanes_core::control::readmodel::{tab_status, PaneStatus, TabStatus};
+use hyperpanes_core::control::server::{activity_for, IDLE_THRESHOLD_MS};
 use hyperpanes_core::layout::presets::{
     compute_tiles, effective_layout, DividerKind, Layout, Orientation,
 };
-use hyperpanes_core::control::readmodel::{tab_status, PaneStatus, TabStatus};
-use hyperpanes_core::control::server::{activity_for, IDLE_THRESHOLD_MS};
 use hyperpanes_core::session_manager::SessionManager;
 use hyperpanes_terminal_widget::{cells_for_px, RenderOpts};
 
