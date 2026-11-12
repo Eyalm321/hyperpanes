@@ -107,6 +107,9 @@ jobs:
           # The self-hosted runner keeps build/ and the Xcode workspace between jobs; after a
           # Flutter SDK update the precompiled cache is stale and the build refuses to run.
           flutter clean --include-xcode-workspace
+          # Xcode's DerivedData (outside the repo) keeps precompiled Flutter modules that no
+          # longer match the new SDK headers ("has been modified since the module file").
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData"/Runner-*
           flutter pub get
           flutter build ios --release --no-codesign \
             ${BUILD_NAME:+--build-name "$BUILD_NAME"} \
