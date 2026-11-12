@@ -124,6 +124,11 @@ prompt wedges the pane).
     pane with default org meta (role="worker", task="queue:<q>", `parent` = your pane), so an impl
     agent's `send_to_parent` reaches you out of the box — no manual `set_meta` step; a caller
     `meta` key always wins over the defaults.
+  - **Every pane you open goes to the project tab.** Your panes are part of the project, so any
+    other pane you open (`open_pane`: a probe shell, a judge, a helper) gets the same `project` +
+    `projectTab:true` (or `tabId:<tab id from list_panes>` for a specific existing tab). **Never
+    open a pane and then `move_pane` it into place**: until the move lands, the pane sits in the
+    window's active tab, which is usually someone else's, and the owner sees it flash there.
   - **Account rotation:** if `HP_GOAL_ACCOUNTS` is set (newline-separated `CLAUDE_CONFIG_DIR`s
     the orchestrator passed down), split it on newlines and pass the array as `accounts` to
     `spawn_workers` — it round-robins one `CLAUDE_CONFIG_DIR` per worker pane (pane *i* gets
