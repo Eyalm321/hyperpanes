@@ -40,6 +40,7 @@ fn kitchen_sink() -> WorkspaceFile {
         talk: Some(true),
         env: Some(BTreeMap::from([("MY_VAR".to_string(), "1".to_string())])),
         env_dropped: Some(vec!["MY_SECRET".to_string()]),
+        subtitle: Some("team/worker · ready".into()),
     };
     let group = GroupSpec {
         color: Some("#aabbcc".into()),

@@ -15,8 +15,8 @@
 //! `meta` is a `BTreeMap` (sorted keys): `serde_json` has no insertion-order map
 //! without the `preserve_order` feature, which the frozen `Cargo.toml` does not
 //! enable. Sorted-key files round-trip exactly. The TS source declares the pane
-//! fields as label/color/command/args/cwd/shell/fontSize/meta — there is no
-//! `subtitle` (the stub header's mention was stale), so this port omits it.
+//! fields as label/color/command/args/cwd/shell/fontSize/meta. `subtitle` (the header's
+//! second line) is newer and Rust-only: optional, absent in older files.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -63,6 +63,10 @@ pub struct PaneSpec {
     /// say what the pane lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_dropped: Option<Vec<String>>,
+    /// The pane header's second line (e.g. `<team>/<session> · <state>`), so a descriptive
+    /// title survives a restart. Absent in older files and for panes without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
 }
 
 /// One tab (group): a layout plus its panes and per-slot split state.

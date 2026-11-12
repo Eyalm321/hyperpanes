@@ -6045,6 +6045,7 @@ impl State {
                         let (env, env_dropped) = self.persisted_env_of(p, &pane_meta(&p.uid));
                         PaneSpec {
                             label: Some(p.title.to_string()),
+                            subtitle: p.subtitle.as_ref().map(|s| s.to_string()),
                             env,
                             env_dropped,
                             color: p.pinned_accent.map(color_hex),
@@ -6555,7 +6556,13 @@ impl State {
         Some(PaneState {
             uid,
             title: label.into(),
-            subtitle: None,
+            // A restored pane gets its descriptive second line back (absent in older files).
+            subtitle: spec
+                .subtitle
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string().into()),
             show_frame: Some(project),
             show_dot: Some(project),
             accent: pinned.unwrap_or_else(|| theme::accent_for(idx, palette)),
@@ -8464,6 +8471,41 @@ mod env_persist_tests {
         // A workspace template (Save dialog) never carries env.
         let tpl = serde_json::to_string(&st.to_workspace_file()).unwrap();
         assert!(!tpl.contains("env") && !tpl.contains("MYTOOL"), "{tpl}");
+    }
+
+    #[test]
+    fn snapshot_round_trips_the_pane_subtitle() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        let mut d = det_with_env("22222222-uuid", &[]);
+        d.subtitle = Some("team/member-a · ready".into());
+        st.adopt_pane(&mgr(), d);
+        let json = serde_json::to_string(&st.to_session_file()).unwrap();
+        assert!(
+            json.contains("\"subtitle\":\"team/member-a · ready\""),
+            "{json}"
+        );
+        let back: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let mut st2 = fresh();
+        st2.load_workspace(back, &mgr());
+        assert_eq!(
+            st2.active_tab().panes[0].subtitle.as_deref(),
+            Some("team/member-a · ready")
+        );
+
+        // An older snapshot (no `subtitle` key) still loads, with no subtitle; a pane without
+        // one writes no key.
+        let old = r#"{"groups":[{"title":"t","panes":[{"label":"x","command":"sh"}]}]}"#;
+        let back: WorkspaceFile = serde_json::from_str(old).unwrap();
+        assert_eq!(back.groups.as_ref().unwrap()[0].panes[0].subtitle, None);
+        let mut st3 = fresh();
+        st3.load_workspace(back, &mgr());
+        assert_eq!(st3.active_tab().panes[0].subtitle, None);
+        let json3 = serde_json::to_string(&st3.to_session_file()).unwrap();
+        assert!(!json3.contains("subtitle"), "{json3}");
     }
 
     fn meta_of(p: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {

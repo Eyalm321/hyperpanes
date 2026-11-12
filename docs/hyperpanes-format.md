@@ -88,6 +88,7 @@ ordinary tab, and unknown fields inside it are tolerated.
 | JSON field | Rust type | Notes |
 |---|---|---|
 | `label`    | `string?`              | pane label (defaults to the command's first token) |
+| `subtitle` | `string?`              | the header's second line; written by the session snapshot so a descriptive subtitle survives a restart (absent in older files) |
 | `color`    | `string?`              | accent color, e.g. `#e5484d` |
 | `command`  | `string?`              | shell command line to run |
 | `args`     | `string[]?`            | literal argv for a direct (no-shell) spawn with `command` |
@@ -311,7 +312,8 @@ pane (or the tab) in scope, like `recolorPane`.
 - `newPane` accepts `"pane":{"project":"…","projectTab":true,…}`: the new pane opens straight in
   that project's tab (reused or created, as above) instead of the caller's tab. It is opt-in.
   Without `projectTab`, `project` still only defaults the cwd and colour.
-- `newPane` keeps `pane.subtitle` (the header's second line). It used to be dropped.
+- `newPane` keeps `pane.subtitle` (the header's second line). It used to be dropped. The session
+  snapshot records it, so it survives a restart.
 
 Like `groupPanes`, `movePane` is validated against the read model and then queued for the GUI
 app, which applies it on its next tick. A headless server accepts and queues the request but
