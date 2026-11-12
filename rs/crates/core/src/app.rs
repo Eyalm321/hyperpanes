@@ -137,7 +137,8 @@ pub async fn run(version: &str) -> io::Result<()> {
 
     // Back the work queue with the durable on-disk DB (survives restart) and recover any
     // in-flight tasks left claimed by workers that died with this process.
-    shared.attach_durable_work_queue();
+    let work_attach = shared.attach_durable_work_queue();
+    shared.attach_durable_inbox(&work_attach);
 
     // The activity ticker is a separate task from `run_server` now (so the GUI host can abort it
     // independently); the headless daemon runs it for the whole process lifetime. The reaper

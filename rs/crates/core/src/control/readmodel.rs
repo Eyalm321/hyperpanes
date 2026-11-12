@@ -168,6 +168,9 @@ pub struct ReadModel {
     /// The pane the GUI currently has focused (`None` = unknown — no GUI publisher
     /// wired up yet). Consulted by the speech service's `focusedOnly` filter.
     focused_pane: Option<String>,
+    /// Old pane id → live pane id, for panes that were re-spawned under a new id by a full
+    /// restore. Consulted only after a live id/uid lookup misses.
+    aliases: HashMap<String, String>,
 }
 
 impl ReadModel {
@@ -305,7 +308,32 @@ impl ReadModel {
         if self.pane_loc.contains_key(&alias) {
             return Some(alias);
         }
-        self.uid_to_pane(id)
+        if let Some(uid_hit) = self.uid_to_pane(id) {
+            return Some(uid_hit);
+        }
+        self.resolve_alias(id)
+    }
+
+    /// Replace the old-id → new-id alias table (kept in sync with the durable store).
+    pub fn set_aliases(&mut self, aliases: HashMap<String, String>) {
+        self.aliases = aliases;
+    }
+
+    /// Follow `id` (either `pane-` spelling) through the alias table to a live pane id.
+    fn resolve_alias(&self, id: &str) -> Option<String> {
+        let spell = |s: &str| match s.strip_prefix("pane-") {
+            Some(bare) => bare.to_string(),
+            None => format!("pane-{s}"),
+        };
+        let target = self
+            .aliases
+            .get(id)
+            .or_else(|| self.aliases.get(&spell(id)))?;
+        if self.pane_loc.contains_key(target) {
+            return Some(target.clone());
+        }
+        let alt = spell(target);
+        self.pane_loc.contains_key(&alt).then_some(alt)
     }
 
     pub fn tab_window(&self, tab_id: &str) -> Option<i64> {
