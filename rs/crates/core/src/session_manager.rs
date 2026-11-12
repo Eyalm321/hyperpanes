@@ -434,6 +434,15 @@ impl SessionRegistry {
             })
     }
 
+    /// Test-only hook: stamp the pane's last-output time (epoch ms) so liveness heuristics
+    /// can be exercised deterministically.
+    #[doc(hidden)]
+    pub fn set_last_output_at_for_test(&self, uid: &str, ms: u64) {
+        if let Some(s) = self.sessions.lock().unwrap().get(uid) {
+            s.shared.last_output_at.store(ms, Ordering::Relaxed);
+        }
+    }
+
     /// Serialize the pane's current screen to clean text (for `mode:"screen"` reads).
     /// Brings the lazily-fed screen mirror fully up to date first (see `screen_pending`).
     pub fn render_screen(&self, uid: &str) -> Option<String> {
@@ -814,6 +823,14 @@ impl SessionManager {
         match self {
             SessionManager::InProcess(r) => r.output_bytes(uid),
             SessionManager::Daemon(d) => d.output_bytes(uid),
+        }
+    }
+
+    /// Test-only hook (in-process backend only): stamp a pane's last-output time.
+    #[doc(hidden)]
+    pub fn set_last_output_at_for_test(&self, uid: &str, ms: u64) {
+        if let SessionManager::InProcess(r) = self {
+            r.set_last_output_at_for_test(uid, ms);
         }
     }
 
