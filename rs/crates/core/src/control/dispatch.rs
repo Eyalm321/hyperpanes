@@ -184,11 +184,18 @@ pub fn handle_command(
     }
 
     // `newPane {tabId}` spawns straight into that tab (no open-then-move flash): the tab must
-    // exist, and an explicit windowId must be the tab's own window.
-    if ty == "newPane" {
+    // exist, and an explicit windowId must be the tab's own window. `attach {as:"panes",tabId}`
+    // merges its panes into that tab the same way; tabId is meaningless for new tabs.
+    if ty == "newPane" || ty == "attach" {
         if let Err(msg) = validate_new_pane_tab(cmd, model) {
             return DispatchResult::err(400, &msg);
         }
+    }
+    if ty == "attach"
+        && cmd.get("tabId").is_some_and(|v| !v.is_null())
+        && cmd.get("as").and_then(Value::as_str) != Some("panes")
+    {
+        return DispatchResult::err(400, "attach tabId needs \"as\":\"panes\"");
     }
 
     // Resolve a target window: explicit windowId (number or numeric string), else the pane's
@@ -289,13 +296,19 @@ fn exec(
                 .cloned()
                 .unwrap_or_default();
             if unit == "panes" {
+                // `tabId` (validated in `handle_command`) merges into that tab; else the active one.
+                let tab_id = new_pane_tab_id(cmd);
                 let mut pane_ids = Vec::new();
                 for g in &groups {
                     if let Some(panes) = g.get("panes").and_then(Value::as_array) {
                         for ps in panes {
                             let pane = spawn_pane(sessions, control_file, ps)?;
                             pane_ids.push(Value::String(pane.id.clone()));
-                            if !model.insert_pane(window_id, pane) {
+                            let placed = match tab_id {
+                                Some(t) => model.insert_pane_in_tab(t, pane),
+                                None => model.insert_pane(window_id, pane),
+                            };
+                            if !placed {
                                 return Err(format!("window not found: {window_id}"));
                             }
                         }
@@ -1322,7 +1335,8 @@ fn new_pane_tab_id(cmd: &Value) -> Option<&str> {
     cmd.get("tabId").and_then(Value::as_str)
 }
 
-/// Reject a malformed or unknown `newPane` `tabId`, or one outside an explicit `windowId`.
+/// Reject a malformed or unknown `newPane` / `attach` `tabId`, or one outside an explicit
+/// `windowId`.
 fn validate_new_pane_tab(cmd: &Value, model: &ReadModel) -> Result<(), String> {
     let Some(v) = cmd.get("tabId").filter(|v| !v.is_null()) else {
         return Ok(());
@@ -1738,6 +1752,73 @@ mod tests {
         let cmd = json!({ "type": "newPane", "tabId": "t1", "pane": { "command": "echo hi" } });
         let r = handle_command(&mut m, &s, None, Some(&mine), &cmd, &speech());
         assert_eq!(r.status, 403, "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn attach_panes_tab_id_merges_into_that_tab_not_the_active_one() {
+        let mut m = model_one_window();
+        assert!(m.insert_tab(
+            1,
+            TabInfo {
+                id: "t2".into(),
+                title: "Mine".into(),
+                color: None,
+                layout: "auto".into(),
+                panes: vec![],
+                pane_group: None,
+            }
+        ));
+        let s = sessions();
+        let groups = json!([{ "panes": [{ "command": "echo a" }, { "command": "echo b" }] }]);
+        // t1 is active; tabId puts both panes in t2 and leaves the active tab alone.
+        let cmd = json!({ "type": "attach", "windowId": 1, "tabId": "t2", "as": "panes", "groups": groups });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        assert_eq!(r.status, 200, "{}", r.body);
+        let ids = r.body["result"].as_array().unwrap();
+        assert_eq!(ids.len(), 2);
+        for id in ids {
+            assert_eq!(m.coords_of(id.as_str().unwrap()).unwrap().tab_id, "t2");
+        }
+        assert_eq!(m.active_tab_id(1).as_deref(), Some("t1"));
+        // windowId is optional with tabId.
+        let cmd = json!({ "type": "attach", "tabId": "t2", "as": "panes", "groups": groups });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        assert_eq!(r.status, 200, "{}", r.body);
+        // Without tabId: the active tab, as before.
+        let cmd = json!({ "type": "attach", "windowId": 1, "as": "panes", "groups": groups });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        let id = r.body["result"][0].as_str().unwrap();
+        assert_eq!(m.coords_of(id).unwrap().tab_id, "t1");
+        // A tab-scoped token may merge into its own background tab, not another one.
+        let mine = Scope {
+            tab_ids: Some(vec!["t2".into()]),
+            ..Default::default()
+        };
+        let cmd = json!({ "type": "attach", "tabId": "t2", "as": "panes", "groups": groups });
+        let r = handle_command(&mut m, &s, None, Some(&mine), &cmd, &speech());
+        assert_eq!(r.status, 200, "{}", r.body);
+        let cmd = json!({ "type": "attach", "tabId": "t1", "as": "panes", "groups": groups });
+        let r = handle_command(&mut m, &s, None, Some(&mine), &cmd, &speech());
+        assert_eq!(r.status, 403, "{}", r.body);
+    }
+
+    #[tokio::test]
+    async fn attach_tab_id_is_validated_and_spawns_nothing_when_bad() {
+        let mut m = model_one_window();
+        let s = sessions();
+        let groups = json!([{ "panes": [{ "command": "echo a" }] }]);
+        let before = m.panes().len();
+        for cmd in [
+            json!({ "type": "attach", "windowId": 1, "tabId": "nope", "as": "panes", "groups": groups }),
+            json!({ "type": "attach", "windowId": 1, "tabId": 7, "as": "panes", "groups": groups }),
+            json!({ "type": "attach", "windowId": 2, "tabId": "t1", "as": "panes", "groups": groups }),
+            json!({ "type": "attach", "windowId": 1, "tabId": "t1", "groups": groups }),
+            json!({ "type": "attach", "windowId": 1, "tabId": "t1", "as": "tab", "groups": groups }),
+        ] {
+            let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+            assert_eq!(r.status, 400, "{cmd}: {}", r.body);
+        }
+        assert_eq!(m.panes().len(), before);
     }
 
     #[tokio::test]
