@@ -507,18 +507,20 @@ impl SessionRegistry {
         let removed = self.sessions.lock().unwrap().remove(uid);
         if let Some(s) = removed {
             s.shared.killed.store(true, Ordering::SeqCst);
+            crate::persistence::session_log::record("kill", uid, "registry kill", None);
             let _ = s.pty.kill();
         }
     }
 
     /// Kill every live pane and clear the map.
     pub fn kill_all(&self) {
-        let drained: Vec<Session> = {
+        let drained: Vec<(String, Session)> = {
             let mut map = self.sessions.lock().unwrap();
-            map.drain().map(|(_, s)| s).collect()
+            map.drain().collect()
         };
-        for s in drained {
+        for (uid, s) in drained {
             s.shared.killed.store(true, Ordering::SeqCst);
+            crate::persistence::session_log::record("kill-all", &uid, "registry kill_all", None);
             let _ = s.pty.kill();
         }
     }
@@ -1170,7 +1172,14 @@ impl SessionPipeline {
             return Vec::new();
         }
         self.ended = true;
-        if self.shared.killed.load(Ordering::SeqCst) {
+        let killed = self.shared.killed.load(Ordering::SeqCst);
+        crate::persistence::session_log::record(
+            if killed { "exit-after-kill" } else { "exit" },
+            &self.uid,
+            &format!("code={code}"),
+            None,
+        );
+        if killed {
             return Vec::new();
         }
         let mut out = Vec::new();

@@ -319,6 +319,15 @@ pub fn resume_prompts_json() -> PathBuf {
     state_dir().join("resume-prompts.json")
 }
 
+/// Append-only log of pane-session ends (`session-events.log`, JSON lines): every kill with
+/// the reason the caller gave (a user close, a control-API `closePane`, a window close, …)
+/// and every natural exit with its code, from the GUI and the session daemon alike. Both
+/// processes otherwise run with stderr on `/dev/null`, so this is the only record of WHY a
+/// pane's program died. Runtime state → [`state_dir`]; see [`super::session_log`].
+pub fn session_events_log() -> PathBuf {
+    state_dir().join("session-events.log")
+}
+
 /// Directory of per-pane Claude session markers (`<pane-id>.json`), written by the
 /// Claude Code SessionStart/SessionEnd hook (`resources/claude/hp-claude-session-hook.sh`)
 /// and read by the relaunch snapshot so a restored pane can `claude --resume` its
