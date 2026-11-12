@@ -36,7 +36,17 @@ const DEFAULT_PANE_COLOR: &str = "#3b82f6";
 /// Top-level keys that indicate a `newPane` spawn spec was mistakenly flattened instead of
 /// nested under `pane` (see the `newPane` guard in `handle_command`).
 const NEW_PANE_SPEC_KEYS: &[&str] = &[
-    "command", "args", "cwd", "label", "subtitle", "color", "shell", "env", "meta", "project",
+    "command",
+    "args",
+    "cwd",
+    "label",
+    "subtitle",
+    "color",
+    "shell",
+    "env",
+    "meta",
+    "project",
+    "projectTab",
 ];
 
 /// The HTTP outcome of a `/command` POST: a status, a JSON body, and whether the structure

@@ -55,6 +55,9 @@ selected". See the decision table in [tab-bar.md](tab-bar.md).
   A manual tab colour set over the control API (`recolorTab`) overrides the group colour until
   it is cleared (`"color": null`) or the user picks a "Group Color". See
   [tab-bar.md](tab-bar.md#tab-colour-and-the-control-api).
+- Project tabs made over the control API (`movePane` with `project`, or `newPane` with
+  `projectTab`) are ordinary pane groups for that project. See
+  [hyperpanes-format.md](hyperpanes-format.md#moving-a-live-pane-over-the-control-api).
 - **Ungroup** sends the panes back to the tab they came from, if it is still open, and closes
   the group tab. Otherwise the tab just stops being a group. Ungroup never closes a pane.
 - The origin of a group is runtime-only; after a restart a group tab ungroups into an ordinary

@@ -369,7 +369,7 @@ pub fn upsert_project_by_root(root: &str) -> Project {
 
 /// Resolve a remembered project from a handle: an exact `id` match first, then an exact
 /// `name` match (newest-opened wins on a name collision, since the list is sorted
-/// newest-first). Used by the control plane's `newPane { project }` to turn a project handle
+/// newest-first), then an absolute path naming the project's directory. Used by the control plane's `newPane { project }` to turn a project handle
 /// into its directory. `None` when nothing matches.
 pub fn resolve(id_or_name: &str) -> Option<Project> {
     let mut list = load_from(&paths::projects_json());
@@ -386,6 +386,14 @@ fn resolve_in(list: &[Project], id_or_name: &str) -> Option<Project> {
     list.iter()
         .find(|p| p.id == id_or_name)
         .or_else(|| list.iter().find(|p| p.name == id_or_name))
+        .or_else(|| {
+            // An absolute path (e.g. a launcher's working folder) names the project there.
+            if !std::path::Path::new(id_or_name).is_absolute() {
+                return None;
+            }
+            let key = path_key(id_or_name);
+            list.iter().find(|p| path_key(&p.path) == key)
+        })
         .cloned()
 }
 
@@ -679,6 +687,11 @@ mod tests {
         assert_eq!(resolve_in(&list, "dup").as_ref(), Some(&newer));
         // No match → None.
         assert_eq!(resolve_in(&list, "nope"), None);
+        // An absolute path names the project in that directory (a trailing slash is fine);
+        // a relative one never matches by path.
+        assert_eq!(resolve_in(&list, "/repo/old").as_ref(), Some(&older));
+        assert_eq!(resolve_in(&list, "/repo/old/").as_ref(), Some(&older));
+        assert_eq!(resolve_in(&list, "repo/old"), None);
     }
 
     #[test]

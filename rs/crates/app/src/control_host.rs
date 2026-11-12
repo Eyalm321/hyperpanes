@@ -230,6 +230,9 @@ pub struct ControlHost {
     pending_meta: RefCell<Vec<PendingMeta>>,
     /// `(old pane id, new pane id)` restore aliases waiting for the control server to exist.
     pending_aliases: RefCell<Vec<(String, String)>>,
+    /// `movePane` requests whose pane is not in the GUI yet (a `projectTab` newPane adopted on a
+    /// later tick), with the ticks waited. Retried by [`Self::apply_pane_group_requests`].
+    pending_moves: RefCell<Vec<(server::PaneGroupRequest, u32)>>,
     /// The read-model panes as last published (baseline for the next reconcile diff).
     prev: RefCell<HashMap<String, PaneSnap>>,
     /// Tab title/layout as last published, keyed by model tab id (baseline for tab reconcile).
@@ -285,6 +288,7 @@ impl ControlHost {
             ctl: RefCell::new(HashMap::new()),
             pending_meta: RefCell::new(Vec::new()),
             pending_aliases: RefCell::new(Vec::new()),
+            pending_moves: RefCell::new(Vec::new()),
             prev: RefCell::new(HashMap::new()),
             prev_tabs: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
@@ -790,16 +794,49 @@ impl ControlHost {
     ) -> bool {
         let reqs = shared.take_pane_group_requests();
         let mut changed = false;
+        // `movePane` requests still waiting for their pane go first, in arrival order.
+        let mut moves: Vec<(server::PaneGroupRequest, u32)> =
+            self.pending_moves.borrow_mut().drain(..).collect();
+        // A control pane id resolves to its GUI session uid through the alias map; a
+        // GUI-native pane's id IS its uid.
+        let resolve = |id: &str| self.uid_for_pane_id(id).unwrap_or_else(|| id.to_string());
         for req in &reqs {
-            // A control pane id resolves to its GUI session uid through the alias map; a
-            // GUI-native pane's id IS its uid.
-            let resolve = |id: &str| self.uid_for_pane_id(id).unwrap_or_else(|| id.to_string());
+            if matches!(req, server::PaneGroupRequest::Move { .. }) {
+                moves.push((req.clone(), 0));
+                continue;
+            }
             for w in windows {
                 let mut st = w.state.borrow_mut();
                 if apply_pane_group_request(&mut st, mgr, w.id as i64, &resolve, req) {
                     changed = true;
                     break;
                 }
+            }
+        }
+        changed |= self.apply_move_requests(moves, windows, mgr, &resolve);
+        changed
+    }
+
+    /// Run queued `movePane` requests; one whose pane the GUI does not host yet is retried on
+    /// later ticks (bounded), any other miss is dropped. Returns whether a pane moved.
+    fn apply_move_requests(
+        &self,
+        moves: Vec<(server::PaneGroupRequest, u32)>,
+        windows: &[Rc<Window>],
+        mgr: &Arc<SessionManager>,
+        resolve: &dyn Fn(&str) -> String,
+    ) -> bool {
+        const MAX_MOVE_WAIT_TICKS: u32 = 120;
+        let states: Vec<(i64, &RefCell<crate::state::State>)> =
+            windows.iter().map(|w| (w.id as i64, &w.state)).collect();
+        let mut changed = false;
+        for (req, waited) in moves {
+            match apply_move_request(&states, mgr, resolve, &req) {
+                MoveOutcome::Moved => changed = true,
+                MoveOutcome::NotFound if waited < MAX_MOVE_WAIT_TICKS => {
+                    self.pending_moves.borrow_mut().push((req, waited + 1));
+                }
+                MoveOutcome::NotFound | MoveOutcome::Refused => {}
             }
         }
         changed
@@ -1594,7 +1631,119 @@ pub(crate) fn apply_pane_group_request(
             st.ungroup(ti, mgr);
             true
         }
+        // Spans windows, so it runs through `apply_move_request` instead.
+        R::Move { .. } => false,
     }
+}
+
+/// What [`apply_move_request`] did.
+#[derive(Debug, PartialEq)]
+pub(crate) enum MoveOutcome {
+    /// The pane is now in the target tab (or already was).
+    Moved,
+    /// No window hosts the pane (yet).
+    NotFound,
+    /// The move can't happen (unknown/remote target, or the window's only pane).
+    Refused,
+}
+
+/// Execute one queued `movePane` across the GUI windows `states` (`(window id, state)`): lift the
+/// live pane out of whichever tab hosts it and re-host it in the target tab of the target window,
+/// creating that tab (in the background, never stealing focus) for `newTab` / a project without
+/// one. The session, label, subtitle and control meta (keyed by session uid) are untouched.
+pub(crate) fn apply_move_request(
+    states: &[(i64, &RefCell<crate::state::State>)],
+    mgr: &SessionManager,
+    resolve: &dyn Fn(&str) -> String,
+    req: &server::PaneGroupRequest,
+) -> MoveOutcome {
+    use crate::state::PaneGroup;
+    use server::MoveTarget as T;
+    let server::PaneGroupRequest::Move {
+        pane_id,
+        window_id,
+        to,
+    } = req
+    else {
+        return MoveOutcome::Refused;
+    };
+    let uid = resolve(pane_id);
+    let Some(src) = states
+        .iter()
+        .find(|(_, s)| s.borrow_mut().find_pane(&uid).is_some())
+        .map(|(_, s)| *s)
+    else {
+        return MoveOutcome::NotFound;
+    };
+    let Some(dst) = states.iter().find(|(w, _)| w == window_id).map(|(_, s)| *s) else {
+        return MoveOutcome::Refused;
+    };
+    // The existing target tab's stable uid (None ⇒ make a new tab after lifting the pane).
+    let existing: Option<u64> = {
+        let mut st = dst.borrow_mut();
+        let idx = match to {
+            T::Tab { tab_id } => match resolve_tab_index(&st.tabs, tab_id) {
+                Some(i) => Some(i),
+                None => return MoveOutcome::Refused,
+            },
+            T::NewTab { .. } => None,
+            T::Project {
+                tab_id, project_id, ..
+            } => {
+                let i = st.project_tab(project_id);
+                // Reusing a project tab the API didn't know about: give it the id it returned.
+                if let Some(t) = i.and_then(|i| st.tabs.get_mut(i)) {
+                    t.ctl_id.get_or_insert_with(|| tab_id.clone());
+                }
+                i
+            }
+        };
+        match idx {
+            Some(i) if st.tabs[i].remote.is_some() => return MoveOutcome::Refused,
+            Some(i) if st.tabs[i].panes.iter().any(|p| p.uid == uid) => return MoveOutcome::Moved,
+            Some(i) => Some(st.tabs[i].uid),
+            None => None,
+        }
+    };
+    let Some(mp) = src.borrow_mut().lift_pane(&uid) else {
+        return MoveOutcome::Refused;
+    };
+    let mut st = dst.borrow_mut();
+    let tab_uid = existing.unwrap_or_else(|| match to {
+        T::NewTab {
+            tab_id,
+            title,
+            color,
+        } => st.push_background_tab(
+            title.as_deref().unwrap_or(""),
+            color.as_deref().and_then(crate::state::parse_hex_strict),
+            None,
+            Some(tab_id.clone()),
+        ),
+        T::Project {
+            tab_id,
+            project_id,
+            title,
+            color,
+        } => {
+            let color = color.as_deref().and_then(crate::state::parse_hex_strict);
+            st.push_background_tab(
+                title,
+                None,
+                Some(PaneGroup {
+                    project: Some(project_id.clone()),
+                    color,
+                }),
+                Some(tab_id.clone()),
+            )
+        }
+        // An existing tab always resolved above.
+        T::Tab { .. } => st.push_background_tab("", None, None, None),
+    });
+    if let Some(ti) = st.tab_index_by_uid(tab_uid) {
+        st.place_moved_pane(mgr, mp, ti);
+    }
+    MoveOutcome::Moved
 }
 
 /// Map a model tab id (control id or positional) to a GUI tab index within one window.
@@ -2161,6 +2310,187 @@ mod tests {
         };
         assert!(apply_tab_change(&mut st, idx, &ch));
         assert_eq!(st.tabs[0].layout, Layout::Grid);
+    }
+
+    #[test]
+    fn move_requests_rehost_live_panes_across_tabs_and_windows() {
+        use hyperpanes_core::control::server::{MoveTarget as T, PaneGroupRequest as R};
+        use std::cell::RefCell;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        let det = |n: &str| crate::state::DetachedPane {
+            replay_answered: true,
+            uid: n.into(),
+            title: format!("{n} title").into(),
+            subtitle: Some(format!("{n} sub").into()),
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        };
+        let w1 = RefCell::new(crate::state::State::new(crate::theme::load_font(1.0)));
+        let w2 = RefCell::new(crate::state::State::new(crate::theme::load_font(1.0)));
+        for n in ["a", "b", "c"] {
+            w1.borrow_mut().adopt_pane(&m, det(n));
+        }
+        w2.borrow_mut().adopt_pane(&m, det("z"));
+        w1.borrow_mut().tabs[0].panes[0].cwd = Some("/work/a".into());
+        w1.borrow_mut().tabs[0].panes[0].talk = true;
+        let states = [(1i64, &w1), (2i64, &w2)];
+        let resolve = |id: &str| id.trim_start_matches("ctl-").to_string();
+        let mv = |pane: &str, window_id: i64, to: T| R::Move {
+            pane_id: pane.into(),
+            window_id,
+            to,
+        };
+
+        // newTab in the same window: made in the background, carries label/subtitle/cwd/talk.
+        let r = mv(
+            "ctl-a",
+            1,
+            T::NewTab {
+                tab_id: "new-1".into(),
+                title: Some("proj-a".into()),
+                color: Some("#a855f7".into()),
+            },
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Moved
+        );
+        {
+            let st = w1.borrow();
+            assert_eq!(st.tabs.len(), 2);
+            assert_eq!(st.active, 0, "a control move never steals focus");
+            let t = &st.tabs[1];
+            assert_eq!(t.title.as_str(), "proj-a");
+            assert_eq!(t.ctl_id.as_deref(), Some("new-1"));
+            assert!(t.color.is_some());
+            let p = &t.panes[0];
+            assert_eq!(p.uid, "a");
+            assert_eq!(p.title.as_str(), "a title");
+            assert_eq!(p.subtitle.as_deref(), Some("a sub"));
+            assert_eq!(p.cwd.as_deref(), Some("/work/a"));
+            assert!(p.talk);
+            assert_eq!(st.tabs[0].panes.len(), 2);
+        }
+
+        // To an existing tab (by the id the API returned) in the same window.
+        let r = mv(
+            "ctl-b",
+            1,
+            T::Tab {
+                tab_id: "new-1".into(),
+            },
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Moved
+        );
+        assert_eq!(w1.borrow().tabs[1].panes.len(), 2);
+        // Already there → Moved, no change.
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Moved
+        );
+        assert_eq!(w1.borrow().tabs[1].panes.len(), 2);
+
+        // Project tab: created as a pane group the first time (in window 2), reused after.
+        let proj = |tab: &str| T::Project {
+            tab_id: tab.into(),
+            project_id: "pid-1".into(),
+            title: "proj-a".into(),
+            color: Some("#22c55e".into()),
+        };
+        let r = mv("ctl-c", 2, proj("ptab-1"));
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Moved
+        );
+        {
+            let st = w2.borrow();
+            assert_eq!(st.tabs.len(), 2);
+            let t = &st.tabs[1];
+            assert_eq!(t.title.as_str(), "proj-a");
+            assert_eq!(t.ctl_id.as_deref(), Some("ptab-1"));
+            let g = t
+                .pane_group
+                .as_ref()
+                .expect("a project tab is a pane group");
+            assert_eq!(g.project.as_deref(), Some("pid-1"));
+            assert_eq!(t.panes[0].uid, "c");
+        }
+        // Window 1's source tab emptied → dropped, active index still valid.
+        assert_eq!(w1.borrow().tabs.len(), 1);
+        assert_eq!(w1.borrow().active, 0);
+        let r = mv("ctl-a", 2, proj("ptab-2"));
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Moved
+        );
+        {
+            let st = w2.borrow();
+            assert_eq!(st.tabs.len(), 2, "the project's tab is reused");
+            assert_eq!(
+                st.tabs[1].ctl_id.as_deref(),
+                Some("ptab-1"),
+                "a tab keeps its id"
+            );
+            assert_eq!(st.tabs[1].panes.len(), 2);
+        }
+
+        // The window's only pane is refused; an unknown pane is NotFound (retried later);
+        // an unknown target tab or window is refused. Nothing moves.
+        let r = mv(
+            "ctl-b",
+            2,
+            T::Tab {
+                tab_id: "2:0".into(),
+            },
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Refused
+        );
+        assert_eq!(w1.borrow().tabs[0].panes[0].uid, "b");
+        let r = mv(
+            "ctl-nope",
+            1,
+            T::Tab {
+                tab_id: "1:0".into(),
+            },
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::NotFound
+        );
+        let r = mv(
+            "ctl-z",
+            1,
+            T::Tab {
+                tab_id: "zzz".into(),
+            },
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Refused
+        );
+        let r = mv(
+            "ctl-z",
+            9,
+            T::Tab {
+                tab_id: "1:0".into(),
+            },
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &r),
+            MoveOutcome::Refused
+        );
+        assert_eq!(w2.borrow().tabs[0].panes[0].uid, "z");
     }
 
     #[test]
