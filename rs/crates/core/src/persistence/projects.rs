@@ -387,8 +387,9 @@ fn resolve_in(list: &[Project], id_or_name: &str) -> Option<Project> {
         .find(|p| p.id == id_or_name)
         .or_else(|| list.iter().find(|p| p.name == id_or_name))
         .or_else(|| {
-            // An absolute path (e.g. a launcher's working folder) names the project there.
-            if !std::path::Path::new(id_or_name).is_absolute() {
+            // A rooted path (e.g. a launcher's working folder) names the project there.
+            // `has_root`, not `is_absolute`: on Windows `/repo/x` has a root but no drive.
+            if !std::path::Path::new(id_or_name).has_root() {
                 return None;
             }
             let key = path_key(id_or_name);
