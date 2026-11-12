@@ -38,25 +38,30 @@ Host change H3 adds it (additive; legacy clients ignore unknown fields).
 
 ## 2. Host-side additions (all additive, default-off)
 
-- **H1 `bindAddress` + `port` in control-settings.json** — server today binds
-  `127.0.0.1:0` (ephemeral). New optional fields: `bindAddress` (default `127.0.0.1`)
-  and `port` (default `0` = ephemeral). Set `bindAddress` to the Tailscale IP (or
-  `0.0.0.0`) + a fixed port for mobile. Missing/invalid values coerce to the old
-  behaviour; `control.json` keeps its exact legacy fields and gains `bindAddress`.
+- **H1 `remoteEndpoints` + `port` in control-settings.json** (revised by #131) — the server
+  ALWAYS binds `127.0.0.1` and additionally one socket per configured remote endpoint: an
+  interface name (recommended: the VPN interface) or a specific IP. `port` (default `0` =
+  ephemeral) is shared by all sockets; set a fixed one for mobile. Wildcards (`0.0.0.0`/`::`)
+  are refused, never bound. An endpoint that can't be bound is reported (Prefs status line,
+  app notice, stderr, `control.json` `remoteEndpoints` status array — never the token) instead
+  of silently falling back, and a ~10s watcher binds it once the address appears. The legacy
+  single `bindAddress` is read as one more endpoint; `control.json` no longer writes it.
 - **H2 events URL** — `control.json.events` still advertises `127.0.0.1` (it is a
   *local* discovery file consumed by the MCP); the mobile app builds its own URLs from
   the pairing info.
 - **H3 `cursor` on WS `output` frames** — monotonic byte cursor after the batch.
 - **H4 `cols`/`rows` on `/state` panes** — from the session screen, so the device knows
   the grid to emulate.
-- **H5 `hyperpanes pair`** — CLI subcommand: reads `control.json`, enumerates non-loopback
-  IPs (Tailscale 100.64/10 preferred), prints `hp://<host>:<port>/#<token>` pairing URLs
-  + a scannable terminal QR code.
+- **H5 `hyperpanes pair`** — CLI subcommand: reads `control.json`, prints
+  `hp://<host>:<port>/?token=<token>&v=1` pairing URLs for every BOUND remote endpoint
+  + a scannable terminal QR code. With none bound it mints nothing and explains why (it
+  never guesses an address from the default route).
 
 ### Security model
 Token-bearer auth, transport security by **network layer**: the recommended
-deployment is Tailscale (WireGuard-encrypted, no open LAN ports). Binding `0.0.0.0` on
-untrusted LANs is possible but the pair output warns about it. `allowInput` stays a
+deployment is a WireGuard-style VPN interface listed in `remoteEndpoints` (encrypted, no open
+LAN ports). Wildcard binds are refused, and unauthenticated `GET /health` carries no pid
+(#131). `allowInput` stays a
 separate host-side switch. TLS termination is a non-goal for v1 (tailscale serve can
 provide HTTPS if wanted).
 
@@ -133,6 +138,6 @@ lib/src/ui/       connect, dashboard, terminal, composer, actions, settings
 - Remote pty resize / mobile-driven layouts (would fight the desktop).
 - True push notifications (needs a relay service).
 - TLS in the control server (Tailscale covers transport; `tailscale serve` for HTTPS).
-- Prefs GUI fields for bindAddress/port (settings file + `pair` cover it; Slint prefs
-  panel is a follow-up).
+- Prefs GUI fields for remoteEndpoints/port (settings file + `pair` cover it; the prefs
+  panel shows each endpoint's bind status; editing them there is a follow-up).
 - Worker-queue dashboards on mobile (API exists; UI later).

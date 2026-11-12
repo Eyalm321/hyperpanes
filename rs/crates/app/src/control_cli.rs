@@ -1,14 +1,14 @@
 //! Shared plumbing for the CLI subcommands that drive a running control server as a LOCAL client
 //! over HTTP — `pair` (mint a device token), `devices` (list), `revoke` (drop one). Each reads
-//! `control.json` for the port + master token, figures the address the server actually listens on
-//! (a specific `bindAddress` isn't reachable via loopback — the server binds a single socket), and
-//! hands back a blocking `reqwest` client primed with the master bearer.
+//! `control.json` for the port + master token, figures the address the server listens on (loopback,
+//! always, since #131 — except an OLDER server whose control.json still names a single legacy
+//! `bindAddress`), and hands back a blocking `reqwest` client primed with the master bearer.
 
 use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use hyperpanes_core::persistence::{control_settings, paths};
+use hyperpanes_core::persistence::paths;
 
 /// A live connection to the local control server: `base` URL, the master `token`, the listen
 /// `port`, and a blocking HTTP client.
@@ -49,8 +49,7 @@ pub fn connect() -> io::Result<Conn> {
         .ok_or_else(|| io_err("control.json is missing a token"))?
         .to_string();
 
-    let settings = control_settings::load();
-    let base = base_url(port, settings.bind_address.as_deref());
+    let base = base_url(port, legacy_bind_address(&v));
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -62,9 +61,17 @@ pub fn connect() -> io::Result<Conn> {
     })
 }
 
-/// Base URL for LOCAL calls to the control server. A configured, specific `bindAddress` is the
-/// only address the server listens on (single-socket bind), so loopback would refuse — dial it
-/// directly. An unspecified bind (`0.0.0.0`/`::`) or none means loopback works.
+/// The legacy single-socket `bindAddress` from a control.json, if any. Current servers always
+/// serve loopback and never write this field (#131); its presence marks an OLDER, not-yet-restarted
+/// server that listens only there.
+pub fn legacy_bind_address(control_json: &serde_json::Value) -> Option<&str> {
+    control_json.get("bindAddress").and_then(|b| b.as_str())
+}
+
+/// Base URL for LOCAL calls to the control server: loopback. The one exception is a legacy
+/// `bindAddress` from an older server's control.json (see [`legacy_bind_address`]) — that server
+/// bound a single socket, so loopback would refuse and it is dialed directly. An unspecified
+/// legacy bind (`0.0.0.0`/`::`) also listened on loopback.
 pub fn base_url(port: u16, bind_address: Option<&str>) -> String {
     let host = match bind_address.and_then(|a| a.parse::<IpAddr>().ok()) {
         Some(ip) if !ip.is_unspecified() => bracket(&ip.to_string()),
@@ -126,6 +133,25 @@ mod tests {
             "http://100.64.0.1:41419"
         );
         assert_eq!(base_url(41419, Some("fd7a::1")), "http://[fd7a::1]:41419");
+    }
+
+    #[test]
+    fn new_control_json_dials_loopback_legacy_one_dials_its_bind() {
+        let new: serde_json::Value = serde_json::from_str(
+            r#"{"port":41419,"token":"t","remoteEndpoints":[{"spec":"wg0","address":"100.64.0.1","bound":true,"error":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            base_url(41419, legacy_bind_address(&new)),
+            "http://127.0.0.1:41419"
+        );
+        let old: serde_json::Value =
+            serde_json::from_str(r#"{"port":41419,"token":"t","bindAddress":"100.64.0.1"}"#)
+                .unwrap();
+        assert_eq!(
+            base_url(41419, legacy_bind_address(&old)),
+            "http://100.64.0.1:41419"
+        );
     }
 
     #[test]

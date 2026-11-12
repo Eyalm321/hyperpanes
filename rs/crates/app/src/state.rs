@@ -4857,6 +4857,16 @@ impl State {
         true
     }
 
+    /// Show a short notice on the focused pane of the active tab (app-level notices such as a
+    /// control-API remote endpoint that failed to bind).
+    pub fn toast_focused(&mut self, msg: &str) {
+        self.dirty = true;
+        let (ti, pi) = (self.active, self.active_tab().focused);
+        if let Some(p) = self.tabs.get_mut(ti).and_then(|t| t.panes.get_mut(pi)) {
+            p.pane.set_toast(msg);
+        }
+    }
+
     /// Report a dictation failure on the pane it was aimed at (or the focused pane once the
     /// target is gone), and stop aiming.
     pub fn toast_dictation(&mut self, msg: &str) {

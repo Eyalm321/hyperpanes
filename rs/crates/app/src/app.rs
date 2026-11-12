@@ -380,6 +380,9 @@ pub struct App {
     timer: RefCell<Option<slint::Timer>>,
     /// Consecutive pump ticks with no work — drives the drop to the idle cadence.
     idle_ticks: Cell<u32>,
+    /// The last remote-endpoint failure signature a toast was shown for (#131): one notice
+    /// per state change, never per tick.
+    remote_notice: RefCell<String>,
     /// Whether the pump is currently at the slow (idle) cadence (so we re-interval only on a
     /// transition, never every tick).
     cadence_slow: Cell<bool>,
@@ -441,6 +444,7 @@ impl App {
             update: crate::update::Updater::new(),
             timer: RefCell::new(None),
             idle_ticks: Cell::new(0),
+            remote_notice: RefCell::new(String::new()),
             cadence_slow: Cell::new(false),
             handoffs: RefCell::new(None),
             last_autosave: Cell::new(None),
@@ -1349,8 +1353,26 @@ impl App {
         // Mirror the control-server status into every window's Preferences props.
         {
             let (enabled, allow_input, port) = self.control.status();
+            let remote = self.control.remote_status();
             let status: slint::SharedString =
-                control_status_line(enabled, allow_input, port).into();
+                control_status_line(enabled, allow_input, port, &remote).into();
+            // A failed / refused remote endpoint gets ONE toast per state change (#131).
+            let failed: Vec<String> = remote
+                .iter()
+                .filter(|e| !e.bound)
+                .map(|e| e.summary(port.unwrap_or(0)))
+                .collect();
+            let sig = failed.join("; ");
+            if sig != *self.remote_notice.borrow() {
+                *self.remote_notice.borrow_mut() = sig.clone();
+                if !sig.is_empty() {
+                    if let Some(w) = windows.first() {
+                        w.state.borrow_mut().toast_focused(&format!(
+                            "Control API remote endpoint not served: {sig}"
+                        ));
+                    }
+                }
+            }
             let cur = (enabled, allow_input, status);
             for w in &windows {
                 // Same idle-render guard as the maximized flag: only write when it changed.
@@ -4147,8 +4169,14 @@ fn apply_ai_status_props(app: &AppWindow, st: &hyperpanes_core::ai::service::AiS
 }
 
 /// The human-readable Control-API status line for the Preferences section: off, or running
-/// with its loopback port + whether input is allowed.
-fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> String {
+/// with its loopback port + whether input is allowed, plus each configured remote endpoint's
+/// bind status (#131), e.g. `Remote: wg0 → 100.x.y.z:41419 ✓`.
+fn control_status_line(
+    enabled: bool,
+    allow_input: bool,
+    port: Option<u16>,
+    remote: &[hyperpanes_core::control::endpoints::EndpointStatus],
+) -> String {
     if !enabled {
         return "Off".to_string();
     }
@@ -4157,9 +4185,55 @@ fn control_status_line(enabled: bool, allow_input: bool, port: Option<u16>) -> S
     } else {
         "input blocked"
     };
-    match port {
+    let mut line = match port {
         Some(p) => format!("Running · http://127.0.0.1:{p} · {input}"),
         None => format!("Starting… · {input}"),
+    };
+    if !remote.is_empty() {
+        let parts: Vec<String> = remote
+            .iter()
+            .map(|e| e.summary(port.unwrap_or(0)))
+            .collect();
+        line.push_str(" · Remote: ");
+        line.push_str(&parts.join(", "));
+    }
+    line
+}
+
+#[cfg(test)]
+mod control_status_line_tests {
+    use super::control_status_line;
+    use hyperpanes_core::control::endpoints::EndpointStatus;
+
+    #[test]
+    fn loopback_only_line_is_unchanged() {
+        assert_eq!(
+            control_status_line(true, true, Some(41419), &[]),
+            "Running · http://127.0.0.1:41419 · input allowed"
+        );
+        assert_eq!(control_status_line(false, true, None, &[]), "Off");
+    }
+
+    #[test]
+    fn remote_endpoints_are_listed_with_their_status() {
+        let remote = vec![
+            EndpointStatus {
+                spec: "wg0".into(),
+                address: Some("100.64.0.1".into()),
+                bound: true,
+                error: None,
+            },
+            EndpointStatus {
+                spec: "tun9".into(),
+                address: None,
+                bound: false,
+                error: Some("interface not found".into()),
+            },
+        ];
+        assert_eq!(
+            control_status_line(true, false, Some(41419), &remote),
+            "Running · http://127.0.0.1:41419 · input blocked · Remote: wg0 → 100.64.0.1:41419 ✓, tun9 ✗ interface not found"
+        );
     }
 }
 

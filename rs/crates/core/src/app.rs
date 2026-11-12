@@ -73,16 +73,8 @@ pub async fn run(version: &str) -> io::Result<()> {
         control_file.clone(),
         paths::speech_json(),
     );
-    // Remote-access bind (mobile client): honor bindAddress/port from control-settings.json.
-    if settings.bind_address.is_some() || settings.port.is_some() {
-        shared.set_bind(
-            settings
-                .bind_address
-                .clone()
-                .unwrap_or_else(|| "127.0.0.1".to_string()),
-            settings.port.unwrap_or(0),
-        );
-    }
+    // Listen config (#131): loopback always, plus any configured remote endpoints.
+    shared.set_listen(settings.remote_specs(), settings.port.unwrap_or(0));
 
     // Seed the read-model from the launch workspace (argv only — no last-session restore, so the
     // daemon starts clean and deterministic). Always leaves ≥1 window for open_pane to target.
