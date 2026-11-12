@@ -1820,7 +1820,11 @@ mod tests {
         // is reported failed and loopback still serves.
         let (shared, port, dir) = boot_listen(
             "unbindable",
-            vec!["203.0.113.7".into(), "0.0.0.0".into(), "hp-no-such-if0".into()],
+            vec![
+                "203.0.113.7".into(),
+                "0.0.0.0".into(),
+                "hp-no-such-if0".into(),
+            ],
         )
         .await;
         assert!(health_on("127.0.0.1", port).await.is_some());
@@ -1828,7 +1832,11 @@ mod tests {
         assert_eq!(st.len(), 3, "{st:?}");
         assert!(st.iter().all(|e| !e.bound && e.error.is_some()), "{st:?}");
         assert_eq!(st[0].address.as_deref(), Some("203.0.113.7"));
-        assert!(st[1].error.as_deref().unwrap().starts_with("wildcard bind refused"));
+        assert!(st[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("wildcard bind refused"));
         assert_eq!(st[2].error.as_deref(), Some("interface not found"));
         // Status reaches control.json, never carrying the token.
         let disco: serde_json::Value =
@@ -1857,8 +1865,13 @@ mod tests {
             ip: ip.parse().unwrap(),
         };
         assert!(remotes.reconcile(&shared, vec![at("127.0.0.2")]).await);
-        assert!(health_on("127.0.0.1", port).await.is_some(), "loopback down");
-        let body = health_on("127.0.0.2", port).await.expect("remote socket not serving");
+        assert!(
+            health_on("127.0.0.1", port).await.is_some(),
+            "loopback down"
+        );
+        let body = health_on("127.0.0.2", port)
+            .await
+            .expect("remote socket not serving");
         assert!(body.contains(r#""app":"hyperpanes""#));
         // Unauthenticated over the remote socket: no pid (#131).
         assert!(!body.contains("\"pid\""), "{body}");
@@ -1870,7 +1883,10 @@ mod tests {
         assert!(remotes.reconcile(&shared, vec![at("127.0.0.3")]).await);
         assert!(health_on("127.0.0.3", port).await.is_some());
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(health_on("127.0.0.2", port).await.is_none(), "stale listener kept");
+        assert!(
+            health_on("127.0.0.2", port).await.is_none(),
+            "stale listener kept"
+        );
         assert!(health_on("127.0.0.1", port).await.is_some());
         drop(remotes);
         let _ = std::fs::remove_dir_all(&dir);

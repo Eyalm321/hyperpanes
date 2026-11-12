@@ -201,7 +201,6 @@ pub struct ControlHost {
     /// Requested bind `(address, port)` from `control-settings.json` (`None` = loopback
     /// ephemeral). Read once at construction; a settings-file edit needs a restart (or an
     /// Enabled toggle) to re-bind.
-    bind: RefCell<(Option<String>, Option<u16>)>,
     control_file: PathBuf,
     /// The tokio runtime the server tasks run on. Captured once (the app enters the runtime
     /// guard before building the host) and used for every `spawn`, so a spawn from the UI thread
@@ -274,7 +273,6 @@ impl ControlHost {
         let host = ControlHost {
             enabled: Cell::new(settings.enabled),
             allow_input: Cell::new(allow_input),
-            bind: RefCell::new((settings.bind_address.clone(), settings.port)),
             control_file,
             // The app enters the tokio runtime guard before constructing the host, so the current
             // handle is always available here.
@@ -387,18 +385,11 @@ impl ControlHost {
         // workers that died with the previous session.
         let work_attach = shared.attach_durable_work_queue();
         shared.attach_durable_inbox(&work_attach);
-        // Remote-access bind (mobile client): re-read the settings file so an edit takes
-        // effect on the next Enabled toggle without an app restart.
+        // Listen config (#131): loopback always + the configured remote endpoints. Re-read the
+        // settings file so an edit takes effect on the next Enabled toggle without an app restart.
         {
             let fresh = control_settings::load();
-            let mut bind = self.bind.borrow_mut();
-            *bind = (fresh.bind_address, fresh.port);
-            if bind.0.is_some() || bind.1.is_some() {
-                shared.set_bind(
-                    bind.0.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
-                    bind.1.unwrap_or(0),
-                );
-            }
+            shared.set_listen(fresh.remote_specs(), fresh.port.unwrap_or(0));
         }
         let task = self.runtime.spawn(server::run_server(Arc::clone(&shared)));
         let ticker = self
@@ -474,7 +465,8 @@ impl ControlHost {
     }
 
     fn persist(&self) {
-        // Preserve fields this host doesn't own (bindAddress/port live only in the file):
+        // Preserve fields this host doesn't own (remoteEndpoints/bindAddress/port live only in
+        // the file):
         // load-modify-save so toggling the booleans can't erase a remote-access config.
         let mut settings = control_settings::load();
         settings.enabled = self.enabled.get();
@@ -491,6 +483,16 @@ impl ControlHost {
             .map(|s| s.port())
             .filter(|p| *p != 0);
         (self.enabled.get(), self.allow_input.get(), port)
+    }
+
+    /// Per-remote-endpoint bind status of the running server (#131); empty when stopped or
+    /// when no remote endpoint is configured.
+    pub fn remote_status(&self) -> Vec<hyperpanes_core::control::endpoints::EndpointStatus> {
+        self.shared
+            .borrow()
+            .as_ref()
+            .map(|s| s.endpoint_status())
+            .unwrap_or_default()
     }
 
     // ---- speech (SpeechService, owned by the running `Shared`) ----

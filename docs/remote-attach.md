@@ -14,11 +14,11 @@ desktop.
 
 ## Host setup
 
-### 1. Bind the control server to your VPN address
+### 1. Serve the control API on your VPN interface
 
-By default the control server listens on `127.0.0.1` only. To accept a remote client, set
-`bindAddress` (and a fixed `port`, so your pairing URL stays valid across restarts) in
-`control-settings.json` in the host's config directory:
+The control server **always** listens on `127.0.0.1` (local tools and agents use that). To accept
+a remote client, list your VPN interface under `remoteEndpoints` (and set a fixed `port`, so your
+pairing URL stays valid across restarts) in `control-settings.json` in the host's config directory:
 
 | OS | Path |
 |---|---|
@@ -30,24 +30,32 @@ By default the control server listens on `127.0.0.1` only. To accept a remote cl
 {
   "enabled": true,
   "allowInput": true,
-  "bindAddress": "100.x.y.z",
+  "remoteEndpoints": ["<your VPN interface>"],
   "port": 41419
 }
 ```
 
-- `bindAddress`: the IP address of the host's **VPN interface** (WireGuard-style; shown here as the
-  placeholder `100.x.y.z`). Do not use `0.0.0.0` unless you firewall the port yourself.
-- `port`: any free port, 1 to 65535.
+- `remoteEndpoints`: one or more **interface names** (recommended: your WireGuard-style VPN
+  interface, e.g. `wg0` on Linux, the adapter's name on Windows) or specific IP addresses (e.g.
+  `100.x.y.z`). Each gets its own socket next to loopback. An interface name follows the
+  interface: if its address changes, the server rebinds to the new one.
+- `port`: any free port, 1 to 65535. Loopback and every remote endpoint share it.
 - `allowInput`: must be `true` for the client to type. With `false` the client is read-only.
 - `enabled`: the control API must be on (Preferences → Control API).
 
 Restart the host app, or toggle Preferences → Control API off and on.
 
-> **Silent fallback.** The server only binds a non-loopback address when `bindAddress` is an IP that
-> is **live on a local interface right now**. If the VPN is down at startup, or the address is a
-> typo, the server silently falls back to `127.0.0.1` and remote clients see "connection refused".
-> Bring the VPN up first, then restart the host app. `hyperpanes pair` prints a warning when no
-> `bindAddress` is configured.
+> **Never the LAN, never a wildcard.** `0.0.0.0` and `::` are **refused**: they would expose the
+> control API on every interface, LAN included, and the transport is plain HTTP. The server keeps
+> serving loopback, logs a warning naming every interface the wildcard would have exposed, and
+> shows the refusal in Preferences. The legacy single `bindAddress` setting still works as one
+> more remote endpoint.
+
+> **No silent fallback.** An endpoint that can't be served (the interface doesn't exist or has no
+> address yet, the IP isn't local, the port is taken) is reported, not quietly swapped for
+> loopback: in Preferences → Control API (`Remote: <endpoint> ✗ <reason>`), as a notice in the
+> app, on stderr, and in `control.json` (`remoteEndpoints` status). The server re-checks every
+> ~10 seconds, so if the VPN comes up after the app, the endpoint is bound automatically.
 
 ### 2. Mint a pairing URL
 
@@ -66,6 +74,8 @@ hp://100.x.y.z:41419/?token=<TOKEN>&v=1
 ```
 
 and a QR code (for the phone app; ignore it for desktop). Treat the whole URL as a secret.
+`hyperpanes pair` prints one URL per **bound** remote endpoint. If none is bound, it mints nothing
+and prints which endpoints failed and why.
 
 ### 3. Revoke
 
@@ -144,7 +154,7 @@ Does not (yet):
 
 | Symptom | Likely cause and fix |
 |---|---|
-| **Connection refused** | The host fell back to loopback because `bindAddress` was not a live local IP at startup (VPN down, typo). Bring the VPN up and restart the host app. Also check the port matches `port` in `control-settings.json`, and that no firewall blocks it. On the host, `ss -ltn` should show the VPN address and port, not `127.0.0.1`. |
+| **Connection refused** | The remote endpoint isn't served. Check Preferences → Control API on the host: `Remote: <endpoint> ✗ <reason>` names the problem (interface not found / no address yet: bring the VPN up and wait ~10s; IP not local: fix the address; port in use: pick another `port`). A wildcard (`0.0.0.0`/`::`) is refused by design. Also check the client uses the same port and no firewall blocks it. |
 | **401 / auth error** | The token is bad, was revoked (`hyperpanes revoke`), or expired (`--ttl`). Mint a new pairing URL. The client stops retrying on purpose. |
 | **403 on typing / "host disallows input"** | `allowInput` is off on the host. Set `"allowInput": true` in `control-settings.json` (or toggle Allow input in Preferences) and restart or toggle the control API. |
 | **Stuck "disconnected"** | The VPN is down or the client's network changed. Bring the VPN back up. The client retries with capped backoff; use **Reconnect** to retry now. If the host app restarted with a different address, update the saved host. |
@@ -157,7 +167,9 @@ Does not (yet):
   means running commands as your user. Never paste a URL into chat, tickets, or screenshots.
 - **The transport is plain HTTP and WS.** Nothing is encrypted at the application layer. Only use
   remote attach over a WireGuard-style VPN (or another encrypted tunnel). Never expose the port on an
-  untrusted LAN or the internet, and avoid `bindAddress: "0.0.0.0"` without a firewall.
+  untrusted LAN or the internet. Wildcard binds (`0.0.0.0`/`::`) are refused for that reason.
+- `GET /health` is reachable without a token on every served address; it reports only the app
+  name, version and a few flags (the app pid is included only for authenticated callers).
 - Tokens are never shown in tab titles or written to logs by the client. The saved-hosts file is
   mode `0600`, but it is still a plaintext secret on disk: protect your client disk accordingly.
 - **Lost or stolen laptop?** Run `hyperpanes revoke <label>` on the host immediately. Prefer

@@ -1,20 +1,20 @@
-//! `hyperpanes pair` — print pairing info for the mobile app (docs/mobile-client-plan.md).
+//! `hyperpanes pair` — print pairing info for the mobile app / a desktop remote-attach client
+//! (docs/mobile-client-plan.md, docs/remote-attach.md).
 //!
-//! Reads the running app's `control.json` (port + master token), mints a per-device token off it
-//! via the control API so the master never leaves the machine, figures
-//! out which addresses a phone could reach (the configured `bindAddress`, else the
-//! machine's default-route + Tailscale IPs via the connected-UDP-socket trick — no
-//! packets are sent), and prints `hp://<host>:<port>/?token=<token>` pairing URLs plus a
-//! scannable terminal QR code for the best candidate.
+//! Reads the running app's `control.json` (port + master token + the per-remote-endpoint bind
+//! status), mints a per-device token off it via the control API so the master never leaves the
+//! machine, and prints `hp://<host>:<port>/?token=<token>` pairing URLs for every BOUND remote
+//! endpoint, plus a scannable terminal QR code for the first.
 //!
-//! Remote reachability requires `bindAddress` in `control-settings.json` (the server
-//! binds loopback-only by default); when it's missing we still print the URLs but warn
-//! that only this machine can connect.
+//! Remote reachability requires `remoteEndpoints` in `control-settings.json` (#131): the server
+//! always serves loopback, and serves remotely only on the endpoints listed there (a VPN
+//! interface name, ideally). With none bound we refuse to mint a token and explain why; we never
+//! guess an address from the default route.
 
-use std::net::UdpSocket;
 use std::path::Path;
 
 use hyperpanes_core::persistence::{control_settings, paths};
+use serde::Deserialize;
 
 pub fn wants_pair(argv: &[String]) -> bool {
     argv.get(1).map(|a| a == "pair").unwrap_or(false)
@@ -104,7 +104,7 @@ pub fn run(argv: &[String]) -> std::io::Result<()> {
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(paths::control_json);
-    let Some((port, token)) = read_discovery(&control_file) else {
+    let Some(disco) = read_discovery(&control_file) else {
         eprintln!(
             "No running control API found ({}).\n\
              Start hyperpanes and enable Preferences → Control API, then re-run `hyperpanes pair`.",
@@ -112,29 +112,34 @@ pub fn run(argv: &[String]) -> std::io::Result<()> {
         );
         std::process::exit(1);
     };
+    let (port, token) = (disco.port, disco.token.clone());
 
     let settings = control_settings::load();
-    let bound_remote = settings.bind_address.is_some();
-    let hosts = candidate_hosts(settings.bind_address.as_deref());
+    let hosts = match candidate_hosts(&disco) {
+        Ok(h) => h,
+        Err(why) => {
+            eprintln!(
+                "hyperpanes pair: no remote endpoint is being served, so another device CANNOT connect.\n\
+                 {why}\n\n\
+                 Add your VPN interface to {}:\n\
+                 {{ \"enabled\": true, \"allowInput\": true, \"remoteEndpoints\": [\"<your VPN interface>\"], \"port\": {port} }}\n\
+                 then toggle Preferences → Control API (or restart) and re-run `hyperpanes pair`.\n\
+                 Use a VPN interface (WireGuard-encrypted), never the LAN: the control API is plain HTTP.\n\
+                 0.0.0.0 / :: are refused (they would expose it on every interface).",
+                paths::control_settings_json().display()
+            );
+            std::process::exit(1);
+        }
+    };
 
     println!("hyperpanes pairing — control API on port {port}\n");
-    if !bound_remote {
-        println!(
-            "⚠ control server is bound to 127.0.0.1 (loopback only) — a phone CANNOT connect yet.\n\
-             Add a bind address to {}:\n\
-             {{ \"enabled\": true, \"allowInput\": true, \"bindAddress\": \"<this machine's Tailscale/LAN IP>\", \"port\": {port} }}\n\
-             then toggle Preferences → Control API (or restart), and re-run `hyperpanes pair`.\n\
-             Prefer a Tailscale IP (100.x.y.z): WireGuard-encrypted, no open LAN ports.\n",
-            paths::control_settings_json().display()
-        );
-    }
     if !settings.allow_input {
-        println!("⚠ allowInput is off — the mobile app will be read-only (no typing/keys).\n");
+        println!("⚠ allowInput is off — the paired device will be read-only (no typing/keys).\n");
     }
 
     // Mint a per-device token via the control API so the MASTER token never leaves this machine.
     // The phone carries only this named, revocable credential (`hyperpanes devices` / `revoke`).
-    let device_token = match mint_device(port, settings.bind_address.as_deref(), &token, &opts) {
+    let device_token = match mint_device(port, disco.legacy_bind.as_deref(), &token, &opts) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("failed to mint device token: {e}");
@@ -164,8 +169,28 @@ pub fn run(argv: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `{ port, token }` from control.json, or `None` when missing/corrupt.
-fn read_discovery(path: &Path) -> Option<(u16, String)> {
+/// One `remoteEndpoints` status row of control.json (#131).
+#[derive(Debug, Clone, Deserialize)]
+struct EndpointRow {
+    spec: String,
+    address: Option<String>,
+    #[serde(default)]
+    bound: bool,
+    error: Option<String>,
+}
+
+/// What `pair` needs from control.json.
+#[derive(Debug)]
+struct Discovery {
+    port: u16,
+    token: String,
+    /// An OLDER server's single-socket `bindAddress` (current servers never write it).
+    legacy_bind: Option<String>,
+    remote: Vec<EndpointRow>,
+}
+
+/// Parse control.json, or `None` when missing/corrupt.
+fn read_discovery(path: &Path) -> Option<Discovery> {
     let raw = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let port = v
@@ -173,7 +198,60 @@ fn read_discovery(path: &Path) -> Option<(u16, String)> {
         .as_u64()
         .filter(|&p| (1..=65535).contains(&p))? as u16;
     let token = v.get("token")?.as_str()?.to_string();
-    Some((port, token))
+    let legacy_bind = crate::control_cli::legacy_bind_address(&v).map(str::to_string);
+    let remote = v
+        .get("remoteEndpoints")
+        .and_then(|r| serde_json::from_value::<Vec<EndpointRow>>(r.clone()).ok())
+        .unwrap_or_default();
+    Some(Discovery {
+        port,
+        token,
+        legacy_bind,
+        remote,
+    })
+}
+
+/// Addresses another device can dial: every BOUND remote endpoint (deduped, config order). An
+/// older server's specific legacy `bindAddress` counts too. Never loopback, never a wildcard,
+/// never a guess. `Err` explains why there is none (listing failed endpoints).
+fn candidate_hosts(d: &Discovery) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(ip) = d
+        .legacy_bind
+        .as_deref()
+        .and_then(|a| a.parse::<std::net::IpAddr>().ok())
+        .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+    {
+        out.push(ip.to_string());
+    }
+    for e in d.remote.iter().filter(|e| e.bound) {
+        if let Some(a) = &e.address {
+            if !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+    }
+    if !out.is_empty() {
+        return Ok(out);
+    }
+    if d.remote.is_empty() {
+        return Err("No remoteEndpoints are configured (the server is loopback-only).".to_string());
+    }
+    let lines: Vec<String> = d
+        .remote
+        .iter()
+        .map(|e| {
+            format!(
+                "  {} ✗ {}",
+                e.spec,
+                e.error.as_deref().unwrap_or("not bound")
+            )
+        })
+        .collect();
+    Err(format!(
+        "Configured remote endpoints, none bound:\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// The pairing URL the mobile app parses (keep in sync with `mobile/…/pairing.dart`).
@@ -184,45 +262,6 @@ fn pairing_url(host: &str, port: u16, token: &str) -> String {
         host.to_string()
     };
     format!("hp://{h}:{port}/?token={token}&v=1")
-}
-
-/// Addresses a phone could dial, best first. A configured SPECIFIC bind address wins
-/// outright (that's the only address the server listens on); an unspecified bind
-/// (`0.0.0.0`) or no config falls back to discovering this machine's Tailscale +
-/// default-route IPs.
-fn candidate_hosts(bind_address: Option<&str>) -> Vec<String> {
-    if let Some(addr) = bind_address {
-        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
-            if !ip.is_unspecified() {
-                return vec![addr.to_string()];
-            }
-        }
-    }
-    let mut out = Vec::new();
-    // Tailscale first (encrypted path; 100.100.100.100 is the tailnet's MagicDNS resolver,
-    // so the OS routes this via the tailscale interface). connect() sends nothing.
-    if let Some(ip) = local_ip_toward("100.100.100.100:53") {
-        if ip.starts_with("100.") {
-            out.push(ip);
-        }
-    }
-    // Default-route LAN IP.
-    if let Some(ip) = local_ip_toward("8.8.8.8:53") {
-        if !out.contains(&ip) {
-            out.push(ip);
-        }
-    }
-    if out.is_empty() {
-        out.push("127.0.0.1".to_string());
-    }
-    out
-}
-
-/// The local address the OS would use to reach `target` — connected-UDP trick, no I/O.
-fn local_ip_toward(target: &str) -> Option<String> {
-    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect(target).ok()?;
-    Some(sock.local_addr().ok()?.ip().to_string())
 }
 
 /// Render `data` as a terminal QR (quiet zone + half-block cells, dark-on-light).
@@ -263,19 +302,64 @@ mod tests {
             br#"{ "port": 51888, "token": "abc", "pid": 1, "version": "x", "events": "ws://..." }"#,
         )
         .unwrap();
-        assert_eq!(read_discovery(&p), Some((51888, "abc".to_string())));
+        let d = read_discovery(&p).unwrap();
+        assert_eq!((d.port, d.token.as_str()), (51888, "abc"));
+        assert!(d.legacy_bind.is_none() && d.remote.is_empty());
         std::fs::write(&p, b"not json").unwrap();
-        assert_eq!(read_discovery(&p), None);
+        assert!(read_discovery(&p).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn disco(json: &str) -> Discovery {
+        let dir = std::env::temp_dir().join(format!(
+            "hp-pair-cand-{}-{}",
+            std::process::id(),
+            json.len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("control.json");
+        std::fs::write(&p, json).unwrap();
+        let d = read_discovery(&p).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        d
+    }
+
     #[test]
-    fn specific_bind_address_wins() {
-        assert_eq!(candidate_hosts(Some("100.64.0.1")), vec!["100.64.0.1"]);
-        // Unspecified bind → discovery path (non-empty, never contains 0.0.0.0).
-        let hosts = candidate_hosts(Some("0.0.0.0"));
-        assert!(!hosts.is_empty());
-        assert!(hosts.iter().all(|h| h != "0.0.0.0"));
+    fn candidates_are_the_bound_remote_endpoints_only() {
+        let d = disco(
+            r#"{"port":41419,"token":"t","remoteEndpoints":[
+                {"spec":"wg0","address":"100.64.0.1","bound":true,"error":null},
+                {"spec":"wg0","address":"fd7a::1","bound":true,"error":null},
+                {"spec":"203.0.113.7","address":"203.0.113.7","bound":false,"error":"cannot assign"},
+                {"spec":"0.0.0.0","address":null,"bound":false,"error":"wildcard bind refused"}]}"#,
+        );
+        let hosts = candidate_hosts(&d).unwrap();
+        assert_eq!(hosts, vec!["100.64.0.1", "fd7a::1"]);
+        // IPv6 is bracketed in the URL.
+        assert_eq!(
+            pairing_url(&hosts[1], 41419, "t"),
+            "hp://[fd7a::1]:41419/?token=t&v=1"
+        );
+    }
+
+    #[test]
+    fn none_bound_is_an_error_listing_failures_never_a_guess() {
+        let d = disco(
+            r#"{"port":41419,"token":"t","remoteEndpoints":[
+                {"spec":"tun9","address":null,"bound":false,"error":"interface not found"}]}"#,
+        );
+        let err = candidate_hosts(&d).unwrap_err();
+        assert!(err.contains("tun9 ✗ interface not found"), "{err}");
+        let d = disco(r#"{"port":41419,"token":"t"}"#);
+        assert!(candidate_hosts(&d).unwrap_err().contains("loopback-only"));
+    }
+
+    #[test]
+    fn an_older_servers_specific_bind_still_counts() {
+        let d = disco(r#"{"port":41419,"token":"t","bindAddress":"100.64.0.1"}"#);
+        assert_eq!(candidate_hosts(&d).unwrap(), vec!["100.64.0.1"]);
+        let d = disco(r#"{"port":41419,"token":"t","bindAddress":"0.0.0.0"}"#);
+        assert!(candidate_hosts(&d).is_err());
     }
 
     #[test]

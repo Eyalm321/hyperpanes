@@ -1832,14 +1832,24 @@ mod tests {
         parts.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The worker dials whatever `control.json` says the server bound to. A specific
-    /// `bindAddress` is a single-socket bind, so loopback is NOT listening: hardcoding
-    /// 127.0.0.1 made every claim fail with ConnectionRefused and the worker exit before
-    /// claiming — indistinguishable from an empty queue.
+    /// The worker dials loopback, which current servers always serve (#131). The exception is
+    /// an OLDER server whose control.json names a specific legacy `bindAddress`: that was a
+    /// single-socket bind, so loopback is NOT listening there, and hardcoding 127.0.0.1 made
+    /// every claim fail with ConnectionRefused (indistinguishable from an empty queue).
     fn base_from_control_json(json: &str) -> String {
         let d: Discovery = serde_json::from_str(json).expect("control.json parses");
         // Calls the PRODUCTION helper `run()` uses, so reverting that line turns these red.
         control_base(&d)
+    }
+
+    #[test]
+    fn dials_loopback_for_a_current_server_with_remote_endpoints() {
+        assert_eq!(
+            base_from_control_json(
+                r#"{"port":41419,"token":"t","remoteEndpoints":[{"spec":"wg0","address":"100.64.0.1","bound":true,"error":null}]}"#
+            ),
+            "http://127.0.0.1:41419"
+        );
     }
 
     #[test]
