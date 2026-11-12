@@ -59,6 +59,10 @@ you start, so read your inbox at every checkpoint: **before your first edit, bef
 pass, and before you commit.** Keep a cursor `N`: start at 0, and after each read set it to the
 reply's `latestSeq`.
 
+- **Automatic delivery.** When the app's worker settings are in effect, new mail also arrives on
+  its own as `[hyperpanes inbox]` additional context after your tool calls (a `hyperpanes
+  inbox-hook`). Treat it like a checkpoint read: act on it, and advance your cursor `N` past the
+  seqs it shows. Keep the manual read before you commit as the fallback for older app versions.
 - If `mcp__hyperpanes__read_messages` is directly callable, use it:
   `read_messages {paneId:"<your pane id>", after:N}`. MCP arguments are not shell-expanded, so pass
   the literal values of `$HYPERPANES_PANE_ID` and `$HP_TASK_ID` (`echo` them once), never the

@@ -447,6 +447,24 @@ pub(crate) enum GoalTier {
     Worker,
 }
 
+/// The executable a worker's `inbox-hook` command should run: `$APPIMAGE` when set (the
+/// AppImage mount path dies with the process), else the current exe.
+fn inbox_hook_exe() -> Option<String> {
+    std::env::var("APPIMAGE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+}
+
+/// POSIX single-quote `s` for a hook command line.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Build the contents of a goal settings blob.
 ///
 /// Carries three things, and each is load-bearing for an unattended pane:
@@ -461,6 +479,10 @@ pub(crate) enum GoalTier {
 ///   expires after `dialogExpiry` (5 min default) and the sender is told it lapsed. Opting in is
 ///   what makes agent-to-agent messaging reach a goal pane at all.
 /// * `permissions.deny` on the worker tier — see [`GoalTier::Worker`] below.
+/// * `hooks` on the worker tier — `PostToolUse` + `UserPromptSubmit` running
+///   `<exe> inbox-hook`. The user's own hooks live in their own settings sources and Claude
+///   MERGES those with `--settings`, so nothing is copied from or clobbers them. This file is
+///   generated: never hand-edit a live one.
 ///
 /// Deliberately nothing else: no model / effort / outputStyle keys leak in from the user's
 /// settings, so a goal pane's behaviour is a function of its persona and flags, not of whatever
@@ -486,6 +508,22 @@ fn goals_settings_json(status_line: Option<&serde_json::Value>, tier: GoalTier) 
             "permissions".to_string(),
             serde_json::json!({ "deny": ["SendMessage", "ListAgents"] }),
         );
+        // Mid-task inbox delivery: after each tool call (and on prompt submit) `inbox-hook`
+        // prints new control-plane mail as additionalContext. Omitted if the exe is unknown.
+        if let Some(exe) = inbox_hook_exe() {
+            let entry = serde_json::json!([{
+                "type": "command",
+                "command": format!("{} inbox-hook", shell_quote(&exe)),
+                "timeout": 2
+            }]);
+            root.insert(
+                "hooks".to_string(),
+                serde_json::json!({
+                    "PostToolUse": [{ "matcher": "*", "hooks": entry.clone() }],
+                    "UserPromptSubmit": [{ "hooks": entry }],
+                }),
+            );
+        }
     }
     serde_json::Value::Object(root).to_string()
 }
@@ -646,6 +684,35 @@ mod goals_mcp_config_tests {
             coord.get("permissions").is_none(),
             "coordinators keep the tools — they are what coordinates across panes"
         );
+    }
+
+    #[test]
+    fn worker_settings_carry_the_inbox_hook_and_coordinator_does_not() {
+        let worker: serde_json::Value =
+            serde_json::from_str(&super::goals_settings_json(None, super::GoalTier::Worker))
+                .unwrap();
+        let exe = super::inbox_hook_exe().expect("test process has an exe");
+        let want = format!("{} inbox-hook", super::shell_quote(&exe));
+        let post = &worker["hooks"]["PostToolUse"][0];
+        assert_eq!(post["matcher"], "*");
+        assert_eq!(post["hooks"][0]["type"], "command");
+        assert_eq!(post["hooks"][0]["command"], want.as_str());
+        assert_eq!(post["hooks"][0]["timeout"], 2);
+        let ups = &worker["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        assert_eq!(ups["command"], want.as_str());
+        assert!(worker["crossSessionInbound"] == "accept");
+
+        let coord: serde_json::Value = serde_json::from_str(&super::goals_settings_json(
+            None,
+            super::GoalTier::Coordinator,
+        ))
+        .unwrap();
+        assert!(coord.get("hooks").is_none());
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(super::shell_quote("/a b/it's"), "'/a b/it'\\''s'");
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod claude_peers;
 pub mod claude_recovery;
 pub mod cli;
 pub mod control;
+pub mod inbox_hook;
 pub mod layout;
 pub mod listen;
 pub mod paths;

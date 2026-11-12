@@ -53,12 +53,13 @@ prompt wedges the pane).
   the advisor:** include `advisor=<your $HYPERPANES_PANE_ID>` in every payload so an impl agent that
   hits a strategic fork can consult you mid-build instead of guessing or bouncing the whole subtask
   (see IMPL.md "Consult your advisor").
-- **Put every requirement in the payload.** An impl agent is one `claude -p` turn, and nothing is
-  pushed into it. A correction you send after fan-out (`send_message` to its pane) reaches it only
-  at its next checkpoint, when it reads its own inbox (IMPL.md "Checkpoints"). An agent already past
-  its last checkpoint never sees it. If a spec change can't wait for that: nack the task or close
-  its pane and re-enqueue a corrected payload, or hand-apply the change at integration. Never assume
-  a sent correction landed. Check the diff, and the `seq` the agent names in its commit message.
+- **Put every requirement in the payload.** An impl agent is one `claude -p` turn. On app versions
+  that ship the inbox hook, a correction you `send_message` to its pane reaches it at its next tool
+  call, as `[hyperpanes inbox]` context; on older versions only when it reads its own inbox
+  (IMPL.md "Checkpoints"). An agent between tool calls, or already finished, never sees it, so still
+  put every requirement in the payload. If a spec change can't wait: nack the task or close its pane
+  and re-enqueue a corrected payload, or hand-apply the change at integration. Never assume a sent
+  correction landed. Check the diff, and the `seq` the agent names in its commit message.
 - `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
   project: $HP_GOAL_PROJECT_NAME, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
   split on newlines>, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <your
@@ -139,7 +140,7 @@ prompt wedges the pane).
   for `<taskId>:` consults and answer fast (`send_message {to:<the `from` pane id on the message>,
   from:"$HYPERPANES_PANE_ID", body:<crisp decision>}`). A 20-second answer here saves a thrown-away
   subtask and a whole re-spec round-trip — this is the point of pairing your intelligence with their
-  cheap execution. Your reply reaches the agent only when it next polls its inbox; it is not pushed.
+  cheap execution. Your reply reaches the agent at its next tool call (inbox hook, on app versions that ship it), else when it next polls its inbox.
 - **Wait for the whole wave — synchronization barrier.** Don't verify or report `done` while any
   impl pane is still `working`. Collect every subtask's result (or its failure) first; a green check
   on a half-built tree is a false pass.
