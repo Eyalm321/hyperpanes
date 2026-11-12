@@ -104,6 +104,9 @@ jobs:
           BUILD_NAME: ${{ inputs.version }}
           BUILD_NUMBER: ${{ inputs.build-number || github.run_number }}
         run: |
+          # The self-hosted runner keeps build/ and the Xcode workspace between jobs; after a
+          # Flutter SDK update the precompiled cache is stale and the build refuses to run.
+          flutter clean --include-xcode-workspace
           flutter pub get
           flutter build ios --release --no-codesign \
             ${BUILD_NAME:+--build-name "$BUILD_NAME"} \
