@@ -59,7 +59,10 @@ For each goal you're given (free text):
    name (e.g. `g1`) so it can `send_to_parent` and fan out.
    **Pane identity:** every pane you spawn wears the project's colors — pass
    `project:"<project name or id>"` to `open_pane` (that defaults the cwd AND the project frame
-   color from the registry), set `label` = the project name (`$HP_GOAL_PROJECT_NAME` in your env;
+   color from the registry) plus `projectTab:true`, so the pane opens in the project's own tab
+   (one tab per project, named and colored from the registry, reused when it exists) instead of
+   whatever tab is active (an app without `projectTab` ignores it). Set `label` = the project
+   name (`$HP_GOAL_PROJECT_NAME` in your env;
    `$HP_GOAL_PROJECT_COLOR` has the hex if you need an explicit `color`), and set the pane's
    subtitle to its task — `rename_pane {paneId, label:<project name>, subtitle:"<goal one-liner>"}`.
    Your own pane already carries this identity (the app set it); keep the scheme for everything
