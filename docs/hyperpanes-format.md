@@ -321,6 +321,9 @@ pane (or the tab) in scope, like `recolorPane`.
   and `pane.projectTab` can't be combined. Errors: `400` (no such tab, a non-string `tabId`, a
   `windowId` that isn't the tab's window, or `tabId` together with `projectTab`), `403` (the tab
   is out of a scoped token's scope).
+- `attach` with `"as":"panes"` accepts the same top-level `"tabId":"…"`: all its panes merge into
+  that existing tab instead of the window's active tab, with the same rules and errors as
+  `newPane` `tabId`. `tabId` with `"as":"tab"` (or no `as`) is a `400`.
 - To put a new pane in another tab, use `tabId` or `projectTab`. Don't `newPane` and then
   `movePane`: the pane sits in the active tab until the move lands.
 - `newPane` keeps `pane.subtitle` (the header's second line). It used to be dropped. The session
