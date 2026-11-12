@@ -12,6 +12,11 @@
 //! legacy `{ enabled, allowInput }` shape. Coercion is equally forgiving: `bindAddress`
 //! must be a non-empty string that parses as an IP address, `port` an integer in
 //! 1..=65535 — anything else coerces to "unset" (loopback / ephemeral).
+//!
+//! #131: optional `remoteEndpoints: [string]` — interface names (a VPN interface) or specific
+//! IPs, each served on its own socket IN ADDITION to loopback, which is always served. Legacy
+//! `bindAddress` is folded in as one more endpoint (see [`ControlSettings::remote_specs`]).
+//! Wildcards are kept here (so the server can REPORT the refusal) but never bound.
 
 use crate::persistence::paths;
 use serde::{Deserialize, Serialize};
@@ -27,13 +32,38 @@ use serde::{Deserialize, Serialize};
 pub struct ControlSettings {
     pub enabled: bool,
     pub allow_input: bool,
-    /// Bind address for the control server. `None` → `127.0.0.1`. Set to the host's
-    /// Tailscale/LAN IP (or `0.0.0.0`) to allow remote clients.
+    /// LEGACY single bind address. Now treated as one remote endpoint (merged into
+    /// [`remote_specs`](Self::remote_specs)); prefer `remote_endpoints`. Loopback is always
+    /// served regardless.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind_address: Option<String>,
     /// Fixed listen port. `None` → ephemeral (OS-assigned), the legacy behaviour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Remote endpoints (#131): interface names or specific IPs, each its own socket beside
+    /// loopback. Empty = loopback only. Omitted from the file when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remote_endpoints: Vec<String>,
+}
+
+impl ControlSettings {
+    /// Every configured remote endpoint spec: `remote_endpoints`, then the legacy
+    /// `bind_address` unless it's loopback, deduped (first wins). Wildcards stay in the list
+    /// so the server reports their refusal instead of silently ignoring them.
+    pub fn remote_specs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let legacy = self
+            .bind_address
+            .iter()
+            .filter(|a| a.as_str() != "127.0.0.1" && a.as_str() != "::1");
+        for spec in self.remote_endpoints.iter().chain(legacy) {
+            let spec = spec.trim();
+            if !spec.is_empty() && !out.iter().any(|s| s == spec) {
+                out.push(spec.to_string());
+            }
+        }
+        out
+    }
 }
 
 /// Read the settings from the canonical `control-settings.json`.
@@ -65,6 +95,18 @@ pub fn load_from(path: &std::path::Path) -> ControlSettings {
             .and_then(|v| v.as_u64())
             .filter(|&p| (1..=65535).contains(&p))
             .map(|p| p as u16),
+        remote_endpoints: value
+            .get("remoteEndpoints")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str())
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -167,6 +209,7 @@ mod tests {
             allow_input: true,
             bind_address: Some("100.64.0.1".into()),
             port: Some(51888),
+            remote_endpoints: vec!["wg0".into(), "fd7a::1".into()],
         };
         save_to(&p, &settings).unwrap();
         assert_eq!(load_from(&p), settings);
@@ -195,5 +238,42 @@ mod tests {
         assert_eq!(s.bind_address.as_deref(), Some("0.0.0.0"));
         assert_eq!(s.port, None);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn remote_endpoints_coerce_forgivingly() {
+        let p = temp_path("remote-coerce");
+        std::fs::write(
+            &p,
+            br#"{ "remoteEndpoints": ["wg0", 7, "", "  ", null, "Ethernet 2", "0.0.0.0"] }"#,
+        )
+        .unwrap();
+        let s = load_from(&p);
+        // Non-strings and blanks dropped; names with spaces and wildcards kept (the server
+        // reports a wildcard's refusal).
+        assert_eq!(s.remote_endpoints, vec!["wg0", "Ethernet 2", "0.0.0.0"]);
+        std::fs::write(&p, br#"{ "remoteEndpoints": "wg0" }"#).unwrap();
+        assert!(load_from(&p).remote_endpoints.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn remote_specs_merge_legacy_bind_address() {
+        let mut s = ControlSettings {
+            remote_endpoints: vec!["wg0".into(), "100.64.0.1".into()],
+            bind_address: Some("100.64.0.1".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.remote_specs(), vec!["wg0", "100.64.0.1"]);
+        s.remote_endpoints.clear();
+        assert_eq!(s.remote_specs(), vec!["100.64.0.1"]);
+        // A legacy wildcard is kept so it gets refused loudly, not silently ignored.
+        s.bind_address = Some("0.0.0.0".into());
+        assert_eq!(s.remote_specs(), vec!["0.0.0.0"]);
+        // Loopback legacy value = nothing remote.
+        s.bind_address = Some("127.0.0.1".into());
+        assert!(s.remote_specs().is_empty());
+        s.bind_address = None;
+        assert!(s.remote_specs().is_empty());
     }
 }

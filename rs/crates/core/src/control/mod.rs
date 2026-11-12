@@ -12,6 +12,7 @@ pub mod work;
 pub mod work_lock;
 
 pub mod discovery_guard;
+pub mod endpoints;
 pub mod dispatch;
 pub mod events;
 pub mod readmodel;

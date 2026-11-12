@@ -181,7 +181,10 @@ fn find_pane_scoped(
 struct HealthOut {
     ok: bool,
     app: &'static str,
-    pid: u32,
+    /// Only for a caller presenting a VALID bearer token (#131): `/health` is unauthenticated
+    /// and may be reachable over a remote endpoint, so it must not leak the app pid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
     version: String,
     allow_input: bool,
     /// Additive, stable: `"durable"` (this instance owns the on-disk work queue),
@@ -196,11 +199,19 @@ struct HealthOut {
     build: Option<String>,
 }
 
-async fn health(State(shared): State<Arc<Shared>>) -> Response {
+async fn health(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+    // An absent or invalid token is NOT a 401 here: /health stays reachable without auth, it
+    // just omits the pid.
+    let authed = shared
+        .tokens
+        .lock()
+        .unwrap()
+        .resolve(bearer_header(&headers).as_deref(), now_ms())
+        .is_some();
     ok_json(HealthOut {
         ok: true,
         app: "hyperpanes",
-        pid: shared.pid,
+        pid: authed.then_some(shared.pid),
         version: shared.version.clone(),
         allow_input: shared.allow_input(),
         work_queue: shared.work_queue_mode().as_str(),
@@ -2761,7 +2772,23 @@ mod golden {
             .await
             .unwrap();
         assert_eq!(r.status().as_u16(), 200);
-        assert!(r.text().await.unwrap().contains(r#""allowInput":false"#));
+        let body = r.text().await.unwrap();
+        assert!(body.contains(r#""allowInput":false"#));
+        // #131: no pid without a valid token.
+        assert!(!body.contains("\"pid\""), "{body}");
+        assert_eq!(
+            body,
+            r#"{"ok":true,"app":"hyperpanes","version":"0.1.8","allowInput":false,"workQueue":"memory","inbox":"memory"}"#
+        );
+        // An INVALID token is treated as unauthenticated: still 200, still no pid.
+        let r = client()
+            .get(format!("{}/health", s.base))
+            .header("authorization", "Bearer not-a-real-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        assert!(!r.text().await.unwrap().contains("\"pid\""));
     }
 
     #[tokio::test]

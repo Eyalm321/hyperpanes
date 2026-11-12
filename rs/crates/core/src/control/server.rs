@@ -22,6 +22,7 @@ use tokio::runtime::Handle;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::control::endpoints::{plan, EndpointStatus, Planned};
 use crate::control::events::{ControlEvent, EventHub};
 use crate::control::inbox::MessageInbox;
 use crate::control::lock::PaneLocks;
@@ -99,11 +100,14 @@ pub struct Shared {
     /// each tick and performs the teardown (snapshot flush, detached relauncher, quit) on the
     /// UI thread. In the headless bin it is simply never read.
     pub restart_app: AtomicU8,
-    /// Requested bind `(address, port)` for the listener. Defaults to `("127.0.0.1", 0)` —
-    /// loopback, ephemeral — the frozen legacy behaviour. An embedder sets this from
-    /// `control_settings` BEFORE `run_server` to allow remote clients (mobile app over
-    /// Tailscale/LAN). Port `0` = OS-assigned.
-    bind: Mutex<(String, u16)>,
+    /// Listen config: the configured remote endpoint specs (interface names / IPs, #131) and
+    /// the requested port. Loopback is ALWAYS bound in addition; no specs = loopback only (the
+    /// legacy default). An embedder sets this from `control_settings` BEFORE `run_server`.
+    /// Port `0` = OS-assigned (remote sockets then reuse loopback's port).
+    listen: Mutex<(Vec<String>, u16)>,
+    /// Per-remote-endpoint bind status (see [`crate::control::endpoints`]), maintained by the
+    /// server's rebind watcher. Empty when no remote endpoint is configured.
+    endpoint_status: Mutex<Vec<EndpointStatus>>,
     /// The runtime to spawn background tasks on (the coalescer in [`notify_state`]). Set once by
     /// an embedder that wants spawns bound to an explicit runtime rather than the ambient
     /// thread-local — the GUI host sets this so a `notify_state` from the UI thread can never
@@ -280,7 +284,8 @@ impl Shared {
             projects_dirty: AtomicBool::new(false),
             queue_dirty: AtomicBool::new(false),
             restart_app: AtomicU8::new(0),
-            bind: Mutex::new(("127.0.0.1".to_string(), 0)),
+            listen: Mutex::new((Vec::new(), 0)),
+            endpoint_status: Mutex::new(Vec::new()),
             runtime: OnceLock::new(),
             speech: SpeechService::new(speech_settings_path),
             remote_connects: Mutex::new(Vec::new()),
@@ -330,28 +335,32 @@ impl Shared {
         self.remote_screens.lock().unwrap().clone()
     }
 
-    /// Set the requested bind address/port (from `control_settings`) BEFORE `run_server`.
-    /// `address` must be a bare IP (the settings loader already validated it); `port` 0 =
-    /// ephemeral.
-    pub fn set_bind(&self, address: impl Into<String>, port: u16) {
-        *self.bind.lock().unwrap() = (address.into(), port);
+    /// Set the listen config (from `control_settings`) BEFORE `run_server`: the remote endpoint
+    /// specs (interface names or IPs; empty = loopback only) and the port (0 = ephemeral).
+    pub fn set_listen(&self, remote_endpoints: Vec<String>, port: u16) {
+        *self.listen.lock().unwrap() = (remote_endpoints, port);
     }
 
-    /// The requested `(address, port)` to bind.
-    pub fn bind_config(&self) -> (String, u16) {
-        self.bind.lock().unwrap().clone()
+    /// The requested `(remote endpoint specs, port)`.
+    pub fn listen_config(&self) -> (Vec<String>, u16) {
+        self.listen.lock().unwrap().clone()
     }
 
-    /// The host to advertise in `control.json` / `POST /tokens` events URLs: the bind
-    /// address itself, except unspecified (`0.0.0.0` / `::`) — which listens on loopback
-    /// too — where the legacy `127.0.0.1` stays correct for local readers.
+    /// Whether any remote endpoint is configured (bound or not).
+    pub fn has_remote_endpoints(&self) -> bool {
+        !self.listen.lock().unwrap().0.is_empty()
+    }
+
+    /// The current per-remote-endpoint bind status (empty when none is configured).
+    pub fn endpoint_status(&self) -> Vec<EndpointStatus> {
+        self.endpoint_status.lock().unwrap().clone()
+    }
+
+    /// The host to advertise in `control.json` / `POST /tokens` events URLs. Loopback is always
+    /// served, and both are LOCAL discovery surfaces, so this is always `127.0.0.1` (remote
+    /// clients build their URLs from the pairing info).
     pub fn advertised_host(&self) -> String {
-        let (addr, _) = self.bind_config();
-        match addr.parse::<std::net::IpAddr>() {
-            Ok(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
-            Ok(_) => addr,
-            Err(_) => "127.0.0.1".to_string(),
-        }
+        "127.0.0.1".to_string()
     }
 
     /// Flag that the project registry changed off-thread (a `/projects` write or a
@@ -707,8 +716,10 @@ pub fn notify_state(shared: &Arc<Shared>) {
 }
 
 /// The control.json discovery shape — field order + 2-space pretty JSON match TS `writeDiscovery`.
-/// `bindAddress` is additive (mobile-client remote access) and OMITTED for the default
-/// loopback bind, keeping the legacy shape byte-identical.
+/// `remoteEndpoints` is additive (#131: the per-endpoint bind status, never a token) and OMITTED
+/// when no remote endpoint is configured, keeping the legacy shape byte-identical. This server
+/// never writes the legacy `bindAddress` field: its presence marks an OLDER server that listens
+/// only there (local dialers then dial it instead of loopback).
 #[derive(Serialize)]
 struct Discovery<'a> {
     port: u16,
@@ -716,8 +727,8 @@ struct Discovery<'a> {
     pid: u32,
     version: &'a str,
     events: String,
-    #[serde(rename = "bindAddress", skip_serializing_if = "Option::is_none")]
-    bind_address: Option<&'a str>,
+    #[serde(rename = "remoteEndpoints", skip_serializing_if = "Vec::is_empty")]
+    remote_endpoints: Vec<EndpointStatus>,
 }
 
 /// Build the WS events URL for a host + port + token (also used by `POST /tokens`).
@@ -731,7 +742,6 @@ fn write_discovery(shared: &Arc<Shared>) -> io::Result<()> {
     let Some(token) = token else {
         return Ok(());
     };
-    let (bind_addr, _) = shared.bind_config();
     let host = shared.advertised_host();
     let discovery = Discovery {
         port,
@@ -739,7 +749,7 @@ fn write_discovery(shared: &Arc<Shared>) -> io::Result<()> {
         pid: shared.pid,
         version: &shared.version,
         events: events_url(&host, port, &token),
-        bind_address: (bind_addr != "127.0.0.1").then_some(bind_addr.as_str()),
+        remote_endpoints: shared.endpoint_status(),
     };
     let json = serde_json::to_string_pretty(&discovery)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -757,26 +767,19 @@ pub fn remove_discovery(shared: &Arc<Shared>) {
     }
 }
 
-/// Bind loopback on an ephemeral port, mint the master token, write `control.json`, and serve
-/// until the process exits. Never returns under normal operation. The activity ticker is a
-/// SEPARATE task ([`run_activity_ticker`]) the embedder spawns alongside this one, so its
-/// lifetime can be torn down independently (the GUI host aborts it on stop — see `control_host`).
+/// Bind loopback (always), mint the master token, bind the configured remote endpoints (#131),
+/// write `control.json`, and serve until the process exits. Never returns under normal
+/// operation. Remote sockets live in a [`JoinSet`](tokio::task::JoinSet) owned by this future,
+/// so aborting the server task (the GUI host does on stop) tears every listener down. The
+/// activity ticker is a SEPARATE task ([`run_activity_ticker`]) the embedder spawns alongside.
 pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
     // A control file owned by a live, different-pid instance is not ours to claim — fail
     // loudly before binding anything (see control::discovery_guard).
     crate::control::discovery_guard::ensure_claimable(&shared.control_file, shared.pid).await?;
-    let (addr, req_port) = shared.bind_config();
-    let listener = match tokio::net::TcpListener::bind((addr.as_str(), req_port)).await {
-        Ok(l) => l,
-        Err(e) if addr != "127.0.0.1" || req_port != 0 => {
-            // A configured remote bind that fails (port taken, iface gone) must not brick
-            // the LOCAL control API — fall back to the frozen loopback/ephemeral default.
-            eprintln!("[control] bind {addr}:{req_port} failed ({e}); falling back to 127.0.0.1:0");
-            shared.set_bind("127.0.0.1", 0);
-            tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?
-        }
-        Err(e) => return Err(e),
-    };
+    let (specs, req_port) = shared.listen_config();
+    // Loopback is ALWAYS served. A taken fixed port is an error for loopback too (no silent
+    // move to another port: local clients and the pairing URL would disagree).
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", req_port)).await?;
     let port = listener.local_addr()?.port();
     shared.port.store(port, Ordering::SeqCst);
 
@@ -786,7 +789,7 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
         .unwrap()
         .set_master(master_token(&shared));
     // Reload persisted device tokens (paired phones) so pairing survives a restart, just like the
-    // master token does for remote binds. Kept beside the active control.json (custom in tests).
+    // master token does when remote endpoints are configured. Kept beside the active control.json.
     {
         let path = shared.control_file.with_file_name("device-tokens.json");
         let mut tokens = shared.tokens.lock().unwrap();
@@ -794,10 +797,139 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
             tokens.add_device(rec.token, rec.label, rec.expires_at);
         }
     }
-    write_discovery(&shared)?;
 
     let app = routes::router(Arc::clone(&shared));
-    axum::serve(listener, app).await
+    let mut remotes = RemoteListeners::new(app.clone(), port);
+    if !specs.is_empty() {
+        let table = crate::control::endpoints::system_ifaces();
+        remotes.reconcile(&shared, plan(&specs, &table)).await;
+    }
+    write_discovery(&shared)?;
+
+    let watcher = async {
+        if specs.is_empty() {
+            // Nothing remote configured: no watcher at all.
+            std::future::pending::<()>().await;
+        }
+        let mut tick = tokio::time::interval(REBIND_EVERY);
+        tick.tick().await; // the first tick is immediate; the initial bind already ran
+        loop {
+            tick.tick().await;
+            let table = crate::control::endpoints::system_ifaces();
+            if remotes.reconcile(&shared, plan(&specs, &table)).await {
+                let _ = write_discovery(&shared);
+            }
+        }
+    };
+    tokio::select! {
+        r = axum::serve(listener, app) => r,
+        _ = watcher => Ok(()),
+    }
+}
+
+/// How often the rebind watcher re-resolves the configured remote endpoints.
+const REBIND_EVERY: Duration = Duration::from_secs(10);
+
+/// The bound remote sockets, keyed by address, each served by its own task in `tasks`.
+struct RemoteListeners {
+    app: axum::Router,
+    port: u16,
+    tasks: tokio::task::JoinSet<()>,
+    bound: HashMap<std::net::IpAddr, tokio::task::AbortHandle>,
+}
+
+impl RemoteListeners {
+    fn new(app: axum::Router, port: u16) -> Self {
+        Self {
+            app,
+            port,
+            tasks: tokio::task::JoinSet::new(),
+            bound: HashMap::new(),
+        }
+    }
+
+    /// Bring the bound set in line with `planned` (from [`plan`]): drop listeners whose address
+    /// is gone, bind newly-resolvable addresses, record a status per endpoint. Returns whether
+    /// the published status changed (and logs each change loudly — failures included, once per
+    /// change, never on every tick).
+    async fn reconcile(&mut self, shared: &Arc<Shared>, planned: Vec<Planned>) -> bool {
+        // Reap listener tasks that ended on their own (accept error); they rebind below.
+        while self.tasks.try_join_next().is_some() {}
+        self.bound.retain(|_, h| !h.is_finished());
+
+        let wanted: Vec<std::net::IpAddr> = planned
+            .iter()
+            .filter_map(|p| match p {
+                Planned::Addr { ip, .. } => Some(*ip),
+                Planned::Failed { .. } => None,
+            })
+            .collect();
+        let stale: Vec<std::net::IpAddr> = self
+            .bound
+            .keys()
+            .filter(|ip| !wanted.contains(ip))
+            .copied()
+            .collect();
+        for ip in stale {
+            if let Some(h) = self.bound.remove(&ip) {
+                h.abort();
+            }
+        }
+
+        let mut status = Vec::with_capacity(planned.len());
+        for p in planned {
+            match p {
+                Planned::Failed { spec, error } => status.push(EndpointStatus {
+                    spec,
+                    address: None,
+                    bound: false,
+                    error: Some(error),
+                }),
+                Planned::Addr { spec, ip } => {
+                    let mut error = None;
+                    if !self.bound.contains_key(&ip) {
+                        match tokio::net::TcpListener::bind((ip, self.port)).await {
+                            Ok(l) => {
+                                let app = self.app.clone();
+                                let h = self.tasks.spawn(async move {
+                                    if let Err(e) = axum::serve(l, app).await {
+                                        eprintln!("[control] remote listener {ip} ended: {e}");
+                                    }
+                                });
+                                self.bound.insert(ip, h);
+                            }
+                            Err(e) => error = Some(e.to_string()),
+                        }
+                    }
+                    status.push(EndpointStatus {
+                        spec,
+                        address: Some(ip.to_string()),
+                        bound: error.is_none(),
+                        error,
+                    });
+                }
+            }
+        }
+
+        let mut cur = shared.endpoint_status.lock().unwrap();
+        if *cur == status {
+            return false;
+        }
+        for st in &status {
+            if !cur.contains(st) {
+                if st.bound {
+                    eprintln!("[control] remote endpoint up: {}", st.summary(self.port));
+                } else {
+                    eprintln!(
+                        "[control] WARNING remote endpoint NOT served (loopback only): {}",
+                        st.summary(self.port)
+                    );
+                }
+            }
+        }
+        *cur = status;
+        true
+    }
 }
 
 /// The master token for this server run. Loopback (the frozen default) mints a fresh
@@ -806,8 +938,7 @@ pub async fn run_server(shared: Arc<Shared>) -> io::Result<()> {
 /// host restarts, or every reboot strands it until the user is back at the desk to
 /// re-scan a QR.
 fn master_token(shared: &Arc<Shared>) -> String {
-    let (addr, _) = shared.bind_config();
-    if addr == "127.0.0.1" {
+    if !shared.has_remote_endpoints() {
         return random_token();
     }
     let path = shared.control_file.with_file_name("control-token");
@@ -1361,8 +1492,8 @@ mod tests {
         assert_ne!(a, b);
         assert!(!dir.join("control-token").exists());
 
-        // Remote bind: minted once, then stable across restarts.
-        shared.set_bind("100.64.0.1", 51888);
+        // A configured remote endpoint: minted once, then stable across restarts.
+        shared.set_listen(vec!["wg0".into()], 51888);
         let c = master_token(&shared);
         let d = master_token(&shared);
         assert_eq!(c, d);
@@ -1382,18 +1513,11 @@ mod tests {
     }
 
     #[test]
-    fn advertised_host_rules() {
+    fn advertised_host_is_always_loopback() {
         let (shared, _uid) = shared_with_pane();
-        // Default loopback bind advertises loopback.
         assert_eq!(shared.advertised_host(), "127.0.0.1");
-        // A specific address advertises itself (local readers can reach the machine's
-        // own LAN/Tailscale IP).
-        shared.set_bind("100.64.0.1", 51888);
-        assert_eq!(shared.advertised_host(), "100.64.0.1");
-        // Unspecified listens on loopback too — keep the legacy local URL.
-        shared.set_bind("0.0.0.0", 51888);
-        assert_eq!(shared.advertised_host(), "127.0.0.1");
-        shared.set_bind("::", 51888);
+        // Loopback is always served, so local discovery never advertises a remote address.
+        shared.set_listen(vec!["100.64.0.1".into(), "0.0.0.0".into()], 51888);
         assert_eq!(shared.advertised_host(), "127.0.0.1");
     }
 
@@ -1633,5 +1757,122 @@ mod tests {
         );
         assert!(drain(&mut only_c).is_empty());
         assert!(drain(&mut pane_only).is_empty());
+    }
+
+    // ---- #131: loopback always + remote endpoints -------------------------------------------
+
+    /// Boot `run_server` on a fresh temp control file with the given remote specs; returns the
+    /// shared state, the loopback port and the temp dir (caller removes it).
+    async fn boot_listen(tag: &str, specs: Vec<String>) -> (Arc<Shared>, u16, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hp-listen-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = unbounded_channel();
+        let sm = Arc::new(SessionManager::new(tx));
+        let shared = Shared::new(
+            sm,
+            false,
+            "0.0.0-test",
+            dir.join("control.json"),
+            dir.join("speech.json"),
+        );
+        shared.set_listen(specs, 0);
+        tokio::spawn(run_server(Arc::clone(&shared)));
+        let mut port = 0;
+        for _ in 0..200 {
+            port = shared.port();
+            if port != 0 && dir.join("control.json").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_ne!(port, 0, "server never bound");
+        (shared, port, dir)
+    }
+
+    async fn health_on(host: &str, port: u16) -> Option<String> {
+        let r = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap()
+            .get(format!("http://{host}:{port}/health"))
+            .send()
+            .await
+            .ok()?;
+        r.text().await.ok()
+    }
+
+    #[tokio::test]
+    async fn loopback_only_by_default_with_legacy_discovery_shape() {
+        let (shared, port, dir) = boot_listen("default", Vec::new()).await;
+        assert!(health_on("127.0.0.1", port).await.is_some());
+        assert!(shared.endpoint_status().is_empty());
+        let disco = std::fs::read_to_string(dir.join("control.json")).unwrap();
+        assert!(!disco.contains("remoteEndpoints"), "{disco}");
+        assert!(!disco.contains("bindAddress"), "{disco}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unbindable_and_wildcard_endpoints_fail_loudly_loopback_stays_up() {
+        // 203.0.113.7 is TEST-NET-3: never a local address. No silent fallback: the endpoint
+        // is reported failed and loopback still serves.
+        let (shared, port, dir) = boot_listen(
+            "unbindable",
+            vec!["203.0.113.7".into(), "0.0.0.0".into(), "hp-no-such-if0".into()],
+        )
+        .await;
+        assert!(health_on("127.0.0.1", port).await.is_some());
+        let st = shared.endpoint_status();
+        assert_eq!(st.len(), 3, "{st:?}");
+        assert!(st.iter().all(|e| !e.bound && e.error.is_some()), "{st:?}");
+        assert_eq!(st[0].address.as_deref(), Some("203.0.113.7"));
+        assert!(st[1].error.as_deref().unwrap().starts_with("wildcard bind refused"));
+        assert_eq!(st[2].error.as_deref(), Some("interface not found"));
+        // Status reaches control.json, never carrying the token.
+        let disco: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("control.json")).unwrap())
+                .unwrap();
+        let token = disco["token"].as_str().unwrap().to_string();
+        let eps = disco["remoteEndpoints"].as_array().unwrap();
+        assert_eq!(eps.len(), 3);
+        assert!(!disco["remoteEndpoints"].to_string().contains(&token));
+        assert!(disco.get("bindAddress").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 127.0.0.2 is a loopback ALIAS on Linux (any 127/8 address is local there), so it stands
+    /// in for a VPN interface address: the planner would never pick a 127/8 address, so the
+    /// plan is injected directly. Proves a second socket serves the same router, and that an
+    /// address change rebinds (stale listener dropped, new one up).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn remote_socket_serves_beside_loopback_and_rebinds_on_change() {
+        let (shared, port, dir) = boot_listen("both", Vec::new()).await;
+        let app = routes::router(Arc::clone(&shared));
+        let mut remotes = RemoteListeners::new(app, port);
+        let at = |ip: &str| Planned::Addr {
+            spec: "testif0".into(),
+            ip: ip.parse().unwrap(),
+        };
+        assert!(remotes.reconcile(&shared, vec![at("127.0.0.2")]).await);
+        assert!(health_on("127.0.0.1", port).await.is_some(), "loopback down");
+        let body = health_on("127.0.0.2", port).await.expect("remote socket not serving");
+        assert!(body.contains(r#""app":"hyperpanes""#));
+        // Unauthenticated over the remote socket: no pid (#131).
+        assert!(!body.contains("\"pid\""), "{body}");
+        let st = shared.endpoint_status();
+        assert!(st[0].bound && st[0].address.as_deref() == Some("127.0.0.2"));
+        // Same plan again: no status change.
+        assert!(!remotes.reconcile(&shared, vec![at("127.0.0.2")]).await);
+        // The interface's address moves: new socket up, stale one dropped.
+        assert!(remotes.reconcile(&shared, vec![at("127.0.0.3")]).await);
+        assert!(health_on("127.0.0.3", port).await.is_some());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(health_on("127.0.0.2", port).await.is_none(), "stale listener kept");
+        assert!(health_on("127.0.0.1", port).await.is_some());
+        drop(remotes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
