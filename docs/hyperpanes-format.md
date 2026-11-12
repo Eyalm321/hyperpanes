@@ -311,6 +311,7 @@ pane (or the tab) in scope, like `recolorPane`.
 - `newPane` accepts `"pane":{"project":"…","projectTab":true,…}`: the new pane opens straight in
   that project's tab (reused or created, as above) instead of the caller's tab. It is opt-in.
   Without `projectTab`, `project` still only defaults the cwd and colour.
+- `newPane` keeps `pane.subtitle` (the header's second line). It used to be dropped.
 
 Like `groupPanes`, `movePane` is validated against the read model and then queued for the GUI
 app, which applies it on its next tick. A headless server accepts and queues the request but
