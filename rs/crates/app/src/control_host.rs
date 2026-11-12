@@ -1165,6 +1165,15 @@ impl ControlHost {
                 }
                 p.started = true;
                 p.cwd = c.cwd.clone();
+                // The respawned pty starts at the backend's default size (the control path
+                // knows no geometry), while this pane's grid keeps the size it was laid out
+                // at. `place()` only resizes the pty when the grid size changes, which it
+                // doesn't here, so push the pane's current size to the new session now —
+                // else the program inside renders at 80x24 in a full-size pane.
+                if p.remote.is_none() {
+                    let (cols, rows) = respawn_pty_size(p.applied, p.pane.grid_size());
+                    mgr.resize(new_uid, cols, rows);
+                }
                 st.dirty = true;
                 drop(st);
                 let mut ids = self.pane_ids.borrow_mut();
@@ -1807,8 +1816,31 @@ pub(crate) fn alias_meta_patch(
     (!patch.is_empty()).then_some(patch)
 }
 
+/// The cols/rows a control-respawned pane's new pty gets: the size the pane was last laid out
+/// at, else its grid's size (a pane respawned before its first layout), clamped to a usable
+/// minimum. The respawn path spawns the pty at the backend default, so this is what makes the
+/// new program see the pane's real width.
+fn respawn_pty_size(applied: (usize, usize), grid: (usize, usize)) -> (u16, u16) {
+    let (cols, rows) = if applied.0 > 0 && applied.1 > 0 {
+        applied
+    } else {
+        grid
+    };
+    let clamp = |v: usize, min: u16| u16::try_from(v).unwrap_or(u16::MAX).max(min);
+    (clamp(cols, 2), clamp(rows, 1))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_respawned_pty_takes_the_panes_laid_out_size_not_the_default() {
+        assert_eq!(respawn_pty_size((291, 81), (291, 81)), (291, 81));
+        // Never laid out yet: fall back to the grid's size.
+        assert_eq!(respawn_pty_size((0, 0), (120, 40)), (120, 40));
+        // Degenerate sizes clamp to a usable minimum; huge ones saturate.
+        assert_eq!(respawn_pty_size((0, 0), (0, 0)), (2, 1));
+        assert_eq!(respawn_pty_size((100_000, 3), (1, 1)), (u16::MAX, 3));
+    }
     /// A control-spawned session the GUI never showed has UNANSWERED terminal queries in its
     /// replay (a just-started program may be waiting on them): its adoption must answer them,
     /// unlike a re-attach or a move, whose replay a previous grid already answered.
