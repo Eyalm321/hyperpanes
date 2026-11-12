@@ -1629,29 +1629,36 @@ async fn command(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
         return move_pane_command(&shared, &info, &cmd);
     }
     // `newPane` with `pane.projectTab: true` lands in its project's tab (reused or created)
-    // instead of the caller's: validate up front, then queue a move once the pane exists.
+    // instead of the caller's. Validate up front; see `place_project_tab` for how it lands.
     let project_tab = match new_pane_project_tab(&cmd) {
         Ok(v) => v,
         Err(msg) => return jstatus(400, json!({ "error": msg })),
     };
+    let mut cmd = cmd;
     let control_file = shared.control_file.to_str().map(str::to_string);
     let result = {
+        // ONE model lock across placement → dispatch → queued move, so the GUI sync tick never
+        // sees the new pane without its move (it would host it for a frame in the active tab).
         let mut m = shared.model.lock().unwrap();
-        dispatch::handle_command(
+        let deferred = project_tab
+            .as_deref()
+            .and_then(|h| place_project_tab(&m, info.scope.as_ref(), &mut cmd, h));
+        let result = dispatch::handle_command(
             &mut m,
             &shared.sessions,
             control_file.as_deref(),
             info.scope.as_ref(),
             &cmd,
             &shared.speech,
-        )
+        );
+        if let (Some(handle), 200) = (deferred, result.status) {
+            queue_project_tab_move(&shared, &m, &handle, &result.body);
+        }
+        result
     };
     // Phase-5: keep supervisor policies in lockstep with pane meta (setMeta flips
     // hp.supervise; newPane carries meta; closePane removes a pane). Cheap + idempotent.
     shared.reconcile_policies();
-    if let (Some(handle), 200) = (project_tab, result.status) {
-        queue_project_tab_move(&shared, &handle, &result.body);
-    }
     if result.notify_state {
         notify_state(&shared);
     }
@@ -1836,22 +1843,11 @@ fn resolve_move_target(
         return bad(format!("unknown project: {handle}"));
     };
     // Reuse the window's existing tab for the project when the model already shows one.
-    let existing = m.tabs().find(|(w, t)| {
-        *w == win
-            && t.pane_group
-                .as_ref()
-                .is_some_and(|g| g.project.as_deref() == Some(p.id.as_str()))
-    });
-    if let Some((_, t)) = existing {
-        if !tab_in_scope(scope, &t.id, win) {
-            return Err((403, format!("tabId {} is out of scope", t.id)));
+    if let Some(tab_id) = existing_project_tab(m, win, &p.id) {
+        if !tab_in_scope(scope, &tab_id, win) {
+            return Err((403, format!("tabId {tab_id} is out of scope")));
         }
-        return Ok((
-            win,
-            MoveTarget::Tab {
-                tab_id: t.id.clone(),
-            },
-        ));
+        return Ok((win, MoveTarget::Tab { tab_id }));
     }
     Ok((
         win,
@@ -1941,6 +1937,9 @@ fn new_pane_project_tab(cmd: &Value) -> Result<Option<String>, String> {
     }
     match cmd.pointer("/pane/projectTab") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
+        Some(Value::Bool(true)) if cmd.get("tabId").is_some_and(|v| !v.is_null()) => {
+            Err("newPane takes tabId or pane.projectTab, not both".into())
+        }
         Some(Value::Bool(true)) => match cmd.pointer("/pane/project").and_then(Value::as_str) {
             Some(h) => Ok(Some(h.to_string())),
             None => Err("pane.projectTab needs pane.project".into()),
@@ -1949,24 +1948,87 @@ fn new_pane_project_tab(cmd: &Value) -> Result<Option<String>, String> {
     }
 }
 
-/// After a successful `projectTab` `newPane`, queue the move of the new pane into its
-/// project's tab. Best effort: on any miss the pane simply stays where `newPane` put it.
-fn queue_project_tab_move(shared: &Arc<Shared>, handle: &str, body: &Value) {
+/// Where a `projectTab` `newPane` goes. When the window already has the project's tab (and the
+/// caller may act on it), the pane is spawned straight into it: `tabId` is set on `cmd` and
+/// `None` is returned, so nothing moves. Otherwise the project tab must be created by the GUI,
+/// so the handle comes back for [`queue_project_tab_move`] to run once the pane exists.
+fn place_project_tab(
+    m: &crate::control::readmodel::ReadModel,
+    scope: Option<&Scope>,
+    cmd: &mut Value,
+    handle: &str,
+) -> Option<String> {
+    let deferred = Some(handle.to_string());
+    let win = match cmd.get("windowId") {
+        None | Some(Value::Null) => m.first_window_id(),
+        Some(v) => v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok())),
+    };
+    let Some(win) = win else { return deferred };
+    let Some(p) = projects::resolve(handle) else {
+        return deferred;
+    };
+    match project_tab_target(m, scope, win, &p.id) {
+        Some(tab_id) => {
+            let obj = cmd.as_object_mut()?;
+            obj.insert("tabId".into(), Value::String(tab_id));
+            None
+        }
+        None => deferred,
+    }
+}
+
+/// The window's existing tab for project `project_id`, if the caller may spawn into it.
+fn project_tab_target(
+    m: &crate::control::readmodel::ReadModel,
+    scope: Option<&Scope>,
+    win: i64,
+    project_id: &str,
+) -> Option<String> {
+    existing_project_tab(m, win, project_id)
+        .filter(|t| crate::control::scope::tab_in_scope(scope, t, win))
+}
+
+/// The id of window `win`'s tab grouped under project `project_id`, as the read model shows it.
+fn existing_project_tab(
+    m: &crate::control::readmodel::ReadModel,
+    win: i64,
+    project_id: &str,
+) -> Option<String> {
+    m.tabs()
+        .find(|(w, t)| {
+            *w == win
+                && t.pane_group
+                    .as_ref()
+                    .is_some_and(|g| g.project.as_deref() == Some(project_id))
+        })
+        .map(|(_, t)| t.id.clone())
+}
+
+/// After a successful `projectTab` `newPane` whose project tab does not exist yet, queue the
+/// move of the new pane into it. The caller still holds the model lock from dispatch, so the
+/// GUI adopts and moves the pane in the same tick. Best effort: on any miss the pane simply
+/// stays where `newPane` put it.
+fn queue_project_tab_move(
+    shared: &Arc<Shared>,
+    m: &crate::control::readmodel::ReadModel,
+    handle: &str,
+    body: &Value,
+) {
     let Some(pane_id) = body.get("result").and_then(Value::as_str) else {
         return;
     };
-    let m = shared.model.lock().unwrap();
     let Some(c) = m.coords_of(pane_id) else {
         return;
     };
     let cmd = json!({ "project": handle });
-    let Ok((window_id, to)) = resolve_move_target(&m, None, &cmd, c.window_id) else {
+    let Ok((window_id, to)) = resolve_move_target(m, None, &cmd, c.window_id) else {
         return;
     };
     if move_target_tab_id(&to) == c.tab_id {
         return;
     }
-    drop(m);
     shared.queue_pane_group_request(PaneGroupRequest::Move {
         pane_id: pane_id.to_string(),
         window_id,
@@ -2217,7 +2279,7 @@ mod tests {
 /// Runs the full socket round-trip with `reqwest` (a lib dependency, available to unit tests).
 #[cfg(test)]
 mod golden {
-    use super::router;
+    use super::{project_tab_target, router, Scope};
     use crate::control::readmodel::{PaneInfo, PaneStatus, TabInfo, WindowInfo};
     use crate::control::server::Shared;
     use crate::session_manager::SessionManager;
@@ -2489,6 +2551,113 @@ mod golden {
             assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
         }
         assert!(s.shared.take_pane_group_requests().is_empty());
+    }
+
+    fn bare_tab(id: &str, pane_group: Option<crate::control::readmodel::PaneGroupInfo>) -> TabInfo {
+        TabInfo {
+            id: id.into(),
+            title: id.into(),
+            color: None,
+            layout: "auto".into(),
+            panes: vec![],
+            pane_group,
+        }
+    }
+
+    #[tokio::test]
+    async fn new_pane_with_tab_id_spawns_straight_into_that_tab() {
+        let s = boot(true).await;
+        // t1 stays the ACTIVE tab; t2 is a background tab.
+        s.shared
+            .model
+            .lock()
+            .unwrap()
+            .insert_tab(1, bare_tab("t2", None));
+        for body in [
+            json!({"type":"newPane","windowId":1,"tabId":"t2","pane":{"command":"true"}}),
+            // windowId is optional: the tab names its window.
+            json!({"type":"newPane","tabId":"t2","pane":{"command":"true"}}),
+        ] {
+            let (st, v) = post_cmd(&s, body.clone()).await;
+            assert_eq!(st, 200, "{body}: {v}");
+            let id = v["result"].as_str().unwrap();
+            let c = s.shared.model.lock().unwrap().coords_of(id).unwrap();
+            assert_eq!((c.window_id, c.tab_id.as_str()), (1, "t2"), "{body}");
+        }
+        // Placed by the model, not moved by the GUI: nothing queued.
+        assert!(s.shared.take_pane_group_requests().is_empty());
+        // Each 400 case spawns nothing.
+        let before = s
+            .shared
+            .model
+            .lock()
+            .unwrap()
+            .tabs()
+            .map(|(_, t)| t.panes.len())
+            .sum::<usize>();
+        for body in [
+            json!({"type":"newPane","windowId":1,"tabId":"nope","pane":{"command":"true"}}),
+            json!({"type":"newPane","windowId":1,"tabId":7,"pane":{"command":"true"}}),
+            json!({"type":"newPane","windowId":2,"tabId":"t2","pane":{"command":"true"}}),
+            json!({"type":"newPane","windowId":1,"tabId":"t2","pane":{"project":"x","projectTab":true}}),
+        ] {
+            let (st, v) = post_cmd(&s, body.clone()).await;
+            assert_eq!(st, 400, "{body}: {v}");
+            assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
+        }
+        let after = s
+            .shared
+            .model
+            .lock()
+            .unwrap()
+            .tabs()
+            .map(|(_, t)| t.panes.len())
+            .sum::<usize>();
+        assert_eq!(before, after);
+        assert!(s.shared.take_pane_group_requests().is_empty());
+    }
+
+    #[test]
+    fn project_tab_target_finds_the_windows_project_tab_in_scope() {
+        use crate::control::readmodel::{PaneGroupInfo, ReadModel, WindowInfo};
+        let group = |p: &str| {
+            Some(PaneGroupInfo {
+                project: Some(p.into()),
+                ..Default::default()
+            })
+        };
+        let mut m = ReadModel::new();
+        m.add_window(WindowInfo {
+            window_id: 1,
+            active_tab_id: Some("lead".into()),
+            tabs: vec![bare_tab("lead", None), bare_tab("pa", group("proj-a"))],
+        });
+        m.add_window(WindowInfo {
+            window_id: 2,
+            active_tab_id: Some("pb".into()),
+            tabs: vec![bare_tab("pb", group("proj-b"))],
+        });
+        assert_eq!(
+            project_tab_target(&m, None, 1, "proj-a").as_deref(),
+            Some("pa")
+        );
+        // Another window's project tab is not reused; a missing one is created by the GUI.
+        assert_eq!(project_tab_target(&m, None, 1, "proj-b"), None);
+        assert_eq!(project_tab_target(&m, None, 1, "proj-c"), None);
+        // A scoped caller only lands directly in a tab it may act on.
+        let own = Scope {
+            tab_ids: Some(vec!["pa".into()]),
+            ..Default::default()
+        };
+        let other = Scope {
+            tab_ids: Some(vec!["lead".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            project_tab_target(&m, Some(&own), 1, "proj-a").as_deref(),
+            Some("pa")
+        );
+        assert_eq!(project_tab_target(&m, Some(&other), 1, "proj-a"), None);
     }
 
     #[tokio::test]

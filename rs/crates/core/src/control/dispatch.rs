@@ -183,12 +183,23 @@ pub fn handle_command(
         };
     }
 
-    // Resolve a target window: explicit windowId (number or numeric string), else the pane's window.
-    let window_id = window_id_field(cmd).or_else(|| {
-        cmd.get("paneId")
-            .and_then(Value::as_str)
-            .and_then(|p| model.coords_of(p).map(|c| c.window_id))
-    });
+    // `newPane {tabId}` spawns straight into that tab (no open-then-move flash): the tab must
+    // exist, and an explicit windowId must be the tab's own window.
+    if ty == "newPane" {
+        if let Err(msg) = validate_new_pane_tab(cmd, model) {
+            return DispatchResult::err(400, &msg);
+        }
+    }
+
+    // Resolve a target window: explicit windowId (number or numeric string), else the pane's
+    // window, else (newPane) the target tab's window.
+    let window_id = window_id_field(cmd)
+        .or_else(|| {
+            cmd.get("paneId")
+                .and_then(Value::as_str)
+                .and_then(|p| model.coords_of(p).map(|c| c.window_id))
+        })
+        .or_else(|| new_pane_tab_id(cmd).and_then(|t| model.tab_window(t)));
     if window_id.is_none() {
         return DispatchResult::err(400, "command needs a paneId or windowId");
     }
@@ -260,7 +271,12 @@ fn exec(
             resolve_project_into_spec(&mut spec)?;
             let pane = spawn_pane(sessions, control_file, &spec)?;
             let pane_id = pane.id.clone();
-            if !model.insert_pane(window_id, pane) {
+            // `tabId` (validated in `handle_command`) places it in that tab; else the active one.
+            let placed = match new_pane_tab_id(cmd) {
+                Some(tab_id) => model.insert_pane_in_tab(tab_id, pane),
+                None => model.insert_pane(window_id, pane),
+            };
+            if !placed {
                 return Err(format!("window not found: {window_id}"));
             }
             Ok((Some(Value::String(pane_id)), true))
@@ -1301,6 +1317,28 @@ fn str_field(cmd: &Value, key: &str) -> Result<String, String> {
 /// Read `windowId` from a command, accepting either a JSON number OR a numeric string. Clients
 /// that build the request by hand (e.g. `jq -r '.windows[0].windowId'` → the string `"0"`) would
 /// otherwise fail the strict `as_i64` and hit the misleading "needs a paneId or windowId".
+/// `newPane`'s optional top-level `tabId`: the tab to spawn into instead of the active one.
+fn new_pane_tab_id(cmd: &Value) -> Option<&str> {
+    cmd.get("tabId").and_then(Value::as_str)
+}
+
+/// Reject a malformed or unknown `newPane` `tabId`, or one outside an explicit `windowId`.
+fn validate_new_pane_tab(cmd: &Value, model: &ReadModel) -> Result<(), String> {
+    let Some(v) = cmd.get("tabId").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let Some(tab_id) = v.as_str() else {
+        return Err("tabId must be a string".into());
+    };
+    let Some(win) = model.tab_window(tab_id) else {
+        return Err(format!("no such tab: {tab_id}"));
+    };
+    match window_id_field(cmd) {
+        Some(w) if w != win => Err(format!("tabId {tab_id} is not in window {w}")),
+        _ => Ok(()),
+    }
+}
+
 fn window_id_field(cmd: &Value) -> Option<i64> {
     cmd.get("windowId").and_then(|v| {
         v.as_i64()
@@ -1664,6 +1702,42 @@ mod tests {
         assert!(m.pane(&id).is_some());
         assert_eq!(m.pane(&id).unwrap().label, "w");
         assert_eq!(m.pane(&id).unwrap().subtitle, None);
+    }
+
+    #[tokio::test]
+    async fn new_pane_tab_id_lets_a_tab_scoped_token_spawn_into_its_background_tab() {
+        let mut m = model_one_window();
+        assert!(m.insert_tab(
+            1,
+            TabInfo {
+                id: "t2".into(),
+                title: "Mine".into(),
+                color: None,
+                layout: "auto".into(),
+                panes: vec![],
+                pane_group: None,
+            }
+        ));
+        let s = sessions();
+        let mine = Scope {
+            tab_ids: Some(vec!["t2".into()]),
+            ..Default::default()
+        };
+        // t1 is active, so without tabId a t2-scoped token cannot spawn at all.
+        let cmd = json!({ "type": "newPane", "windowId": 1, "pane": { "command": "echo hi" } });
+        let r = handle_command(&mut m, &s, None, Some(&mine), &cmd, &speech());
+        assert_eq!(r.status, 403, "{}", r.body);
+        // With tabId it lands in t2 and the active tab is untouched.
+        let cmd = json!({ "type": "newPane", "tabId": "t2", "pane": { "command": "echo hi" } });
+        let r = handle_command(&mut m, &s, None, Some(&mine), &cmd, &speech());
+        assert_eq!(r.status, 200, "{}", r.body);
+        let id = r.body["result"].as_str().unwrap();
+        assert_eq!(m.coords_of(id).unwrap().tab_id, "t2");
+        assert_eq!(m.active_tab_id(1).as_deref(), Some("t1"));
+        // Another tab stays out of scope.
+        let cmd = json!({ "type": "newPane", "tabId": "t1", "pane": { "command": "echo hi" } });
+        let r = handle_command(&mut m, &s, None, Some(&mine), &cmd, &speech());
+        assert_eq!(r.status, 403, "{}", r.body);
     }
 
     #[tokio::test]
