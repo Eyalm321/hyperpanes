@@ -413,6 +413,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Past the daemon / kill-daemon branches this process is the GUI: from here on, every
+    // pane kill it requests (and, on the in-process backend, every kill/exit its registry
+    // carries out) is recorded with its reason in session-events.log.
+    if !worker::wants_worker(&argv0) {
+        hyperpanes_core::persistence::session_log::set_role("gui");
+    }
+
     // Headless worker mode (`worker --queue <q> -- <cmd>`): drain a work queue by running a
     // child command per claimed task, acking/nacking on its exit, until the queue empties —
     // then return without launching a GUI. Worker runner MVP (#10); the loop lives in `worker`.

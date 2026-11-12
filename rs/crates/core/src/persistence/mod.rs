@@ -7,3 +7,4 @@ pub mod device_tokens;
 pub mod isolation;
 pub mod paths;
 pub mod projects;
+pub mod session_log;

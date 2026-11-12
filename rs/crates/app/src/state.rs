@@ -68,6 +68,12 @@ pub enum Overlay {
 #[derive(Debug, Clone)]
 pub struct DetachedPane {
     pub uid: String,
+    /// Whether a GUI grid already answered the terminal queries in this session's replay
+    /// buffer: true for a pane detached from a live grid (move, tear-off, closed-tab stack),
+    /// false for a control-spawned session the GUI has never shown. Re-hosting drops the
+    /// emulator's replies to an answered replay (see `TerminalPane::feed_replay`) and answers
+    /// an unanswered one, since a just-started program may still be waiting on it.
+    pub replay_answered: bool,
     pub title: SharedString,
     pub subtitle: Option<SharedString>,
     pub pinned_accent: Option<Color>,
@@ -86,6 +92,18 @@ pub struct DetachedPane {
     /// The explicit spawn env, carried across a re-host so the relaunch snapshot can still
     /// persist it (see `hyperpanes_core::workspace::env_persist`).
     pub spawn_env: Option<hyperpanes_core::session::spawn::EnvMap>,
+}
+
+/// Prime a fresh grid from a session's replay buffer. `answered`: a previous GUI grid already
+/// answered the terminal queries in it (a GUI-restart re-attach, a moved pane), so the
+/// emulator's replies are dropped instead of being typed into the live program; otherwise
+/// (a session no grid has shown yet) they are kept and flushed at its next output.
+pub(crate) fn prime_from_replay(pane: &mut TerminalPane, replay: &str, answered: bool) {
+    if answered {
+        pane.feed_replay(replay);
+    } else {
+        pane.feed(replay);
+    }
 }
 
 /// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
@@ -1127,6 +1145,7 @@ impl PaneState {
     /// Strip this pane down to its re-hostable essentials (session stays alive).
     fn into_detached(self) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: self.uid,
             title: self.title,
             subtitle: self.subtitle,
@@ -1982,7 +2001,7 @@ impl State {
 
     /// Close pane `idx` in the active tab (see [`Self::close_pane_in`]).
     pub fn close_pane(&mut self, idx: usize, mgr: &SessionManager) -> bool {
-        self.close_pane_in(self.active, idx, mgr)
+        self.close_pane_in(self.active, idx, mgr, "user-close-pane")
     }
 
     /// Remove pane `idx` of tab `ti` **without** killing its session, returning the
@@ -2047,10 +2066,16 @@ impl State {
     /// Close pane `idx` of tab `ti`, killing its session. An emptied tab is
     /// dropped; closing the last pane of the last tab returns `false` (caller
     /// quits). Works for background tabs too (used by self-exiting shells).
-    pub fn close_pane_in(&mut self, ti: usize, idx: usize, mgr: &SessionManager) -> bool {
+    pub fn close_pane_in(
+        &mut self,
+        ti: usize,
+        idx: usize,
+        mgr: &SessionManager,
+        why: &str,
+    ) -> bool {
         match self.take_pane_in(ti, idx) {
             Some((ps, alive)) => {
-                crate::remote::kill(mgr, &ps.uid);
+                crate::remote::kill(mgr, &ps.uid, why);
                 alive
             }
             None => true,
@@ -2075,6 +2100,7 @@ impl State {
         let (ps, alive) = self.take_pane_in(ti, idx)?;
         Some((
             DetachedPane {
+                replay_answered: true,
                 uid: ps.uid,
                 title: ps.title,
                 subtitle: ps.subtitle,
@@ -2112,7 +2138,7 @@ impl State {
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         // Replay the rolling buffer so the re-hosted pane shows recent output instantly.
         if let Some(replay) = mgr.replay(&det.uid) {
-            pane.feed(&replay);
+            prime_from_replay(&mut pane, &replay, det.replay_answered);
         }
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let font = theme::load_font_at(&self.settings.font_path(), det.font_px, self.last_scale);
@@ -2211,6 +2237,7 @@ impl State {
         let (ps, alive) = self.take_pane_in(ti, idx)?;
         Some((
             DetachedPane {
+                replay_answered: true,
                 uid: ps.uid,
                 title: ps.title,
                 subtitle: ps.subtitle,
@@ -2354,7 +2381,7 @@ impl State {
     /// `false` if that emptied the whole workspace (caller quits).
     pub fn pane_exited(&mut self, uid: &str, mgr: &SessionManager) -> bool {
         match self.find_pane(uid) {
-            Some((ti, pi)) => self.close_pane_in(ti, pi, mgr),
+            Some((ti, pi)) => self.close_pane_in(ti, pi, mgr, "pane-exited"),
             None => {
                 // A PARKED (reminder) pane's shell exited on its own — its session is gone,
                 // so drop the reminder rather than leave a dead row in the bell list.
@@ -2543,13 +2570,13 @@ impl State {
         if self.tabs.len() <= 1 {
             // Last tab: kill its sessions and signal quit.
             for p in &self.tabs[idx].panes {
-                crate::remote::kill(mgr, &p.uid);
+                crate::remote::kill(mgr, &p.uid, "user-close-last-tab");
             }
             return false;
         }
         let tab = self.tabs.remove(idx);
         for p in &tab.panes {
-            crate::remote::kill(mgr, &p.uid);
+            crate::remote::kill(mgr, &p.uid, "user-close-tab");
         }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
@@ -4995,7 +5022,7 @@ impl State {
         newgrid.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         if let Some(p) = self.active_tab_mut().panes.get_mut(idx) {
             let old = std::mem::replace(&mut p.uid, uid);
-            crate::remote::kill(mgr, &old);
+            crate::remote::kill(mgr, &old, "user-restart-pane");
             p.pane = newgrid;
             p.applied = (cols as usize, rows as usize);
             p.started = false;
@@ -5032,6 +5059,7 @@ impl State {
         }
         let (ps, _alive) = self.take_pane_in(self.active, idx)?;
         Some(DetachedPane {
+            replay_answered: true,
             uid: ps.uid,
             title: ps.title,
             subtitle: ps.subtitle,
@@ -5062,7 +5090,7 @@ impl State {
         );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         if let Some(replay) = mgr.replay(&det.uid) {
-            pane.feed(&replay);
+            prime_from_replay(&mut pane, &replay, det.replay_answered);
         }
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let at = self.tabs[ti].panes.len();
@@ -5632,7 +5660,7 @@ impl State {
         while self.closed_tabs.len() > CLOSED_STACK_CAP {
             let evicted = self.closed_tabs.remove(0);
             for p in &evicted.panes {
-                crate::remote::kill(mgr, &p.uid);
+                crate::remote::kill(mgr, &p.uid, "closed-tab-evicted-from-reopen-stack");
             }
         }
     }
@@ -5661,6 +5689,7 @@ impl State {
             .panes
             .into_iter()
             .map(|p| DetachedPane {
+                replay_answered: true,
                 uid: p.uid,
                 title: p.title,
                 subtitle: p.subtitle,
@@ -6382,7 +6411,7 @@ impl State {
             // same replay-into-a-fresh-grid path `adopt_into_tab` uses for a moved pane). No
             // pty spawn — the live process is already running in the daemon.
             if let Some(replay) = mgr.replay(&uid) {
-                pane.feed(&replay);
+                pane.feed_replay(&replay);
             }
         } else {
             Self::spawn_session_async(
@@ -6576,6 +6605,61 @@ pub(crate) fn local_secs_since_midnight() -> u64 {
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn secs_from_hms(h: u64, m: u64, s: u64) -> u64 {
     h * 3600 + m * 60 + s
+}
+
+#[cfg(test)]
+mod replay_priming_tests {
+    use super::*;
+
+    fn grid() -> TerminalPane {
+        TerminalPane::new(20, 4, Box::new(SoftwareRenderer::new()))
+    }
+
+    /// A GUI-only restart re-attached live agents and replayed their history into fresh
+    /// grids; the emulator's answers to the old DA query were typed into every live program.
+    /// An answered replay (re-attach, move) must produce no replies; an unanswered one (a
+    /// control-spawned pane the GUI never showed) still gets its answer.
+    #[test]
+    fn only_an_unanswered_replay_is_answered() {
+        let history = "\x1b[c$ ";
+        let mut answered = grid();
+        prime_from_replay(&mut answered, history, true);
+        assert!(answered.take_replies().is_empty());
+        let mut fresh = grid();
+        prime_from_replay(&mut fresh, history, false);
+        assert!(!fresh.take_replies().is_empty());
+    }
+
+    /// Once a grid has shown a session it has answered its queries: re-detaching it (a move, a
+    /// tear-off, the closed-tab stack) carries an answered replay, even when it was first
+    /// adopted unanswered (a control-spawned pane).
+    #[test]
+    fn a_pane_detached_from_a_live_grid_has_an_answered_replay() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        let mut st = State::new(theme::load_font(1.0));
+        for uid in ["a", "b"] {
+            st.adopt_pane(
+                &m,
+                DetachedPane {
+                    replay_answered: false,
+                    uid: uid.into(),
+                    title: uid.into(),
+                    subtitle: None,
+                    pinned_accent: None,
+                    show_frame: None,
+                    show_dot: None,
+                    font_px: 14.0,
+                    spawn_command: None,
+                    spawn_args: None,
+                    spawn_shell: None,
+                    spawn_env: None,
+                },
+            );
+        }
+        let (det, _) = st.detach_focused(&m).expect("a pane to detach");
+        assert!(det.replay_answered);
+    }
 }
 
 #[cfg(test)]
@@ -6952,6 +7036,7 @@ mod dictation_tests {
 
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,
@@ -7073,6 +7158,7 @@ mod spawn_cells_tests {
 
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: uid.into(),
             title: "t".into(),
             subtitle: None,
@@ -7159,6 +7245,7 @@ mod session_file_tests {
 
     fn det(uid: &str, font_px: f32) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,
@@ -7604,6 +7691,7 @@ mod reminder_tests {
 
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,
@@ -8146,6 +8234,7 @@ mod env_persist_tests {
     }
     fn det_with_env(uid: &str, env: &[(&str, &str)]) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: uid.into(),
             title: "p".into(),
             subtitle: None,
@@ -8450,6 +8539,7 @@ mod pane_group_tests {
 
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
+            replay_answered: true,
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,

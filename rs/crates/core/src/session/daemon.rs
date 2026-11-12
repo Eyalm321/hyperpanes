@@ -112,6 +112,9 @@ fn idle_grace_from(raw: Option<&str>) -> Duration {
 /// (the lock is held → `AddrInUse`).
 #[cfg(unix)]
 pub fn run(salt: &str) -> io::Result<()> {
+    // Every kill/exit the registry carries out lands in session-events.log: this process has
+    // no visible stderr, so that file is the only record of why a pane's program ended.
+    crate::persistence::session_log::set_role("daemon");
     let names = daemon_names(salt);
     if let Some(dir) = names.lock.parent() {
         ensure_runtime_dir(dir)?;

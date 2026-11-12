@@ -320,6 +320,12 @@ fn exec(
         "closePane" => {
             let pane_id = str_field(cmd, "paneId")?;
             if let Some(uid) = model.remove_pane(&pane_id) {
+                crate::persistence::session_log::record(
+                    "kill-request",
+                    &uid,
+                    "control:closePane",
+                    Some(&pane_id),
+                );
                 sessions.kill(&uid);
             }
             Ok((None, true))
@@ -364,6 +370,12 @@ fn exec(
                     integration: None,
                     control_file: control_file.map(str::to_string),
                 };
+                crate::persistence::session_log::record(
+                    "kill-request",
+                    &old_uid,
+                    "control:restartPane",
+                    Some(&pane_id),
+                );
                 sessions.kill(&old_uid);
                 sessions.create(opts).map_err(|e| e.to_string())?;
                 model.respawn_pane(&pane_id, &new_uid);
@@ -840,6 +852,12 @@ fn respawn_resuming(
         integration: None,
         control_file: control_file.map(str::to_string),
     };
+    crate::persistence::session_log::record(
+        "kill-request",
+        &old_uid,
+        "control:restartPane(resume)",
+        Some(pane_id),
+    );
     sessions.kill(&old_uid);
     sessions.create(opts).map_err(|e| e.to_string())?;
     model.respawn_pane(pane_id, &new_uid);

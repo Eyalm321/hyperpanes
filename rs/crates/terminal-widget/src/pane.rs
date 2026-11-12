@@ -257,6 +257,20 @@ impl TerminalPane {
         self.grid.feed(data.as_bytes());
     }
 
+    /// Prime a fresh grid from a session's RETAINED output (a re-attach after a GUI restart,
+    /// a pane moved to another tab or window, a respawn's replay). The replay is history: the
+    /// program asked its terminal queries (DA, DSR, kitty-keyboard, …) long ago and already
+    /// got its answers. Feeding it through [`Self::feed`] would queue the emulator's answers
+    /// to every one of those old queries, and the next live output would flush them into the
+    /// running program as if typed (a TUI agent sees `ESC[?6c` arrive out of nowhere). So the
+    /// answers, and any OSC 52 clipboard writes in the history, are dropped here: only output
+    /// that arrives live after this call can produce replies or clipboard writes.
+    pub fn feed_replay(&mut self, data: &str) {
+        self.grid.feed(data.as_bytes());
+        let _ = self.grid.take_replies();
+        let _ = self.grid.take_clipboard_stores();
+    }
+
     /// Feed raw output bytes (when you have bytes rather than a decoded `String`).
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
         self.grid.feed(bytes);
@@ -1425,6 +1439,41 @@ mod tests {
         p.feed("hi");
         assert!(p.take_dirty());
         assert_eq!(p.grid_size(), (20, 4));
+    }
+
+    /// A re-attach replays history the program already got answers for: priming a grid from
+    /// it must not queue replies (they would be typed into the live program at its next
+    /// output, e.g. `ESC[?6c` into a TUI agent's prompt) nor stale OSC 52 clipboard writes.
+    /// Live output after the replay still gets answered.
+    #[test]
+    fn feed_replay_drops_replies_and_clipboard_writes_from_history() {
+        // DA1, DSR, and an OSC 52 clipboard store, as a TUI emits them at startup.
+        let history = "\x1b[c\x1b[6n\x1b]52;c;aGk=\x07hello";
+        let mut fed = TerminalPane::new(20, 4, Box::new(SoftwareRenderer::new()));
+        fed.feed(history);
+        assert!(
+            !fed.take_replies().is_empty(),
+            "plain feed answers the queries"
+        );
+
+        let mut primed = TerminalPane::new(20, 4, Box::new(SoftwareRenderer::new()));
+        primed.feed_replay(history);
+        assert!(
+            primed.take_replies().is_empty(),
+            "replayed queries get no reply"
+        );
+        assert_eq!(
+            primed.apply_osc52_stores(true),
+            None,
+            "no stale clipboard write"
+        );
+        assert!(primed.take_dirty(), "the history is still drawn");
+
+        primed.feed("\x1b[c");
+        assert!(
+            !primed.take_replies().is_empty(),
+            "a live query after the replay is answered"
+        );
     }
 
     #[test]

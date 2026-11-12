@@ -15,6 +15,7 @@
 //! Then run the MCP with the same `HYPERPANES_CONTROL_FILE`.
 
 fn main() {
+    hyperpanes_core::persistence::session_log::set_role("headless");
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {

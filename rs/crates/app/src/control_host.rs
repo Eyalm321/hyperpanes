@@ -1395,6 +1395,7 @@ fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
 /// bare shell, and its spawn `env` so the snapshot can persist the (filtered) explicit env.
 fn detached_pane_from_model(uid: &str, c: &ModelPane, font_px: f32) -> DetachedPane {
     DetachedPane {
+        replay_answered: false,
         uid: uid.to_string(),
         title: c.label.clone().into(),
         subtitle: c.subtitle.clone().map(Into::into),
@@ -1659,6 +1660,15 @@ pub(crate) fn alias_meta_patch(
 
 #[cfg(test)]
 mod tests {
+    /// A control-spawned session the GUI never showed has UNANSWERED terminal queries in its
+    /// replay (a just-started program may be waiting on them): its adoption must answer them,
+    /// unlike a re-attach or a move, whose replay a previous grid already answered.
+    #[test]
+    fn a_never_shown_control_pane_adopts_with_an_unanswered_replay() {
+        let c = model_pane(Some("claude"), None);
+        assert!(!detached_pane_from_model("u-new", &c, 14.0).replay_answered);
+    }
+
     #[test]
     fn old_external_id_prefers_the_persisted_map_then_the_uid() {
         let mut m = HashMap::new();
@@ -2163,6 +2173,7 @@ mod tests {
             st.adopt_pane(
                 &m,
                 crate::state::DetachedPane {
+                    replay_answered: true,
                     uid: n.into(),
                     title: n.into(),
                     subtitle: None,

@@ -112,7 +112,10 @@ pub fn write(mgr: &SessionManager, uid: &str, data: &str) {
 }
 
 /// Closing a remote pane DETACHES it (the host pane keeps running); local uids are killed.
-pub fn kill(mgr: &SessionManager, uid: &str) {
+/// `why` says which GUI path asked (`user-close-pane`, `window-closed`, …): it is recorded in
+/// session-events.log, the only trace of a kill once the GUI's stderr is gone.
+pub fn kill(mgr: &SessionManager, uid: &str, why: &str) {
+    hyperpanes_core::persistence::session_log::record("kill-request", uid, why, None);
     match parse_uid(uid) {
         Some((key, pane)) => {
             let mut r = registry().lock().unwrap();
@@ -797,7 +800,7 @@ mod tests {
         let mgr = SessionManager::new(tx);
         write(&mgr, "remote:9999:p", "x");
         write(&mgr, "pane-1", "x");
-        kill(&mgr, "remote:9999:p");
+        kill(&mgr, "remote:9999:p", "test");
         assert!(is_detached("remote:9999:p"));
     }
 
@@ -968,9 +971,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _g = rt.enter();
         let mgr = SessionManager::new(m_tx);
-        kill(&mgr, &uid);
+        kill(&mgr, &uid, "test");
         let (ti, pi) = st.find_pane(&uid).unwrap();
-        st.close_pane_in(ti, pi, &mgr);
+        st.close_pane_in(ti, pi, &mgr, "test");
         assert!(st.find_pane(&uid).is_none());
         let plan = plan_tabs(71, &state_with(vec![rp("a", "shell", "running")]));
         apply_plan(&mut st, 71, "laptop", ConnStatus::Connected, &plan, &mut no);

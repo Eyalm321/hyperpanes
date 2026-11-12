@@ -1303,7 +1303,7 @@ impl App {
                 }
             }
             if !found {
-                crate::remote::kill(&self.mgr, &uid);
+                crate::remote::kill(&self.mgr, &uid, "spawn-finished-for-a-closed-pane");
             }
         }
 
@@ -1482,7 +1482,7 @@ impl App {
                     for uid in w.state.borrow().session_uids() {
                         self.ai_feed.borrow_mut().remove(&uid);
                         if !keep_sessions {
-                            crate::remote::kill(&self.mgr, &uid);
+                            crate::remote::kill(&self.mgr, &uid, "window-closed");
                         }
                     }
                     let _ = w.app.window().hide();
