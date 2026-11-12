@@ -1271,6 +1271,12 @@ pub struct State {
     /// `--resume`d orchestrator never starts again. Without the role the inbox nudge never fires,
     /// so a spec agent reporting back is never heard — the goal org goes silent.
     pub pending_pane_meta: Vec<(String, std::collections::BTreeMap<String, String>)>,
+    /// `(old external pane id, new pane id)` for panes a full restore re-spawned under a new uid;
+    /// drained by the app tick into the control host, which registers the pane-id aliases.
+    pub pending_pane_aliases: Vec<(String, String)>,
+    /// The pre-restore uid → external-id map (`control_pane_ids.json`), loaded once on the
+    /// first re-spawn that needs it.
+    restore_old_ids: Option<std::collections::HashMap<String, String>>,
     /// Extra key patterns (`*` = prefix) added to the default spawn-env persistence allow-list
     /// (`hyperpanes_core::workspace::env_persist`). Empty by default; see
     /// [`State::set_env_persist_allow`].
@@ -1425,6 +1431,8 @@ impl State {
             goal_orch_models: std::collections::HashMap::new(),
             goal_orch_identity: std::collections::HashMap::new(),
             pending_pane_meta: Vec::new(),
+            pending_pane_aliases: Vec::new(),
+            restore_old_ids: None,
             env_persist_allow: Vec::new(),
             goal_draft_images: Vec::new(),
             goal_text: String::new(),
@@ -6143,6 +6151,23 @@ impl State {
             (true, Some(u)) => u.clone(),
             _ => mgr.fresh_uid(),
         };
+
+        // A re-spawn under a different uid changes the pane's id: remember old → new so mail and
+        // routes addressed to the old id still reach it.
+        if !reattach {
+            if let Some(old_uid) = spec.uid.as_deref().filter(|u| *u != uid) {
+                let old_ids = self.restore_old_ids.get_or_insert_with(|| {
+                    std::fs::read_to_string(
+                        hyperpanes_core::persistence::paths::control_pane_ids_json(),
+                    )
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or_default()
+                });
+                let old = crate::control_host::old_external_id(old_uid, old_ids);
+                self.pending_pane_aliases.push((old, uid.clone()));
+            }
+        }
 
         // Re-apply the persisted control meta (re-attached or re-spawned alike), queued before
         // any goal-orchestrator meta below so the latter wins on a clash.

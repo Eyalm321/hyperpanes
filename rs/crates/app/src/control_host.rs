@@ -228,6 +228,8 @@ pub struct ControlHost {
     /// ticks waited)`. Fed by [`Self::queue_meta`], applied after each publish. Needed because a
     /// pane restored this tick is not in the model until the publish that follows.
     pending_meta: RefCell<Vec<PendingMeta>>,
+    /// `(old pane id, new pane id)` restore aliases waiting for the control server to exist.
+    pending_aliases: RefCell<Vec<(String, String)>>,
     /// The read-model panes as last published (baseline for the next reconcile diff).
     prev: RefCell<HashMap<String, PaneSnap>>,
     /// Tab title/layout as last published, keyed by model tab id (baseline for tab reconcile).
@@ -282,6 +284,7 @@ impl ControlHost {
             pane_ids: RefCell::new(HashMap::new()),
             ctl: RefCell::new(HashMap::new()),
             pending_meta: RefCell::new(Vec::new()),
+            pending_aliases: RefCell::new(Vec::new()),
             prev: RefCell::new(HashMap::new()),
             prev_tabs: RefCell::new(HashMap::new()),
             prev_active: RefCell::new(HashMap::new()),
@@ -578,6 +581,37 @@ impl ControlHost {
         });
     }
 
+    /// Queue a restore alias (`old` pane id is now `new`), registered with the control server
+    /// as soon as it is up (immediately on the next sync if it already is).
+    pub fn queue_alias(&self, old: String, new: String) {
+        self.pending_aliases.borrow_mut().push((old, new));
+    }
+
+    /// Register queued aliases and re-point restored panes' `parent` / `advisor` meta at the
+    /// live ids. Runs under the model lock's caller; the alias table is cloned first so the
+    /// inbox and model locks are never nested.
+    fn apply_aliases(&self, shared: &Shared) {
+        let queued: Vec<(String, String)> = std::mem::take(&mut *self.pending_aliases.borrow_mut());
+        for (old, new) in queued {
+            shared.register_pane_alias(&old, &new);
+        }
+        let aliases = shared.inbox.lock().unwrap().aliases().clone();
+        if aliases.is_empty() {
+            return;
+        }
+        let mut model = shared.model.lock().unwrap();
+        let ids: Vec<String> = model.panes().into_iter().map(|p| p.pane_id).collect();
+        for id in ids {
+            let patch = model
+                .pane(&id)
+                .and_then(|p| p.meta.as_ref())
+                .and_then(|m| alias_meta_patch(m, &aliases));
+            if let Some(patch) = patch {
+                model.set_meta(&id, &patch);
+            }
+        }
+    }
+
     /// Apply queued meta to every pane that has reached the read model; keep the rest.
     ///
     /// A pane id is the control alias when one exists, else the session uid itself. Entries are
@@ -658,6 +692,10 @@ impl ControlHost {
             self.apply_pending_meta(&mut model);
             (reconciled || healed || grouped, republished)
         };
+
+        // 3c. Restore aliases: register them, then rewrite stale parent/advisor ids. After the
+        //     model guard drops (the inbox lock is taken inside).
+        self.apply_aliases(&shared);
 
         // 4. Nudge WS clients if the published structure changed (GUI- or control-driven).
         //    (After the guard drops — notify serializes `/state` under the same lock.)
@@ -1583,8 +1621,70 @@ fn env_truthy(name: &str) -> bool {
     )
 }
 
+/// Meta keys holding another pane's id that a restore must re-point at the live pane.
+const ID_META_KEYS: [&str; 2] = ["parent", "advisor"];
+
+/// The external pane id a restored pane advertised BEFORE the restore: the persisted
+/// uid→external-id map entry for `spec_uid` when present, else the uid itself (a GUI-native
+/// pane's id is its uid).
+pub(crate) fn old_external_id(spec_uid: &str, old_ids: &HashMap<String, String>) -> String {
+    old_ids
+        .get(spec_uid)
+        .cloned()
+        .unwrap_or_else(|| spec_uid.to_string())
+}
+
+/// The `parent` / `advisor` meta values that point at an aliased (pre-restore) pane id,
+/// as a set-patch to the live id. Either `pane-` spelling of the old id matches. `None` when
+/// nothing needs rewriting.
+pub(crate) fn alias_meta_patch(
+    meta: &BTreeMap<String, String>,
+    aliases: &HashMap<String, String>,
+) -> Option<BTreeMap<String, Option<String>>> {
+    let mut patch = BTreeMap::new();
+    for key in ID_META_KEYS {
+        let Some(v) = meta.get(key) else { continue };
+        let alt = match v.strip_prefix("pane-") {
+            Some(bare) => bare.to_string(),
+            None => format!("pane-{v}"),
+        };
+        if let Some(new) = aliases.get(v).or_else(|| aliases.get(&alt)) {
+            if new != v {
+                patch.insert(key.to_string(), Some(new.clone()));
+            }
+        }
+    }
+    (!patch.is_empty()).then_some(patch)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_external_id_prefers_the_persisted_map_then_the_uid() {
+        let mut m = HashMap::new();
+        m.insert("u1".to_string(), "pane-ctl".to_string());
+        assert_eq!(old_external_id("u1", &m), "pane-ctl");
+        assert_eq!(old_external_id("u2", &m), "u2");
+    }
+
+    #[test]
+    fn alias_meta_patch_rewrites_parent_and_advisor_only() {
+        let mut aliases = HashMap::new();
+        aliases.insert("pane-old".to_string(), "new1".to_string());
+        aliases.insert("adv".to_string(), "new2".to_string());
+        let meta: BTreeMap<String, String> =
+            [("parent", "old"), ("advisor", "pane-adv"), ("task", "old")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        let p = alias_meta_patch(&meta, &aliases).unwrap();
+        assert_eq!(p.get("parent"), Some(&Some("new1".to_string())));
+        assert_eq!(p.get("advisor"), Some(&Some("new2".to_string())));
+        assert!(!p.contains_key("task"));
+        let live: BTreeMap<String, String> = [("parent".to_string(), "new1".to_string())].into();
+        assert!(alias_meta_patch(&live, &aliases).is_none());
+    }
+
     use super::*;
     use hyperpanes_core::layout::presets::Layout;
 

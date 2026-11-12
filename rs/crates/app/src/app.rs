@@ -1337,6 +1337,10 @@ impl App {
             for (uid, meta) in queued {
                 self.control.queue_meta(uid, meta);
             }
+            let aliases = std::mem::take(&mut w.state.borrow_mut().pending_pane_aliases);
+            for (old, new) in aliases {
+                self.control.queue_alias(old, new);
+            }
         }
         self.control.sync(&windows, &self.mgr);
         // 2c'. Remote attach: apply queued `connectRemote`s, drain every host's event channel
