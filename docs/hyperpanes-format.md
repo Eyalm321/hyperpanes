@@ -88,6 +88,7 @@ ordinary tab, and unknown fields inside it are tolerated.
 | JSON field | Rust type | Notes |
 |---|---|---|
 | `label`    | `string?`              | pane label (defaults to the command's first token) |
+| `subtitle` | `string?`              | the header's second line; written by the session snapshot so a descriptive subtitle survives a restart (absent in older files) |
 | `color`    | `string?`              | accent color, e.g. `#e5484d` |
 | `command`  | `string?`              | shell command line to run |
 | `args`     | `string[]?`            | literal argv for a direct (no-shell) spawn with `command` |
@@ -287,6 +288,37 @@ Both are validated against the read model, then **queued for the GUI app** to ap
 (`Shared::take_pane_group_requests`), since only the GUI can move panes across tabs. A headless
 server (no GUI) accepts and queues the request but never applies it. Scoped tokens need every
 pane (or the tab) in scope, like `recolorPane`.
+
+## Moving a live pane over the control API
+
+- `POST /command {"type":"movePane","paneId":"…", <one target>, "windowId"?}` →
+  `{"ok":true,"tabId":"…","result":{"tabId":"…"}}`. Exactly one target:
+  - `"tabId":"…"`: an existing tab, in any window.
+  - `"newTab":{"title"?,"color"?}`: a new tab (`color` is `#rrggbb` or `#rgb`).
+  - `"project":"…"` (a project id, name or absolute path): the window's pane-group tab for
+    that project. It is reused if one exists. Otherwise one is created, titled with the
+    project's name and coloured from the registry.
+
+  For `newTab` and `project`, `windowId` picks the window. The default is the pane's own window.
+- The pane keeps running: same PTY, session, pane id, label, subtitle, meta, inbox, cwd and talk
+  state. Only its tab changes. A tab emptied by the move closes. A new tab opens in the
+  background (the active tab doesn't change). The answered `tabId` stays valid for a new tab.
+  Positional ids (`"w:i"`) of other tabs can shift when a tab closes, so re-read `/state` before
+  reusing one.
+- Errors: `400` (no such pane / tab / window, unknown project, zero or several targets, a bad
+  colour), `403` (pane, target tab or target window out of a scoped token's scope), `409` (the
+  pane is its window's only pane). A pane already in the target tab answers `200` and nothing
+  happens.
+- `newPane` accepts `"pane":{"project":"…","projectTab":true,…}`: the new pane opens straight in
+  that project's tab (reused or created, as above) instead of the caller's tab. It is opt-in.
+  Without `projectTab`, `project` still only defaults the cwd and colour.
+- `newPane` keeps `pane.subtitle` (the header's second line). It used to be dropped. The session
+  snapshot records it, so it survives a restart.
+
+Like `groupPanes`, `movePane` is validated against the read model and then queued for the GUI
+app, which applies it on its next tick. A headless server accepts and queues the request but
+never applies it. Tab membership is part of the session snapshot, so a moved pane comes back in
+its new tab after a restart.
 
 ## Session file (`last-workspace.json`)
 

@@ -139,6 +139,34 @@ pub enum PaneGroupRequest {
     },
     /// Turn the group tab `tab_id` back into ordinary tab(s).
     Ungroup { tab_id: String },
+    /// `movePane`: re-host live pane `pane_id` (from any tab of any window) into `to`, in window
+    /// `window_id`. The PTY, session, meta and inbox are untouched; only the tab changes.
+    Move {
+        pane_id: String,
+        window_id: i64,
+        to: MoveTarget,
+    },
+}
+
+/// Where a [`PaneGroupRequest::Move`] puts its pane.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MoveTarget {
+    /// An existing tab.
+    Tab { tab_id: String },
+    /// A brand-new tab whose control id is `tab_id` (the id the API already returned).
+    NewTab {
+        tab_id: String,
+        title: Option<String>,
+        color: Option<String>,
+    },
+    /// The window's pane-group tab for project `project_id`, reused when it exists, else
+    /// created as `tab_id` with the project's `title` (name) and `color`.
+    Project {
+        tab_id: String,
+        project_id: String,
+        title: String,
+        color: Option<String>,
+    },
 }
 
 /// Which work queue an instance runs — `/health`'s stable `workQueue` field.

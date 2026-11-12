@@ -36,7 +36,17 @@ const DEFAULT_PANE_COLOR: &str = "#3b82f6";
 /// Top-level keys that indicate a `newPane` spawn spec was mistakenly flattened instead of
 /// nested under `pane` (see the `newPane` guard in `handle_command`).
 const NEW_PANE_SPEC_KEYS: &[&str] = &[
-    "command", "args", "cwd", "label", "subtitle", "color", "shell", "env", "meta", "project",
+    "command",
+    "args",
+    "cwd",
+    "label",
+    "subtitle",
+    "color",
+    "shell",
+    "env",
+    "meta",
+    "project",
+    "projectTab",
 ];
 
 /// The HTTP outcome of a `/command` POST: a status, a JSON body, and whether the structure
@@ -1022,12 +1032,19 @@ fn spawn_pane(
         control_file: control_file.map(str::to_string),
     };
     sessions.create(opts).map_err(|e| e.to_string())?;
+    // The header's second line (e.g. a launcher's `<team>/<session> · <state>`); blank = none.
+    let subtitle = spec
+        .get("subtitle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     Ok(PaneInfo {
         id: pane_id,
         session_uid,
         label,
-        subtitle: None,
+        subtitle,
         color,
         command,
         args,
@@ -1646,6 +1663,26 @@ mod tests {
         let id = r.body["result"].as_str().unwrap().to_string();
         assert!(m.pane(&id).is_some());
         assert_eq!(m.pane(&id).unwrap().label, "w");
+        assert_eq!(m.pane(&id).unwrap().subtitle, None);
+    }
+
+    #[tokio::test]
+    async fn new_pane_keeps_its_subtitle() {
+        let mut m = model_one_window();
+        let s = sessions();
+        for (given, want) in [
+            (
+                json!("team/member-a · ready"),
+                Some("team/member-a · ready"),
+            ),
+            (json!("   "), None),
+        ] {
+            let cmd = json!({ "type": "newPane", "windowId": 1, "pane": { "label": "w", "command": "echo hi", "subtitle": given } });
+            let r = handle_command(&mut m, &s, Some("C:/control.json"), None, &cmd, &speech());
+            assert_eq!(r.status, 200);
+            let id = r.body["result"].as_str().unwrap().to_string();
+            assert_eq!(m.pane(&id).unwrap().subtitle.as_deref(), want);
+        }
     }
 
     #[tokio::test]

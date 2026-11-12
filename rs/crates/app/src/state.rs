@@ -106,6 +106,20 @@ pub(crate) fn prime_from_replay(pane: &mut TerminalPane, replay: &str, answered:
     }
 }
 
+/// A live pane lifted out of its tab by [`State::lift_pane`] for a control `movePane`: the
+/// [`DetachedPane`] plus the per-pane runtime state a plain detach drops (cwd, talk, AI mute).
+pub(crate) struct MovedPane {
+    pub det: DetachedPane,
+    pub cwd: Option<String>,
+    pub talk: bool,
+    pub ai_muted: bool,
+    /// Replies the old grid generated but had not flushed yet (no output since it was primed,
+    /// e.g. a `projectTab` newPane moved in the tick it was adopted). They are genuine answers
+    /// the program is still waiting for, so [`State::place_moved_pane`] writes them once; the
+    /// new grid itself is primed answered and never re-answers the history.
+    pub pending_replies: Vec<u8>,
+}
+
 /// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
 /// closed-tab stack (for "Reopen Closed Tab"). Like [`DetachedPane`] the sessions stay alive
 /// centrally, so re-hosting is a replay-into-fresh-grids, never a restart.
@@ -5583,6 +5597,97 @@ impl State {
         self.dirty = true;
     }
 
+    // ---- control `movePane` (any tab, any window) ----
+
+    /// Lift live pane `uid` out of whatever tab hosts it, for a control `movePane`. The session
+    /// keeps running; the source tab is dropped when this was its last pane. Refuses (`None`)
+    /// a remote pane, an unknown uid, and the window's ONLY pane (moving it would leave an
+    /// empty window behind).
+    pub(crate) fn lift_pane(&mut self, uid: &str) -> Option<MovedPane> {
+        let (ti, pi) = self.find_pane(uid)?;
+        let total: usize = self.tabs.iter().map(|t| t.panes.len()).sum();
+        if total <= 1 || self.tabs[ti].remote.is_some() || self.tabs[ti].panes[pi].remote.is_some()
+        {
+            return None;
+        }
+        let (mut ps, _) = self.take_pane_in(ti, pi)?;
+        let pending_replies = ps.pane.take_replies();
+        let (cwd, talk, ai_muted) = (ps.cwd.clone(), ps.talk, ps.ai_muted);
+        // `into_detached` marks the replay answered: this grid has shown the session.
+        Some(MovedPane {
+            det: ps.into_detached(),
+            cwd,
+            talk,
+            ai_muted,
+            pending_replies,
+        })
+    }
+
+    /// The index of the tab whose stable [`Tab::uid`] is `tab_uid`.
+    pub(crate) fn tab_index_by_uid(&self, tab_uid: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.uid == tab_uid)
+    }
+
+    /// The local pane-group tab for project `project_id` (the first one, if several), if any.
+    pub(crate) fn project_tab(&self, project_id: &str) -> Option<usize> {
+        self.tabs.iter().position(|t| {
+            t.remote.is_none()
+                && t.pane_group
+                    .as_ref()
+                    .is_some_and(|g| g.project.as_deref() == Some(project_id))
+        })
+    }
+
+    /// Append an empty tab WITHOUT switching to it (a control-made tab must not steal the
+    /// user's focus); [`Self::place_moved_pane`] fills it in the same step. Returns its uid.
+    pub(crate) fn push_background_tab(
+        &mut self,
+        title: &str,
+        color: Option<Color>,
+        group: Option<PaneGroup>,
+        ctl_id: Option<String>,
+    ) -> u64 {
+        let title = title.trim();
+        let title: SharedString = if title.is_empty() {
+            self.fresh_tab().title
+        } else {
+            title.into()
+        };
+        let mut tab = Tab::empty(title);
+        tab.color = color;
+        tab.pane_group = group;
+        tab.ctl_id = ctl_id;
+        let uid = tab.uid;
+        self.tabs.push(tab);
+        self.dirty = true;
+        uid
+    }
+
+    /// Re-host a [`MovedPane`] at the end of tab `ti` (replay-primed, no PTY restart), carrying
+    /// its label, subtitle, accent, zoom, spawn spec, cwd and talk/AI state. The new grid is
+    /// primed through the answered-replay path (`feed_replay`), so a move never types stale
+    /// query answers (`ESC[?6c` …) into the live program; only replies the old grid still owed
+    /// are written, once. Does not change the active tab.
+    pub(crate) fn place_moved_pane(&mut self, mgr: &SessionManager, mp: MovedPane, ti: usize) {
+        if ti >= self.tabs.len() {
+            return;
+        }
+        let uid = mp.det.uid.clone();
+        debug_assert!(
+            mp.det.replay_answered,
+            "a moved pane re-hosts an answered replay"
+        );
+        self.adopt_into_tab(mgr, mp.det, ti);
+        if !mp.pending_replies.is_empty() {
+            crate::remote::write(mgr, &uid, &String::from_utf8_lossy(&mp.pending_replies));
+        }
+        if let Some(p) = self.tabs[ti].panes.iter_mut().find(|p| p.uid == uid) {
+            p.cwd = mp.cwd;
+            p.talk = mp.talk;
+            p.ai_muted = mp.ai_muted;
+        }
+    }
+
     // ---- tab actions ----
 
     /// Duplicate tab `idx`: a fresh tab adopting its layout + title with the same number of
@@ -5940,6 +6045,7 @@ impl State {
                         let (env, env_dropped) = self.persisted_env_of(p, &pane_meta(&p.uid));
                         PaneSpec {
                             label: Some(p.title.to_string()),
+                            subtitle: p.subtitle.as_ref().map(|s| s.to_string()),
                             env,
                             env_dropped,
                             color: p.pinned_accent.map(color_hex),
@@ -6450,7 +6556,13 @@ impl State {
         Some(PaneState {
             uid,
             title: label.into(),
-            subtitle: None,
+            // A restored pane gets its descriptive second line back (absent in older files).
+            subtitle: spec
+                .subtitle
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string().into()),
             show_frame: Some(project),
             show_dot: Some(project),
             accent: pinned.unwrap_or_else(|| theme::accent_for(idx, palette)),
@@ -6659,6 +6771,69 @@ mod replay_priming_tests {
         }
         let (det, _) = st.detach_focused(&m).expect("a pane to detach");
         assert!(det.replay_answered);
+    }
+
+    /// A control `movePane` re-hosts a LIVE session: the program's old DA query in the replay
+    /// must not be answered again (no stale `ESC[?6c` typed into a running agent). A reply the
+    /// old grid still owed (moved in the tick it was adopted) is carried out and written once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moved_pane_gets_no_replay_replies() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        m.create(SpawnOptions {
+            uid: "live".into(),
+            command: Some("printf '\\033[c'; sleep 30".into()),
+            ..Default::default()
+        })
+        .expect("spawn a session");
+        let t0 = Instant::now();
+        while !m.replay("live").is_some_and(|r| r.contains("\x1b[c")) {
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(10),
+                "no DA query in replay"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut st = State::new(theme::load_font(1.0));
+        for (uid, answered) in [("other", true), ("live", false)] {
+            st.adopt_pane(
+                &m,
+                DetachedPane {
+                    replay_answered: answered,
+                    uid: uid.into(),
+                    title: uid.into(),
+                    subtitle: None,
+                    pinned_accent: None,
+                    show_frame: None,
+                    show_dot: None,
+                    font_px: 14.0,
+                    spawn_command: None,
+                    spawn_args: None,
+                    spawn_shell: None,
+                    spawn_env: None,
+                },
+            );
+        }
+        // Moved in the same tick it was adopted: the old grid still owes the DA answer.
+        let mp = st.lift_pane("live").expect("lift");
+        assert!(mp.det.replay_answered);
+        assert!(
+            !mp.pending_replies.is_empty(),
+            "the owed answer is carried out"
+        );
+        st.place_moved_pane(&m, mp, 0);
+        let (ti, pi) = st.find_pane("live").unwrap();
+        assert!(
+            st.tabs[ti].panes[pi].pane.take_replies().is_empty(),
+            "the re-hosted grid does not answer the history again"
+        );
+        // A later move of the long-shown pane: nothing owed, nothing re-answered.
+        let mp = st.lift_pane("live").expect("lift again");
+        assert!(mp.pending_replies.is_empty());
+        st.place_moved_pane(&m, mp, 0);
+        let (ti, pi) = st.find_pane("live").unwrap();
+        assert!(st.tabs[ti].panes[pi].pane.take_replies().is_empty());
+        m.kill("live");
     }
 }
 
@@ -8298,6 +8473,41 @@ mod env_persist_tests {
         assert!(!tpl.contains("env") && !tpl.contains("MYTOOL"), "{tpl}");
     }
 
+    #[test]
+    fn snapshot_round_trips_the_pane_subtitle() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let mut st = fresh();
+        let mut d = det_with_env("22222222-uuid", &[]);
+        d.subtitle = Some("team/member-a · ready".into());
+        st.adopt_pane(&mgr(), d);
+        let json = serde_json::to_string(&st.to_session_file()).unwrap();
+        assert!(
+            json.contains("\"subtitle\":\"team/member-a · ready\""),
+            "{json}"
+        );
+        let back: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let mut st2 = fresh();
+        st2.load_workspace(back, &mgr());
+        assert_eq!(
+            st2.active_tab().panes[0].subtitle.as_deref(),
+            Some("team/member-a · ready")
+        );
+
+        // An older snapshot (no `subtitle` key) still loads, with no subtitle; a pane without
+        // one writes no key.
+        let old = r#"{"groups":[{"title":"t","panes":[{"label":"x","command":"sh"}]}]}"#;
+        let back: WorkspaceFile = serde_json::from_str(old).unwrap();
+        assert_eq!(back.groups.as_ref().unwrap()[0].panes[0].subtitle, None);
+        let mut st3 = fresh();
+        st3.load_workspace(back, &mgr());
+        assert_eq!(st3.active_tab().panes[0].subtitle, None);
+        let json3 = serde_json::to_string(&st3.to_session_file()).unwrap();
+        assert!(!json3.contains("subtitle"), "{json3}");
+    }
+
     fn meta_of(p: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
         p.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -8937,5 +9147,40 @@ mod pane_group_tests {
         // JSON key is camelCase and absent for ordinary tabs.
         let json = serde_json::to_string(&groups).unwrap();
         assert!(json.contains("\"paneGroup\""));
+    }
+
+    #[test]
+    fn moved_pane_lands_in_project_tab_and_snapshot() {
+        let (mut st, m) = with_panes(&["a", "b"]);
+        let mp = st.lift_pane("a").expect("a live pane lifts");
+        let uid = st.push_background_tab(
+            "proj-a",
+            None,
+            Some(PaneGroup {
+                project: Some("p1".into()),
+                color: Some(parse_hex("#0a0b0c")),
+            }),
+            Some("ctl-tab".into()),
+        );
+        let ti = st.tab_index_by_uid(uid).unwrap();
+        assert_eq!(st.project_tab("p1"), Some(ti));
+        st.place_moved_pane(&m, mp, ti);
+        assert_eq!(
+            st.active, 0,
+            "placing in a background tab keeps the active tab"
+        );
+        // The workspace snapshot records the move: the pane sits in the group tab.
+        let snap = st.to_session_file();
+        let groups = snap.groups.unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].panes.len(), 1);
+        assert_eq!(groups[1].panes.len(), 1);
+        assert_eq!(groups[1].title.as_deref(), Some("proj-a"));
+        let pg = groups[1].pane_group.clone().unwrap();
+        assert_eq!(pg.project.as_deref(), Some("p1"));
+        // The only remaining pane of the window can't be lifted.
+        let mut solo = with_panes(&["x"]).0;
+        assert!(solo.lift_pane("x").is_none());
+        assert!(st.lift_pane("nope").is_none());
     }
 }
