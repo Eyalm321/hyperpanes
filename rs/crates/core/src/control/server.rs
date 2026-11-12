@@ -616,7 +616,7 @@ impl Shared {
 /// Free-function core of [`Shared::compute_activity`], factored out so `dispatch::recoverPane`
 /// (which has a `&SessionManager` but no `Shared`) reads liveness through the exact same
 /// source of truth as `/state`'s `activity` field, rather than a second, driftable copy.
-pub(crate) fn activity_for(
+pub fn activity_for(
     sessions: &SessionManager,
     idle_threshold_ms: i64,
     uid: &str,

@@ -50,6 +50,34 @@ pub enum Activity {
     Exited,
 }
 
+/// Aggregate status of a tab: the single computation shared by `/state` `tabs[].status` and
+/// the app's tab-chip indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabStatus {
+    Working,
+    Idle,
+}
+
+impl TabStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TabStatus::Working => "working",
+            TabStatus::Idle => "idle",
+        }
+    }
+}
+
+/// A tab is `Working` iff any of its panes is [`Activity::Busy`]. Idle, awaiting-input and
+/// exited panes never count as working (exited panes in particular never do); an empty tab
+/// is `Idle`.
+pub fn tab_status<I: IntoIterator<Item = Activity>>(acts: I) -> TabStatus {
+    if acts.into_iter().any(|a| a == Activity::Busy) {
+        TabStatus::Working
+    } else {
+        TabStatus::Idle
+    }
+}
+
 impl Activity {
     /// The precise wire string (used by the new `liveness` channel and internal logic).
     pub fn as_str(self) -> &'static str {
@@ -685,6 +713,7 @@ impl ReadModel {
             let mut tabs = Vec::new();
             for t in &w.tabs {
                 let mut panes = Vec::new();
+                let mut acts = Vec::new();
                 for p in &t.panes {
                     let in_scope = pane_in_scope(
                         scope,
@@ -697,7 +726,9 @@ impl ReadModel {
                     if !in_scope {
                         continue;
                     }
-                    panes.push(pane_out(p, activity(p), dims(p)));
+                    let act = activity(p);
+                    acts.push(act);
+                    panes.push(pane_out(p, act, dims(p)));
                 }
                 // Scoped views drop tabs/windows left empty; the master view keeps them verbatim.
                 if scope.is_some() && panes.is_empty() {
@@ -708,6 +739,7 @@ impl ReadModel {
                     title: t.title.clone(),
                     color: t.color.clone(),
                     layout: t.layout.clone(),
+                    status: tab_status(acts).as_str(),
                     panes,
                     pane_group: t.pane_group.clone(),
                 });
@@ -759,6 +791,8 @@ pub struct TabOut {
     pub title: String,
     pub color: Option<String>,
     pub layout: String,
+    /// `working` | `idle` — additive; see [`tab_status`].
+    pub status: &'static str,
     pub panes: Vec<PaneOut>,
     /// `{project,color}` for a pane-group tab, else `null` (always present).
     #[serde(rename = "paneGroup")]
@@ -892,6 +926,18 @@ mod tests {
         m
     }
 
+    #[test]
+    fn tab_status_rules() {
+        use Activity::*;
+        assert_eq!(tab_status([Idle, Busy, Exited]), TabStatus::Working);
+        assert_eq!(tab_status([Idle, Idle]), TabStatus::Idle);
+        assert_eq!(tab_status([Exited, Exited]), TabStatus::Idle);
+        assert_eq!(tab_status([]), TabStatus::Idle);
+        assert_eq!(tab_status([AwaitingInput, Idle]), TabStatus::Idle);
+        assert_eq!(TabStatus::Working.as_str(), "working");
+        assert_eq!(TabStatus::Idle.as_str(), "idle");
+    }
+
     fn busy(_p: &PaneInfo) -> Activity {
         Activity::Busy
     }
@@ -904,7 +950,7 @@ mod tests {
         // Optionals omitted; activity present; key ORDER preserved (struct order, not sorted).
         assert_eq!(
             s,
-            r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","color":null,"layout":"auto","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#888888","status":"running","activity":"busy"}],"paneGroup":null}]}]}"##
+            r##"{"windows":[{"windowId":1,"activeTabId":"t1","tabs":[{"id":"t1","title":"Tab 1","color":null,"layout":"auto","status":"working","panes":[{"id":"p1","sessionUid":"u1","label":"shell","color":"#888888","status":"running","activity":"busy"}],"paneGroup":null}]}]}"##
         );
     }
 
