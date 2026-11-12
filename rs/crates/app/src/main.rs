@@ -287,6 +287,8 @@ USAGE:
                                    --worktree, an exit 0 with no commit fails the task (and
                                    uncommitted work is saved as a patch) unless
                                    --allow-empty-result
+    hyperpanes inbox-hook          (internal) Claude Code hook: print this pane's new inbox mail as
+                                   additionalContext; always exits 0
     hyperpanes pair [--device <label>] [--ttl <30d|12h|90m|<ms>>]
                                    Mint a per-device token and print pairing URLs + a QR code
     hyperpanes devices             List paired mobile devices
@@ -323,6 +325,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => {}
         }
+    }
+
+    // `hyperpanes inbox-hook`: a Claude Code hook (PostToolUse / UserPromptSubmit) that prints
+    // the pane's new control-plane mail as additionalContext. Handled right after --help so it
+    // starts fast, before the crash hook, daemon, worker and GUI init. Never fails.
+    if std::env::args().nth(1).as_deref() == Some("inbox-hook") {
+        let default_file = hyperpanes_core::persistence::paths::control_json();
+        let cursor_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .map(|v| std::path::PathBuf::from(v).join("hyperpanes"))
+            .unwrap_or_else(hyperpanes_core::persistence::paths::state_dir)
+            .join("inbox-cursor");
+        hyperpanes_core::inbox_hook::main_entry(&default_file, &cursor_dir);
+        return Ok(());
     }
 
     // Crash-reporter mode: a fresh process spawned by the panic hook (or by the next launch when a
