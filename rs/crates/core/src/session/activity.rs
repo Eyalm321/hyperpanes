@@ -64,17 +64,74 @@ impl OutputGate {
     }
 }
 
+/// How long an ask episode survives without a fresh "asking" verdict before it ends. Bridges the
+/// short stale windows a dialog screen with a ticking element causes (its content changed, the
+/// screen is re-classified ~1 s later), and ends the episode soon after the prompt is answered.
+pub const ASK_GRACE_MS: u64 = 3_000;
+
+/// What one render of a pane's screen said, cached under the content cursor it was taken at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScreenVerdict {
+    /// The content cursor the screen was rendered at.
+    pub cursor: u64,
+    /// `detect_awaiting_input`: the screen waits for input (any prompt). Drives `AwaitingInput`.
+    pub awaiting: bool,
+    /// `blocks_typed_input`: the screen waits on a DECISION (a permission / confirm dialog, a
+    /// picker, a y/n question). Drives the tab's ASK state and the "needs input" alerts.
+    pub asking: bool,
+    /// The prompt's question line, when one was found.
+    pub question: Option<String>,
+}
+
+/// One "waiting on a decision" episode of a pane: from the first fresh asking verdict until
+/// [`ASK_GRACE_MS`] pass without one. Stepped on a clock by the screen classifier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AskEpisode {
+    /// When the episode began (epoch ms), or `None` while the pane is not asking.
+    pub since: Option<u64>,
+    /// The latest question seen during the episode.
+    pub question: Option<String>,
+    /// When a fresh asking verdict was last seen (epoch ms).
+    last_fresh_at: u64,
+}
+
+impl AskEpisode {
+    /// Advance at `now`. `fresh` is the current verdict's question when the pane's CURRENT
+    /// content is classified as asking (`Some(None)` = asking, no question found), else `None`.
+    /// `started_at` is when that content appeared (the episode start on a new episode).
+    pub fn step(&mut self, fresh: Option<Option<&str>>, started_at: u64, now: u64) {
+        match fresh {
+            Some(question) => {
+                if self.since.is_none() {
+                    self.since = Some(started_at.min(now));
+                }
+                self.last_fresh_at = now;
+                if let Some(q) = question {
+                    self.question = Some(q.to_string());
+                }
+            }
+            None => {
+                if self.since.is_some() && now.saturating_sub(self.last_fresh_at) > ASK_GRACE_MS {
+                    *self = AskEpisode::default();
+                }
+            }
+        }
+    }
+}
+
 /// The activity inputs a session exposes to `control::server::activity_for`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivitySignal {
     /// Epoch-ms of the last GENUINE output chunk, or `None` if there has been none.
     pub content_at: Option<u64>,
     /// The output cursor (`output_bytes`) right after the last genuine chunk: the key the
-    /// awaiting-input classification is cached under. Cosmetic chunks do not move it.
+    /// screen verdict is cached under. Cosmetic chunks do not move it.
     pub content_cursor: u64,
-    /// The cached screen classification `(content_cursor it was computed for, awaiting)`.
-    /// Valid only while its cursor equals [`content_cursor`](Self::content_cursor).
-    pub awaiting: Option<(u64, bool)>,
+    /// The latest screen verdict. Current only while its cursor equals
+    /// [`content_cursor`](Self::content_cursor).
+    pub verdict: Option<ScreenVerdict>,
+    /// The pane's current ask episode (see [`AskEpisode`]).
+    pub ask: AskEpisode,
 }
 
 impl ActivitySignal {
@@ -84,14 +141,39 @@ impl ActivitySignal {
         self.content_cursor = cursor;
     }
 
-    /// Whether the current screen content was classified as blocked on a decision.
-    pub fn awaiting_now(&self) -> bool {
-        self.awaiting == Some((self.content_cursor, true))
+    /// The verdict, if it was taken at the current content.
+    pub fn current_verdict(&self) -> Option<&ScreenVerdict> {
+        self.verdict
+            .as_ref()
+            .filter(|v| v.cursor == self.content_cursor)
     }
 
-    /// Whether the cached classification is missing or was computed for older content.
+    /// Whether the current screen content was classified as waiting for input.
+    pub fn awaiting_now(&self) -> bool {
+        self.current_verdict().is_some_and(|v| v.awaiting)
+    }
+
+    /// Whether the cached verdict is missing or was taken at older content.
     pub fn classification_stale(&self) -> bool {
-        !matches!(self.awaiting, Some((c, _)) if c == self.content_cursor)
+        self.current_verdict().is_none()
+    }
+
+    /// Step the ask episode at `now` from the current verdict.
+    pub fn step_ask(&mut self, now: u64) {
+        let fresh = self
+            .current_verdict()
+            .filter(|v| v.asking)
+            .map(|v| v.question.clone());
+        let started_at = self.content_at.unwrap_or(now);
+        self.ask
+            .step(fresh.as_ref().map(|q| q.as_deref()), started_at, now);
+    }
+
+    /// `(since, question)` while the pane is in an ask episode.
+    pub fn asking(&self) -> Option<(u64, Option<&str>)> {
+        self.ask
+            .since
+            .map(|since| (since, self.ask.question.as_deref()))
     }
 }
 
@@ -328,20 +410,77 @@ mod tests {
         assert!(v[2..].iter().all(|g| !g), "{v:?}");
     }
 
+    fn verdict(cursor: u64, awaiting: bool, asking: bool) -> ScreenVerdict {
+        ScreenVerdict {
+            cursor,
+            awaiting,
+            asking,
+            question: asking.then(|| "Do you want to proceed?".to_string()),
+        }
+    }
+
     #[test]
     fn signal_classification_is_keyed_by_the_content_cursor() {
         let mut s = ActivitySignal {
             content_at: Some(1),
             content_cursor: 10,
-            awaiting: None,
+            ..Default::default()
         };
         assert!(s.classification_stale());
         assert!(!s.awaiting_now());
-        s.awaiting = Some((10, true));
+        s.verdict = Some(verdict(10, true, false));
         assert!(!s.classification_stale());
         assert!(s.awaiting_now());
         s.content_cursor = 11;
         assert!(s.classification_stale());
         assert!(!s.awaiting_now());
+    }
+
+    #[test]
+    fn ask_episode_starts_on_a_fresh_verdict_and_ends_after_the_grace() {
+        let mut s = ActivitySignal {
+            content_at: Some(1_000),
+            content_cursor: 10,
+            ..Default::default()
+        };
+        s.step_ask(1_200);
+        assert_eq!(s.asking(), None);
+        s.verdict = Some(verdict(10, true, true));
+        s.step_ask(2_000);
+        // The episode starts when the dialog's content appeared.
+        assert_eq!(s.asking(), Some((1_000, Some("Do you want to proceed?"))));
+        // The content changes (a ticking element): stale for a moment, episode holds.
+        s.note_genuine(4_000, 11);
+        s.step_ask(4_500);
+        assert_eq!(s.asking().map(|a| a.0), Some(1_000));
+        // Re-classified as still asking: same episode.
+        s.verdict = Some(verdict(11, true, true));
+        s.step_ask(4_800);
+        assert_eq!(s.asking().map(|a| a.0), Some(1_000));
+        // Answered: new content, never re-classified as asking. Ends once the grace passes.
+        s.note_genuine(6_000, 20);
+        s.step_ask(4_800 + ASK_GRACE_MS);
+        assert!(s.asking().is_some());
+        s.step_ask(4_800 + ASK_GRACE_MS + 1);
+        assert_eq!(s.asking(), None);
+        // A later dialog is a new episode with its own start.
+        s.note_genuine(20_000, 30);
+        s.verdict = Some(verdict(30, true, true));
+        s.step_ask(21_000);
+        assert_eq!(s.asking().map(|a| a.0), Some(20_000));
+    }
+
+    #[test]
+    fn a_not_asking_verdict_never_starts_an_episode() {
+        let mut s = ActivitySignal {
+            content_at: Some(1_000),
+            content_cursor: 10,
+            verdict: Some(verdict(10, true, false)),
+            ..Default::default()
+        };
+        for now in (2_000..20_000).step_by(500) {
+            s.step_ask(now);
+        }
+        assert_eq!(s.asking(), None);
     }
 }

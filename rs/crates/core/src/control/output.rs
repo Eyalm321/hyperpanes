@@ -304,6 +304,66 @@ fn shows_option_form(lines: &[&str]) -> bool {
     numbered >= 2
 }
 
+// A row that asks something: ends with `?`, or a "do you want / wish / trust" / "would you like".
+fn is_question(row: &str) -> bool {
+    let lower = row.to_lowercase();
+    row.ends_with('?')
+        || bounded_contains(&lower, "do you want")
+        || bounded_contains(&lower, "do you wish")
+        || bounded_contains(&lower, "do you trust")
+        || bounded_contains(&lower, "would you like")
+}
+
+/// Longest question (chars) [`decision_question`] returns; longer ones end in `…`.
+pub const QUESTION_MAX_CHARS: usize = 200;
+
+/// The question a decision prompt on screen asks: the line a "needs input" alert shows. For a
+/// menu, the nearest question row above its cursor; otherwise the last row when it carries an
+/// explicit prompt ("(y/n)", "press enter"…). Frame stripped, capped at [`QUESTION_MAX_CHARS`].
+/// `None` when neither is found.
+pub fn decision_question(screen_text: &str) -> Option<String> {
+    let lines: Vec<&str> = screen_text.split('\n').collect();
+    let rows: Vec<&str> = lines
+        .iter()
+        .map(|l| strip_frame(l))
+        .filter(|r| !r.is_empty() && !is_rule_row(r))
+        .collect();
+    let window = &rows[rows.len().saturating_sub(DIALOG_SCAN_ROWS)..];
+    if let Some(sel) = window.iter().rposition(|r| selected_option(r)) {
+        if let Some(q) = window[..sel].iter().rev().find(|r| is_question(r)) {
+            return Some(cap_chars(q, QUESTION_MAX_CHARS));
+        }
+    }
+    let last = strip_frame(last_content_line(&lines)?);
+    explicit_prompt(last).then(|| cap_chars(last, QUESTION_MAX_CHARS))
+}
+
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+/// One render's verdict, cached under the content cursor `cursor` it was taken at: whether the
+/// screen waits for input ([`detect_awaiting_input`]), whether it waits on a decision
+/// ([`blocks_typed_input`]), and that decision's question ([`decision_question`]).
+pub fn verdict_for(screen_text: &str, cursor: u64) -> crate::session::activity::ScreenVerdict {
+    let asking = blocks_typed_input(screen_text);
+    crate::session::activity::ScreenVerdict {
+        cursor,
+        awaiting: detect_awaiting_input(screen_text),
+        asking,
+        question: if asking {
+            decision_question(screen_text)
+        } else {
+            None
+        },
+    }
+}
+
 // How many content rows above the bottom of the screen the selection-dialog scan looks at
 // (blank rows, borders and horizontal rules are not counted).
 const DIALOG_SCAN_ROWS: usize = 12;
@@ -415,15 +475,7 @@ fn detect_selection_dialog(lines: &[&str]) -> bool {
     if !other_option {
         return false;
     }
-    let question = window[..w_sel].iter().any(|&i| {
-        let row = all[i].0;
-        let lower = row.to_lowercase();
-        row.ends_with('?')
-            || bounded_contains(&lower, "do you want")
-            || bounded_contains(&lower, "do you wish")
-            || bounded_contains(&lower, "do you trust")
-            || bounded_contains(&lower, "would you like")
-    });
+    let question = window[..w_sel].iter().any(|&i| is_question(all[i].0));
     let footer = window[w_sel + 1..].iter().any(|&i| {
         let lower = all[i].0.to_lowercase();
         bounded_contains(&lower, "esc to cancel")
@@ -905,6 +957,41 @@ mod tests {
             " 2. unrelated\n",
             " 3. unrelated\n",
         )));
+    }
+
+    #[test]
+    fn decision_question_finds_the_prompt_line() {
+        assert_eq!(
+            decision_question(PERMISSION_DIALOG).as_deref(),
+            Some("Do you want to proceed?")
+        );
+        assert_eq!(
+            decision_question(TRUST_DIALOG).as_deref(),
+            Some("Do you trust the files in this folder?")
+        );
+        assert_eq!(
+            decision_question("Applied 3 edits.\nRun the tests now? (y/n)").as_deref(),
+            Some("Run the tests now? (y/n)")
+        );
+        assert_eq!(decision_question(IDLE_PROMPT), None);
+        let long = format!("{}? (y/n)", "x".repeat(400));
+        let q = decision_question(&long).unwrap();
+        assert_eq!(q.chars().count(), QUESTION_MAX_CHARS);
+        assert!(q.ends_with('…'));
+    }
+
+    #[test]
+    fn verdict_separates_waiting_from_deciding() {
+        let v = verdict_for(PERMISSION_DIALOG, 42);
+        assert_eq!(v.cursor, 42);
+        assert!(v.awaiting && v.asking);
+        assert_eq!(v.question.as_deref(), Some("Do you want to proceed?"));
+        // A starship prompt waits for input but asks nothing.
+        let v = verdict_for("❯ ls\nsrc  target\n❯ ", 7);
+        assert!(v.awaiting && !v.asking);
+        assert_eq!(v.question, None);
+        let v = verdict_for(WORKING, 1);
+        assert!(!v.awaiting && !v.asking);
     }
 
     #[test]

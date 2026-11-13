@@ -398,6 +398,10 @@ pub struct App {
     last_autosave_json: RefCell<String>,
     /// Throttle for the queued-prompt delivery tick (claude-resume speak-first).
     last_prompt_delivery: Cell<Option<std::time::Instant>>,
+    /// "Needs input" alerts: the once-per-episode policy, its notifier, and its tick throttle.
+    ask_alerts: RefCell<crate::ask_alert::AskAlerts>,
+    notifier: Box<dyn crate::ask_alert::Notifier>,
+    last_ask_poll: Cell<Option<std::time::Instant>>,
     /// Push-to-talk dictation: the mic-capture + transcribe worker (core::listen). Always
     /// spawned (one idle thread); `ready()` is false until both backends exist, which is what
     /// the toast tells the user about.
@@ -421,6 +425,11 @@ const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 impl App {
     pub fn new(mgr: Arc<SessionManager>, erx: UnboundedReceiver<SessionEvent>) -> Rc<Self> {
         let control = crate::control_host::ControlHost::new(&mgr);
+        // The screen classifier (awaiting / asking verdicts and ask episodes behind the tab's ASK
+        // state and the "needs input" alerts) runs whether or not the control server is on.
+        tokio::spawn(hyperpanes_core::control::classifier::run_screen_classifier(
+            Arc::clone(&mgr),
+        ));
         let listen_settings =
             hyperpanes_core::listen::load(&hyperpanes_core::persistence::paths::listen_json());
         let listen = hyperpanes_core::listen::engine::ListenEngine::spawn(&listen_settings);
@@ -451,6 +460,9 @@ impl App {
             last_autosave: Cell::new(None),
             last_autosave_json: RefCell::new(String::new()),
             last_prompt_delivery: Cell::new(None),
+            ask_alerts: RefCell::new(crate::ask_alert::AskAlerts::default()),
+            notifier: Box::new(crate::ask_alert::DesktopNotifier),
+            last_ask_poll: Cell::new(None),
             listen,
             listen_settings: RefCell::new(listen_settings),
             remote: crate::remote::Hub::new(),
@@ -595,6 +607,55 @@ impl App {
                     std::thread::sleep(Duration::from_millis(400));
                 }
             });
+        }
+    }
+
+    /// Raise the "needs input" desktop alert for each pane that has been asking (its tab reads
+    /// ASK) for a minute, once per ask episode (`ask_alert`). Once a second; cheap: one signal
+    /// read per local pane, no screen render (the classifier already did that).
+    fn alert_asking_panes(&self) {
+        const EVERY: Duration = Duration::from_secs(1);
+        let now = std::time::Instant::now();
+        if self
+            .last_ask_poll
+            .get()
+            .is_some_and(|last| now.duration_since(last) < EVERY)
+        {
+            return;
+        }
+        self.last_ask_poll.set(Some(now));
+        let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        let mut asking = Vec::new();
+        let mut enabled = true;
+        for (i, w) in windows.iter().enumerate() {
+            let st = w.state.borrow();
+            if i == 0 {
+                enabled = st.settings.ask_notify;
+            }
+            for t in st.tabs.iter().filter(|t| t.remote.is_none()) {
+                for p in &t.panes {
+                    let Some(sig) = self.mgr.activity_signal(&p.uid) else {
+                        continue;
+                    };
+                    if let Some((since, question)) = sig.asking() {
+                        asking.push(crate::ask_alert::AskingPane {
+                            uid: p.uid.clone(),
+                            tab: t.title.to_string(),
+                            label: p.title.to_string(),
+                            since,
+                            question: question.map(str::to_string),
+                        });
+                    }
+                }
+            }
+        }
+        let epoch_now = hyperpanes_core::control::server::now_ms() as u64;
+        for alert in self
+            .ask_alerts
+            .borrow_mut()
+            .poll(&asking, epoch_now, enabled)
+        {
+            self.notifier.notify(&alert);
         }
     }
 
@@ -1531,6 +1592,7 @@ impl App {
         //     the restartApp control command). Both throttled/cheap no-ops in the common case.
         self.deliver_queued_prompts();
         self.deliver_pending_goals();
+        self.alert_asking_panes();
         self.service_restart_request();
 
         // ---- adaptive idle cadence (#3) ----
@@ -3906,6 +3968,7 @@ impl App {
                     21 => crate::state::Setting::CopyOnSelect(arg != 0),
                     22 => crate::state::Setting::Osc52Clipboard(arg != 0),
                     23 => crate::state::Setting::ReduceMotion(arg != 0),
+                    24 => crate::state::Setting::AskNotify(arg != 0),
                     // idle-glow settings — apply immediately (not drafted).
                     10 => crate::state::Setting::IdleAlert(arg != 0),
                     11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),

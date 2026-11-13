@@ -54,7 +54,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[cfg(unix)]
-use crate::session::activity::{ActivitySignal, OutputGate};
+use crate::session::activity::{ActivitySignal, OutputGate, ScreenVerdict};
 #[cfg(unix)]
 use crate::session::proto::{
     read_frame, write_frame, ClientMsg, DaemonMsg, SpawnSpec, FEATURE_SCREEN_SEED, PROTO_VER,
@@ -402,13 +402,24 @@ impl DaemonSessionManager {
 
     /// The pane's activity inputs — from the shadow (no I/O); `None` for an unknown uid.
     pub fn activity_signal(&self, uid: &str) -> Option<ActivitySignal> {
-        self.shadows.lock().unwrap().get(uid).map(|s| s.activity)
+        self.shadows
+            .lock()
+            .unwrap()
+            .get(uid)
+            .map(|s| s.activity.clone())
     }
 
-    /// Cache an awaiting-input classification in the shadow (no I/O).
-    pub fn set_awaiting(&self, uid: &str, content_cursor: u64, awaiting: bool) {
+    /// Cache a screen verdict in the shadow (no I/O).
+    pub fn set_verdict(&self, uid: &str, verdict: ScreenVerdict) {
         if let Some(s) = self.shadows.lock().unwrap().get_mut(uid) {
-            s.activity.awaiting = Some((content_cursor, awaiting));
+            s.activity.verdict = Some(verdict);
+        }
+    }
+
+    /// Step the shadow's ask episode at `now` (no I/O).
+    pub fn step_ask(&self, uid: &str, now: u64) {
+        if let Some(s) = self.shadows.lock().unwrap().get_mut(uid) {
+            s.activity.step_ask(now);
         }
     }
 
@@ -896,7 +907,10 @@ impl DaemonSessionManager {
     pub fn activity_signal(&self, _uid: &str) -> Option<crate::session::activity::ActivitySignal> {
         unreachable!("daemon backend is unix-only")
     }
-    pub fn set_awaiting(&self, _uid: &str, _content_cursor: u64, _awaiting: bool) {
+    pub fn set_verdict(&self, _uid: &str, _verdict: crate::session::activity::ScreenVerdict) {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn step_ask(&self, _uid: &str, _now: u64) {
         unreachable!("daemon backend is unix-only")
     }
     pub fn render_screen(&self, _uid: &str) -> Option<String> {
@@ -1004,7 +1018,7 @@ mod tests {
         };
         apply_event_to_shadow(&s, &data(0));
         apply_event_to_shadow(&s, &data(1));
-        let after_two = s.lock().unwrap()["u1"].activity;
+        let after_two = s.lock().unwrap()["u1"].activity.clone();
         assert!(after_two.content_at.is_some());
         for i in 2..20 {
             apply_event_to_shadow(&s, &data(i));

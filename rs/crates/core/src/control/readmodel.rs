@@ -55,6 +55,8 @@ pub enum Activity {
 /// the app's tab-chip indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabStatus {
+    /// A pane waits on a decision prompt (a permission / confirm dialog): it needs the owner.
+    Asking,
     Working,
     Idle,
 }
@@ -62,20 +64,79 @@ pub enum TabStatus {
 impl TabStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            TabStatus::Asking => "asking",
             TabStatus::Working => "working",
             TabStatus::Idle => "idle",
         }
     }
 }
 
-/// A tab is `Working` iff any of its panes is [`Activity::Busy`]. Idle, awaiting-input and
-/// exited panes never count as working (exited panes in particular never do); an empty tab
-/// is `Idle`.
-pub fn tab_status<I: IntoIterator<Item = Activity>>(acts: I) -> TabStatus {
-    if acts.into_iter().any(|a| a == Activity::Busy) {
+/// One pane's contribution to its tab's status: its activity, and whether it is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneTabState {
+    pub activity: Activity,
+    pub asking: bool,
+}
+
+impl From<Activity> for PaneTabState {
+    fn from(activity: Activity) -> Self {
+        PaneTabState {
+            activity,
+            asking: false,
+        }
+    }
+}
+
+impl From<&PaneLive> for PaneTabState {
+    fn from(live: &PaneLive) -> Self {
+        PaneTabState {
+            activity: live.activity,
+            asking: live.asking.is_some(),
+        }
+    }
+}
+
+/// A tab is `Asking` iff any of its panes is asking; else `Working` iff any is
+/// [`Activity::Busy`]; else `Idle`. Precedence asking > working > idle. Idle, awaiting-input
+/// and exited panes never count as working (exited panes never ask either); an empty tab is
+/// `Idle`.
+pub fn tab_status<T: Into<PaneTabState>, I: IntoIterator<Item = T>>(panes: I) -> TabStatus {
+    let mut working = false;
+    for p in panes {
+        let p = p.into();
+        if p.asking && p.activity != Activity::Exited {
+            return TabStatus::Asking;
+        }
+        working |= p.activity == Activity::Busy;
+    }
+    if working {
         TabStatus::Working
     } else {
         TabStatus::Idle
+    }
+}
+
+/// A pane waiting on a decision prompt: since when (epoch ms) and, when found, its question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asking {
+    pub since: u64,
+    pub question: Option<String>,
+}
+
+/// What `/state` reports about one pane's liveness: its [`Activity`] and, while it waits on a
+/// decision prompt, [`Asking`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneLive {
+    pub activity: Activity,
+    pub asking: Option<Asking>,
+}
+
+impl From<Activity> for PaneLive {
+    fn from(activity: Activity) -> Self {
+        PaneLive {
+            activity,
+            asking: None,
+        }
     }
 }
 
@@ -760,15 +821,24 @@ impl ReadModel {
         scope: Option<&Scope>,
         activity: &dyn Fn(&PaneInfo) -> Activity,
     ) -> StateOut {
-        self.state_for_scope_with_dims(scope, activity, &|_| None)
+        self.state_for_scope_with_dims(scope, &|p| PaneLive::from(activity(p)), &|_| None)
     }
 
-    /// [`Self::state_for_scope`] + per-pane grid dims (`cols`/`rows`, omitted when the
+    /// [`Self::state_for_scope`] with each pane's full [`PaneLive`] (activity + ask episode).
+    pub fn state_for_scope_live(
+        &self,
+        scope: Option<&Scope>,
+        live: &dyn Fn(&PaneInfo) -> PaneLive,
+    ) -> StateOut {
+        self.state_for_scope_with_dims(scope, live, &|_| None)
+    }
+
+    /// [`Self::state_for_scope_live`] + per-pane grid dims (`cols`/`rows`, omitted when the
     /// resolver returns `None`) — additive, for remote clients that emulate the pane.
     pub fn state_for_scope_with_dims(
         &self,
         scope: Option<&Scope>,
-        activity: &dyn Fn(&PaneInfo) -> Activity,
+        live: &dyn Fn(&PaneInfo) -> PaneLive,
         dims: &dyn Fn(&PaneInfo) -> Option<(u16, u16)>,
     ) -> StateOut {
         let mut windows = Vec::new();
@@ -776,7 +846,7 @@ impl ReadModel {
             let mut tabs = Vec::new();
             for t in &w.tabs {
                 let mut panes = Vec::new();
-                let mut acts = Vec::new();
+                let mut states: Vec<PaneTabState> = Vec::new();
                 for p in &t.panes {
                     let in_scope = pane_in_scope(
                         scope,
@@ -789,9 +859,9 @@ impl ReadModel {
                     if !in_scope {
                         continue;
                     }
-                    let act = activity(p);
-                    acts.push(act);
-                    panes.push(pane_out(p, act, dims(p)));
+                    let l = live(p);
+                    states.push((&l).into());
+                    panes.push(pane_out(p, l, dims(p)));
                 }
                 // Scoped views drop tabs/windows left empty; the master view keeps them verbatim.
                 if scope.is_some() && panes.is_empty() {
@@ -802,7 +872,7 @@ impl ReadModel {
                     title: t.title.clone(),
                     color: t.color.clone(),
                     layout: t.layout.clone(),
-                    status: tab_status(acts).as_str(),
+                    status: tab_status(states).as_str(),
                     panes,
                     pane_group: t.pane_group.clone(),
                 });
@@ -854,7 +924,8 @@ pub struct TabOut {
     pub title: String,
     pub color: Option<String>,
     pub layout: String,
-    /// `working` | `idle` — additive; see [`tab_status`].
+    /// `asking` | `working` | `idle` — additive; see [`tab_status`]. Clients that only know
+    /// `working` / `idle` should derive a status from the panes for any other value.
     pub status: &'static str,
     pub panes: Vec<PaneOut>,
     /// `{project,color}` for a pane-group tab, else `null` (always present).
@@ -896,13 +967,25 @@ pub struct PaneOut {
     /// Per-pane "talk" — additive, omitted when off so the legacy shape is untouched.
     #[serde(skip_serializing_if = "is_false")]
     pub talk: bool,
+    /// Epoch ms since which the pane waits on a decision prompt (its tab reads `asking`) —
+    /// additive, omitted while it is not asking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asking_since: Option<u64>,
+    /// The question that prompt asks, when found — additive, omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
 }
 
-fn pane_out(p: &PaneInfo, activity: Activity, dims: Option<(u16, u16)>) -> PaneOut {
+fn pane_out(p: &PaneInfo, live: PaneLive, dims: Option<(u16, u16)>) -> PaneOut {
+    let activity = live.activity;
+    let (asking_since, question) = match live.asking {
+        Some(a) => (Some(a.since), a.question),
+        None => (None, None),
+    };
     PaneOut {
         id: p.id.clone(),
         session_uid: p.session_uid.clone(),
@@ -922,6 +1005,8 @@ fn pane_out(p: &PaneInfo, activity: Activity, dims: Option<(u16, u16)>) -> PaneO
         cols: dims.map(|(c, _)| c),
         rows: dims.map(|(_, r)| r),
         talk: p.talk,
+        asking_since,
+        question,
     }
 }
 
@@ -995,8 +1080,69 @@ mod tests {
         assert_eq!(tab_status([Idle, Busy, Exited]), TabStatus::Working);
         assert_eq!(tab_status([Idle, Idle]), TabStatus::Idle);
         assert_eq!(tab_status([Exited, Exited]), TabStatus::Idle);
-        assert_eq!(tab_status([]), TabStatus::Idle);
+        assert_eq!(tab_status([] as [Activity; 0]), TabStatus::Idle);
         assert_eq!(tab_status([AwaitingInput, Idle]), TabStatus::Idle);
+    }
+
+    #[test]
+    fn tab_status_asking_wins_over_working() {
+        use Activity::*;
+        let ask = |activity| PaneTabState {
+            activity,
+            asking: true,
+        };
+        assert_eq!(
+            tab_status([ask(AwaitingInput), Busy.into()]),
+            TabStatus::Asking
+        );
+        assert_eq!(tab_status([Busy.into(), ask(Busy)]), TabStatus::Asking);
+        assert_eq!(tab_status([Idle.into(), ask(Idle)]), TabStatus::Asking);
+        // An exited pane never asks.
+        assert_eq!(tab_status([ask(Exited), Idle.into()]), TabStatus::Idle);
+        assert_eq!(tab_status([ask(Exited), Busy.into()]), TabStatus::Working);
+        assert_eq!(TabStatus::Asking.as_str(), "asking");
+    }
+
+    #[test]
+    fn state_reports_asking_tabs_and_panes() {
+        let mut m = ReadModel::new();
+        m.add_window(WindowInfo {
+            window_id: 1,
+            active_tab_id: Some("t1".into()),
+            tabs: vec![TabInfo {
+                id: "t1".into(),
+                title: "Tab 1".into(),
+                color: None,
+                layout: "auto".into(),
+                panes: vec![pane("p1", "u1"), pane("p2", "u2")],
+                pane_group: None,
+            }],
+        });
+        let v = serde_json::to_value(m.state_for_scope_live(None, &|p| {
+            if p.id == "p1" {
+                PaneLive {
+                    activity: Activity::AwaitingInput,
+                    asking: Some(Asking {
+                        since: 1_700,
+                        question: Some("Do you want to proceed?".into()),
+                    }),
+                }
+            } else {
+                Activity::Busy.into()
+            }
+        }))
+        .unwrap();
+        let tab = &v["windows"][0]["tabs"][0];
+        assert_eq!(tab["status"], json!("asking"));
+        assert_eq!(tab["panes"][0]["activity"], json!("idle"));
+        assert_eq!(tab["panes"][0]["askingSince"], json!(1_700));
+        assert_eq!(
+            tab["panes"][0]["question"],
+            json!("Do you want to proceed?")
+        );
+        // Not asking: both fields omitted (the legacy shape is untouched).
+        assert!(tab["panes"][1].get("askingSince").is_none());
+        assert!(tab["panes"][1].get("question").is_none());
         assert_eq!(TabStatus::Working.as_str(), "working");
         assert_eq!(TabStatus::Idle.as_str(), "idle");
     }

@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use hyperpanes_core::control::readmodel::{tab_status, PaneStatus, TabStatus};
-use hyperpanes_core::control::server::{activity_for, IDLE_THRESHOLD_MS};
+use hyperpanes_core::control::server::{live_for, IDLE_THRESHOLD_MS};
 use hyperpanes_core::layout::presets::{
     compute_tiles, effective_layout, DividerKind, Layout, Orientation,
 };
@@ -512,18 +512,19 @@ fn build_dividers(state: &State, area: (f32, f32)) -> Vec<DividerItem> {
 }
 
 /// The tab-chip status: the SAME computation `/state` `tabs[].status` uses — core
-/// [`tab_status`] over each pane's [`activity_for`] (the single liveness source), with the
+/// [`tab_status`] over each pane's [`live_for`] (the single liveness source), with the
 /// status the read model publishes for local panes (`Running`). Remote tabs never enter the
 /// read model, so they are always `Idle` here too.
 pub fn tab_status_for(tab: &crate::state::Tab, mgr: &SessionManager) -> TabStatus {
     if tab.remote.is_some() {
         return TabStatus::Idle;
     }
-    tab_status(
-        tab.panes
-            .iter()
-            .map(|p| activity_for(mgr, IDLE_THRESHOLD_MS, &p.uid, PaneStatus::Running)),
-    )
+    let lives: Vec<_> = tab
+        .panes
+        .iter()
+        .map(|p| live_for(mgr, IDLE_THRESHOLD_MS, &p.uid, PaneStatus::Running))
+        .collect();
+    tab_status(lives.iter())
 }
 
 /// How often the pump resamples the tab-chip statuses.
@@ -576,6 +577,7 @@ pub fn resync(
                 a11y_label: group_a11y_label(&t.title, t.pane_group.is_some(), project.as_deref())
                     .into(),
                 working: tab_status_for(t, mgr) == TabStatus::Working,
+                asking: tab_status_for(t, mgr) == TabStatus::Asking,
             }
         })
         .collect();
@@ -944,6 +946,7 @@ pub fn resync(
     app.set_pref_clickable(state.settings.clickable_paths);
     app.set_pref_copy_on_select(state.settings.copy_on_select);
     app.set_pref_reduce_motion(state.settings.reduce_motion);
+    app.set_pref_ask_notify(state.settings.ask_notify);
     app.set_pref_osc52_clipboard(state.settings.osc52_clipboard);
     app.set_pref_editor(state.settings.editor_command.clone().into());
 
@@ -1379,11 +1382,14 @@ pub fn pump(
             state.tab_status_at = now;
             let mut any = false;
             for (i, t) in state.tabs.iter().enumerate() {
-                let w = tab_status_for(t, mgr) == TabStatus::Working;
+                let status = tab_status_for(t, mgr);
+                let w = status == TabStatus::Working;
+                let a = status == TabStatus::Asking;
                 any |= w;
                 let mut row = ui.tabs.row_data(i).unwrap();
-                if row.working != w {
+                if row.working != w || row.asking != a {
                     row.working = w;
+                    row.asking = a;
                     ui.tabs.set_row_data(i, row);
                 }
             }
@@ -1709,8 +1715,8 @@ mod tab_status_tests {
         st.adopt_pane(&mgr, detached("ts-idle2"));
 
         let model = model_for(&st);
-        let out = model.state_for_scope(None, &|p| {
-            activity_for(&mgr, IDLE_THRESHOLD_MS, &p.session_uid, p.status)
+        let out = model.state_for_scope_live(None, &|p| {
+            live_for(&mgr, IDLE_THRESHOLD_MS, &p.session_uid, p.status)
         });
         let api: Vec<&str> = out.windows[0].tabs.iter().map(|t| t.status).collect();
         let ui: Vec<&str> = st
@@ -1725,12 +1731,26 @@ mod tab_status_tests {
         }
     }
 
-    /// The panes the tab dot must NOT count — one that only blinks (fresh raw output, no genuine
-    /// output for a minute) and one showing a permission dialog (fresh output, screen classified
-    /// as awaiting input) — read the same on the GUI chip and in `/state`, and leave their tab
-    /// idle; a pane with fresh genuine output still makes its tab working.
+    /// Mark `uid`'s current screen with a verdict, as the classifier would after rendering it.
+    fn verdict(mgr: &SessionManager, uid: &str, awaiting: bool, asking: bool) {
+        let cursor = mgr.activity_signal(uid).unwrap().content_cursor;
+        mgr.set_verdict(
+            uid,
+            hyperpanes_core::session::activity::ScreenVerdict {
+                cursor,
+                awaiting,
+                asking,
+                question: asking.then(|| "Do you want to proceed?".to_string()),
+            },
+        );
+        mgr.step_ask(uid, hyperpanes_core::control::server::now_ms() as u64);
+    }
+
+    /// The GUI chip and `/state` agree on all three states: a tab with a pane on a permission
+    /// dialog reads `asking` (over a busy pane in the same tab); a pane that only blinks or sits
+    /// at a shell prompt never makes its tab working; fresh genuine output does.
     #[test]
-    fn ui_and_state_agree_on_blinking_and_dialog_panes() {
+    fn ui_and_state_agree_on_asking_blinking_and_prompt_panes() {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -1739,26 +1759,30 @@ mod tab_status_tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mgr = SessionManager::new(tx);
         let now = hyperpanes_core::control::server::now_ms() as u64;
-        // Tab 0: a blinking pane + a dialog pane. Tab 1: a dialog pane + a busy pane.
+        // Tab 0: a dialog pane + a busy pane. Tab 1: a shell-prompt pane + a busy pane.
+        // Tab 2: a blinking pane alone.
+        spawn(&mgr, "ts-dialog", 100);
+        verdict(&mgr, "ts-dialog", true, true);
+        spawn(&mgr, "ts-busy", 100);
+        spawn(&mgr, "ts-prompt", 100);
+        verdict(&mgr, "ts-prompt", true, false);
+        spawn(&mgr, "ts-busy2", 100);
         spawn(&mgr, "ts-blink", 60_000);
         mgr.note_raw_output_for_test("ts-blink", now);
-        for uid in ["ts-dialog", "ts-dialog2"] {
-            spawn(&mgr, uid, 100);
-            let cursor = mgr.activity_signal(uid).unwrap().content_cursor;
-            mgr.set_awaiting(uid, cursor, true);
-        }
-        spawn(&mgr, "ts-busy2", 100);
         let mut st = State::new(theme::load_font(1.0));
-        st.adopt_pane(&mgr, detached("ts-blink"));
         st.adopt_pane(&mgr, detached("ts-dialog"));
+        st.adopt_pane(&mgr, detached("ts-busy"));
         st.tabs.push(crate::state::Tab::new_for_test("t2".into()));
         st.switch_tab(1);
-        st.adopt_pane(&mgr, detached("ts-dialog2"));
+        st.adopt_pane(&mgr, detached("ts-prompt"));
         st.adopt_pane(&mgr, detached("ts-busy2"));
+        st.tabs.push(crate::state::Tab::new_for_test("t3".into()));
+        st.switch_tab(2);
+        st.adopt_pane(&mgr, detached("ts-blink"));
 
         let model = model_for(&st);
-        let out = model.state_for_scope(None, &|p| {
-            activity_for(&mgr, IDLE_THRESHOLD_MS, &p.session_uid, p.status)
+        let out = model.state_for_scope_live(None, &|p| {
+            live_for(&mgr, IDLE_THRESHOLD_MS, &p.session_uid, p.status)
         });
         let api: Vec<&str> = out.windows[0].tabs.iter().map(|t| t.status).collect();
         let ui: Vec<&str> = st
@@ -1767,14 +1791,14 @@ mod tab_status_tests {
             .map(|t| tab_status_for(t, &mgr).as_str())
             .collect();
         assert_eq!(ui, api);
-        assert_eq!(api, vec!["idle", "working"]);
-        let acts: Vec<&str> = out.windows[0].tabs[0]
-            .panes
-            .iter()
-            .map(|p| p.activity)
-            .collect();
-        assert_eq!(acts, vec!["idle", "idle"]);
-        for uid in ["ts-blink", "ts-dialog", "ts-dialog2", "ts-busy2"] {
+        assert_eq!(api, vec!["asking", "working", "idle"]);
+        let dialog = &out.windows[0].tabs[0].panes[0];
+        assert_eq!(dialog.activity, "idle");
+        assert!(dialog.asking_since.is_some());
+        assert_eq!(dialog.question.as_deref(), Some("Do you want to proceed?"));
+        assert!(out.windows[0].tabs[1].panes[0].asking_since.is_none());
+        assert_eq!(out.windows[0].tabs[2].panes[0].activity, "idle");
+        for uid in ["ts-dialog", "ts-busy", "ts-prompt", "ts-busy2", "ts-blink"] {
             mgr.kill(uid);
         }
     }

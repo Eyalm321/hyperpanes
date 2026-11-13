@@ -116,6 +116,7 @@ export component AppWindow inherits Window {
     in property <bool> pref-clickable: true;
     in property <bool> pref-copy-on-select: false;
     in property <bool> pref-reduce-motion: false;
+    in property <bool> pref-ask-notify: true;
     in property <int> tab-dot-phase: 0;
     in property <bool> pref-osc52-clipboard: true;
     in property <string> pref-editor: "";
@@ -674,6 +675,7 @@ export component AppWindow inherits Window {
             clickable-paths: root.pref-clickable;
             copy-on-select: root.pref-copy-on-select;
             reduce-motion: root.pref-reduce-motion;
+            ask-notify: root.pref-ask-notify;
             osc52-clipboard: root.pref-osc52-clipboard;
             editor-command: root.pref-editor;
             prefs-confirm: root.prefs-confirm;

@@ -1,8 +1,16 @@
-# Tab activity dots
+# Tab activity dots and the ASK state
 
-A tab shows its animated "working" dots while at least one of its panes is **busy**. The same
-value is `tabs[].status` in `GET /state`, and the MCP `list_panes` forwards it as `tabStatus`
-next to each pane's `activity`.
+A tab chip shows one of three states, in this order of precedence:
+
+1. **ASK** (an amber badge; `"asking"`): a pane in the tab waits on a decision prompt, such
+   as a permission or confirm dialog, a picker, or a y/n question. It needs the owner.
+2. **Working** (animated dots; `"working"`): a pane in the tab is busy.
+3. **IDLE** (`"idle"`): neither.
+
+The same value is `tabs[].status` in `GET /state`, and the MCP `list_panes` forwards it as
+`tabStatus` next to each pane's `activity`. `"asking"` is additive. A client that only knows
+`"working"` and `"idle"` should derive a status from the panes for any other value; the
+hyperpanes-mcp `tabStatusOf` already does. An asking pane's legacy `activity` reads `"idle"`.
 
 ## One source
 
@@ -38,19 +46,51 @@ Known misses, accepted on purpose (each one reads idle, never busy, after the 10
 - a blink interleaved with another periodic cosmetic chunk, so the cycle is longer than two
   frames: that reads busy, the one miss in the other direction.
 
-## Awaiting input
+## Awaiting input and asking
 
-A pane whose screen shows a decision prompt reads `awaiting-input` (it never makes a tab
-working). `control::output::detect_awaiting_input` recognises y/n prompts, "press enter", a
-cursored menu on the last line, and Claude-style selection dialogs (`❯ 1. …` with another
-numbered option and a question above or an "Esc to cancel" footer below) even when a
-statusline or frame is drawn under them. A menu that is only quoted in the chat, above the
+A pane whose screen waits for input reads `awaiting-input` (it never makes a tab working).
+`control::output::detect_awaiting_input` recognises y/n prompts, "press enter", a cursored menu
+on the last line, and Claude-style selection dialogs (`❯ 1. …` with another numbered option and
+a question above or an "Esc to cancel" footer below) even when a statusline or frame is drawn
+under them. A menu that is only quoted in the chat, above the
 agent's visible input box, does not count.
 
-The screen is classified lazily: the control server's activity ticker renders a pane's screen
-once its genuine output has been quiet for 750 ms inside the busy window, and a
-`mode:"screen"` read reuses its result. The verdict is cached under the output cursor of the
+One render of the screen gives a verdict with three facts. `awaiting` comes from
+`detect_awaiting_input` and drives `AwaitingInput`. `asking` comes from
+`blocks_typed_input` (decision prompts only, never a plain `❯` shell prompt) and drives ASK.
+`question` is the prompt's question line. The verdict is cached under the output cursor of the
 last genuine chunk, so a blink does not invalidate it and the next real change does.
+
+A pane is in an **ask episode** from its first fresh asking verdict until 3 s pass without
+one. The grace bridges the short moment after a dialog's content changes but before it is
+re-classified, and ends the episode soon after the prompt is answered. While a pane is in an
+episode, `/state` adds two fields to it, both omitted otherwise:
+
+- `askingSince`: epoch ms, when the prompt appeared;
+- `question`: the prompt line, when one was found.
+
+An episode starting or ending pings `state` on `/events`.
+
+### The screen classifier
+
+`control::classifier::run_screen_classifier` renders screens and steps the episodes. The app
+starts it at launch, whether or not the control server is enabled. It is bounded:
+
+- a pane is rendered only when its content cursor moved since its last verdict, so an
+  unchanged screen is never rendered again (a blink does not move the cursor);
+- only once its genuine output has been quiet for 750 ms;
+- at most 4 renders per 500 ms tick, served round-robin by pane;
+- a failed render is retried after 10 s, or sooner if the content changes.
+
+A `mode:"screen"` read also refreshes the verdict.
+
+### Needs-input alert
+
+Once a pane has been asking for 60 s, the app raises one desktop notification for that episode.
+Its title is "`<tab>` needs input" and its body is "`<pane label>`: `<question>`". It is sent
+through `org.freedesktop.Notifications` on Linux, and does nothing elsewhere. A new episode
+alerts again. Preferences → "Notify when a tab needs input" turns it off (setting
+`askNotify`, on by default).
 
 ## Never typing into a decision prompt
 

@@ -254,7 +254,7 @@ async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respons
     };
     let out = {
         let m = shared.model.lock().unwrap();
-        m.state_for_scope_with_dims(info.scope.as_ref(), &|p| shared.compute_activity(p), &|p| {
+        m.state_for_scope_with_dims(info.scope.as_ref(), &|p| shared.compute_live(p), &|p| {
             shared.sessions.dims(&p.session_uid)
         })
     };
@@ -709,7 +709,9 @@ fn build_screen_body(
             // prompt above the tail window.
             let awaiting = detect_awaiting_input(&full);
             if let Some(c) = content_cursor {
-                shared.sessions.set_awaiting(uid, c, awaiting);
+                shared
+                    .sessions
+                    .set_verdict(uid, crate::control::output::verdict_for(&full, c));
             }
             let mut text = full;
             if let Some(tail) = tail_num(q.get("tail")) {
