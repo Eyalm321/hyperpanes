@@ -157,15 +157,24 @@ pub const REPAINT_NUDGE_HOLD: std::time::Duration = std::time::Duration::from_mi
 pub enum RepaintNudge {
     #[default]
     Idle,
-    /// Primed from the replay buffer; shrink the pty on the first laid-out tick.
-    Armed,
+    /// Primed from the replay buffer; shrink the pty once the pane's layout has been stable
+    /// for [`REPAINT_NUDGE_HOLD`] (never in the middle of a resize). `Some` = when the layout
+    /// last changed the grid size.
+    Armed(Option<Instant>),
     /// The pty is one row short since this instant; restore it after [`REPAINT_NUDGE_HOLD`].
     Shrunk(Instant),
 }
 
 impl RepaintNudge {
+    /// The layout just resized this pane's grid: an armed nudge waits for it to settle.
+    pub fn layout_changed(&mut self, now: Instant) {
+        if let RepaintNudge::Armed(_) = self {
+            *self = RepaintNudge::Armed(Some(now));
+        }
+    }
+
     /// Advance the nudge for a laid-out pane whose grid is `applied` (cols, rows). Returns the
-    /// pty size to apply now, if any.
+    /// pty size to apply now, if any. Fires exactly once per arming: shrink, then restore.
     pub fn step(&mut self, now: Instant, applied: (usize, usize)) -> Option<(u16, u16)> {
         let (cols, rows) = (
             applied.0.clamp(1, u16::MAX as usize) as u16,
@@ -173,7 +182,8 @@ impl RepaintNudge {
         );
         match *self {
             RepaintNudge::Idle => None,
-            RepaintNudge::Armed => {
+            RepaintNudge::Armed(Some(at)) if now.duration_since(at) < REPAINT_NUDGE_HOLD => None,
+            RepaintNudge::Armed(_) => {
                 let short = if rows >= 2 {
                     (cols, rows - 1)
                 } else if cols >= 2 {
@@ -211,7 +221,7 @@ pub(crate) fn rehost_grid(
     if let Some(replay) = mgr.replay(&det.uid) {
         prime_from_replay(&mut pane, &replay, det.replay_answered);
         if !replay.is_empty() {
-            nudge = RepaintNudge::Armed;
+            nudge = RepaintNudge::Armed(None);
         }
     }
     (pane, fallback, nudge)
@@ -6720,7 +6730,7 @@ impl State {
                 pane.feed_replay(&replay);
                 // A raw tail can't rebuild a full-screen program's screen: have it repaint.
                 if !replay.is_empty() {
-                    repaint_nudge = RepaintNudge::Armed;
+                    repaint_nudge = RepaintNudge::Armed(None);
                 }
             }
         } else {
@@ -7164,7 +7174,10 @@ mod rehost_grid_tests {
         st.adopt_pane(&m, det("drawn", true));
         st.adopt_pane(&m, det("never-drew", true));
         let (ti, pi) = st.find_pane("drawn").unwrap();
-        assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Armed);
+        assert_eq!(
+            st.tabs[ti].panes[pi].repaint_nudge,
+            RepaintNudge::Armed(None)
+        );
         let (ti, pi) = st.find_pane("never-drew").unwrap();
         assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Idle);
         m.kill("drawn");
@@ -7175,16 +7188,27 @@ mod rehost_grid_tests {
     #[test]
     fn repaint_nudge_shrinks_holds_then_restores_once() {
         let t0 = Instant::now();
-        let mut n = RepaintNudge::Armed;
+        let mut n = RepaintNudge::Armed(None);
         assert_eq!(n.step(t0, (200, 40)), Some((200, 39)));
         assert_eq!(n.step(t0 + Duration::from_millis(10), (200, 40)), None);
         assert_eq!(n.step(t0 + REPAINT_NUDGE_HOLD, (200, 40)), Some((200, 40)));
         assert_eq!(n, RepaintNudge::Idle);
         assert_eq!(n.step(t0 + REPAINT_NUDGE_HOLD * 2, (200, 40)), None);
+        // Mid-resize: a layout change re-arms the settle window; nothing fires until it holds.
+        let mut n = RepaintNudge::Armed(None);
+        n.layout_changed(t0);
+        assert_eq!(n.step(t0 + Duration::from_millis(10), (200, 40)), None);
+        assert_eq!(n.step(t0 + REPAINT_NUDGE_HOLD, (200, 40)), Some((200, 39)));
+        // Once shrunk, a layout change doesn't restart it; the restore sends the new size.
+        n.layout_changed(t0 + REPAINT_NUDGE_HOLD);
+        assert_eq!(
+            n.step(t0 + REPAINT_NUDGE_HOLD * 2, (210, 42)),
+            Some((210, 42))
+        );
         // A one-row grid shrinks a column instead; a 1x1 grid can't be nudged.
-        let mut n = RepaintNudge::Armed;
+        let mut n = RepaintNudge::Armed(None);
         assert_eq!(n.step(t0, (80, 1)), Some((79, 1)));
-        let mut n = RepaintNudge::Armed;
+        let mut n = RepaintNudge::Armed(None);
         assert_eq!(n.step(t0, (1, 1)), None);
         assert_eq!(n, RepaintNudge::Idle);
     }

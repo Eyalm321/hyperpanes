@@ -439,6 +439,7 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
                 mgr.resize(&p.uid, cols as u16, rows as u16);
             }
             p.applied = (cols, rows);
+            p.repaint_nudge.layout_changed(Instant::now());
             // The grid rewrapped — recompute any open search so its highlights track the
             // reflowed text instead of drifting against stale match coordinates.
             p.pane.search_reflow();
@@ -1464,6 +1465,7 @@ pub fn pump(
         // the pty one row short and back so the program repaints over it (see RepaintNudge).
         if ps.remote.is_none() && ps.rect.2 > 0.0 {
             if let Some((c, r)) = ps.repaint_nudge.step(Instant::now(), ps.applied) {
+                crate::dbg_log(&format!("repaint-nudge uid={} pty={c}x{r}", ps.uid));
                 mgr.resize(&ps.uid, c, r);
             }
         }
