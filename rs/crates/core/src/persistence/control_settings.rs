@@ -62,7 +62,7 @@ pub struct SpecSweepSettings {
     pub idle_close_hours: u64,
     /// Close a spec pane whose goal is done once idle this many minutes (default 30).
     pub done_close_minutes: u64,
-    /// Log what would be closed, close nothing (default off).
+    /// Log what would be closed, close nothing (default on until the live close path is proven).
     pub dry_run: bool,
 }
 
@@ -72,7 +72,7 @@ impl Default for SpecSweepSettings {
             enabled: true,
             idle_close_hours: 3,
             done_close_minutes: 30,
-            dry_run: false,
+            dry_run: true,
         }
     }
 }
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn spec_sweep_defaults_on_missing_or_garbage() {
         let d = SpecSweepSettings::default();
-        assert!(d.enabled && !d.dry_run);
+        assert!(d.enabled && d.dry_run);
         assert_eq!((d.idle_close_hours, d.done_close_minutes), (3, 30));
         assert_eq!(SpecSweepSettings::from_value(None), d);
         let garbage = serde_json::json!({"enabled": "no", "idleCloseHours": -2,

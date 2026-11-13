@@ -24,6 +24,7 @@ fn idle_obs() -> SpecPaneObs {
         asking: false,
         last_report: None,
         last_inbound_ts: None,
+        last_parent_msg_ts: None,
         last_message_ts: None,
         claimed_tasks: 0,
         worker_children: 0,
@@ -40,8 +41,18 @@ fn idle_obs() -> SpecPaneObs {
     }
 }
 
+/// Closing config (the shipped default is dry-run; the policy tests exercise real closes).
 fn cfg() -> SweepCfg {
-    SweepCfg::default()
+    SweepCfg {
+        dry_run: false,
+        ..SweepCfg::default()
+    }
+}
+
+#[test]
+fn shipped_default_is_dry_run() {
+    assert!(SweepCfg::default().dry_run);
+    assert!(SweepCfg::default().enabled);
 }
 
 fn v(o: &SpecPaneObs) -> Verdict {
@@ -130,7 +141,8 @@ fn idle_close_meta_parsing() {
 
 #[test]
 fn each_skip_rule_blocks_the_close() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut SpecPaneObs)>, SkipReason)> = vec![
+    type Case = (&'static str, Box<dyn Fn(&mut SpecPaneObs)>, SkipReason);
+    let cases: Vec<Case> = vec![
         ("busy", Box::new(|o| o.busy = true), SkipReason::Busy),
         ("no peer", Box::new(|o| o.peer = None), SkipReason::NoPeer),
         (
@@ -178,6 +190,26 @@ fn each_skip_rule_blocks_the_close() {
             "report missing",
             Box::new(|o| o.report_file = ReportFile::Missing),
             SkipReason::ReportMissing,
+        ),
+        (
+            "no goal",
+            Box::new(|o| o.goal = String::new()),
+            SkipReason::NotGoalPane,
+        ),
+        (
+            "no parent",
+            Box::new(|o| o.parent = None),
+            SkipReason::NotGoalPane,
+        ),
+        (
+            "no session",
+            Box::new(|o| o.session = None),
+            SkipReason::NoResume,
+        ),
+        (
+            "bad session id",
+            Box::new(|o| o.session.as_mut().unwrap().session_id = "$(boom)".into()),
+            SkipReason::NoResume,
         ),
         (
             "nothing known",
@@ -228,16 +260,59 @@ fn unanswered_needs_decision_blocks_only_trigger_b() {
             ts: NOW - 5 * HOUR,
         });
         assert_eq!(v(&o), Verdict::Keep(SkipReason::OpenQuestion), "{kind:?}");
-        // Answered since: closable.
+        // A message from anyone else (a worker report, a broadcast) is no answer.
         o.last_inbound_ts = Some(NOW - 4 * HOUR - 1);
+        assert_eq!(v(&o), Verdict::Keep(SkipReason::OpenQuestion), "{kind:?}");
+        // The parent answered since: closable.
+        o.last_parent_msg_ts = Some(NOW - 4 * HOUR - 1);
         assert_eq!(v(&o), Verdict::Close(CloseReason::Idle));
+        // A parent message from BEFORE the question is no answer either.
+        o.last_parent_msg_ts = Some(NOW - 6 * HOUR);
+        assert_eq!(v(&o), Verdict::Keep(SkipReason::OpenQuestion), "{kind:?}");
         o.last_inbound_ts = None;
+        o.last_parent_msg_ts = None;
     }
     // Trigger A (done via meta) ignores the open question.
     o.meta_done = true;
     o.last_output_at = Some(NOW - HOUR);
     o.peer.as_mut().unwrap().status_updated_at = Some(NOW - HOUR);
     assert_eq!(v(&o), Verdict::Close(CloseReason::GoalDone));
+}
+
+#[test]
+fn parent_rework_after_done_cancels_the_done_trigger() {
+    let mut o = idle_obs();
+    o.last_report = Some(Report {
+        kind: ReportKind::Done,
+        ts: NOW - 2 * HOUR,
+    });
+    o.last_output_at = Some(NOW - HOUR);
+    o.peer.as_mut().unwrap().status_updated_at = Some(NOW - HOUR);
+    assert_eq!(v(&o), Verdict::Close(CloseReason::GoalDone));
+    // Someone else writing does not reopen it.
+    o.last_inbound_ts = Some(NOW - 90 * MIN);
+    assert_eq!(v(&o), Verdict::Close(CloseReason::GoalDone));
+    // The parent writing after the done (rework) does: back to the 3 h idle rule.
+    o.last_parent_msg_ts = Some(NOW - 90 * MIN);
+    assert_eq!(v(&o), Verdict::Keep(SkipReason::NotIdleLongEnough));
+    // meta hp.goalState=done still counts.
+    o.meta_done = true;
+    assert_eq!(v(&o), Verdict::Close(CloseReason::GoalDone));
+}
+
+#[test]
+fn ledger_tracks_messages_per_sender_and_apply_keeps_non_spec_panes() {
+    let mut l = SweepLedger::new();
+    l.record_post("S", Some("W"), false, 1, 100, "worker note");
+    l.record_post("S", Some("O"), false, 2, 200, "answer: B");
+    l.record_post("S", Some("W"), false, 3, 300, "worker note 2");
+    assert_eq!(l.last_inbound_from("S", "O"), Some(200));
+    assert_eq!(l.last_inbound_from("S", "W"), Some(300));
+    assert_eq!(l.last_inbound_ts("S"), Some(300));
+    // The orchestrator's open consult survives a pass that only observed spec panes.
+    l.record_post("O", Some("S"), true, 4, 400, "needs-decision: A or B?");
+    let _ = apply_pass(&mut l, vec![idle_obs()], &cfg(), NOW);
+    assert_eq!(l.open_consults("O").len(), 1);
 }
 
 // ---- screen ----
@@ -471,6 +546,15 @@ fn record_and_log_contents_land_in_the_given_state_dir() {
     append_log(&d, &r, Some(&path), false, 1234).unwrap();
     append_log(&d, &r, None, true, 1300).unwrap();
     let log = std::fs::read_to_string(d.join("spec-sweep.log")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(d.join("spec-sweep.log"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the log holds session ids");
+    }
     let lines: Vec<serde_json::Value> = log
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -581,6 +665,9 @@ impl SweepEnv for Fake {
     fn inbox_last_to(&self, _: &str) -> Option<i64> {
         None
     }
+    fn inbox_last_from(&self, _: &str, _: &str) -> Option<i64> {
+        None
+    }
     fn reports_from(&self, _: &str, _: &str) -> Vec<(String, i64)> {
         vec![
             ("progress: x".into(), NOW - 5 * HOUR),
@@ -634,10 +721,7 @@ fn pass_dry_run_reports_once_per_run_and_a_keep_resets() {
 #[test]
 fn queue_name_candidates() {
     let mut m = BTreeMap::new();
-    m.insert(
-        "project".to_string(),
-        "/home/u/dev/my-app/".to_string(),
-    );
+    m.insert("project".to_string(), "/home/u/dev/my-app/".to_string());
     assert_eq!(queue_names(&m, "g7"), ["g7", "my-app-g7"]);
     m.insert(META_QUEUE.to_string(), "custom-q".to_string());
     assert_eq!(queue_names(&m, "g7"), ["custom-q"]);

@@ -215,6 +215,9 @@ pub struct SpecPaneObs {
     pub last_report: Option<Report>,
     /// Newest message addressed TO the pane.
     pub last_inbound_ts: Option<i64>,
+    /// Newest message the pane's PARENT sent it: the only thing that answers its
+    /// needs-decision/blocked, or reopens a `done` (rework).
+    pub last_parent_msg_ts: Option<i64>,
     /// Newest message to OR from the pane.
     pub last_message_ts: Option<i64>,
     pub claimed_tasks: usize,
@@ -243,6 +246,10 @@ pub enum SkipReason {
     PendingNudge,
     ReportMissing,
     Disabled,
+    /// Not a goal spec pane: `goal` or `parent` meta missing.
+    NotGoalPane,
+    /// No resume command could be built (no valid session id / cwd): closing would lose it.
+    NoResume,
 }
 
 impl SkipReason {
@@ -262,6 +269,8 @@ impl SkipReason {
             SkipReason::PendingNudge => "pending-nudge",
             SkipReason::ReportMissing => "report-missing",
             SkipReason::Disabled => "disabled",
+            SkipReason::NotGoalPane => "not-goal-pane",
+            SkipReason::NoResume => "no-resume",
         }
     }
 }
@@ -316,6 +325,9 @@ pub fn decide(o: &SpecPaneObs, cfg: &SweepCfg, now: i64) -> Verdict {
     if !cfg.enabled {
         return Verdict::Keep(SkipReason::Disabled);
     }
+    if o.goal.is_empty() || o.parent.is_none() {
+        return Verdict::Keep(SkipReason::NotGoalPane);
+    }
     if o.idle_override == IdleOverride::Off {
         return Verdict::Keep(SkipReason::IdleCloseOff);
     }
@@ -335,7 +347,11 @@ pub fn decide(o: &SpecPaneObs, cfg: &SweepCfg, now: i64) -> Verdict {
         return Verdict::Keep(SkipReason::UnknownIdle);
     };
     let idle = now - since;
-    let done = o.meta_done || o.last_report.is_some_and(|r| r.kind == ReportKind::Done);
+    let parent_since = |ts: i64| o.last_parent_msg_ts.is_some_and(|t| t > ts);
+    // A `done` report counts until the parent writes to the pane again (rework reopens it).
+    let done = o.meta_done
+        || o.last_report
+            .is_some_and(|r| r.kind == ReportKind::Done && !parent_since(r.ts));
     let idle_limit = match o.idle_override {
         IdleOverride::Hours(h) => (h * 3_600_000.0) as i64,
         _ => cfg.idle_close_ms,
@@ -352,7 +368,8 @@ pub fn decide(o: &SpecPaneObs, cfg: &SweepCfg, now: i64) -> Verdict {
     if reason == CloseReason::Idle {
         if let Some(r) = o.last_report {
             let open = matches!(r.kind, ReportKind::NeedsDecision | ReportKind::Blocked);
-            let answered = o.last_inbound_ts.is_some_and(|t| t > r.ts);
+            // Only the parent answers: a worker report or a broadcast does not.
+            let answered = parent_since(r.ts);
             if open && !answered {
                 return Verdict::Keep(SkipReason::OpenQuestion);
             }
@@ -372,6 +389,13 @@ pub fn decide(o: &SpecPaneObs, cfg: &SweepCfg, now: i64) -> Verdict {
     }
     if o.report_file == ReportFile::Missing {
         return Verdict::Keep(SkipReason::ReportMissing);
+    }
+    if o.session
+        .as_ref()
+        .and_then(|s| resume_command(s, o.cwd.as_deref()))
+        .is_none()
+    {
+        return Verdict::Keep(SkipReason::NoResume);
     }
     Verdict::Close(reason)
 }
@@ -422,10 +446,12 @@ struct PaneRec {
     consults_in: Vec<OpenConsult>,
     /// Highest seq this pane has sent to each recipient.
     last_sent_seq_to: HashMap<String, u64>,
+    /// Newest message addressed to this pane, per sending pane.
+    inbound_from: HashMap<String, i64>,
 }
 
 /// Per-pane sweeper bookkeeping for the whole server. Pure; callers supply timestamps.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SweepLedger {
     panes: HashMap<String, PaneRec>,
 }
@@ -450,6 +476,10 @@ impl SweepLedger {
         {
             let t = self.panes.entry(to.to_string()).or_default();
             t.last_inbound_ts = Some(t.last_inbound_ts.map_or(ts, |x| x.max(ts)));
+            if let Some(f) = from_pane {
+                let e = t.inbound_from.entry(f.to_string()).or_insert(ts);
+                *e = (*e).max(ts);
+            }
             if from_is_spec && kind == Some(ReportKind::NeedsDecision) {
                 if let Some(f) = from_pane {
                     t.consults_in.push(OpenConsult {
@@ -484,6 +514,13 @@ impl SweepLedger {
 
     pub fn last_inbound_ts(&self, pane: &str) -> Option<i64> {
         self.panes.get(pane).and_then(|p| p.last_inbound_ts)
+    }
+
+    /// Newest message `from` sent to `pane`.
+    pub fn last_inbound_from(&self, pane: &str, from: &str) -> Option<i64> {
+        self.panes
+            .get(pane)
+            .and_then(|p| p.inbound_from.get(from).copied())
     }
 
     pub fn last_sent_ts(&self, pane: &str) -> Option<i64> {
@@ -580,6 +617,8 @@ pub trait SweepEnv {
     fn report_file(&self, path: &str) -> ReportFile;
     /// Newest inbox message addressed to the pane (durable inbox, survives restarts).
     fn inbox_last_to(&self, pane_id: &str) -> Option<i64>;
+    /// Newest message `from` sent to `pane_id` in the durable inbox.
+    fn inbox_last_from(&self, pane_id: &str, from: &str) -> Option<i64>;
     /// `(body, ts)` of messages `from_pane` posted into `parent`'s inbox, oldest first.
     fn reports_from(&self, parent: &str, from_pane: &str) -> Vec<(String, i64)>;
 }
@@ -641,6 +680,15 @@ pub fn observe(env: &dyn SweepEnv, ledger: &SweepLedger, p: &SpecPane) -> SpecPa
         (a, b) => a.or(b),
     };
     let last_message_ts = [inbound, last_sent].into_iter().flatten().max();
+    let last_parent_msg_ts = parent.as_ref().and_then(|par| {
+        [
+            ledger.last_inbound_from(&p.pane_id, par),
+            env.inbox_last_from(&p.pane_id, par),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    });
 
     let descendants = match peer {
         Some(pe) => env.descendants(pe.pid, DESCENDANT_GRACE_MS),
@@ -669,6 +717,7 @@ pub fn observe(env: &dyn SweepEnv, ledger: &SweepLedger, p: &SpecPane) -> SpecPa
         asking,
         last_report,
         last_inbound_ts: inbound,
+        last_parent_msg_ts,
         last_message_ts,
         claimed_tasks: env.claimed_tasks(&queue_names(meta, &goal)),
         worker_children: env.worker_children(&p.pane_id),
@@ -696,22 +745,41 @@ pub struct Action {
 /// One pass over every spec pane: observe, decide, apply hysteresis. Pure over `env`.
 pub fn sweep_pass(env: &dyn SweepEnv, ledger: &mut SweepLedger, cfg: &SweepCfg) -> Vec<Action> {
     let now = env.now_ms();
-    let panes = env.spec_panes();
-    let live: std::collections::HashSet<String> = panes.iter().map(|p| p.pane_id.clone()).collect();
-    ledger.retain_panes(&live);
+    let observed = observe_all(env, ledger);
+    apply_pass(ledger, observed, cfg, now)
+}
+
+/// The observe half of a pass: every spec pane's observation, reading the ledger only. The
+/// server runs this on a CLONE of the ledger so the /proc + screen reads never hold the lock
+/// the inbox post handler needs.
+pub fn observe_all(env: &dyn SweepEnv, ledger: &SweepLedger) -> Vec<SpecPaneObs> {
+    env.spec_panes()
+        .iter()
+        .map(|p| observe(env, ledger, p))
+        .collect()
+}
+
+/// The decide half of a pass: verdicts, hysteresis and dry-run bookkeeping on the live ledger.
+/// It forgets nothing: the ledger also holds non-spec panes (an orchestrator's open consults),
+/// so pruning is by the model's pane list, in [`sweep_once`].
+pub fn apply_pass(
+    ledger: &mut SweepLedger,
+    observed: Vec<SpecPaneObs>,
+    cfg: &SweepCfg,
+    now: i64,
+) -> Vec<Action> {
     let mut out = Vec::new();
-    for p in &panes {
-        let obs = observe(env, ledger, p);
+    for obs in observed {
         let verdict = decide(&obs, cfg, now);
         let close = matches!(verdict, Verdict::Close(_));
-        let ripe = ledger.note_verdict(&p.pane_id, close, now);
+        let ripe = ledger.note_verdict(&obs.pane_id, close, now);
         let Verdict::Close(reason) = verdict else {
             continue;
         };
         if !ripe {
             continue;
         }
-        if cfg.dry_run && !ledger.take_dry_log(&p.pane_id) {
+        if cfg.dry_run && !ledger.take_dry_log(&obs.pane_id) {
             continue;
         }
         let idle_ms = idle_since(&obs).map_or(0, |s| now - s);
@@ -871,10 +939,12 @@ pub fn append_log(
 ) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(state_dir)?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(state_dir.join("spec-sweep.log"))?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    // The log holds session ids: owner-only, like the close records.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts.open(state_dir.join("spec-sweep.log"))?;
     writeln!(f, "{}", log_entry(r, record, would_close, now))
 }
 
@@ -1082,6 +1152,18 @@ impl SweepEnv for LiveEnv {
             .map(|m| m.ts)
     }
 
+    fn inbox_last_from(&self, pane_id: &str, from: &str) -> Option<i64> {
+        self.shared
+            .inbox
+            .lock()
+            .unwrap()
+            .read(pane_id, 0)
+            .into_iter()
+            .filter(|m| m.from == from)
+            .map(|m| m.ts)
+            .max()
+    }
+
     fn reports_from(&self, parent: &str, from_pane: &str) -> Vec<(String, i64)> {
         self.shared
             .inbox
@@ -1248,9 +1330,25 @@ pub fn sweep_once(shared: &Arc<Shared>) {
         return;
     }
     let env = LiveEnv::new(shared);
+    // Observe on a snapshot of the ledger (the /proc + screen reads run unlocked), then take the
+    // lock only to decide and record hysteresis.
+    let snapshot = shared.spec_sweep.lock().unwrap().clone();
+    let observed = observe_all(&env, &snapshot);
+    drop(snapshot);
+    let now = env.now_ms();
+    let live: std::collections::HashSet<String> = shared
+        .model
+        .lock()
+        .unwrap()
+        .panes()
+        .into_iter()
+        .map(|r| r.pane_id)
+        .collect();
     let actions = {
         let mut ledger = shared.spec_sweep.lock().unwrap();
-        sweep_pass(&env, &mut ledger, &cfg)
+        // Forget panes that no longer exist at all (never just non-spec ones).
+        ledger.retain_panes(&live);
+        apply_pass(&mut ledger, observed, &cfg, now)
     };
     let state_dir = crate::persistence::paths::state_dir();
     for a in actions {
@@ -1266,7 +1364,37 @@ pub fn sweep_once(shared: &Arc<Shared>) {
             meta: BTreeMap::new(),
             cwd: a.obs.cwd.clone(),
         };
+        if !a.dry_run && !still_closable(shared, &cfg, &a.obs.pane_id) {
+            continue;
+        }
         perform_close(shared, &env, &state_dir, &pane, &a);
+    }
+}
+
+/// The last look right before a close: a fresh observation (fresh peer registry, screen and
+/// /proc) must still say close. A keep here resets the pane's hysteresis.
+fn still_closable(shared: &Arc<Shared>, cfg: &SweepCfg, pane_id: &str) -> bool {
+    let env = LiveEnv::new(shared);
+    let Some(p) = env.spec_panes().into_iter().find(|p| p.pane_id == pane_id) else {
+        return false;
+    };
+    let snapshot = shared.spec_sweep.lock().unwrap().clone();
+    let o = observe(&env, &snapshot, &p);
+    let now = env.now_ms();
+    match decide(&o, cfg, now) {
+        Verdict::Close(_) => true,
+        keep => {
+            eprintln!(
+                "[spec-sweep] keeping spec pane {pane_id} at the last check ({})",
+                keep.describe()
+            );
+            shared
+                .spec_sweep
+                .lock()
+                .unwrap()
+                .note_verdict(pane_id, false, now);
+            false
+        }
     }
 }
 
@@ -1310,6 +1438,32 @@ fn perform_close(
         eprintln!("[spec-sweep] log write failed: {e}");
     }
     eprintln!("{summary}");
+    let control_file = shared.control_file.to_str().map(str::to_string);
+    let result = {
+        let mut m = shared.model.lock().unwrap();
+        crate::control::dispatch::handle_command(
+            &mut m,
+            &shared.sessions,
+            control_file.as_deref(),
+            None,
+            &json!({ "type": "closePane", "paneId": rec.pane_id }),
+            &shared.speech,
+        )
+    };
+    shared.reconcile_policies();
+    if result.notify_state {
+        notify_state(shared);
+    }
+    if result.status != 200 {
+        eprintln!(
+            "[spec-sweep] closePane {} failed ({}): {}",
+            rec.pane_id, result.status, result.body
+        );
+        return;
+    }
+    shared.nudges.lock().unwrap().drop_pane(&rec.pane_id);
+    shared.spec_sweep.lock().unwrap().drop_pane(&rec.pane_id);
+    // Tell the parent only once the pane is really gone.
     if let (Some(parent), Some(path)) = (&rec.parent, &path) {
         let known = shared.model.lock().unwrap().pane(parent).is_some();
         if known {
@@ -1331,24 +1485,6 @@ fn perform_close(
             );
         }
     }
-    let control_file = shared.control_file.to_str().map(str::to_string);
-    let result = {
-        let mut m = shared.model.lock().unwrap();
-        crate::control::dispatch::handle_command(
-            &mut m,
-            &shared.sessions,
-            control_file.as_deref(),
-            None,
-            &json!({ "type": "closePane", "paneId": rec.pane_id }),
-            &shared.speech,
-        )
-    };
-    shared.reconcile_policies();
-    if result.notify_state {
-        notify_state(shared);
-    }
-    shared.nudges.lock().unwrap().drop_pane(&rec.pane_id);
-    shared.spec_sweep.lock().unwrap().drop_pane(&rec.pane_id);
 }
 
 /// A spec pane's row for a team panel.

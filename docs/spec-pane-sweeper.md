@@ -4,7 +4,7 @@ A goal's spec agent is an interactive `claude` pane that idles forever once its 
 The app sweeps these panes once a minute (`control::spec_sweep`) and closes the ones that are
 provably done, leaving a handover record and a resume command.
 
-A "spec pane" is a pane whose meta has `role: "spec"`.
+A "spec pane" is a pane whose meta has `role: "spec"`, a `goal` and a `parent`.
 
 ## When a pane is closed
 
@@ -12,7 +12,8 @@ A pane is closed only when a close verdict has held on two sweeps at least 60 s 
 that says keep resets the clock), by either trigger:
 
 - **A. Goal done**: meta `hp.goalState` is `done`, or the pane's newest report to its parent
-  starts with `done`; closed once idle for `doneCloseMinutes` (default 30).
+  starts with `done` and its parent has not written to it since (a later message from the parent,
+  e.g. rework, cancels the `done`); closed once idle for `doneCloseMinutes` (default 30).
 - **B. Idle**: idle for `idleCloseHours` (default 3).
 
 `idle since` is the newest of: last pty output, the peer status change (while the peer is idle),
@@ -26,24 +27,28 @@ hours for trigger B.
 - the pane is busy (output-quiet heuristic), or its Claude peer record is missing or not `idle`
 - the screen shows a selection dialog (`Enter to select`, `↑/↓`, `Esc to cancel`, `Do you want`)
   or a typed draft in the prompt box (a dim ghost suggestion does not count)
-- trigger B only: its last report was `needs-decision` or `blocked` and nothing has been sent to it since
+- trigger B only: its last report was `needs-decision` or `blocked` and its parent has not written
+  to it since (messages from anyone else do not count as an answer)
 - a task is `claimed` on its goal queue (`hp.queue`, else `<goal>` and `<project-basename>-<goal>`)
 - a worker pane (role `worker`, `parent` = this pane) is running
 - a live descendant process started more than 60 s after the claude process (Linux only; on
   other platforms this is unknown and the sweeper never closes)
 - an unread inbox nudge is pending for it
 - meta `hp.report` is set but the file is missing or empty
+- no resume command can be built (no valid session id / cwd in the pane's session marker)
 
 ## Settings
 
 `control-settings.json`, all optional:
 
 ```json
-{ "specSweep": { "enabled": true, "idleCloseHours": 3, "doneCloseMinutes": 30, "dryRun": false } }
+{ "specSweep": { "enabled": true, "idleCloseHours": 3, "doneCloseMinutes": 30, "dryRun": true } }
 ```
 
 Missing or garbage values take the defaults. `HYPERPANES_SPEC_SWEEP=0|false|off` disables the
 sweeper regardless. `dryRun` only logs, once per run of close verdicts, with `wouldClose: true`.
+It defaults to `true`, so a first install only logs what it would close: check the `wouldClose`
+lines in `spec-sweep.log`, then set `"dryRun": false` to let it close panes.
 
 ## What a close does
 
@@ -52,7 +57,8 @@ sweeper regardless. `dryRun` only logs, once per run of close verdicts, with `wo
    parent, and the last 60 screen lines. If this write fails the pane is kept.
 2. Appends one JSON line to `<state dir>/spec-sweep.log`:
    `{ts, paneId, goal, parent, reason, sessionId, configDir, cwd, idleMin, rssKb, resume, record}`
-   (plus `wouldClose` in dry-run), and prints a one-line summary to stderr.
+   (plus `wouldClose` in dry-run), and prints a one-line summary to stderr. The log is created
+   owner-only (0600): it holds session ids.
 3. Posts to the parent's inbox, from `hyperpanes`, without a nudge:
    `spec pane closed: goal <g> (<reason>, idle <n>m). Resume: <cmd>. Record: <path>`.
 4. Closes the pane exactly as the `closePane` command does.
