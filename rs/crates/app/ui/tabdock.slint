@@ -5,6 +5,39 @@
 import { Theme, GroupGlyph, SelectionHint } from "theme.slint";
 import { TabItem } from "types.slint";
 
+// Tab status indicator, shared by the top-bar TabChip and the docked VTabChip: three dots
+// (the lit one cycles with `dot-phase`; all lit and static under reduced motion) while any
+// pane in the tab is working, else "IDLE". Fixed width in both states, so the row never jumps.
+export component TabStatusSlot inherits Rectangle {
+    in property <bool> working: false;
+    in property <int> dot-phase: 0;
+    in property <bool> reduce-motion: false;
+    width: 26px;
+    if root.working : HorizontalLayout {
+        alignment: center;
+        spacing: 2px;
+        for i in 3 : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                property <bool> lit: root.reduce-motion || root.dot-phase == i;
+                width: 4px;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.accent;
+                opacity: self.lit ? 1.0 : 0.4;
+            }
+        }
+    }
+    if !root.working : Text {
+        text: "IDLE";
+        color: Theme.subtext;
+        font-size: 9px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component PlusIcon inherits Rectangle {
     in property <color> ink;
     width: 11px;
@@ -91,6 +124,9 @@ component VTabChip inherits Rectangle {
     in property <string> a11y-label: "";
     in property <bool> bar-left: true;       // active bar on the edge facing the panes
     in property <bool> overflowing: false;   // list scrolls → plain wheel scrolls, Shift cycles
+    in property <bool> working: false;       // any pane busy → dots; else IDLE (see TabStatusSlot)
+    in property <int> dot-phase: 0;
+    in property <bool> reduce-motion: false;
     callback select();
     callback close();
     callback begin-rename();
@@ -109,7 +145,7 @@ component VTabChip inherits Rectangle {
 
     height: 28px;
     accessible-role: tab;
-    accessible-label: root.a11y-label != "" ? root.a11y-label : root.title;
+    accessible-label: (root.a11y-label != "" ? root.a11y-label : root.title) + (root.working ? ", working" : ", idle");
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
 
@@ -180,6 +216,13 @@ component VTabChip inherits Rectangle {
             visible: !root.editing;
         }
 
+        TabStatusSlot {
+            working: root.working;
+            dot-phase: root.dot-phase;
+            reduce-motion: root.reduce-motion;
+            visible: !root.editing;
+        }
+
         Rectangle {
             width: 18px;
             height: 18px;
@@ -242,6 +285,8 @@ export component TabColumn inherits Rectangle {
     in property <length> drop-tab-x: 0px;      // caret's window-y
     in property <bool> drop-tab-active: false;
     in property <int> drop-tab-idx: -1;
+    in property <int> tab-dot-phase: 0;
+    in property <bool> reduce-motion: false;
 
     callback select-tab(int);
     callback close-tab(int);
@@ -339,6 +384,9 @@ export component TabColumn inherits Rectangle {
                     tab-color: tab.color;
                     bar-left: root.tab-dock == 1;
                     overflowing: root.overflowing;
+                    working: tab.working;
+                    dot-phase: root.tab-dot-phase;
+                    reduce-motion: root.reduce-motion;
                     select => { root.select-tab(idx); }
                     close => { root.close-tab(idx); }
                     begin-rename => { root.begin-rename(idx); }

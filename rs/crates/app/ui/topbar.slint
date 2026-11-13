@@ -8,7 +8,7 @@
 
 import { Theme, GroupGlyph, SelectionHint } from "theme.slint";
 import { TabItem, LayoutOption } from "types.slint";
-import { PlusIcon, CloseIcon, GripHandle } from "tabdock.slint";
+import { PlusIcon, CloseIcon, GripHandle, TabStatusSlot } from "tabdock.slint";
 
 // ---- stroked icons (match the Electron SVGs: 1.7px rounded strokes) ----
 
@@ -167,33 +167,12 @@ component TabChip inherits Rectangle {
             visible: !root.editing;
         }
 
-        // status slot — fixed width in both states so the chip never jumps
-        Rectangle {
-            width: 26px;
+        // status slot (shared with the vertical tab rows) — fixed width in both states
+        TabStatusSlot {
+            working: root.working;
+            dot-phase: root.dot-phase;
+            reduce-motion: root.reduce-motion;
             visible: !root.editing;
-            if root.working : HorizontalLayout {
-                alignment: center;
-                spacing: 2px;
-                for i in 3 : VerticalLayout {
-                    alignment: center;
-                    Rectangle {
-                        property <bool> lit: root.reduce-motion || root.dot-phase == i;
-                        width: 4px;
-                        height: 4px;
-                        border-radius: 2px;
-                        background: Theme.accent;
-                        opacity: self.lit ? 1.0 : 0.4;
-                    }
-                }
-            }
-            if !root.working : Text {
-                text: "IDLE";
-                color: Theme.subtext;
-                font-size: 9px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
         }
 
         // close affordance: hidden until hover/active (Electron behaviour)

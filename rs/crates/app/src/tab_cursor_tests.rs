@@ -260,3 +260,42 @@ fn grip_is_an_accessible_button_with_label() {
         "grip button missing; labels = {labels:?}"
     );
 }
+
+/// Every tab-dock side (0 top, 1 right, 2 left) renders the tab-status indicator: the docked
+/// VTabChip rows carry the same `working` flag as the top-bar chips, surfaced in each tab's
+/// accessible label (", working" / ", idle").
+#[test]
+fn tab_status_reaches_every_dock_side() {
+    let h = H::new();
+    let tabs: Vec<TabItem> = (0..3)
+        .map(|i| TabItem {
+            title: format!("tab {i}").into(),
+            active: i == 0,
+            has_color: false,
+            color: Default::default(),
+            group: false,
+            group_color: slint::Color::default(),
+            a11y_label: Default::default(),
+            working: i == 1,
+        })
+        .collect();
+    h.win.set_tabs(ModelRc::from(Rc::new(VecModel::from(tabs))));
+    for dock in 0..=2 {
+        h.win.set_tab_dock(dock);
+        h.settle();
+        let comp = WindowInner::from_pub(h.win.window()).component();
+        let mut items = Vec::new();
+        find_role(ItemRc::new(comp, 0), AccessibleRole::Tab, &mut items);
+        let mut labels: Vec<String> = items
+            .iter()
+            .filter_map(|t| t.accessible_string_property(AccessibleStringProperty::Label))
+            .map(|l| l.to_string())
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec!["tab 0, idle", "tab 1, working", "tab 2, idle"],
+            "dock {dock}"
+        );
+    }
+}
