@@ -219,15 +219,18 @@ impl TermGrid {
         const RST: &[u8] = b"\x1b[?2031l";
         const QRY: &[u8] = b"\x1b[?996n";
         let mut buf = std::mem::take(&mut self.scan_tail);
+        // A match must end in the new bytes: one lying whole in the kept tail was seen last time.
+        let seen = buf.len();
         buf.extend_from_slice(bytes);
         let mut i = 0;
         while i < buf.len() {
             let rest = &buf[i..];
-            if rest.starts_with(SET) {
+            let ends_new = |pat: &[u8]| i + pat.len() > seen;
+            if rest.starts_with(SET) && ends_new(SET) {
                 self.scheme_updates = true;
-            } else if rest.starts_with(RST) {
+            } else if rest.starts_with(RST) && ends_new(RST) {
                 self.scheme_updates = false;
-            } else if rest.starts_with(QRY) {
+            } else if rest.starts_with(QRY) && ends_new(QRY) {
                 let report = self.scheme_report();
                 self.queue_reply(report);
             }
@@ -1217,5 +1220,19 @@ mod tests {
         g.set_base16(light_base());
         g.feed(b"\x1b[?996n");
         assert_eq!(reply_str(&mut g), "\x1b[?997;2n");
+        // The query sits whole in the kept tail: the next feed must not answer it again.
+        g.feed(b"x");
+        assert!(g.take_replies().is_empty(), "answered once");
+    }
+
+    #[test]
+    fn scheme_query_996_split_across_feeds() {
+        let mut g = TermGrid::new(20, 3);
+        g.feed(b"\x1b[?99");
+        assert!(g.take_replies().is_empty());
+        g.feed(b"6n");
+        assert_eq!(reply_str(&mut g), "\x1b[?997;1n");
+        g.feed(b"y");
+        assert!(g.take_replies().is_empty(), "answered once");
     }
 }
