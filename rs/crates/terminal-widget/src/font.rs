@@ -397,7 +397,7 @@ fn embolden_mask(mask: &[u8], w: u32, h: u32, d: f32) -> (Vec<u8>, u32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a `Font` whose primary is the bundled JetBrains Mono (written to a temp
@@ -413,7 +413,7 @@ mod tests {
     /// rename is atomic, so a reader either opens the old inode or the new one, never a
     /// half-written file. Writing the shared path directly made `bold_never_dims_a_glyph`
     /// fail intermittently in the full suite while passing when run alone.
-    fn font_at(px: f32) -> Font {
+    pub(crate) fn font_at(px: f32) -> Font {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let dir = std::env::temp_dir();
         let p = dir.join("hp-font-test-jbmono.ttf");

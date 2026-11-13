@@ -795,6 +795,7 @@ mod pane_group_menu_tests {
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,

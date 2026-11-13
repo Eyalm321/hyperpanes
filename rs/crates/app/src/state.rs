@@ -74,6 +74,9 @@ pub struct DetachedPane {
     /// emulator's replies to an answered replay (see `TerminalPane::feed_replay`) and answers
     /// an unanswered one, since a just-started program may still be waiting on it.
     pub replay_answered: bool,
+    /// The pane's live grid when it was lifted off one (see [`LiveGrid`]); empty for a
+    /// session no grid has shown, and for a clone.
+    pub live: LiveGrid,
     pub title: SharedString,
     pub subtitle: Option<SharedString>,
     pub pinned_accent: Option<Color>,
@@ -92,6 +95,136 @@ pub struct DetachedPane {
     /// The explicit spawn env, carried across a re-host so the relaunch snapshot can still
     /// persist it (see `hyperpanes_core::workspace::env_persist`).
     pub spawn_env: Option<hyperpanes_core::session::spawn::EnvMap>,
+}
+
+/// The live emulator grid of a pane lifted off a GUI grid (a move, a tear-off, the closed-tab
+/// stack), carried to whoever re-hosts it.
+///
+/// Re-priming a fresh grid from the session's replay buffer cannot rebuild the screen of a
+/// full-screen TUI: the buffer is a bounded raw tail, and a diff renderer (an agent CLI) only
+/// rewrites the cells it believes changed, so a grid rebuilt from the tail keeps stray glyphs
+/// from earlier frames and misses cells that were not touched inside it. Those stay on screen
+/// until the program happens to repaint everything. Carrying the grid keeps the screen and
+/// scrollback exactly.
+///
+/// `Clone` yields an EMPTY carry: a grid has one owner, so a cloned [`DetachedPane`] re-hosts
+/// from the replay buffer (with a [`RepaintNudge`]) instead.
+#[derive(Default)]
+pub struct LiveGrid(Option<Box<TerminalPane>>);
+
+impl LiveGrid {
+    pub fn new(pane: TerminalPane) -> Self {
+        Self(Some(Box::new(pane)))
+    }
+
+    #[cfg(test)]
+    pub fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn take(&mut self) -> Option<TerminalPane> {
+        self.0.take().map(|b| *b)
+    }
+}
+
+impl Clone for LiveGrid {
+    fn clone(&self) -> Self {
+        Self(None)
+    }
+}
+
+impl std::fmt::Debug for LiveGrid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "LiveGrid(carried)"
+        } else {
+            "LiveGrid(none)"
+        })
+    }
+}
+
+/// How long a [`RepaintNudge`] holds the pty one row short before restoring it. It has to
+/// outlast the program's SIGWINCH handling: a program that reads the size only after both
+/// resizes have landed sees no change, and Node (e.g. an agent CLI) then never emits `resize`.
+pub const REPAINT_NUDGE_HOLD: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A forced full repaint of a pane whose grid was rebuilt from the replay buffer (a GUI-restart
+/// re-attach, a re-host without a carried [`LiveGrid`]). The grid can't be rebuilt faithfully
+/// from a raw tail (see [`LiveGrid`]), so once the pane is laid out the pty is resized one row
+/// short and then back. The program gets a real size change and redraws everything over the
+/// rebuilt grid. A program on the primary screen (a shell) just redraws its prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepaintNudge {
+    #[default]
+    Idle,
+    /// Primed from the replay buffer; shrink the pty once the pane's layout has been stable
+    /// for [`REPAINT_NUDGE_HOLD`] (never in the middle of a resize). `Some` = when the layout
+    /// last changed the grid size.
+    Armed(Option<Instant>),
+    /// The pty is one row short since this instant; restore it after [`REPAINT_NUDGE_HOLD`].
+    Shrunk(Instant),
+}
+
+impl RepaintNudge {
+    /// The layout just resized this pane's grid: an armed nudge waits for it to settle.
+    pub fn layout_changed(&mut self, now: Instant) {
+        if let RepaintNudge::Armed(_) = self {
+            *self = RepaintNudge::Armed(Some(now));
+        }
+    }
+
+    /// Advance the nudge for a laid-out pane whose grid is `applied` (cols, rows). Returns the
+    /// pty size to apply now, if any. Fires exactly once per arming: shrink, then restore.
+    pub fn step(&mut self, now: Instant, applied: (usize, usize)) -> Option<(u16, u16)> {
+        let (cols, rows) = (
+            applied.0.clamp(1, u16::MAX as usize) as u16,
+            applied.1.clamp(1, u16::MAX as usize) as u16,
+        );
+        match *self {
+            RepaintNudge::Idle => None,
+            RepaintNudge::Armed(Some(at)) if now.duration_since(at) < REPAINT_NUDGE_HOLD => None,
+            RepaintNudge::Armed(_) => {
+                let short = if rows >= 2 {
+                    (cols, rows - 1)
+                } else if cols >= 2 {
+                    (cols - 1, rows)
+                } else {
+                    *self = RepaintNudge::Idle;
+                    return None;
+                };
+                *self = RepaintNudge::Shrunk(now);
+                Some(short)
+            }
+            RepaintNudge::Shrunk(at) if now.duration_since(at) >= REPAINT_NUDGE_HOLD => {
+                *self = RepaintNudge::Idle;
+                Some((cols, rows))
+            }
+            RepaintNudge::Shrunk(_) => None,
+        }
+    }
+}
+
+/// The grid a re-hosted pane starts from: the carried [`LiveGrid`] when there is one (exact),
+/// else a fresh `fallback`-sized grid primed from the session's replay buffer, plus whether
+/// that rebuilt grid needs a [`RepaintNudge`]. Returns `(grid, applied size, nudge)`.
+pub(crate) fn rehost_grid(
+    mgr: &SessionManager,
+    det: &mut DetachedPane,
+    fallback: (usize, usize),
+) -> (TerminalPane, (usize, usize), RepaintNudge) {
+    if let Some(pane) = det.live.take() {
+        let size = pane.grid_size();
+        return (pane, size, RepaintNudge::Idle);
+    }
+    let mut pane = TerminalPane::new(fallback.0, fallback.1, Box::new(SoftwareRenderer::new()));
+    let mut nudge = RepaintNudge::Idle;
+    if let Some(replay) = mgr.replay(&det.uid) {
+        prime_from_replay(&mut pane, &replay, det.replay_answered);
+        if !replay.is_empty() {
+            nudge = RepaintNudge::Armed(None);
+        }
+    }
+    (pane, fallback, nudge)
 }
 
 /// Prime a fresh grid from a session's replay buffer. `answered`: a previous GUI grid already
@@ -933,6 +1066,9 @@ pub struct PaneState {
     pub pane: TerminalPane,
     /// Cell dims currently applied to the bound session (to detect a real reflow).
     pub applied: (usize, usize),
+    /// A pending forced repaint after the grid was rebuilt from the replay buffer (see
+    /// [`RepaintNudge`]); advanced by the pump once the pane is laid out.
+    pub repaint_nudge: RepaintNudge,
     /// The latest rendered terminal image.
     pub surface: Image,
     /// Placement in logical px, recomputed on relayout.
@@ -1165,6 +1301,7 @@ impl PaneState {
     fn into_detached(self) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: LiveGrid::new(self.pane),
             uid: self.uid,
             title: self.title,
             subtitle: self.subtitle,
@@ -1887,6 +2024,7 @@ impl State {
             accent: accent.unwrap_or_else(|| theme::accent_for(idx, palette)),
             pane,
             applied: (cols as usize, rows as usize),
+            repaint_nudge: RepaintNudge::Idle,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -1946,6 +2084,7 @@ impl State {
             accent: accent.unwrap_or_else(|| theme::accent_for(idx, self.settings.frame_palette)),
             pane,
             applied: (cols, rows),
+            repaint_nudge: RepaintNudge::Idle,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -2129,6 +2268,7 @@ impl State {
         Some((
             DetachedPane {
                 replay_answered: true,
+                live: LiveGrid::new(ps.pane),
                 uid: ps.uid,
                 title: ps.title,
                 subtitle: ps.subtitle,
@@ -2155,19 +2295,12 @@ impl State {
     /// terminal grid, prime it from the session's **replay buffer** (recent scrollback — so
     /// no blank pane and no PTY restart), rebind it to the existing `uid`, and focus it.
     /// `at` is clamped to `0..=len`, so a stitch can insert the pane at a hovered slot.
-    pub fn adopt_pane_at(&mut self, mgr: &SessionManager, det: DetachedPane, at: usize) {
+    pub fn adopt_pane_at(&mut self, mgr: &SessionManager, mut det: DetachedPane, at: usize) {
         let palette = self.settings.frame_palette;
-        let (cols, rows) = (80u16, 24u16);
-        let mut pane = TerminalPane::new(
-            cols as usize,
-            rows as usize,
-            Box::new(SoftwareRenderer::new()),
-        );
+        // The carried grid when there is one; else rebuilt from the replay buffer (and then
+        // repainted by the program once laid out — see `RepaintNudge`).
+        let (mut pane, applied, repaint_nudge) = rehost_grid(mgr, &mut det, (80, 24));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
-        // Replay the rolling buffer so the re-hosted pane shows recent output instantly.
-        if let Some(replay) = mgr.replay(&det.uid) {
-            prime_from_replay(&mut pane, &replay, det.replay_answered);
-        }
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let font = theme::load_font_at(&self.settings.font_path(), det.font_px, self.last_scale);
         let ps = PaneState {
@@ -2180,7 +2313,8 @@ impl State {
                 .pinned_accent
                 .unwrap_or_else(|| theme::accent_for(at, palette)),
             pane,
-            applied: (cols as usize, rows as usize),
+            applied,
+            repaint_nudge,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -2266,6 +2400,7 @@ impl State {
         Some((
             DetachedPane {
                 replay_answered: true,
+                live: LiveGrid::new(ps.pane),
                 uid: ps.uid,
                 title: ps.title,
                 subtitle: ps.subtitle,
@@ -5100,6 +5235,7 @@ impl State {
         let (ps, _alive) = self.take_pane_in(self.active, idx)?;
         Some(DetachedPane {
             replay_answered: true,
+            live: LiveGrid::new(ps.pane),
             uid: ps.uid,
             title: ps.title,
             subtitle: ps.subtitle,
@@ -5117,23 +5253,15 @@ impl State {
     /// Adopt a detached session at the end of tab `ti` **without** changing the active tab
     /// (re-host into a background tab — replay-primed, no PTY restart). Used by move-to-tab +
     /// reopen-closed-tab.
-    fn adopt_into_tab(&mut self, mgr: &SessionManager, det: DetachedPane, ti: usize) {
+    fn adopt_into_tab(&mut self, mgr: &SessionManager, mut det: DetachedPane, ti: usize) {
         if ti >= self.tabs.len() {
             // Never drop the session on the floor: give it a tab of its own.
             self.rescue_detached(mgr, det, None, "adopt target tab out of range");
             return;
         }
         let palette = self.settings.frame_palette;
-        let (cols, rows) = (80u16, 24u16);
-        let mut pane = TerminalPane::new(
-            cols as usize,
-            rows as usize,
-            Box::new(SoftwareRenderer::new()),
-        );
+        let (mut pane, applied, repaint_nudge) = rehost_grid(mgr, &mut det, (80, 24));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
-        if let Some(replay) = mgr.replay(&det.uid) {
-            prime_from_replay(&mut pane, &replay, det.replay_answered);
-        }
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let at = self.tabs[ti].panes.len();
         let accent = det
@@ -5148,7 +5276,8 @@ impl State {
             show_dot: det.show_dot,
             accent,
             pane,
-            applied: (cols as usize, rows as usize),
+            applied,
+            repaint_nudge,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -5874,6 +6003,7 @@ impl State {
             .into_iter()
             .map(|p| DetachedPane {
                 replay_answered: true,
+                live: LiveGrid::new(p.pane),
                 uid: p.uid,
                 title: p.title,
                 subtitle: p.subtitle,
@@ -6591,12 +6721,17 @@ impl State {
             Box::new(SoftwareRenderer::new()),
         );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        let mut repaint_nudge = RepaintNudge::Idle;
         if reattach {
             // Re-host the survivor: seed the fresh grid from the daemon's retained replay (the
             // same replay-into-a-fresh-grid path `adopt_into_tab` uses for a moved pane). No
             // pty spawn — the live process is already running in the daemon.
             if let Some(replay) = mgr.replay(&uid) {
                 pane.feed_replay(&replay);
+                // A raw tail can't rebuild a full-screen program's screen: have it repaint.
+                if !replay.is_empty() {
+                    repaint_nudge = RepaintNudge::Armed(None);
+                }
             }
         } else {
             Self::spawn_session_async(
@@ -6647,6 +6782,7 @@ impl State {
             accent: pinned.unwrap_or_else(|| theme::accent_for(idx, palette)),
             pane,
             applied: (cols as usize, rows as usize),
+            repaint_nudge,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -6834,6 +6970,7 @@ mod replay_priming_tests {
                 &m,
                 DetachedPane {
                     replay_answered: false,
+                    live: Default::default(),
                     uid: uid.into(),
                     title: uid.into(),
                     subtitle: None,
@@ -6879,6 +7016,7 @@ mod replay_priming_tests {
                 &m,
                 DetachedPane {
                     replay_answered: answered,
+                    live: Default::default(),
                     uid: uid.into(),
                     title: uid.into(),
                     subtitle: None,
@@ -6913,6 +7051,166 @@ mod replay_priming_tests {
         let (ti, pi) = st.find_pane("live").unwrap();
         assert!(st.tabs[ti].panes[pi].pane.take_replies().is_empty());
         m.kill("live");
+    }
+}
+
+#[cfg(test)]
+mod rehost_grid_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn det(uid: &str, answered: bool) -> DetachedPane {
+        DetachedPane {
+            replay_answered: answered,
+            live: Default::default(),
+            uid: uid.into(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        }
+    }
+
+    /// A wide frame of a cursor-addressed (diff-style) full-screen program, the way an agent
+    /// CLI draws: absolute moves, no clears. Fed into an 80x24 grid it wraps and lands in the
+    /// wrong cells, which is what a re-host used to do with the replay buffer.
+    fn wide_frame(tag: &str) -> String {
+        let mut s = String::new();
+        for row in 1..=30 {
+            s.push_str(&format!("\x1b[{row};150H{tag}-right-{row}"));
+            s.push_str(&format!("\x1b[{row};1H{tag}-left-{row}"));
+        }
+        s
+    }
+
+    /// A pane moved between tabs (control `movePane`) keeps its exact grid: the live grid is
+    /// carried, not rebuilt from the replay buffer at 80x24 (which scattered stray glyphs over
+    /// a wide full-screen program), and no repaint nudge is needed.
+    #[test]
+    fn a_moved_pane_keeps_its_grid_cell_for_cell() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        let mut st = State::new(theme::load_font(1.0));
+        st.adopt_pane(&m, det("a", true));
+        st.adopt_pane(&m, det("b", true));
+        let (ti, pi) = st.find_pane("b").unwrap();
+        {
+            let p = &mut st.tabs[ti].panes[pi];
+            p.pane.resize(200, 40);
+            p.applied = (200, 40);
+            p.pane.feed(&wide_frame("one"));
+        }
+        let before = st.tabs[ti].panes[pi].pane.screen_text();
+        assert!(before.contains("one-right-30"));
+
+        let mp = st.lift_pane("b").expect("lift");
+        assert!(mp.det.live.is_some(), "the live grid travels with the pane");
+        let bg = st.push_background_tab("elsewhere", None, None, None);
+        let to = st.tab_index_by_uid(bg).unwrap();
+        st.place_moved_pane(&m, mp, to);
+
+        let (ti, pi) = st.find_pane("b").unwrap();
+        let p = &mut st.tabs[ti].panes[pi];
+        assert!(
+            p.pane.take_dirty(),
+            "the re-hosted surface is redrawn at once"
+        );
+        assert_eq!(p.pane.grid_size(), (200, 40));
+        assert_eq!(p.applied, (200, 40));
+        assert_eq!(p.pane.screen_text(), before);
+        assert_eq!(p.repaint_nudge, RepaintNudge::Idle);
+    }
+
+    /// Detach + adopt (tear-off, cross-window re-host, closed-tab reopen) carries the grid too,
+    /// and a clone of a detached pane carries none (one owner), so it falls back to the replay.
+    #[test]
+    fn detach_then_adopt_carries_the_grid_and_clones_do_not() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        let mut src = State::new(theme::load_font(1.0));
+        src.adopt_pane(&m, det("a", true));
+        src.adopt_pane(&m, det("b", true));
+        let (ti, pi) = src.find_pane("b").unwrap();
+        src.tabs[ti].panes[pi].pane.resize(200, 40);
+        src.tabs[ti].panes[pi].pane.feed(&wide_frame("two"));
+        let before = src.tabs[ti].panes[pi].pane.screen_text();
+
+        let (d, _) = src.detach_focused(&m).expect("detach");
+        assert!(!d.clone().live.is_some(), "a clone never owns the grid");
+        let mut dst = State::new(theme::load_font(1.0));
+        dst.adopt_pane(&m, d);
+        let (ti, pi) = dst.find_pane("b").unwrap();
+        assert_eq!(dst.tabs[ti].panes[pi].pane.screen_text(), before);
+        assert_eq!(dst.tabs[ti].panes[pi].pane.grid_size(), (200, 40));
+    }
+
+    /// A pane rebuilt from a non-empty replay buffer (no carried grid) is armed for one forced
+    /// repaint; an empty replay (nothing drawn yet) is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_replay_primed_pane_is_armed_for_a_repaint() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        m.create(SpawnOptions {
+            uid: "drawn".into(),
+            command: Some("printf 'frame'; sleep 30".into()),
+            ..Default::default()
+        })
+        .expect("spawn a session");
+        let t0 = Instant::now();
+        while !m.replay("drawn").is_some_and(|r| r.contains("frame")) {
+            assert!(
+                t0.elapsed() < Duration::from_secs(10),
+                "no output in replay"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut st = State::new(theme::load_font(1.0));
+        st.adopt_pane(&m, det("drawn", true));
+        st.adopt_pane(&m, det("never-drew", true));
+        let (ti, pi) = st.find_pane("drawn").unwrap();
+        assert_eq!(
+            st.tabs[ti].panes[pi].repaint_nudge,
+            RepaintNudge::Armed(None)
+        );
+        let (ti, pi) = st.find_pane("never-drew").unwrap();
+        assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Idle);
+        m.kill("drawn");
+    }
+
+    /// The nudge shrinks the pty one row, holds it long enough for the program to see a real
+    /// size change, restores the laid-out size, then stays idle.
+    #[test]
+    fn repaint_nudge_shrinks_holds_then_restores_once() {
+        let t0 = Instant::now();
+        let mut n = RepaintNudge::Armed(None);
+        assert_eq!(n.step(t0, (200, 40)), Some((200, 39)));
+        assert_eq!(n.step(t0 + Duration::from_millis(10), (200, 40)), None);
+        assert_eq!(n.step(t0 + REPAINT_NUDGE_HOLD, (200, 40)), Some((200, 40)));
+        assert_eq!(n, RepaintNudge::Idle);
+        assert_eq!(n.step(t0 + REPAINT_NUDGE_HOLD * 2, (200, 40)), None);
+        // Mid-resize: a layout change re-arms the settle window; nothing fires until it holds.
+        let mut n = RepaintNudge::Armed(None);
+        n.layout_changed(t0);
+        assert_eq!(n.step(t0 + Duration::from_millis(10), (200, 40)), None);
+        assert_eq!(n.step(t0 + REPAINT_NUDGE_HOLD, (200, 40)), Some((200, 39)));
+        // Once shrunk, a layout change doesn't restart it; the restore sends the new size.
+        n.layout_changed(t0 + REPAINT_NUDGE_HOLD);
+        assert_eq!(
+            n.step(t0 + REPAINT_NUDGE_HOLD * 2, (210, 42)),
+            Some((210, 42))
+        );
+        // A one-row grid shrinks a column instead; a 1x1 grid can't be nudged.
+        let mut n = RepaintNudge::Armed(None);
+        assert_eq!(n.step(t0, (80, 1)), Some((79, 1)));
+        let mut n = RepaintNudge::Armed(None);
+        assert_eq!(n.step(t0, (1, 1)), None);
+        assert_eq!(n, RepaintNudge::Idle);
     }
 }
 
@@ -7291,6 +7589,7 @@ mod dictation_tests {
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,
@@ -7413,6 +7712,7 @@ mod spawn_cells_tests {
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: "t".into(),
             subtitle: None,
@@ -7500,6 +7800,7 @@ mod session_file_tests {
     fn det(uid: &str, font_px: f32) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,
@@ -7946,6 +8247,7 @@ mod reminder_tests {
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,
@@ -8489,6 +8791,7 @@ mod env_persist_tests {
     fn det_with_env(uid: &str, env: &[(&str, &str)]) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: "p".into(),
             subtitle: None,
@@ -8829,6 +9132,7 @@ mod pane_group_tests {
     fn det(uid: &str) -> DetachedPane {
         DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: uid.into(),
             title: uid.into(),
             subtitle: None,

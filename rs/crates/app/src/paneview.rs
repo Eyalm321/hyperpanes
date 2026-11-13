@@ -439,6 +439,7 @@ fn relayout_active(state: &mut State, area: (f32, f32), scale: f32, mgr: &Sessio
                 mgr.resize(&p.uid, cols as u16, rows as u16);
             }
             p.applied = (cols, rows);
+            p.repaint_nudge.layout_changed(Instant::now());
             // The grid rewrapped — recompute any open search so its highlights track the
             // reflowed text instead of drifting against stale match coordinates.
             p.pane.search_reflow();
@@ -1460,6 +1461,14 @@ pub fn pump(
             let _ = ps.pane.take_dirty();
             continue;
         }
+        // A grid rebuilt from the replay buffer: once laid out (rect set by `place`), resize
+        // the pty one row short and back so the program repaints over it (see RepaintNudge).
+        if ps.remote.is_none() && ps.rect.2 > 0.0 {
+            if let Some((c, r)) = ps.repaint_nudge.step(Instant::now(), ps.applied) {
+                crate::dbg_log(&format!("repaint-nudge uid={} pty={c}x{r}", ps.uid));
+                mgr.resize(&ps.uid, c, r);
+            }
+        }
         // Edge-autoscroll: if a selection drag is held at the top/bottom edge, scroll one line and
         // grow the selection into off-screen scrollback. It marks the grid dirty (so the surface
         // re-renders below) and warrants the fast cadence while it's moving.
@@ -1622,6 +1631,7 @@ mod tab_status_tests {
         DetachedPane {
             uid: uid.into(),
             replay_answered: false,
+            live: Default::default(),
             title: uid.into(),
             subtitle: None,
             pinned_accent: None,

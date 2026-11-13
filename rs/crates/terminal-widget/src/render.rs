@@ -986,6 +986,63 @@ struct GlyphOut { @builtin(position) pos: vec4<f32>,
 mod tests {
     use super::*;
 
+    /// The pane surface is a pure function of the grid: frame after frame through the same
+    /// (double-buffered) renderer, every redraw must equal a fresh render of the same grid.
+    /// Covers the sequences full-screen programs redraw with — erase in line / display,
+    /// scroll-region scrolls, insert / delete line, overwrites and wide glyphs — so no cell a
+    /// sequence cleared or moved can keep pixels from an earlier frame.
+    #[test]
+    fn every_redraw_equals_a_fresh_render_of_the_grid() {
+        use crate::pane::TerminalPane;
+        let mut font = crate::font::tests::font_at(14.0);
+        let opts = RenderOpts { cursor_on: true };
+        let (cols, rows) = (40, 10);
+        let fill: String = (1..=rows)
+            .map(|r| format!("\x1b[{r};1H{}", format!("row{r:02}-").repeat(6)))
+            .collect();
+        let steps: Vec<String> = vec![
+            fill.clone(),
+            "\x1b[3;10H\x1b[K".into(),  // EL 0: erase to end of line
+            "\x1b[4;20H\x1b[1K".into(), // EL 1: erase to start of line
+            "\x1b[5;1H\x1b[2K".into(),  // EL 2: erase whole line
+            "\x1b[7;15H\x1b[J".into(),  // ED 0: erase below
+            fill.clone(),
+            "\x1b[3;8r\x1b[8;1H\n\n\x1b[r".into(), // scroll inside a region
+            "\x1b[2;6r\x1b[2S\x1b[1T\x1b[r".into(), // SU / SD inside a region
+            "\x1b[4;1H\x1b[2L\x1b[6;1H\x1b[1M".into(), // insert / delete line
+            "\x1b[9;3H\x1b[3P\x1b[9;3H\x1b[2@".into(), // delete / insert chars
+            "\x1b[1;1H全角テキスト\x1b[1;2HX".into(), // wide glyphs, then split one
+            "\x1b[6;1Hoverwrite overwrite".into(),
+            "\x1b[1J".into(), // ED 1: erase above
+            "\x1b[2J".into(), // ED 2: erase display
+        ];
+
+        let mut live = TerminalPane::new(cols, rows, Box::new(SoftwareRenderer::new()));
+        let mut fed = String::new();
+        for (i, step) in steps.iter().enumerate() {
+            live.feed(step);
+            fed.push_str(step);
+            let drawn = live
+                .render(&mut font, &opts)
+                .to_rgba8()
+                .expect("rgba frame");
+            let mut fresh = TerminalPane::new(cols, rows, Box::new(SoftwareRenderer::new()));
+            fresh.feed(&fed);
+            let want = fresh
+                .render(&mut font, &opts)
+                .to_rgba8()
+                .expect("rgba frame");
+            assert_eq!(
+                (drawn.width(), drawn.height()),
+                (want.width(), want.height())
+            );
+            assert!(
+                drawn.as_slice() == want.as_slice(),
+                "step {i} ({step:?}): the redraw kept pixels the grid no longer has"
+            );
+        }
+    }
+
     #[test]
     fn srgb_round_trips_through_linear() {
         // The encode table is sampled, not computed, so this is the guard that its resolution
