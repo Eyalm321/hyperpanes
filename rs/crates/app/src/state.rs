@@ -204,17 +204,21 @@ impl RepaintNudge {
     }
 }
 
-/// The grid a re-hosted pane starts from: the carried [`LiveGrid`] when there is one (exact),
-/// else a fresh `fallback`-sized grid primed from the session's replay buffer, plus whether
-/// that rebuilt grid needs a [`RepaintNudge`]. Returns `(grid, applied size, nudge)`.
+/// The grid a re-hosted pane starts from: the carried [`LiveGrid`] when there is one (exact);
+/// else a grid primed from the session's screen seed (exact, see [`seeded_grid`]); else, from a
+/// daemon that offers no seed, a fresh `fallback`-sized grid primed from the session's replay
+/// buffer, which needs a [`RepaintNudge`]. Returns `(grid, applied size, nudge, seed cursor)`.
 pub(crate) fn rehost_grid(
     mgr: &SessionManager,
     det: &mut DetachedPane,
     fallback: (usize, usize),
-) -> (TerminalPane, (usize, usize), RepaintNudge) {
+) -> (TerminalPane, (usize, usize), RepaintNudge, Option<u64>) {
     if let Some(pane) = det.live.take() {
         let size = pane.grid_size();
-        return (pane, size, RepaintNudge::Idle);
+        return (pane, size, RepaintNudge::Idle, None);
+    }
+    if let Some((pane, size, cursor)) = seeded_grid(mgr, &det.uid, det.replay_answered) {
+        return (pane, size, RepaintNudge::Idle, Some(cursor));
     }
     let mut pane = TerminalPane::new(fallback.0, fallback.1, Box::new(SoftwareRenderer::new()));
     let mut nudge = RepaintNudge::Idle;
@@ -224,7 +228,45 @@ pub(crate) fn rehost_grid(
             nudge = RepaintNudge::Armed(None);
         }
     }
-    (pane, fallback, nudge)
+    (pane, fallback, nudge, None)
+}
+
+/// A grid rebuilt from the session's screen seed (issue #140): sized to the session's pty, primed
+/// with the replay (history, for scrollback) and then the seed's VT stream, which rebuilds the
+/// visible screen, modes and cursor exactly as the session's emulator holds them. No repaint
+/// nudge and no pty resize are needed. Returns `(grid, its size, the seed's output cursor)`, or
+/// `None` when the backend offers no seed (an older daemon): the caller falls back to the replay.
+/// `answered`: as for [`prime_from_replay`].
+pub(crate) fn seeded_grid(
+    mgr: &SessionManager,
+    uid: &str,
+    answered: bool,
+) -> Option<(TerminalPane, (usize, usize), u64)> {
+    let seed = mgr.screen_seed(uid)?;
+    let size = (seed.cols.max(1) as usize, seed.rows.max(1) as usize);
+    let mut pane = TerminalPane::new(size.0, size.1, Box::new(SoftwareRenderer::new()));
+    if let Some(replay) = mgr.replay(uid) {
+        prime_from_replay(&mut pane, &replay, answered);
+    }
+    // The seed asks the terminal nothing, so it adds no replies of its own.
+    pane.feed(&seed.vt);
+    Some((pane, size, seed.cursor))
+}
+
+/// Whether a live `Data` chunk ending at output `cursor` is already in the screen seed a pane was
+/// primed from (`seed`, the seed's cursor), so it must not be applied again. Chunks never
+/// straddle a seed's cursor (a seed is taken under the lock that appends whole chunks), so a
+/// chunk is either wholly in the seed or wholly after it. The first chunk past the seed clears
+/// it. A peer that sends no cursor (`0`) is never skipped.
+pub(crate) fn seed_skips(seed: &mut Option<u64>, cursor: u64) -> bool {
+    match *seed {
+        Some(at) if cursor != 0 && cursor <= at => true,
+        Some(_) => {
+            *seed = None;
+            false
+        }
+        None => false,
+    }
 }
 
 /// Prime a fresh grid from a session's replay buffer. `answered`: a previous GUI grid already
@@ -1069,6 +1111,9 @@ pub struct PaneState {
     /// A pending forced repaint after the grid was rebuilt from the replay buffer (see
     /// [`RepaintNudge`]); advanced by the pump once the pane is laid out.
     pub repaint_nudge: RepaintNudge,
+    /// The output cursor of the daemon screen seed this grid was primed from (issue #140), while
+    /// live `Data` the seed already holds may still arrive: see [`seed_skips`].
+    pub seed_cursor: Option<u64>,
     /// The latest rendered terminal image.
     pub surface: Image,
     /// Placement in logical px, recomputed on relayout.
@@ -2025,6 +2070,7 @@ impl State {
             pane,
             applied: (cols as usize, rows as usize),
             repaint_nudge: RepaintNudge::Idle,
+            seed_cursor: None,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -2085,6 +2131,7 @@ impl State {
             pane,
             applied: (cols, rows),
             repaint_nudge: RepaintNudge::Idle,
+            seed_cursor: None,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -2299,7 +2346,7 @@ impl State {
         let palette = self.settings.frame_palette;
         // The carried grid when there is one; else rebuilt from the replay buffer (and then
         // repainted by the program once laid out — see `RepaintNudge`).
-        let (mut pane, applied, repaint_nudge) = rehost_grid(mgr, &mut det, (80, 24));
+        let (mut pane, applied, repaint_nudge, seed_cursor) = rehost_grid(mgr, &mut det, (80, 24));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let font = theme::load_font_at(&self.settings.font_path(), det.font_px, self.last_scale);
@@ -2315,6 +2362,7 @@ impl State {
             pane,
             applied,
             repaint_nudge,
+            seed_cursor,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -5260,7 +5308,7 @@ impl State {
             return;
         }
         let palette = self.settings.frame_palette;
-        let (mut pane, applied, repaint_nudge) = rehost_grid(mgr, &mut det, (80, 24));
+        let (mut pane, applied, repaint_nudge, seed_cursor) = rehost_grid(mgr, &mut det, (80, 24));
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         let glow = Glow::new(crate::glow::seed_from(&det.uid));
         let at = self.tabs[ti].panes.len();
@@ -5278,6 +5326,7 @@ impl State {
             pane,
             applied,
             repaint_nudge,
+            seed_cursor,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -6715,15 +6764,31 @@ impl State {
         };
         self.note_env_dropped(&uid, spec);
 
-        let mut pane = TerminalPane::new(
-            cols as usize,
-            rows as usize,
-            Box::new(SoftwareRenderer::new()),
-        );
+        // A re-attached survivor primes from the session's screen seed when the daemon offers
+        // one: exact, sized to its pty, no repaint nudge (issue #140).
+        let seeded = if reattach {
+            seeded_grid(mgr, &uid, true)
+        } else {
+            None
+        };
+        let mut applied = (cols as usize, rows as usize);
+        let mut seed_cursor = None;
+        let mut pane = match seeded {
+            Some((pane, size, cursor)) => {
+                applied = size;
+                seed_cursor = Some(cursor);
+                pane
+            }
+            None => TerminalPane::new(
+                cols as usize,
+                rows as usize,
+                Box::new(SoftwareRenderer::new()),
+            ),
+        };
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
         let cwd = restored_pane_cwd(reattach, spec.cwd.as_deref(), spawn_cwd.as_deref());
         let mut repaint_nudge = RepaintNudge::Idle;
-        if reattach {
+        if reattach && seed_cursor.is_none() {
             // Re-host the survivor: seed the fresh grid from the daemon's retained replay (the
             // same replay-into-a-fresh-grid path `adopt_into_tab` uses for a moved pane). No
             // pty spawn — the live process is already running in the daemon.
@@ -6734,7 +6799,7 @@ impl State {
                     repaint_nudge = RepaintNudge::Armed(None);
                 }
             }
-        } else {
+        } else if !reattach {
             Self::spawn_session_async(
                 mgr,
                 SpawnOptions {
@@ -6782,8 +6847,9 @@ impl State {
             show_dot: Some(project),
             accent: pinned.unwrap_or_else(|| theme::accent_for(idx, palette)),
             pane,
-            applied: (cols as usize, rows as usize),
+            applied,
             repaint_nudge,
+            seed_cursor,
             surface: Image::default(),
             rect: (0.0, 0.0, 0.0, 0.0),
             visible: true,
@@ -7165,15 +7231,19 @@ mod rehost_grid_tests {
         assert_eq!(dst.tabs[ti].panes[pi].pane.grid_size(), (200, 40));
     }
 
-    /// A pane rebuilt from a non-empty replay buffer (no carried grid) is armed for one forced
-    /// repaint; an empty replay (nothing drawn yet) is not.
+    /// A re-hosted pane with no carried grid primes from the session's screen seed: sized to the
+    /// pty, the program's screen as its emulator holds it, no repaint nudge, and it remembers the
+    /// seed's cursor so in-flight output isn't applied twice. A session that drew nothing yet
+    /// gets an empty seed; an unknown one gets no seed and no nudge.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_replay_primed_pane_is_armed_for_a_repaint() {
+    async fn a_rehosted_pane_primes_from_the_screen_seed() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let m = SessionManager::new(tx);
         m.create(SpawnOptions {
             uid: "drawn".into(),
-            command: Some("printf 'frame'; sleep 30".into()),
+            command: Some("printf '\\033[?1049h\\033[5;10Hframe'; sleep 30".into()),
+            cols: Some(120),
+            rows: Some(35),
             ..Default::default()
         })
         .expect("spawn a session");
@@ -7187,15 +7257,121 @@ mod rehost_grid_tests {
         }
         let mut st = State::new(theme::load_font(1.0));
         st.adopt_pane(&m, det("drawn", true));
-        st.adopt_pane(&m, det("never-drew", true));
+        st.adopt_pane(&m, det("never-existed", true));
         let (ti, pi) = st.find_pane("drawn").unwrap();
+        let p = &st.tabs[ti].panes[pi];
+        assert_eq!(p.repaint_nudge, RepaintNudge::Idle);
+        assert_eq!(p.pane.grid_size(), (120, 35));
+        assert_eq!(p.applied, (120, 35));
+        assert_eq!(p.seed_cursor, m.output_bytes("drawn"));
+        assert_eq!(Some(p.pane.screen_text()), m.render_screen("drawn"));
+        let (ti, pi) = st.find_pane("never-existed").unwrap();
+        assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Idle);
+        assert_eq!(st.tabs[ti].panes[pi].seed_cursor, None);
+        m.kill("drawn");
+    }
+
+    /// The reference: the program's whole output fed live into a grid of the pty's size.
+    fn live_grid(program: &str, size: (u16, u16)) -> TerminalPane {
+        let mut live = TerminalPane::new(
+            size.0 as usize,
+            size.1 as usize,
+            Box::new(SoftwareRenderer::new()),
+        );
+        live.feed(program);
+        live
+    }
+
+    fn assert_same_grid(got: &TerminalPane, want: &TerminalPane) {
+        let (g, w) = (got.grid_snapshot(), want.grid_snapshot());
+        assert_eq!((g.cols, g.rows), (w.cols, w.rows));
+        for r in 0..w.rows {
+            for c in 0..w.cols {
+                assert_eq!(g.cell(c, r), w.cell(c, r), "cell row {r} col {c}");
+            }
+        }
+        assert_eq!(g.cursor, w.cursor, "cursor");
+        assert_eq!(g.cursor_visible, w.cursor_visible, "cursor visibility");
+    }
+
+    fn restore_spec(uid: &str) -> PaneSpec {
+        PaneSpec {
+            uid: Some(uid.into()),
+            ..Default::default()
+        }
+    }
+
+    /// GUI-restart re-attach against a daemon that offers screen seeds: the pane's grid equals,
+    /// cell for cell, the grid the program drew live, at the pty's size, although the replay
+    /// tail alone starts mid-frame; no repaint nudge, so no pty resize.
+    #[cfg(unix)]
+    #[test]
+    fn a_reattached_pane_equals_the_daemon_screen_cell_for_cell() {
+        let (program, tail_from) = crate::fake_daemon::diff_tui();
+        let d = crate::fake_daemon::fake_daemon("tui", &program, tail_from, (100, 30), true);
+        assert!(d.mgr.has("tui"));
+        let mut st = State::new(theme::load_font(1.0));
+        let p = st
+            .make_pane_from_spec(&d.mgr, 0, &restore_spec("tui"))
+            .expect("re-attached pane");
+        assert_eq!(p.uid, "tui");
+        assert_eq!(p.repaint_nudge, RepaintNudge::Idle);
+        assert_eq!(p.applied, (100, 30));
+        assert_eq!(p.seed_cursor, Some(d.cursor));
+        let mut live = live_grid(&program, (100, 30));
+        live.set_palette(theme::terminal_theme(st.settings.terminal_theme));
+        assert_same_grid(&p.pane, &live);
+        // The replay alone (today's fallback) does NOT rebuild it: the seed is what makes it exact.
+        let tail_only = live_grid(&program[tail_from..], (100, 30));
+        assert_ne!(tail_only.screen_text(), live.screen_text());
+        assert!(!d.saw("Resize"), "a seeded re-attach resizes nothing");
+    }
+
+    /// An older daemon (its Hello lists no features) is never sent the seed request, which it
+    /// would answer by dropping the connection: the pane primes from the replay and is armed for
+    /// the repaint nudge, exactly as before.
+    #[cfg(unix)]
+    #[test]
+    fn an_older_daemon_falls_back_to_the_replay_and_the_repaint_nudge() {
+        let (program, tail_from) = crate::fake_daemon::diff_tui();
+        let d = crate::fake_daemon::fake_daemon("tui", &program, tail_from, (100, 30), false);
+        let mut st = State::new(theme::load_font(1.0));
+        let p = st
+            .make_pane_from_spec(&d.mgr, 0, &restore_spec("tui"))
+            .expect("re-attached pane");
+        assert_eq!(p.repaint_nudge, RepaintNudge::Armed(None));
+        assert_eq!(p.seed_cursor, None);
+        assert!(!d.saw("ScreenSeed") && !d.saw("DROPPED"));
+        // Re-host (move / reopen without a carried grid) falls back the same way.
+        st.adopt_pane(&d.mgr, det("tui", true));
+        let (ti, pi) = st.find_pane("tui").unwrap();
         assert_eq!(
             st.tabs[ti].panes[pi].repaint_nudge,
             RepaintNudge::Armed(None)
         );
-        let (ti, pi) = st.find_pane("never-drew").unwrap();
-        assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Idle);
-        m.kill("drawn");
+        assert!(!d.saw("ScreenSeed") && !d.saw("DROPPED"));
+        assert!(d.mgr.has("tui"), "the connection is still up");
+    }
+
+    /// Live output after a seed: a chunk that ends at or before the seed's cursor is already in
+    /// the seed and is skipped; the first one past it is applied and ends the skipping. A chunk
+    /// can't straddle the cursor (a seed is taken under the lock that appends whole chunks: see
+    /// the core test `a_seed_taken_mid_stream_matches_its_cursor`). A cursor-less peer (0) is
+    /// never skipped.
+    #[test]
+    fn live_output_already_in_the_seed_is_skipped_once() {
+        let mut seed = Some(100);
+        assert!(seed_skips(&mut seed, 40));
+        assert!(seed_skips(&mut seed, 100));
+        assert!(!seed_skips(&mut seed, 130));
+        assert_eq!(seed, None);
+        assert!(
+            !seed_skips(&mut seed, 90),
+            "after the seed everything applies"
+        );
+        let mut seed = Some(100);
+        assert!(!seed_skips(&mut seed, 0));
+        assert_eq!(seed, None);
     }
 
     /// The nudge shrinks the pty one row, holds it long enough for the program to see a real

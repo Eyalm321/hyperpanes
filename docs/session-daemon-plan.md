@@ -84,11 +84,12 @@ inspectability). `SpawnOptions` already derives serde.
 ```
 ClientMsg  = Hello{ proto_ver } | ListSessions | Attach{ uid } | Subscribe
            | Create(SpawnOptions) | Write{ uid, data } | Resize{ uid, cols, rows }
-           | Kill{ uid } | KillAll | RenderScreen{ uid } | Ping
-DaemonMsg  = Hello{ proto_ver, daemon_pid }
+           | Kill{ uid } | KillAll | RenderScreen{ uid } | ScreenSeed{ uid } | Ping
+DaemonMsg  = Hello{ proto_ver, daemon_pid, features }
            | Sessions(Vec<SessionMeta>)              // reply to ListSessions
            | Replay{ uid, data }                     // reply to Attach
            | Screen{ uid, text: Option<String> }     // reply to RenderScreen
+           | ScreenSeed{ uid, seed: Option<ScreenSeed> }  // reply to ScreenSeed
            | Event(SessionEvent)                      // Data / Cwd / Exit, streamed
            | Pong
 SessionMeta = { uid, cwd, output_bytes, last_output_at, alive }
@@ -96,6 +97,15 @@ SessionMeta = { uid, cwd, output_bytes, last_output_at, alive }
 
 Versioned `proto_ver`; a mismatch makes the client kill + respawn the daemon (the daemon is ours, so
 lock-step upgrades are fine — no third-party compat burden).
+
+Additive requests ride without a `proto_ver` bump (a bump would kill every session on a GUI upgrade):
+the daemon lists the optional requests it answers in `Hello.features`, and the client sends one only
+when it is listed. An older daemon can't decode an unknown request and drops the connection, so it
+must never receive one. `ScreenSeed` (feature `screen_seed`) returns the session's screen serialized
+as a VT stream (`ScreenSeed{ vt, cols, rows, cursor }`: modes, cells with SGR, saved cursor, cursor),
+taken at output cursor `cursor`. A re-attaching GUI primes the pane with the replay (scrollback) then
+`vt`, which rebuilds the screen exactly with no repaint nudge, and skips live `Data` whose cursor is
+`<= cursor`. Without the feature it falls back to the replay plus the one-row repaint nudge.
 
 ## Daemon lifecycle & discovery
 

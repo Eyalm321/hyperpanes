@@ -222,6 +222,13 @@ impl Shared {
     fn sync_screen(&self) {
         // Take the pending buffer under its own lock first to minimize contention with
         // the driver thread's appends, then parse it into the screen.
+        //
+        // The screen lock is taken FIRST and held while the pending bytes are taken and parsed:
+        // two readers that each took a batch and then raced for the screen could otherwise
+        // apply the later batch before the earlier one. Lock order everywhere:
+        // replay -> screen -> screen_pending (`screen_seed`), replay -> screen_pending
+        // (`flush_into`), screen -> screen_pending (here).
+        let mut screen = self.screen.lock().unwrap();
         let pending = {
             let mut p = self.screen_pending.lock().unwrap();
             if p.is_empty() {
@@ -229,7 +236,29 @@ impl Shared {
             }
             std::mem::take(&mut *p)
         };
-        self.screen.lock().unwrap().advance(&pending);
+        screen.advance(&pending);
+    }
+
+    /// A [`ScreenSeed`](crate::session::screen::ScreenSeed) for a re-attaching view: the screen
+    /// serialized at exactly the output cursor it reflects. The replay lock (which
+    /// `flush_into` holds while it appends a whole chunk, bumps the cursor and buffers the
+    /// chunk for the screen) is held only to read the cursor and take the pending bytes; the
+    /// parse and the serialization run under the screen lock alone, so the output path never
+    /// waits on them.
+    fn screen_seed(&self) -> crate::session::screen::ScreenSeed {
+        let replay = self.replay.lock().unwrap();
+        let mut screen = self.screen.lock().unwrap();
+        let pending = std::mem::take(&mut *self.screen_pending.lock().unwrap());
+        let cursor = self.output_bytes.load(Ordering::Relaxed);
+        drop(replay);
+        screen.advance(&pending);
+        let (cols, rows) = screen.dims();
+        crate::session::screen::ScreenSeed {
+            vt: screen.snapshot_vt(),
+            cols,
+            rows,
+            cursor,
+        }
     }
 
     /// Fold one parsed [`Marker`](crate::session::osc133::Marker) into the liveness mirror.
@@ -512,6 +541,13 @@ impl SessionRegistry {
             s.shared.sync_screen();
             s.shared.screen.lock().unwrap().render_read()
         })
+    }
+
+    /// The pane's screen as a [`ScreenSeed`](crate::session::screen::ScreenSeed) for a
+    /// re-attaching view (issue #140), or `None` for an unknown uid.
+    pub fn screen_seed(&self, uid: &str) -> Option<crate::session::screen::ScreenSeed> {
+        let map = self.sessions.lock().unwrap();
+        map.get(uid).map(|s| s.shared.screen_seed())
     }
 
     /// Current pty grid `(cols, rows)` — the width a remote client must emulate at.
@@ -932,6 +968,16 @@ impl SessionManager {
         }
     }
 
+    /// The pane's screen serialized for a re-attaching view (issue #140): `None` for an unknown
+    /// uid, or a daemon that doesn't offer it (an older daemon surviving a GUI upgrade: the
+    /// caller falls back to the replay buffer). Against a daemon this is a bounded round-trip.
+    pub fn screen_seed(&self, uid: &str) -> Option<crate::session::screen::ScreenSeed> {
+        match self {
+            SessionManager::InProcess(r) => r.screen_seed(uid),
+            SessionManager::Daemon(d) => d.screen_seed(uid),
+        }
+    }
+
     /// The screen text plus the prompt box ([`crate::session::screen::InputLine`]). Against a
     /// daemon that predates the field, `input_line` is `None` (the text still comes back).
     pub fn render_screen_read(&self, uid: &str) -> Option<crate::session::screen::ScreenRead> {
@@ -1300,16 +1346,18 @@ impl SessionPipeline {
         // Bump the cursor while HOLDING the replay lock: `replay_with_cursor` reads the
         // pair under the same lock, so a snapshot can never see one without the other
         // (a torn pair would drop or duplicate bytes on a remote attach splice).
+        // The chunk is buffered for the screen under the same lock too, so a screen seed
+        // (`Shared::screen_seed`) that reads the cursor always has every byte up to it.
         let cursor = {
             let mut replay = self.shared.replay.lock().unwrap();
             replay.append(&data);
+            self.shared
+                .screen_pending
+                .lock()
+                .unwrap()
+                .extend_from_slice(data.as_bytes());
             self.shared.output_bytes.fetch_add(n, Ordering::Relaxed) + n
         };
-        self.shared
-            .screen_pending
-            .lock()
-            .unwrap()
-            .extend_from_slice(data.as_bytes());
         self.shared
             .last_output_at
             .store(now_epoch_ms, Ordering::Relaxed);
@@ -1397,6 +1445,78 @@ mod tests {
             last_exit_code: AtomicI32::new(i32::MIN),
             marker_seen: AtomicBool::new(false),
         })
+    }
+
+    // ---- #140: screen seeds ----
+
+    /// A seed taken while output streams in is consistent: its cursor is the end of a whole
+    /// chunk (chunks never straddle it, so a re-attaching view can skip `Data` whose cursor is
+    /// `<=` it and apply the rest whole), and its screen shows exactly the output up to that
+    /// cursor. Regression for buffering the chunk for the screen OUTSIDE the replay lock: a seed
+    /// could then count a chunk in its cursor that its screen did not show yet.
+    #[test]
+    fn a_seed_taken_mid_stream_matches_its_cursor() {
+        let sh = shared();
+        let writer_sh = Arc::clone(&sh);
+        let writer = std::thread::spawn(move || {
+            let mut p = SessionPipeline::new("u1".into(), writer_sh);
+            let mut ends = Vec::new();
+            for i in 0..4000 {
+                let mut out = Vec::new();
+                p.flush_into(format!("\r\x1b[Kn={i}"), 0, &mut out);
+                if let Some(SessionEvent::Data { cursor, .. }) = out.first() {
+                    ends.push(*cursor);
+                }
+            }
+            ends
+        });
+        let mut seeds = Vec::new();
+        while !writer.is_finished() {
+            seeds.push(sh.screen_seed());
+        }
+        let ends = writer.join().unwrap();
+        seeds.push(sh.screen_seed());
+        assert!(seeds.len() > 1);
+        for seed in &seeds {
+            let mut rebuilt = Screen::new(seed.cols, seed.rows);
+            rebuilt.advance(seed.vt.as_bytes());
+            let text = rebuilt.render();
+            if seed.cursor == 0 {
+                assert_eq!(text, "");
+                continue;
+            }
+            let chunk = ends
+                .iter()
+                .position(|&end| end == seed.cursor)
+                .unwrap_or_else(|| panic!("seed cursor {} is not a chunk end", seed.cursor));
+            assert_eq!(text, format!("n={chunk}"), "seed at cursor {}", seed.cursor);
+        }
+        assert_eq!(seeds.last().unwrap().cursor, *ends.last().unwrap());
+    }
+
+    /// Deterministic regression for the ordering above: while a chunk is not yet buffered for
+    /// the screen, its cursor must not be visible (the cursor is bumped only after the chunk is
+    /// in `screen_pending`, both under the replay lock). With the old order the cursor was
+    /// bumped first, so a seed could read it and serialize a screen without that chunk.
+    #[test]
+    fn a_chunk_is_buffered_for_the_screen_before_its_cursor_shows() {
+        let sh = shared();
+        let held = sh.screen_pending.lock().unwrap();
+        let writer_sh = Arc::clone(&sh);
+        let writer = std::thread::spawn(move || {
+            let mut p = SessionPipeline::new("u1".into(), writer_sh);
+            p.flush_into("chunk".into(), 0, &mut Vec::new());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            sh.output_bytes.load(Ordering::Relaxed),
+            0,
+            "the cursor moved before the chunk reached the screen buffer"
+        );
+        drop(held);
+        writer.join().unwrap();
+        assert_eq!(sh.output_bytes.load(Ordering::Relaxed), 5);
+        assert_eq!(sh.screen_seed().cursor, 5);
     }
 
     // ---- streaming UTF-8 decoder ----

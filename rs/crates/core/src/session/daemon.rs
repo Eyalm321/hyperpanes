@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use crate::session::proto::{
-    read_frame, write_frame, ClientMsg, DaemonMsg, SessionMeta, PROTO_VER,
+    read_frame, write_frame, ClientMsg, DaemonMsg, SessionMeta, FEATURE_SCREEN_SEED, PROTO_VER,
 };
 #[cfg(unix)]
 use crate::session_manager::{SessionEvent, SessionRegistry};
@@ -594,6 +594,7 @@ impl Daemon {
                 let _ = out.send(DaemonMsg::Hello {
                     proto_ver: PROTO_VER,
                     daemon_pid: std::process::id(),
+                    features: vec![FEATURE_SCREEN_SEED.to_string()],
                 });
             }
             ClientMsg::ListSessions => {
@@ -667,6 +668,10 @@ impl Daemon {
                     text,
                     input_line,
                 });
+            }
+            ClientMsg::ScreenSeed { uid } => {
+                let seed = self.registry.screen_seed(&uid);
+                let _ = out.send(DaemonMsg::ScreenSeed { uid, seed });
             }
             ClientMsg::Ping => {
                 let _ = out.send(DaemonMsg::Pong);
