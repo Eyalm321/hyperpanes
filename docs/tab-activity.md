@@ -31,6 +31,13 @@ does not count:
 The gate is byte-level and runs where the output stream is observed (the in-process pipeline,
 or the daemon client), so it needs no VTE parse and no daemon change.
 
+Known misses, accepted on purpose (each one reads idle, never busy, after the 10 s threshold):
+
+- a two-frame spinner with no timer next to it (indistinguishable from a blink);
+- a progress line redrawn with identical text;
+- a blink interleaved with another periodic cosmetic chunk, so the cycle is longer than two
+  frames: that reads busy, the one miss in the other direction.
+
 ## Awaiting input
 
 A pane whose screen shows a decision prompt reads `awaiting-input` (it never makes a tab
@@ -52,8 +59,10 @@ The app types text followed by Enter into a pane on its own in three places: the
 `queue_prompt` and the speak-first `prompt` of a `restartPane` resume), and New-goal delivery
 (`deliver_pending_goals`). Each one renders the screen right before typing and holds while
 `control::output::blocks_typed_input` is true. That predicate covers permission and trust
-dialogs, pickers, y/n questions and "press enter", but not a plain `❯` shell prompt or a
-question in the chat, so a delivery is never held forever by an idle prompt. The Enter of a
+dialogs, pickers, y/n questions and "press enter", but not a plain `❯` shell prompt, a
+question in the chat, or a numbered list in the chat or a shell listing: an option form counts
+only when the `❯` cursor sits on a numbered option in a block of at least two, with no agent
+input box below it. So a delivery is never held forever by an idle prompt. The Enter of a
 nudge typed into a permission dialog would otherwise confirm its default "Yes".
 
 `send_input` / `prompt_pane` type only when a caller asks, and never wait for the pane first.

@@ -568,11 +568,16 @@ impl SessionRegistry {
     /// [`render_screen`](Self::render_screen) plus the prompt-box classification
     /// ([`crate::session::screen::InputLine`]), from the same synced grid.
     pub fn render_screen_read(&self, uid: &str) -> Option<crate::session::screen::ScreenRead> {
-        let map = self.sessions.lock().unwrap();
-        map.get(uid).map(|s| {
-            s.shared.sync_screen();
-            s.shared.screen.lock().unwrap().render_read()
-        })
+        // Clone the session handle out and release the sessions lock before parsing: the parse
+        // can chew through a large pending-output buffer, and every other pane op (the GUI's
+        // status poll included) takes that lock.
+        let shared = {
+            let map = self.sessions.lock().unwrap();
+            Arc::clone(&map.get(uid)?.shared)
+        };
+        shared.sync_screen();
+        let read = shared.screen.lock().unwrap().render_read();
+        Some(read)
     }
 
     /// The pane's screen as a [`ScreenSeed`](crate::session::screen::ScreenSeed) for a

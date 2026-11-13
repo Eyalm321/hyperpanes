@@ -1060,8 +1060,18 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
             let classifying = Arc::clone(&classifying);
             tokio::task::spawn_blocking(move || {
                 for uid in to_classify {
+                    // Leave the in-flight set even if the classification panics, or the pane
+                    // would never be classified again.
+                    struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, &'a str);
+                    impl Drop for Release<'_> {
+                        fn drop(&mut self) {
+                            if let Ok(mut set) = self.0.lock() {
+                                set.remove(self.1);
+                            }
+                        }
+                    }
+                    let _release = Release(&classifying, &uid);
                     classify_screen(&sessions, &uid);
-                    classifying.lock().unwrap().remove(&uid);
                 }
             });
         }

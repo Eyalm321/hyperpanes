@@ -262,32 +262,46 @@ fn explicit_prompt(last: &str) -> bool {
         || bounded_contains(&lower, "do you trust")
 }
 
-// A `❯`-pointed row anywhere on screen plus at least two numbered options: an interactive
-// multi-option form (trust prompt, theme / model picker, permission dialog, account select).
-// Anything typed while one is up lands in the form. Claude's ordinary input box has no
-// numbered options under its `❯`, so it never matches. (Moved from the app's goal delivery.)
+// An interactive multi-option form (trust prompt, theme / model picker, permission dialog,
+// account select): a `❯ N.` cursored option in a run of adjacent rows holding at least two
+// numbered options, with no agent input box below it. Anything typed while one is up lands in
+// the form. A numbered list in an agent's reply above its input box, a past prompt in the chat
+// history, or a shell listing (`1.png`) never matches: the cursor must sit ON a numbered option,
+// and the input box below the history rules the history out. (Moved from the app's goal
+// delivery.)
 fn shows_option_form(lines: &[&str]) -> bool {
-    let mut pointer = false;
-    let mut numbered = 0;
-    for line in lines {
-        // Forms may render inside a box border: strip a leading border before testing.
-        let t = line
-            .trim_start()
-            .trim_start_matches(['│', '║'])
-            .trim_start();
-        let opt = match t.strip_prefix('❯') {
-            Some(rest) => {
-                pointer = true;
-                rest.trim_start()
-            }
-            None => t,
-        };
-        let digits = opt.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits > 0 && opt.chars().nth(digits) == Some('.') {
-            numbered += 1;
-        }
+    // Rows with their frame stripped; a blank row ends a run of adjacent rows.
+    let rows: Vec<&str> = lines.iter().map(|l| strip_frame(l)).collect();
+    let input_box = |i: usize| {
+        rows[i].starts_with('❯')
+            && rows[..i]
+                .iter()
+                .rev()
+                .find(|r| !r.is_empty())
+                .is_some_and(|r| is_rule_row(r))
+    };
+    let Some(sel) = (0..rows.len())
+        .rev()
+        .find(|&i| selected_option(rows[i]) && !input_box(i))
+    else {
+        return false;
+    };
+    if (sel + 1..rows.len()).any(input_box) {
+        return false;
     }
-    pointer && numbered >= 2
+    let first = (0..sel)
+        .rev()
+        .take_while(|&i| !rows[i].is_empty())
+        .last()
+        .unwrap_or(sel);
+    let last = (sel + 1..rows.len())
+        .take_while(|&i| !rows[i].is_empty())
+        .last()
+        .unwrap_or(sel);
+    let numbered = (first..=last)
+        .filter(|&i| numbered_option(rows[i]) || selected_option(rows[i]))
+        .count();
+    numbered >= 2
 }
 
 // How many content rows above the bottom of the screen the selection-dialog scan looks at
@@ -854,6 +868,43 @@ mod tests {
             "──────────────────\n",
         )));
         assert!(!blocks_typed_input(""));
+    }
+
+    // An idle screen must never hold a nudge: it never redraws, so the hold would be forever.
+    #[test]
+    fn typing_is_not_blocked_by_numbered_lists_on_idle_screens() {
+        // An agent's reply with a numbered list, above its empty input box.
+        assert!(!blocks_typed_input(concat!(
+            "Done. Next steps:\n",
+            " 1. run the tests\n",
+            " 2. open the PR\n",
+            "\n",
+            "──────────────────\n",
+            "❯ \n",
+            "──────────────────\n",
+            "  ? for shortcuts\n",
+        )));
+        // A past prompt in the chat history that was itself a numbered list.
+        assert!(!blocks_typed_input(concat!(
+            "❯ 1. fix the build\n",
+            "  2. push it\n",
+            "\n",
+            "● On it.\n",
+            "──────────────────\n",
+            "❯ \n",
+            "──────────────────\n",
+        )));
+        // A plain `❯` shell listing numbered files.
+        assert!(!blocks_typed_input("❯ ls -1\n1.png\n2.png\n❯ "));
+        // A cursor row and numbered rows that are not one block.
+        assert!(!blocks_typed_input(concat!(
+            "❯ 1. only option\n",
+            "\n",
+            "Notes:\n",
+            "\n",
+            " 2. unrelated\n",
+            " 3. unrelated\n",
+        )));
     }
 
     #[test]
