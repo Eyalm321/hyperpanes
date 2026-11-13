@@ -1652,7 +1652,7 @@ impl App {
     /// feed throughput in the perf log (#1).
     fn route_event(&self, windows: &[Rc<Window>], ev: SessionEvent) -> usize {
         match ev {
-            SessionEvent::Data { uid, data, .. } => {
+            SessionEvent::Data { uid, data, cursor } => {
                 // NB: the ambient-AI engine is NOT fed the raw redraw byte stream here — a
                 // repainting TUI (e.g. an agent CLI) would drown the quiescence scheduler in
                 // noise. Instead `pump_ai` feeds each pane's *rendered screen text* on a
@@ -1665,6 +1665,10 @@ impl App {
                 let osc52_clipboard = st.settings.osc52_clipboard;
                 if let Some((ti, pi)) = st.find_pane(&uid) {
                     let pc = &mut st.tabs[ti].panes[pi];
+                    // Already in the screen seed this pane was primed from (issue #140).
+                    if crate::state::seed_skips(&mut pc.seed_cursor, cursor) {
+                        return 0;
+                    }
                     // Sniff the shell's OSC window title so the idle glow can tell an agent
                     // pane (claude, etc.) from a plain shell (app-side; no core change).
                     if let Some(title) = crate::glow::sniff_osc_title(&data) {

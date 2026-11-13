@@ -23,7 +23,7 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, R
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 /// A single resolved cell ready for rasterization.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderCell {
     pub ch: char,
     pub fg: [u8; 4],

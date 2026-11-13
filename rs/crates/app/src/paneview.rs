@@ -1725,3 +1725,82 @@ mod tab_status_tests {
         }
     }
 }
+
+/// #140: a pane primed from a daemon screen seed starts at the pty's size, so laying it out at
+/// that size resizes nothing; at another size the layout resizes grid and pty once, as for any
+/// pane, and no repaint nudge follows.
+#[cfg(all(test, unix))]
+mod seed_layout_tests {
+    use super::*;
+    use crate::fake_daemon::{diff_tui, fake_daemon};
+    use crate::state::{DetachedPane, RepaintNudge};
+
+    fn detached(uid: &str) -> DetachedPane {
+        DetachedPane {
+            uid: uid.into(),
+            replay_answered: true,
+            live: Default::default(),
+            title: uid.into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        }
+    }
+
+    fn resizes(log: &[String]) -> Vec<String> {
+        log.iter()
+            .filter(|f| f.contains("Resize"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_seeded_pane_resizes_only_when_the_layout_differs() {
+        let area = (900.0, 600.0);
+        let (program, tail_from) = diff_tui();
+        // A seed at a size the layout won't give: one real resize, to the laid-out size.
+        let d = fake_daemon("tui", &program, tail_from, (100, 30), true);
+        let mut st = State::new(theme::load_font(1.0));
+        st.adopt_pane(&d.mgr, detached("tui"));
+        relayout_active(&mut st, area, 1.0, &d.mgr);
+        let (ti, pi) = st.find_pane("tui").unwrap();
+        let laid = st.tabs[ti].panes[pi].applied;
+        assert_ne!(laid, (100, 30), "pick an area that differs from the seed");
+        assert_eq!(st.tabs[ti].panes[pi].pane.grid_size(), laid);
+        assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Idle);
+        // A resize is fire-and-forget: a round-trip after it guarantees the daemon has read it.
+        let _ = d.mgr.screen_seed("tui");
+        let log = d.log.lock().unwrap().clone();
+        assert_eq!(
+            resizes(&log),
+            vec![format!(
+                r#"{{"Resize":{{"uid":"tui","cols":{},"rows":{}}}}}"#,
+                laid.0, laid.1
+            )]
+        );
+
+        // A seed at exactly the laid-out size: nothing is resized.
+        let d = fake_daemon(
+            "tui",
+            &program,
+            tail_from,
+            (laid.0 as u16, laid.1 as u16),
+            true,
+        );
+        let mut st = State::new(theme::load_font(1.0));
+        st.adopt_pane(&d.mgr, detached("tui"));
+        relayout_active(&mut st, area, 1.0, &d.mgr);
+        relayout_active(&mut st, area, 1.0, &d.mgr);
+        let (ti, pi) = st.find_pane("tui").unwrap();
+        assert_eq!(st.tabs[ti].panes[pi].applied, laid);
+        assert_eq!(st.tabs[ti].panes[pi].repaint_nudge, RepaintNudge::Idle);
+        let _ = d.mgr.screen_seed("tui");
+        assert!(resizes(&d.log.lock().unwrap()).is_empty());
+    }
+}

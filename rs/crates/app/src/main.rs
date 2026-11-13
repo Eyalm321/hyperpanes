@@ -29,6 +29,8 @@ mod crash;
 mod dbus;
 mod devices;
 mod drag;
+#[cfg(all(test, unix))]
+mod fake_daemon;
 #[cfg(test)]
 mod focus_reentrancy_tests;
 mod glow;

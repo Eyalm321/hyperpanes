@@ -332,6 +332,12 @@ impl TerminalPane {
         (s.cols, s.rows)
     }
 
+    /// A resolved snapshot of the visible grid (cells, cursor), e.g. to compare two grids
+    /// cell for cell.
+    pub fn grid_snapshot(&self) -> crate::grid::GridSnapshot {
+        self.grid.snapshot()
+    }
+
     /// The visible screen as plain text — one line per viewport row (blank cells as spaces),
     /// with trailing whitespace and trailing blank lines trimmed. Lets a host feed an ambient
     /// summariser the *rendered* screen (what the user actually sees) instead of the raw redraw
