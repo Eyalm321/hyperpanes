@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in Hyperpanes is broken or behaves wrongly.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security problems go to a private report instead**: Security tab → Report a vulnerability (see SECURITY.md).
+        Before you paste logs or screenshots, remove tokens, home paths with your user name, and internal IP addresses.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a new pane with …
+        2. Drag it to …
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hyperpanes version
+      description: Output of `hyperpanes --version`.
+      placeholder: 0.0.45
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Android (mobile client)
+        - iOS (mobile client)
+    validations:
+      required: true
+  - type: input
+    id: os-details
+    attributes:
+      label: OS version and desktop
+      description: For example "Fedora 44, GNOME on Wayland", "macOS 15.4 on Apple Silicon", "Windows 11 24H2".
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - AppImage
+        - .deb
+        - .rpm
+        - .dmg
+        - Windows installer (setup.exe)
+        - Android APK
+        - iOS (unsigned build)
+        - Built from source
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: A crash leaves `hyperpanes-crash.log` in your temp directory. Paste the relevant part.
+      render: text

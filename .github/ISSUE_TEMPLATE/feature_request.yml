@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an idea or an improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: How should it work? Mockups, workspace.json snippets or CLI examples help.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Panes, tabs and layouts
+        - Terminal rendering
+        - Workspace files and CLI
+        - Agents, Control API or MCP
+        - Mobile client
+        - Packaging and install
+        - Other
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to work on this myself (see CONTRIBUTING.md).
