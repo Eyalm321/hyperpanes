@@ -7,6 +7,7 @@
 //!                                (control::output cores); cursor ALWAYS present
 //!   POST /panes/{id}/input       allowInput gate (403); data|keys (control::input); submit; lock 423
 //!   GET|POST /panes/{id}/messages durable inbox (control::inbox)
+//!   GET /panes/{id}/open-consults       unanswered needs-decision consults (control::spec_sweep)
 //!   POST|DELETE /panes/{id}/lock  advisory lock (control::lock)
 //!   POST /command                dispatch
 //!   GET  /events                 WS upgrade (token via header or ?token=)
@@ -71,6 +72,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/panes/{id}/messages",
             get(messages_get).post(messages_post),
         )
+        .route("/panes/{id}/open-consults", get(open_consults_get))
         .route("/panes/{id}/lock", post(lock_post).delete(lock_delete))
         // ---- work queue (worker-pool phase-2/3) ----
         .route("/queues", get(queues_list))
@@ -921,6 +923,32 @@ async fn messages_get(
     ok_json(out)
 }
 
+/// `GET /panes/{id}/open-consults`: needs-decision messages addressed to the pane by spec panes
+/// that it has not answered yet. Same auth + scope as reading its messages.
+async fn open_consults_get(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let id = match find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        Ok(f) => f.pane_id,
+        Err(e) => return e,
+    };
+    let open: Vec<Value> = shared
+        .spec_sweep
+        .lock()
+        .unwrap()
+        .open_consults(&id)
+        .into_iter()
+        .map(|c| json!({ "from": c.from, "seq": c.seq, "ts": c.ts }))
+        .collect();
+    jstatus(200, json!({ "ok": true, "paneId": id, "open": open }))
+}
+
 async fn messages_post(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
@@ -961,6 +989,8 @@ async fn messages_post(
         let msg = inbox.post(&id, &from, &msg_body, now_ms());
         (msg, inbox.epoch())
     };
+    // Feed the spec-pane sweeper (reports, inbound timestamps, open consults).
+    crate::control::spec_sweep::record_post(&shared, &id, &from, msg.seq, &msg_body, msg.ts);
     // Wake an opted-in agent pane (goals org): the durable read stays the source of truth, but a
     // TUI agent parked at its prompt would never perform that read on its own.
     if nudge {

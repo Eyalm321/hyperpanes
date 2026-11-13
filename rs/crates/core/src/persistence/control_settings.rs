@@ -44,6 +44,59 @@ pub struct ControlSettings {
     /// loopback. Empty = loopback only. Omitted from the file when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub remote_endpoints: Vec<String>,
+    /// Spec-pane sweeper settings (`specSweep`). `None` = not configured (all defaults);
+    /// omitted from the file when unset so the legacy shape stays byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_sweep: Option<SpecSweepSettings>,
+}
+
+/// `specSweep` block of `control-settings.json`: the app-side sweeper that closes idle or
+/// finished goal spec-agent panes (see `control::spec_sweep`). Every field is optional on
+/// disk; a missing or garbage value takes its default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecSweepSettings {
+    /// Master switch (default on).
+    pub enabled: bool,
+    /// Close a spec pane idle this many hours with nothing in flight (default 3).
+    pub idle_close_hours: u64,
+    /// Close a spec pane whose goal is done once idle this many minutes (default 30).
+    pub done_close_minutes: u64,
+    /// Log what would be closed, close nothing (default on until the live close path is proven).
+    pub dry_run: bool,
+}
+
+impl Default for SpecSweepSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_close_hours: 3,
+            done_close_minutes: 30,
+            dry_run: true,
+        }
+    }
+}
+
+impl SpecSweepSettings {
+    /// Tolerant parse of the `specSweep` JSON value: anything that is not the expected type
+    /// (or a non-positive number) falls back to the default for that field.
+    pub fn from_value(v: Option<&serde_json::Value>) -> Self {
+        let d = Self::default();
+        let Some(v) = v else { return d };
+        let num = |k: &str, dflt: u64| {
+            v.get(k)
+                .and_then(|x| x.as_u64())
+                .filter(|&n| n > 0)
+                .unwrap_or(dflt)
+        };
+        let flag = |k: &str, dflt: bool| v.get(k).and_then(|x| x.as_bool()).unwrap_or(dflt);
+        Self {
+            enabled: flag("enabled", d.enabled),
+            idle_close_hours: num("idleCloseHours", d.idle_close_hours),
+            done_close_minutes: num("doneCloseMinutes", d.done_close_minutes),
+            dry_run: flag("dryRun", d.dry_run),
+        }
+    }
 }
 
 impl ControlSettings {
@@ -107,6 +160,10 @@ pub fn load_from(path: &std::path::Path) -> ControlSettings {
                     .collect()
             })
             .unwrap_or_default(),
+        spec_sweep: value
+            .get("specSweep")
+            .filter(|v| v.is_object())
+            .map(|v| SpecSweepSettings::from_value(Some(v))),
     }
 }
 
@@ -210,6 +267,7 @@ mod tests {
             bind_address: Some("100.64.0.1".into()),
             port: Some(51888),
             remote_endpoints: vec!["wg0".into(), "fd7a::1".into()],
+            spec_sweep: None,
         };
         save_to(&p, &settings).unwrap();
         assert_eq!(load_from(&p), settings);
@@ -275,5 +333,38 @@ mod tests {
         assert!(s.remote_specs().is_empty());
         s.bind_address = None;
         assert!(s.remote_specs().is_empty());
+    }
+
+    #[test]
+    fn spec_sweep_defaults_on_missing_or_garbage() {
+        let d = SpecSweepSettings::default();
+        assert!(d.enabled && d.dry_run);
+        assert_eq!((d.idle_close_hours, d.done_close_minutes), (3, 30));
+        assert_eq!(SpecSweepSettings::from_value(None), d);
+        let garbage = serde_json::json!({"enabled": "no", "idleCloseHours": -2,
+            "doneCloseMinutes": "x", "dryRun": 7});
+        assert_eq!(SpecSweepSettings::from_value(Some(&garbage)), d);
+        let zero = serde_json::json!({"idleCloseHours": 0});
+        assert_eq!(SpecSweepSettings::from_value(Some(&zero)), d);
+    }
+
+    #[test]
+    fn spec_sweep_parses_and_round_trips_through_the_file() {
+        let p = std::env::temp_dir().join(format!("hp-ss-{}.json", std::process::id()));
+        std::fs::write(
+            &p,
+            r#"{"enabled":true,"specSweep":{"enabled":false,"idleCloseHours":5,"doneCloseMinutes":10,"dryRun":true}}"#,
+        )
+        .unwrap();
+        let s = load_from(&p);
+        let ss = s.spec_sweep.clone().unwrap();
+        assert!(!ss.enabled && ss.dry_run);
+        assert_eq!((ss.idle_close_hours, ss.done_close_minutes), (5, 10));
+        save_to(&p, &s).unwrap();
+        assert_eq!(load_from(&p), s);
+        // A non-object block is ignored; absent block stays None.
+        std::fs::write(&p, r#"{"specSweep":"junk"}"#).unwrap();
+        assert!(load_from(&p).spec_sweep.is_none());
+        let _ = std::fs::remove_file(&p);
     }
 }

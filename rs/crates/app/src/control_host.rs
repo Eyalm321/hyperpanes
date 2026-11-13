@@ -401,7 +401,8 @@ impl ControlHost {
             async move {
                 tokio::join!(
                     server::run_reaper_ticker(Arc::clone(&shared)),
-                    server::run_queue_flusher(shared)
+                    server::run_queue_flusher(Arc::clone(&shared)),
+                    server::run_spec_sweep_ticker(shared)
                 );
             }
         });

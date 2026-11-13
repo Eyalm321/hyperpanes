@@ -192,7 +192,10 @@ prompt wedges the pane).
 - `done <evidence>` when acceptance passes (name the branch/commit + what you verified),
 - `failed <reason>` after exhausting reasonable attempts.
 
-Then **exit** — you are per-goal; the orchestrator tears down your pane.
+Before sending `done`, write your report file and
+`set_meta {paneId:<your pane>, meta:{hp.report:"<path>"}}`, and stop any background watch/wait
+loops you started (a live child process keeps your pane open). After reporting, stay idle — you
+are per-goal and the app closes your pane.
 
 ## Discipline
 
