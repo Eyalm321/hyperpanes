@@ -302,7 +302,10 @@ pane (or the tab) in scope, like `recolorPane`.
   For `newTab` and `project`, `windowId` picks the window. The default is the pane's own window.
 - The pane keeps running: same PTY, session, pane id, label, subtitle, meta, inbox, cwd and talk
   state. Only its tab changes. A tab emptied by the move closes. A new tab opens in the
-  background (the active tab doesn't change). The answered `tabId` stays valid for a new tab.
+  background (the active tab doesn't change). The answered `tabId` stays valid for a new tab,
+  and it is addressable at once: the new tab is in the read model (and `/state`) before the reply
+  is sent, so an immediate `movePane {"tabId":…}` or `newPane {"tabId":…}` into it works. The
+  moved pane itself shows in its new tab once the GUI applies the move.
   Positional ids (`"w:i"`) of other tabs can shift when a tab closes, so re-read `/state` before
   reusing one.
 - Errors: `400` (no such pane / tab / window, unknown project, zero or several targets, a bad
@@ -321,6 +324,9 @@ pane (or the tab) in scope, like `recolorPane`.
   and `pane.projectTab` can't be combined. Errors: `400` (no such tab, a non-string `tabId`, a
   `windowId` that isn't the tab's window, or `tabId` together with `projectTab`), `403` (the tab
   is out of a scoped token's scope).
+- `attach` answers with `result`: an array of TAB ids (one per group) for `"as":"tab"` (the
+  default), or of PANE ids for `"as":"panes"`. Each new tab id is addressable at once, like
+  `movePane`'s.
 - `attach` with `"as":"panes"` accepts the same top-level `"tabId":"…"`: all its panes merge into
   that existing tab instead of the window's active tab, with the same rules and errors as
   `newPane` `tabId`. `tabId` with `"as":"tab"` (or no `as`) is a `400`.
@@ -330,7 +336,9 @@ pane (or the tab) in scope, like `recolorPane`.
   snapshot records it, so it survives a restart.
 
 Like `groupPanes`, `movePane` is validated against the read model and then queued for the GUI
-app, which applies it on its next tick. A headless server accepts and queues the request but
+app, which applies it on its next tick. A tab the move creates goes into the read model at once,
+under the id the GUI then gives the tab it makes. If the GUI never makes it (the move was
+dropped), the model forgets the tab after 30 s. A headless server accepts and queues the request but
 never applies it. Tab membership is part of the session snapshot, so a moved pane comes back in
 its new tab after a restart.
 
@@ -360,6 +368,11 @@ re-applied to the pane after a relaunch, whether it was re-attached or re-spawne
 keys (`hp.recovered`, `hp.env-dropped`, any key whose last segment ends in `state` or is
 `status` / `activity` / `liveness`) and secret-looking keys or values are not saved; at most
 64 keys, values up to 4 KiB. A self-healed pane keeps its last-known label and meta.
+
+A restored pane's `cwd` in `/state` starts from the snapshot: a re-attached pane reports the cwd
+the snapshot recorded, a re-spawned one the cwd it was spawned in. A shell's own cwd reports
+(OSC 7) update it later. Program panes (a `command`/`args` spawn) never send those, so this is
+what keeps their `cwd` from reading `null` after a restart.
 
 "Runs a process" for the close prompt means a program pane (spawned with a command) or a shell
 whose shell-integration markers report a running command. Marker state is not carried across a

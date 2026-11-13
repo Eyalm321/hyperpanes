@@ -1686,9 +1686,9 @@ pub(crate) fn apply_pane_group_request(
 pub(crate) enum MoveOutcome {
     /// The pane is now in the target tab (or already was).
     Moved,
-    /// No window hosts the pane (yet).
+    /// No window hosts the pane, or the target tab id, (yet): retried on later ticks.
     NotFound,
-    /// The move can't happen (unknown/remote target, or the window's only pane).
+    /// The move can't happen (unknown window, remote target tab, or the window's only pane).
     Refused,
 }
 
@@ -1726,16 +1726,26 @@ pub(crate) fn apply_move_request(
     // The existing target tab's stable uid (None ⇒ make a new tab after lifting the pane).
     let existing: Option<u64> = {
         let mut st = dst.borrow_mut();
+        // A tab the API created (`newTab` / project) may already exist under its id: an earlier
+        // request made it, or a `newPane {tabId}` aimed at the model's pending tab was adopted
+        // into a tab under that id first. Reuse it rather than make a second tab with the same id.
+        let by_ctl_id = |tabs: &[crate::state::Tab], id: &str| {
+            tabs.iter().position(|t| t.ctl_id.as_deref() == Some(id))
+        };
         let idx = match to {
+            // Unknown here but valid in the read model (the API checked): a tab a queued move
+            // has not made yet (its move is still waiting for its pane). Retry, don't drop.
             T::Tab { tab_id } => match resolve_tab_index(&st.tabs, tab_id) {
                 Some(i) => Some(i),
-                None => return MoveOutcome::Refused,
+                None => return MoveOutcome::NotFound,
             },
-            T::NewTab { .. } => None,
+            T::NewTab { tab_id, .. } => by_ctl_id(&st.tabs, tab_id),
             T::Project {
                 tab_id, project_id, ..
             } => {
-                let i = st.project_tab(project_id);
+                let i = st
+                    .project_tab(project_id)
+                    .or_else(|| by_ctl_id(&st.tabs, tab_id));
                 // Reusing a project tab the API didn't know about: give it the id it returned.
                 if let Some(t) = i.and_then(|i| st.tabs.get_mut(i)) {
                     t.ctl_id.get_or_insert_with(|| tab_id.clone());
@@ -2512,8 +2522,9 @@ mod tests {
             assert_eq!(st.tabs[1].panes.len(), 2);
         }
 
-        // The window's only pane is refused; an unknown pane is NotFound (retried later);
-        // an unknown target tab or window is refused. Nothing moves.
+        // The window's only pane is refused; an unknown pane or target tab is NotFound (retried
+        // later: the tab may be one a queued move has yet to make); an unknown window is
+        // refused. Nothing moves.
         let r = mv(
             "ctl-b",
             2,
@@ -2546,7 +2557,7 @@ mod tests {
         );
         assert_eq!(
             apply_move_request(&states, &m, &resolve, &r),
-            MoveOutcome::Refused
+            MoveOutcome::NotFound
         );
         let r = mv(
             "ctl-z",
@@ -2560,6 +2571,84 @@ mod tests {
             MoveOutcome::Refused
         );
         assert_eq!(w2.borrow().tabs[0].panes[0].uid, "z");
+    }
+
+    /// Issue #125: a `movePane {tabId}` aimed at a tab a queued `newTab` move has not made yet
+    /// waits (NotFound, retried) instead of being dropped, and a `newTab` move reuses a tab that
+    /// already carries its id instead of making a second one.
+    #[test]
+    fn move_into_a_not_yet_made_tab_waits_and_new_tab_ids_are_reused() {
+        use hyperpanes_core::control::server::{MoveTarget as T, PaneGroupRequest as R};
+        use std::cell::RefCell;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        let det = |n: &str| crate::state::DetachedPane {
+            replay_answered: true,
+            live: Default::default(),
+            uid: n.into(),
+            title: n.to_string().into(),
+            subtitle: None,
+            pinned_accent: None,
+            show_frame: None,
+            show_dot: None,
+            font_px: 14.0,
+            spawn_command: None,
+            spawn_args: None,
+            spawn_shell: None,
+            spawn_env: None,
+        };
+        let w1 = RefCell::new(crate::state::State::new(crate::theme::load_font(1.0)));
+        for n in ["a", "b", "c", "d"] {
+            w1.borrow_mut().adopt_pane(&m, det(n));
+        }
+        let states = [(1i64, &w1)];
+        let resolve = |id: &str| id.to_string();
+        let new_tab = |pane: &str| R::Move {
+            pane_id: pane.into(),
+            window_id: 1,
+            to: T::NewTab {
+                tab_id: "nt-1".into(),
+                title: Some("x".into()),
+                color: None,
+            },
+        };
+        let into = |pane: &str| R::Move {
+            pane_id: pane.into(),
+            window_id: 1,
+            to: T::Tab {
+                tab_id: "nt-1".into(),
+            },
+        };
+        // The newTab move's pane isn't hosted yet: the follow-up move into its tab waits too.
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &new_tab("later")),
+            MoveOutcome::NotFound
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &into("b")),
+            MoveOutcome::NotFound
+        );
+        assert_eq!(w1.borrow().tabs.len(), 1, "nothing moved yet");
+        // Once the tab exists, the waiting move lands in it.
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &new_tab("a")),
+            MoveOutcome::Moved
+        );
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &into("b")),
+            MoveOutcome::Moved
+        );
+        // A second newTab request with the same id joins that tab, never a duplicate.
+        assert_eq!(
+            apply_move_request(&states, &m, &resolve, &new_tab("c")),
+            MoveOutcome::Moved
+        );
+        let st = w1.borrow();
+        assert_eq!(st.tabs.len(), 2);
+        assert_eq!(st.tabs[1].ctl_id.as_deref(), Some("nt-1"));
+        let uids: Vec<&str> = st.tabs[1].panes.iter().map(|p| p.uid.as_str()).collect();
+        assert_eq!(uids, ["a", "b", "c"]);
+        assert_eq!(st.tabs[0].panes.len(), 1);
     }
 
     #[test]

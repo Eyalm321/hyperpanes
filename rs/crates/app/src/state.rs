@@ -6721,6 +6721,7 @@ impl State {
             Box::new(SoftwareRenderer::new()),
         );
         pane.set_palette(theme::terminal_theme(self.settings.terminal_theme));
+        let cwd = restored_pane_cwd(reattach, spec.cwd.as_deref(), spawn_cwd.as_deref());
         let mut repaint_nudge = RepaintNudge::Idle;
         if reattach {
             // Re-host the survivor: seed the fresh grid from the daemon's retained replay (the
@@ -6807,7 +6808,9 @@ impl State {
             font_px,
             font,
             font_dirty: false,
-            cwd: None,
+            // Known up front, not left to OSC 7: a program pane (claude, a `command`/`args`
+            // spawn) never reports one, so `/state` would show `cwd: null` after every restart.
+            cwd,
             // The persisted base env, so the next relaunch snapshot keeps it.
             env: spec
                 .env
@@ -6823,6 +6826,18 @@ impl State {
             remote: None,
         })
     }
+}
+
+/// The cwd a restored pane starts with, before its shell (if any) reports one over OSC 7. A
+/// re-attached survivor is still in the cwd the snapshot recorded; a re-spawned pane runs in the
+/// cwd it was spawned with (the snapshot's, or a resumed conversation's own). Empty = unknown.
+fn restored_pane_cwd(
+    reattach: bool,
+    snapshot_cwd: Option<&str>,
+    spawn_cwd: Option<&str>,
+) -> Option<String> {
+    let cwd = if reattach { snapshot_cwd } else { spawn_cwd };
+    cwd.filter(|c| !c.trim().is_empty()).map(str::to_string)
 }
 
 /// Track F: reminder panes — park a live pane until a chosen time. Its own `impl` block so
@@ -7787,6 +7802,54 @@ mod session_file_tests {
     //! its layout/split/focus state and carry per-pane zoom exactly like the workspace
     //! path (`font_size` only when off the base size).
     use super::*;
+
+    /// Issue #125: a restored pane starts with a cwd (a program pane never reports one over
+    /// OSC 7), so `/state` doesn't show `cwd: null` for it after a restart.
+    #[test]
+    fn restored_pane_cwd_comes_from_the_snapshot_or_the_spawn() {
+        assert_eq!(
+            super::restored_pane_cwd(true, Some("/work/a"), Some("/elsewhere")).as_deref(),
+            Some("/work/a"),
+            "a re-attached survivor is where the snapshot saw it"
+        );
+        assert_eq!(
+            super::restored_pane_cwd(false, Some("/work/a"), Some("/conv/dir")).as_deref(),
+            Some("/conv/dir"),
+            "a re-spawn runs where it was spawned"
+        );
+        assert_eq!(super::restored_pane_cwd(true, Some("  "), None), None);
+        assert_eq!(super::restored_pane_cwd(false, None, None), None);
+    }
+
+    #[test]
+    fn restored_program_pane_keeps_its_cwd_for_the_next_snapshot() {
+        // The restore spawns its pty through the async session path.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let m = mgr();
+        let mut st = fresh();
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let seed = WorkspaceFile {
+            groups: Some(vec![GroupSpec {
+                panes: vec![PaneSpec {
+                    command: Some("true".into()),
+                    args: Some(vec![]),
+                    cwd: Some(dir.clone()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            active: Some(0),
+            ..Default::default()
+        };
+        st.load_workspace(seed, &m);
+        assert_eq!(st.active_tab().panes[0].cwd.as_deref(), Some(dir.as_str()));
+        let groups = st.to_session_file().groups.expect("one group per tab");
+        assert_eq!(groups[0].panes[0].cwd.as_deref(), Some(dir.as_str()));
+    }
 
     fn fresh() -> State {
         State::new(theme::load_font(1.0))
