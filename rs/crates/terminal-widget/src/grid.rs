@@ -20,8 +20,8 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{ClipboardType, Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
-use std::sync::Arc;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 /// A single resolved cell ready for rasterization.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,7 +156,7 @@ impl TermGrid {
         let (resp_tx, resp_rx) = channel::<Vec<u8>>();
         let (clip_tx, clip_rx) = channel::<String>();
         let (color_tx, color_rx) = channel::<ColorRequest>();
-                // `Config::default()` has `osc52 = OnlyCopy`: stores are emitted, loads are denied by
+        // `Config::default()` has `osc52 = OnlyCopy`: stores are emitted, loads are denied by
         // the terminal itself (belt and braces with the listener above).
         let term = Term::new(
             Config::default(),
