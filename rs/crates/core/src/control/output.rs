@@ -220,16 +220,37 @@ fn matches_press_key(s: &str) -> bool {
 // the last non-empty line only. A heuristic, not a guarantee.
 pub fn detect_awaiting_input(screen_text: &str) -> bool {
     let lines: Vec<&str> = screen_text.split('\n').collect();
-    let mut i = lines.len() as isize - 1;
-    while i >= 0 && lines[i as usize].trim().is_empty() {
-        i -= 1;
-    }
-    if i < 0 {
+    let Some(last) = last_content_line(&lines) else {
         return false;
-    }
-    let last = lines[i as usize].trim();
-    let lower = last.to_lowercase();
+    };
+    explicit_prompt(last)
+        || last.contains('❯')
+        || last.ends_with('?')
+        || detect_selection_dialog(&lines)
+}
 
+/// Whether text + Enter typed by the app itself (an inbox nudge, a queued prompt, a goal) would
+/// land in a prompt that wants a DECISION instead of in the agent's input box, and so must be
+/// held: a permission or trust dialog, a picker, a y/n question, "press enter". Narrower than
+/// [`detect_awaiting_input`] on purpose: it ignores the generic last-line `❯` and `?` cues, so a
+/// shell prompt or a question in the chat never holds a delivery forever. It is the one
+/// predicate every automated typing path checks.
+pub fn blocks_typed_input(screen_text: &str) -> bool {
+    let lines: Vec<&str> = screen_text.split('\n').collect();
+    last_content_line(&lines).is_some_and(explicit_prompt)
+        || detect_selection_dialog(&lines)
+        || shows_option_form(&lines)
+}
+
+// The last non-blank row, trimmed.
+fn last_content_line<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    lines.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty())
+}
+
+// An explicit "answer me" phrase on the last row: y/n, yes/no, press a key, enter to confirm, or
+// a "do you want / wish / trust" question.
+fn explicit_prompt(last: &str) -> bool {
+    let lower = last.to_lowercase();
     lower.contains("(y/n)")
         || lower.contains("[y/n]")
         || lower.contains("(yes/no)")
@@ -239,8 +260,163 @@ pub fn detect_awaiting_input(screen_text: &str) -> bool {
         || bounded_contains(&lower, "do you want")
         || bounded_contains(&lower, "do you wish")
         || bounded_contains(&lower, "do you trust")
-        || last.contains('❯')
-        || last.ends_with('?')
+}
+
+// A `❯`-pointed row anywhere on screen plus at least two numbered options: an interactive
+// multi-option form (trust prompt, theme / model picker, permission dialog, account select).
+// Anything typed while one is up lands in the form. Claude's ordinary input box has no
+// numbered options under its `❯`, so it never matches. (Moved from the app's goal delivery.)
+fn shows_option_form(lines: &[&str]) -> bool {
+    let mut pointer = false;
+    let mut numbered = 0;
+    for line in lines {
+        // Forms may render inside a box border: strip a leading border before testing.
+        let t = line
+            .trim_start()
+            .trim_start_matches(['│', '║'])
+            .trim_start();
+        let opt = match t.strip_prefix('❯') {
+            Some(rest) => {
+                pointer = true;
+                rest.trim_start()
+            }
+            None => t,
+        };
+        let digits = opt.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && opt.chars().nth(digits) == Some('.') {
+            numbered += 1;
+        }
+    }
+    pointer && numbered >= 2
+}
+
+// How many content rows above the bottom of the screen the selection-dialog scan looks at
+// (blank rows, borders and horizontal rules are not counted).
+const DIALOG_SCAN_ROWS: usize = 12;
+
+// Vertical border glyphs a TUI frames its rows with (`│ … │`). They are stripped from both ends
+// of a row before matching, so a framed dialog reads like an unframed one.
+fn is_border(c: char) -> bool {
+    matches!(c, '│' | '┃' | '║' | '╎' | '╏' | '┆' | '┇' | '┊' | '┋')
+}
+
+// Horizontal rule and corner glyphs. A row that starts AND ends with one is a rule (a box edge, a
+// separator, or a statusline rule that carries a label in the middle: `──── name ─`).
+fn is_rule_glyph(c: char) -> bool {
+    matches!(
+        c,
+        '─' | '━'
+            | '═'
+            | '╌'
+            | '╍'
+            | '┄'
+            | '┅'
+            | '┈'
+            | '┉'
+            | '╭'
+            | '╮'
+            | '╰'
+            | '╯'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '╔'
+            | '╗'
+            | '╚'
+            | '╝'
+    )
+}
+
+// A row with its frame removed: trimmed, border glyphs stripped from both ends, trimmed again.
+fn strip_frame(row: &str) -> &str {
+    row.trim().trim_matches(is_border).trim()
+}
+
+fn is_rule_row(row: &str) -> bool {
+    let first = row.chars().next();
+    let last = row.chars().next_back();
+    matches!((first, last), (Some(a), Some(b)) if is_rule_glyph(a) && is_rule_glyph(b))
+}
+
+// `N. text` / `N) text`: a numbered option (no selection cursor).
+fn numbered_option(row: &str) -> bool {
+    let digits = row.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return false;
+    }
+    let mut rest = row[digits..].chars();
+    matches!(rest.next(), Some('.') | Some(')'))
+        && matches!(rest.next(), Some(c) if c.is_whitespace())
+        && rest.as_str().trim_start().chars().next().is_some()
+}
+
+// `❯ N. text`: the cursored (selected) numbered option of a selection menu.
+fn selected_option(row: &str) -> bool {
+    row.strip_prefix('❯')
+        .map(|rest| numbered_option(rest.trim_start()))
+        .unwrap_or(false)
+}
+
+// A Claude-Code-style selection dialog anywhere in the bottom rows of the screen:
+//
+//   Do you want to proceed?
+//   ❯ 1. Yes
+//     2. No
+//
+//   Esc to cancel · Tab to amend
+//   ──────────────────────────── status ─
+//
+// The last-line rules above miss it once anything is drawn below the dialog (a statusline rule,
+// a frame). It needs a cursored numbered option, at least one other numbered option, and either a
+// question above the cursor or a cancel/confirm footer below it, so a numbered list in prose never
+// matches. A real dialog REPLACES the agent's input box (a `❯` row right under a rule): when that
+// box is still visible below the menu, the menu is only quoted in the chat.
+fn detect_selection_dialog(lines: &[&str]) -> bool {
+    // Non-blank rows with their frame stripped, each flagged as a rule or not.
+    let all: Vec<(&str, bool)> = lines
+        .iter()
+        .map(|l| strip_frame(l))
+        .filter(|r| !r.is_empty())
+        .map(|r| (r, is_rule_row(r)))
+        .collect();
+    let input_box = |i: usize| i > 0 && all[i - 1].1 && all[i].0.starts_with('❯');
+    let content: Vec<usize> = (0..all.len()).filter(|&i| !all[i].1).collect();
+    let window = &content[content.len().saturating_sub(DIALOG_SCAN_ROWS)..];
+    let Some(w_sel) = window
+        .iter()
+        .rposition(|&i| selected_option(all[i].0) && !input_box(i))
+    else {
+        return false;
+    };
+    let sel = window[w_sel];
+    if (sel + 1..all.len()).any(input_box) {
+        return false;
+    }
+    let other_option = window
+        .iter()
+        .any(|&i| i != sel && (numbered_option(all[i].0) || selected_option(all[i].0)));
+    if !other_option {
+        return false;
+    }
+    let question = window[..w_sel].iter().any(|&i| {
+        let row = all[i].0;
+        let lower = row.to_lowercase();
+        row.ends_with('?')
+            || bounded_contains(&lower, "do you want")
+            || bounded_contains(&lower, "do you wish")
+            || bounded_contains(&lower, "do you trust")
+            || bounded_contains(&lower, "would you like")
+    });
+    let footer = window[w_sel + 1..].iter().any(|&i| {
+        let lower = all[i].0.to_lowercase();
+        bounded_contains(&lower, "esc to cancel")
+            || bounded_contains(&lower, "enter to confirm")
+            || bounded_contains(&lower, "esc to exit")
+    });
+    question || footer
 }
 
 #[cfg(test)]
@@ -533,5 +709,164 @@ mod tests {
     #[test]
     fn does_not_flag_an_agent_that_is_mid_turn_working() {
         assert!(!detect_awaiting_input(WORKING));
+    }
+
+    // A permission dialog as a framed Claude pane renders it: every row carries a right border,
+    // and a labelled statusline rule sits BELOW the dialog, so the last non-empty line is the
+    // rule, not the prompt. Content is synthetic.
+    const PERMISSION_DIALOG: &str = concat!(
+        "● Running the build script                                         │\n",
+        "  ⎿  $ cd /work && ./build.sh 2>&1 | tail -40                       │\n",
+        "                                                                   │\n",
+        "───────────────────────────────────────────────────────────────────│\n",
+        " Bash command                                                      │\n",
+        " Run the build script                                              │\n",
+        "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│\n",
+        " │ cd /work && ./build.sh 2>&1 | tail -40                          │\n",
+        "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌│\n",
+        "                                                                   │\n",
+        " Do you want to proceed?                                           │\n",
+        " ❯ 1. Yes                                                          │\n",
+        "   2. No                                                           │\n",
+        "                                                                   │\n",
+        " Esc to cancel · Tab to amend                                      │\n",
+        "──────────────────────────────────────────────────────── status ──│\n",
+    );
+
+    #[test]
+    fn flags_a_permission_dialog_above_a_statusline_rule() {
+        assert!(detect_awaiting_input(PERMISSION_DIALOG));
+    }
+
+    #[test]
+    fn flags_a_boxed_permission_dialog_with_three_options() {
+        let screen = concat!(
+            "╭──────────────────────────────────────────────╮\n",
+            "│ Edit file                                    │\n",
+            "│ Do you want to make this edit to main.rs?    │\n",
+            "│ ❯ 1. Yes                                     │\n",
+            "│   2. Yes, allow all edits during this session │\n",
+            "│   3. No, and tell Claude what to do           │\n",
+            "│      differently (esc)                        │\n",
+            "╰──────────────────────────────────────────────╯\n",
+            "──────────────────────────────────── status ──\n",
+        );
+        assert!(detect_awaiting_input(screen));
+    }
+
+    #[test]
+    fn flags_a_dialog_with_only_a_cancel_footer() {
+        let screen = concat!(
+            " Pick a plan\n",
+            " ❯ 1. Keep planning\n",
+            "   2. Start building\n",
+            "\n",
+            " Esc to cancel\n",
+            "──────── status ─\n",
+        );
+        assert!(detect_awaiting_input(screen));
+    }
+
+    #[test]
+    fn does_not_flag_a_numbered_list_in_prose() {
+        let screen = concat!(
+            "Here is the plan:\n",
+            "1. Read the file\n",
+            "2. Fix the bug\n",
+            "Shall I go ahead?\n",
+            "──────────────────\n",
+            "❯ \n",
+            "──────────────────\n",
+            "  ? for shortcuts\n",
+        );
+        assert!(!detect_awaiting_input(screen));
+    }
+
+    // The agent's chat output merely QUOTES a menu (cursor, options, question and footer all
+    // present) above its normal, empty input box: not blocked.
+    #[test]
+    fn does_not_flag_a_menu_quoted_in_chat_above_the_input_box() {
+        let screen = concat!(
+            "● The dialog offered these choices:\n",
+            "  Do you want to proceed?\n",
+            "  ❯ 1. Yes\n",
+            "    2. No\n",
+            "  Esc to cancel\n",
+            "\n",
+            "────────────────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────────────────\n",
+            "  ? for shortcuts\n",
+        );
+        assert!(!detect_awaiting_input(screen));
+        // The same quote with typed text in the box reads the same.
+        assert!(!detect_awaiting_input(
+            &screen.replace("❯ \n", "❯ 1. ship it\n")
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_a_single_cursored_option_without_alternatives() {
+        let screen = concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "──────── status ─\n",
+        );
+        assert!(!detect_awaiting_input(screen));
+    }
+
+    // ── blocks_typed_input: the guard every automated typing path checks ──
+
+    #[test]
+    fn typing_is_blocked_by_decision_prompts() {
+        assert!(blocks_typed_input(PERMISSION_DIALOG));
+        assert!(blocks_typed_input(TRUST_DIALOG));
+        assert!(blocks_typed_input(MENU_TAIL));
+        assert!(blocks_typed_input("Overwrite the file? (y/n)"));
+        assert!(blocks_typed_input("Press enter to continue"));
+        // Option forms moved from the app's goal delivery (trust prompt, boxed permission).
+        assert!(blocks_typed_input(
+            "Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n"
+        ));
+        assert!(blocks_typed_input(
+            "│ Do you want to proceed?      │\n│ ❯ 1. Yes                     │\n│   2. No, and tell Claude why │\n"
+        ));
+    }
+
+    #[test]
+    fn typing_is_not_blocked_by_input_boxes_shells_or_chat() {
+        assert!(!blocks_typed_input(IDLE_PROMPT));
+        assert!(!blocks_typed_input(WORKING));
+        assert!(!blocks_typed_input(
+            "╭─────────────────╮\n│ > Try \"help\"    │\n╰─────────────────╯\n  ? for shortcuts\n"
+        ));
+        assert!(!blocks_typed_input(
+            "Plan:\n 1. do a thing\n 2. do another\n"
+        ));
+        // A `❯` shell prompt (starship) at rest: awaiting input, but not a decision.
+        assert!(!blocks_typed_input("❯ ls\nsrc  target\n❯ "));
+        assert!(detect_awaiting_input("❯ ls\nsrc  target\n❯ "));
+        // A question at the end of the chat, above the agent's input box.
+        assert!(!blocks_typed_input(concat!(
+            "Shall I go ahead?\n",
+            "──────────────────\n",
+            "❯ \n",
+            "──────────────────\n",
+        )));
+        assert!(!blocks_typed_input(""));
+    }
+
+    #[test]
+    fn does_not_flag_a_dialog_scrolled_far_above_the_bottom() {
+        let mut screen = String::from(concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel\n",
+        ));
+        for i in 0..DIALOG_SCAN_ROWS {
+            screen.push_str(&format!("output line {i}\n"));
+        }
+        assert!(!detect_awaiting_input(&screen));
     }
 }

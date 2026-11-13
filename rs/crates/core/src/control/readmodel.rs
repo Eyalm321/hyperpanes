@@ -1,7 +1,8 @@
 //! The CENTRAL read-model — AUTHORITATIVE here (not an Electron renderer mirror). Holds the
 //! windows → tabs → panes tree + reverse indexes (uidToPane / paneIndex / tabToWindow) rebuilt
 //! on STRUCTURE change only, a per-window structural fingerprint, and per-pane `activity`
-//! (busy/idle/exited) computed centrally from `session_manager` `last_output_at` at the
+//! (busy/idle/exited) computed centrally (`control::server::activity_for`) from each session's
+//! last GENUINE output (cosmetic redraws excluded, see `session::activity`) at the
 //! `idleAlertSeconds` threshold. Serializes the EXACT `/state` JSON (PaneState:
 //! id/sessionUid/label/color/command?/args?/cwd?/shell?/subtitle?/status/exitCode?/activity/meta?,
 //! optionals OMITTED when unset). Scope-filtered per request. `talk` (per-pane "talk", additive)

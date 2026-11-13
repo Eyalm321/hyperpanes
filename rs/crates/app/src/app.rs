@@ -21,6 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hyperpanes_core::control::output::blocks_typed_input;
 use hyperpanes_core::layout::presets::DividerKind;
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
 use hyperpanes_terminal_widget::{encode_key, keys};
@@ -552,13 +553,14 @@ impl App {
                 .control
                 .uid_for_pane_id(pane_id)
                 .unwrap_or_else(|| pane_id.to_string());
-            // Hold while an interactive selector (trust prompt, model picker…) is on screen —
-            // typed text would land in the form and be swallowed. The queue keeps the prompt.
+            // Hold while a decision prompt (trust prompt, model picker, permission dialog, y/n
+            // question…) is on screen — typed text would land in the form and its Enter would
+            // answer it. The queue keeps the prompt. Same predicate as the inbox nudge.
             if self
                 .mgr
                 .render_screen(&uid)
                 .as_deref()
-                .is_some_and(screen_shows_option_form)
+                .is_some_and(blocks_typed_input)
             {
                 continue;
             }
@@ -638,14 +640,14 @@ impl App {
                         .is_some_and(|age| age.as_secs() >= READY_AGE_SECS);
                     let timed_out = g.queued_at.elapsed().as_secs() >= FALLBACK_SECS;
                     if marker_ready || timed_out {
-                        // Hold while an interactive selector is on screen — writing now would
-                        // type the goal into the form (swallowed on the user's next pick).
-                        // No timeout on this hold: the goal outlives the form.
+                        // Hold while a decision prompt is on screen — writing now would type
+                        // the goal into the form (and its Enter would answer it). No timeout
+                        // on this hold: the goal outlives the form.
                         if self
                             .mgr
                             .render_screen(&g.uid)
                             .as_deref()
-                            .is_some_and(screen_shows_option_form)
+                            .is_some_and(blocks_typed_input)
                         {
                             return true;
                         }
@@ -4093,36 +4095,6 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
         .find(|w| w.state.borrow_mut().hosts_session(uid))
 }
 
-/// True when a Claude-style interactive multi-option form is on the pane's rendered screen —
-/// the trust-folder prompt, theme/model pickers, permission dialogs, `/login` account select.
-/// Those render a `❯`-pointed row over a numbered option list ("❯ 1. Yes, proceed" / "2. No…");
-/// anything typed while one is up lands in the form and is swallowed on the user's next pick,
-/// so goal delivery holds while this returns true. The ordinary Claude input box (`>` prompt)
-/// has no `❯` pointer, so it never matches.
-fn screen_shows_option_form(screen: &str) -> bool {
-    let mut pointer = false;
-    let mut numbered = 0;
-    for line in screen.lines() {
-        // Forms may render inside a box border — strip a leading `│` before testing.
-        let t = line
-            .trim_start()
-            .trim_start_matches(['│', '║'])
-            .trim_start();
-        let opt = match t.strip_prefix('❯') {
-            Some(rest) => {
-                pointer = true;
-                rest.trim_start()
-            }
-            None => t,
-        };
-        let digits = opt.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits > 0 && opt.chars().nth(digits) == Some('.') {
-            numbered += 1;
-        }
-    }
-    pointer && numbered >= 2
-}
-
 /// Decode an image file (any of the goal picker's formats) to RGBA8 and place it on the OS
 /// clipboard, so a following Ctrl+V into a Claude pane pastes the actual image. Returns `false`
 /// (a no-op) on a read/decode/clipboard error — the goal's text already carries the file path,
@@ -4238,36 +4210,6 @@ mod control_status_line_tests {
             control_status_line(true, false, Some(41419), &remote),
             "Running · http://127.0.0.1:41419 · input blocked · Remote: wg0 → 100.64.0.1:41419 ✓, tun9 ✗ interface not found"
         );
-    }
-}
-
-#[cfg(test)]
-mod option_form_tests {
-    use super::screen_shows_option_form;
-
-    #[test]
-    fn detects_claude_style_selectors() {
-        // Trust-folder prompt (pointer on the highlighted row, numbered options).
-        let trust =
-            "Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n";
-        assert!(screen_shows_option_form(trust));
-        // Boxed permission dialog (rows inside a │ border).
-        let boxed = "│ Do you want to proceed?      │\n│ ❯ 1. Yes                     │\n│   2. No, and tell Claude why │\n";
-        assert!(screen_shows_option_form(boxed));
-    }
-
-    #[test]
-    fn ignores_the_ordinary_input_box_and_plain_output() {
-        // Claude's normal prompt box — a `>` prompt, no `❯` pointer.
-        let prompt =
-            "╭─────────────────╮\n│ > Try \"help\"    │\n╰─────────────────╯\n  ? for shortcuts\n";
-        assert!(!screen_shows_option_form(prompt));
-        // A numbered list in ordinary output (no pointer) is not a form.
-        let list = "Plan:\n 1. do a thing\n 2. do another\n";
-        assert!(!screen_shows_option_form(list));
-        // A stray `❯` shell prompt without numbered options is not a form.
-        let shell = "❯ ls\nsrc  target\n";
-        assert!(!screen_shows_option_form(shell));
     }
 }
 

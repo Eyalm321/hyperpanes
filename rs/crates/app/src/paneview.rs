@@ -1724,6 +1724,60 @@ mod tab_status_tests {
             mgr.kill(uid);
         }
     }
+
+    /// The panes the tab dot must NOT count — one that only blinks (fresh raw output, no genuine
+    /// output for a minute) and one showing a permission dialog (fresh output, screen classified
+    /// as awaiting input) — read the same on the GUI chip and in `/state`, and leave their tab
+    /// idle; a pane with fresh genuine output still makes its tab working.
+    #[test]
+    fn ui_and_state_agree_on_blinking_and_dialog_panes() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _g = rt.enter();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mgr = SessionManager::new(tx);
+        let now = hyperpanes_core::control::server::now_ms() as u64;
+        // Tab 0: a blinking pane + a dialog pane. Tab 1: a dialog pane + a busy pane.
+        spawn(&mgr, "ts-blink", 60_000);
+        mgr.note_raw_output_for_test("ts-blink", now);
+        for uid in ["ts-dialog", "ts-dialog2"] {
+            spawn(&mgr, uid, 100);
+            let cursor = mgr.activity_signal(uid).unwrap().content_cursor;
+            mgr.set_awaiting(uid, cursor, true);
+        }
+        spawn(&mgr, "ts-busy2", 100);
+        let mut st = State::new(theme::load_font(1.0));
+        st.adopt_pane(&mgr, detached("ts-blink"));
+        st.adopt_pane(&mgr, detached("ts-dialog"));
+        st.tabs.push(crate::state::Tab::new_for_test("t2".into()));
+        st.switch_tab(1);
+        st.adopt_pane(&mgr, detached("ts-dialog2"));
+        st.adopt_pane(&mgr, detached("ts-busy2"));
+
+        let model = model_for(&st);
+        let out = model.state_for_scope(None, &|p| {
+            activity_for(&mgr, IDLE_THRESHOLD_MS, &p.session_uid, p.status)
+        });
+        let api: Vec<&str> = out.windows[0].tabs.iter().map(|t| t.status).collect();
+        let ui: Vec<&str> = st
+            .tabs
+            .iter()
+            .map(|t| tab_status_for(t, &mgr).as_str())
+            .collect();
+        assert_eq!(ui, api);
+        assert_eq!(api, vec!["idle", "working"]);
+        let acts: Vec<&str> = out.windows[0].tabs[0]
+            .panes
+            .iter()
+            .map(|p| p.activity)
+            .collect();
+        assert_eq!(acts, vec!["idle", "idle"]);
+        for uid in ["ts-blink", "ts-dialog", "ts-dialog2", "ts-busy2"] {
+            mgr.kill(uid);
+        }
+    }
 }
 
 /// #140: a pane primed from a daemon screen seed starts at the pty's size, so laying it out at
