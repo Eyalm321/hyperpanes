@@ -21,6 +21,7 @@
 
 mod ai;
 mod app;
+mod ask_alert;
 mod command;
 mod contextmenu;
 mod control_cli;

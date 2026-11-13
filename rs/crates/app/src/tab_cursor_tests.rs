@@ -104,6 +104,7 @@ impl H {
                 group_color: slint::Color::default(),
                 a11y_label: Default::default(),
                 working: false,
+                asking: false,
             })
             .collect();
         win.set_tabs(ModelRc::from(Rc::new(VecModel::from(tabs))));
@@ -262,8 +263,9 @@ fn grip_is_an_accessible_button_with_label() {
 }
 
 /// Every tab-dock side (0 top, 1 right, 2 left) renders the tab-status indicator: the docked
-/// VTabChip rows carry the same `working` flag as the top-bar chips, surfaced in each tab's
-/// accessible label (", working" / ", idle").
+/// VTabChip rows carry the same `working` / `asking` flags as the top-bar chips, surfaced in
+/// each tab's accessible label (", needs input" / ", working" / ", idle"); asking wins over
+/// working.
 #[test]
 fn tab_status_reaches_every_dock_side() {
     let h = H::new();
@@ -276,7 +278,8 @@ fn tab_status_reaches_every_dock_side() {
             group: false,
             group_color: slint::Color::default(),
             a11y_label: Default::default(),
-            working: i == 1,
+            working: i >= 1,
+            asking: i == 2,
         })
         .collect();
     h.win.set_tabs(ModelRc::from(Rc::new(VecModel::from(tabs))));
@@ -294,7 +297,7 @@ fn tab_status_reaches_every_dock_side() {
         labels.sort();
         assert_eq!(
             labels,
-            vec!["tab 0, idle", "tab 1, working", "tab 2, idle"],
+            vec!["tab 0, idle", "tab 1, working", "tab 2, needs input"],
             "dock {dock}"
         );
     }

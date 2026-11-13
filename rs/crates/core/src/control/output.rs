@@ -12,6 +12,8 @@
 //! `slices_by_utf16_code_units_not_utf8_bytes` test, which would fail under a naive
 //! byte-slicing port.
 
+use crate::session::activity::{AskKind, ScreenVerdict};
+
 // Defaults for `read_pane({ waitForIdle })`. The settle window is DELIBERATELY
 // short — a single interactive turn — and unrelated to useIdle's 10 s glow
 // threshold (idleAlertSeconds), which is far too slow for chat. The activity
@@ -304,6 +306,268 @@ fn shows_option_form(lines: &[&str]) -> bool {
     numbered >= 2
 }
 
+// A row that asks something: ends with `?`, or a "do you want / wish / trust" / "would you like".
+fn is_question(row: &str) -> bool {
+    let lower = row.to_lowercase();
+    row.ends_with('?')
+        || bounded_contains(&lower, "do you want")
+        || bounded_contains(&lower, "do you wish")
+        || bounded_contains(&lower, "do you trust")
+        || bounded_contains(&lower, "would you like")
+}
+
+/// Longest question (chars) a verdict carries; longer ones end in `…`.
+pub const QUESTION_MAX_CHARS: usize = 200;
+
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
+/// A decision dialog found by [`decision_dialog`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dialog {
+    pub kind: AskKind,
+    /// The question row above the dialog's options, frame stripped, capped at
+    /// [`QUESTION_MAX_CHARS`]; `None` when the dialog only has a footer.
+    pub question: Option<String>,
+}
+
+/// Whether the screen ends in a real decision DIALOG that waits on its owner: what drives the
+/// tab's ASK state and the "needs input" alert. Stricter than [`blocks_typed_input`] on purpose:
+/// a screen that never changes keeps its verdict, so a false ASK would read ASK, and alert,
+/// forever. The typing guard may hold on a doubtful screen; ASK may not fire on one.
+///
+/// - Only a cursored selection dialog counts: a `❯ N.` option in a block of at least two
+///   numbered options, with a question above it or a key-hint footer ("Esc to cancel") below.
+///   A bare y/n, "press enter" or "do you want" line never counts: a log tail can end with one,
+///   and nothing in the rendered text tells it from a live prompt. Those still read
+///   awaiting-input and still hold typed input.
+/// - The dialog must be the bottom of the screen. Under its options only the options' own
+///   wrapped text, blank rows, rules, key hints and at most [`STATUS_ROWS_MAX`] other rows (a
+///   statusline) may follow, and none of them may look like a shell prompt: a dialog printed by
+///   `cat` or `grep` in a shell has the shell prompt under it.
+/// - An agent input box (a `❯` row under a rule) below the menu means the menu is only quoted in
+///   the chat.
+/// - A side panel drawn beside the chat (a `│` column most rows share) is cut off first, so its
+///   text neither fakes a dialog nor hides one.
+pub fn decision_dialog(screen_text: &str) -> Option<Dialog> {
+    let lines: Vec<&str> = screen_text.split('\n').collect();
+    let cut = cut_side_panel(&lines);
+    let rows: Vec<&str> = cut.iter().map(|l| strip_frame(l)).collect();
+    let rule: Vec<bool> = rows.iter().map(|r| is_rule_row(r)).collect();
+    let content: Vec<usize> = (0..rows.len())
+        .filter(|&i| !rows[i].is_empty() && !rule[i])
+        .collect();
+    let window = &content[content.len().saturating_sub(DIALOG_SCAN_ROWS)..];
+    let input_box = |i: usize| {
+        rows[i].starts_with('❯')
+            && rows[..i]
+                .iter()
+                .rposition(|r| !r.is_empty())
+                .is_some_and(|j| rule[j])
+    };
+    let &sel = window
+        .iter()
+        .rev()
+        .find(|&&i| selected_option(rows[i]) && !input_box(i))?;
+    if (sel + 1..rows.len()).any(input_box) {
+        return None;
+    }
+    // The option block: the rows adjacent to the cursor (a blank row or a rule ends it).
+    let in_block = |i: usize| !rows[i].is_empty() && !rule[i];
+    let first = (0..sel)
+        .rev()
+        .take_while(|&i| in_block(i))
+        .last()
+        .unwrap_or(sel);
+    let end = (sel + 1..rows.len())
+        .take_while(|&i| in_block(i))
+        .last()
+        .unwrap_or(sel);
+    let is_option = |i: usize| numbered_option(rows[i]) || selected_option(rows[i]);
+    if (first..=end).filter(|&i| is_option(i)).count() < 2 {
+        return None;
+    }
+    // After the last option, inside the block: only its wrapped text (indented deeper than the
+    // option) or a key hint. A shell prompt right under a printed menu fails here.
+    let last_option = (sel..=end).rev().find(|&i| is_option(i)).unwrap_or(sel);
+    let option_indent = indent(cut[last_option]);
+    if (last_option + 1..=end).any(|i| indent(cut[i]) <= option_indent && !is_key_hint(rows[i])) {
+        return None;
+    }
+    // Below the block: rules, key hints and a short statusline; never a shell prompt.
+    let below: Vec<usize> = content.iter().copied().filter(|&i| i > end).collect();
+    if below.iter().any(|&i| shell_prompt_row(rows[i]))
+        || below.iter().filter(|&&i| !is_key_hint(rows[i])).count() > STATUS_ROWS_MAX
+    {
+        return None;
+    }
+    // The question: the nearest question row above the cursor, inside the dialog (below the
+    // nearest rule above it, the dialog's top edge, if there is one), never the chat above.
+    let top = (0..sel).rev().find(|&i| rule[i]);
+    let question = window
+        .iter()
+        .rev()
+        .filter(|&&i| i < sel && top.is_none_or(|t| i > t))
+        .find(|&&i| is_question(rows[i]))
+        .map(|&i| rows[i]);
+    let footers: Vec<String> = window
+        .iter()
+        .filter(|&&i| i > sel)
+        .map(|&i| rows[i].to_lowercase())
+        .collect();
+    let footer = footers.iter().any(|l| {
+        bounded_contains(l, "esc to cancel")
+            || bounded_contains(l, "enter to confirm")
+            || bounded_contains(l, "esc to exit")
+    });
+    if question.is_none() && !footer {
+        return None;
+    }
+    let kind = ask_kind(question, &footers);
+    Some(Dialog {
+        kind,
+        question: question.map(|q| cap_chars(q, QUESTION_MAX_CHARS)),
+    })
+}
+
+/// The most rows other than key hints a dialog may have under its options (a statusline and a
+/// mode line), see [`decision_dialog`].
+pub const STATUS_ROWS_MAX: usize = 3;
+
+// What the dialog decides, from its question and footer rows: a folder trust prompt, a tool
+// permission, or any other choice.
+fn ask_kind(question: Option<&str>, footers: &[String]) -> AskKind {
+    let q = question.map(str::to_lowercase).unwrap_or_default();
+    if bounded_contains(&q, "trust") {
+        AskKind::Trust
+    } else if bounded_contains(&q, "do you want to")
+        || bounded_contains(&q, "allow")
+        || bounded_contains(&q, "proceed")
+        || footers.iter().any(|f| bounded_contains(f, "tab to amend"))
+    {
+        AskKind::Permission
+    } else {
+        AskKind::Choice
+    }
+}
+
+// A key-hint row: "Esc to cancel · Tab to amend", "Enter to confirm", "↑↓ to navigate",
+// "shift+tab to cycle"…
+fn is_key_hint(row: &str) -> bool {
+    let lower = row.to_lowercase();
+    [
+        "esc to",
+        "enter to",
+        "tab to",
+        "to navigate",
+        "to select",
+        "to cancel",
+    ]
+    .iter()
+    .any(|k| bounded_contains(&lower, k))
+        || lower.contains("ctrl+")
+        || lower.contains("shift+tab")
+        || lower.contains('↑')
+}
+
+// A row that looks like a shell or pager prompt: it ends with a prompt glyph (`$ # > ❯ ➜ » λ`,
+// or a `%` that is not a percentage), a prompt is followed by a typed command (`host:~$ ls`), or
+// it is a pager's `:` / `(END)`.
+fn shell_prompt_row(row: &str) -> bool {
+    let row = row.trim();
+    // A prompt glyph right after a non-blank char (`~$`, `host%`); a `%` after a digit is a
+    // percentage.
+    let glyph_after = |i: usize, glyph: char| {
+        row[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace() && !(glyph == '%' && c.is_ascii_digit()))
+    };
+    let ends_with_prompt = match row.char_indices().next_back() {
+        Some((_, '$' | '#' | '>' | '❯' | '➜' | '»' | 'λ')) => true,
+        Some((i, '%')) => i == 0 || glyph_after(i, '%'),
+        _ => false,
+    };
+    ends_with_prompt
+        || row == ":"
+        || row.ends_with("(END)")
+        || ['$', '#', '%'].iter().any(|&g| {
+            row.match_indices(&format!("{g} ") as &str)
+                .any(|(i, _)| glyph_after(i, g))
+        })
+}
+
+// How far a row's text is indented, after any left border glyph (`│   2. No` → 4).
+fn indent(row: &str) -> usize {
+    row.chars()
+        .take_while(|&c| c.is_whitespace() || is_border(c))
+        .count()
+}
+
+// The leftmost column a side-panel separator may sit at: a left frame (`│ …`) is not a panel.
+const PANEL_MIN_COL: usize = 8;
+
+// Each row with a side panel (or a right frame) cut off: a column at which a border glyph sits
+// on at least a third of the non-blank rows (and at least 3) is a separator, and a row is cut at
+// the first separator it reaches. A wide glyph left of the separator renders as one char for two
+// cells, so the glyph is looked for a few chars left of the column too.
+fn cut_side_panel<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    let mut at: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut nonblank = 0usize;
+    for l in lines.iter().filter(|l| !l.trim().is_empty()) {
+        nonblank += 1;
+        for (i, c) in l.chars().enumerate() {
+            if i >= PANEL_MIN_COL && is_border(c) {
+                *at.entry(i).or_default() += 1;
+            }
+        }
+    }
+    let need = (nonblank / 3).max(3);
+    let mut seps: Vec<usize> = at
+        .into_iter()
+        .filter(|&(_, n)| n >= need)
+        .map(|(c, _)| c)
+        .collect();
+    if seps.is_empty() {
+        return lines.to_vec();
+    }
+    seps.sort_unstable();
+    lines
+        .iter()
+        .map(|l| {
+            let chars: Vec<(usize, char)> = l.char_indices().collect();
+            let cut = seps.iter().find_map(|&col| {
+                (col.saturating_sub(4).max(PANEL_MIN_COL)..=col)
+                    .rev()
+                    .find(|&i| chars.get(i).is_some_and(|&(_, c)| is_border(c)))
+                    .map(|i| chars[i].0)
+            });
+            cut.map_or(*l, |byte| &l[..byte])
+        })
+        .collect()
+}
+
+/// One render's verdict, cached under the content cursor `cursor` it was taken at, rendered at
+/// `at` (epoch ms): whether the screen waits for input ([`detect_awaiting_input`]), and whether
+/// it waits on a decision dialog ([`decision_dialog`]), of which kind and on which question.
+pub fn verdict_for(screen_text: &str, cursor: u64, at: u64) -> ScreenVerdict {
+    let dialog = decision_dialog(screen_text);
+    ScreenVerdict {
+        cursor,
+        rendered_at: at,
+        awaiting: detect_awaiting_input(screen_text),
+        asking: dialog.is_some(),
+        kind: dialog.as_ref().map(|d| d.kind).unwrap_or_default(),
+        question: dialog.and_then(|d| d.question),
+    }
+}
+
 // How many content rows above the bottom of the screen the selection-dialog scan looks at
 // (blank rows, borders and horizontal rules are not counted).
 const DIALOG_SCAN_ROWS: usize = 12;
@@ -415,15 +679,7 @@ fn detect_selection_dialog(lines: &[&str]) -> bool {
     if !other_option {
         return false;
     }
-    let question = window[..w_sel].iter().any(|&i| {
-        let row = all[i].0;
-        let lower = row.to_lowercase();
-        row.ends_with('?')
-            || bounded_contains(&lower, "do you want")
-            || bounded_contains(&lower, "do you wish")
-            || bounded_contains(&lower, "do you trust")
-            || bounded_contains(&lower, "would you like")
-    });
+    let question = window[..w_sel].iter().any(|&i| is_question(all[i].0));
     let footer = window[w_sel + 1..].iter().any(|&i| {
         let lower = all[i].0.to_lowercase();
         bounded_contains(&lower, "esc to cancel")
@@ -905,6 +1161,252 @@ mod tests {
             " 2. unrelated\n",
             " 3. unrelated\n",
         )));
+    }
+
+    // ── decision_dialog: what reads ASK and raises the "needs input" alert ──
+
+    fn dialog(screen: &str) -> Option<(AskKind, Option<String>)> {
+        decision_dialog(screen).map(|d| (d.kind, d.question))
+    }
+
+    #[test]
+    fn decision_dialog_finds_the_kind_and_the_question() {
+        assert_eq!(
+            dialog(PERMISSION_DIALOG),
+            Some((AskKind::Permission, Some("Do you want to proceed?".into())))
+        );
+        assert_eq!(
+            dialog(TRUST_DIALOG),
+            Some((
+                AskKind::Trust,
+                Some("Do you trust the files in this folder?".into())
+            ))
+        );
+        let picker = concat!(
+            " Pick a plan\n",
+            " ❯ 1. Keep planning\n",
+            "   2. Start building\n",
+            "\n",
+            " Esc to cancel\n",
+            "──────── status ─\n",
+        );
+        assert_eq!(dialog(picker), Some((AskKind::Choice, None)));
+        // A question in the chat above the dialog's top edge is not the dialog's.
+        let below_chat = format!("● Should I proceed with the plan?\n────────────\n{picker}");
+        assert_eq!(dialog(&below_chat), Some((AskKind::Choice, None)));
+        let boxed = concat!(
+            "╭──────────────────────────────────────────────╮\n",
+            "│ Edit file                                    │\n",
+            "│ Do you want to make this edit to main.rs?    │\n",
+            "│ ❯ 1. Yes                                     │\n",
+            "│   2. Yes, allow all edits during this session │\n",
+            "│   3. No, and tell Claude what to do           │\n",
+            "│      differently (esc)                        │\n",
+            "╰──────────────────────────────────────────────╯\n",
+        );
+        assert_eq!(dialog(boxed).map(|d| d.0), Some(AskKind::Permission));
+        let long = format!("{}?\n❯ 1. Yes\n  2. No\n", "x".repeat(400));
+        let q = dialog(&long).and_then(|d| d.1).unwrap();
+        assert_eq!(q.chars().count(), QUESTION_MAX_CHARS);
+        assert!(q.ends_with('…'));
+    }
+
+    // Chat rows with a side panel drawn beside them, the way a Claude pane with a panel mod
+    // renders: every row is the chat column padded to the separator, `│`, then the panel's row.
+    fn beside(chat: &[&str], panel: &[&str]) -> String {
+        (0..chat.len().max(panel.len()))
+            .map(|i| {
+                let c = chat.get(i).copied().unwrap_or("");
+                let p = panel.get(i).copied().unwrap_or("");
+                format!("{c:<72}│ {p}\n")
+            })
+            .collect()
+    }
+
+    const PANEL: &[&str] = &[
+        "Waiting (2)",
+        "",
+        "■ Review the parser",
+        "   change",
+        "■ Update the docs",
+        "",
+        "Asked of others (1)",
+        "",
+        "■ A pane sat at a push guard",
+        "   'Do you want to proceed?'",
+        "",
+        "Done today (2)",
+        "✓ Pin the toolchain",
+        "✓ Rotate the key",
+    ];
+
+    // A PreToolUse hook that answers "ask" (a push guard) makes Claude show its permission
+    // dialog. Such a dialog once sat for hours on two panes that read busy and never needs-input:
+    // it must read ASK, with or without a side panel, and with a statusline under it.
+    #[test]
+    fn a_hook_confirm_dialog_reads_ask() {
+        let dialog_rows = [
+            "● Bash(git push origin fix/parser)",
+            "  ⎿  Running PreToolUse hook…",
+            "",
+            "──────────────────────────────────────────────────────────────────",
+            " Bash command",
+            "",
+            "   git push origin fix/parser",
+            "   Push the branch",
+            "",
+            " Hook PreToolUse:Bash requires confirmation for this command:",
+            " push guard: check the remote first",
+            "",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ];
+        let want = Some((AskKind::Permission, Some("Do you want to proceed?".into())));
+        // Plain.
+        assert_eq!(dialog(&(dialog_rows.join("\n") + "\n")), want);
+        // The panel runs beside the dialog and on below it.
+        let mut panel = PANEL.to_vec();
+        panel.extend(["", "✓ Audit the hooks", "✓ Fix the guard", ""]);
+        let screen = beside(&dialog_rows, &panel);
+        assert_eq!(dialog(&screen), want, "{screen}");
+        // The panel beside the history only; the dialog and a statusline full width below it.
+        let mut screen = beside(
+            &[
+                "● Pushing the branch.",
+                "",
+                "● Bash(git push origin fix/parser)",
+                "  ⎿  Running PreToolUse hook…",
+            ],
+            PANEL,
+        );
+        screen.push_str(&dialog_rows[3..].join("\n"));
+        screen.push_str("\n  ◆ Opus 5.5 │ ███░░ 15% │ +27/-0 │ my-project\n");
+        screen.push_str("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent\n");
+        assert_eq!(dialog(&screen), want, "{screen}");
+        assert!(blocks_typed_input(&screen));
+    }
+
+    #[test]
+    fn panel_text_alone_never_reads_ask() {
+        // The panel quotes a prompt; the chat column is an idle agent with its input box.
+        let screen = beside(
+            &[
+                "● Done.",
+                "",
+                "────────────────────────────────────────",
+                "❯ ",
+                "────────────────────────────────────────",
+                "  ? for shortcuts",
+            ],
+            &[
+                "Do you want to proceed?",
+                "❯ 1. Yes",
+                "  2. No",
+                "Esc to cancel",
+            ],
+        );
+        assert_eq!(dialog(&screen), None);
+    }
+
+    // Screens that never change once they are up: a false ASK there would alert forever.
+    #[test]
+    fn a_dialog_printed_in_a_shell_never_reads_ask() {
+        let printed = [
+            // `cat` of a saved dialog, then the shell prompt right under it.
+            concat!(
+                "user@host:~/notes$ cat dialog.txt\n",
+                "Do you want to proceed?\n",
+                "❯ 1. Yes\n",
+                "  2. No\n",
+                "user@host:~/notes$ \n",
+            ),
+            // A blank row, a footer and a rule in the file, then the prompt.
+            concat!(
+                "$ cat screen.txt\n",
+                " Do you want to proceed?\n",
+                " ❯ 1. Yes\n",
+                "   2. No\n",
+                "\n",
+                " Esc to cancel · Tab to amend\n",
+                "──────── status ─\n",
+                "user@host:~/notes$ \n",
+            ),
+            // A starship prompt.
+            "❯ cat dialog.txt\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n❯ \n",
+            // A prompt with the next command already typed.
+            "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nhost:~/notes% ls\n",
+            // `grep` prefixes every row.
+            "dialog.txt:1:Do you want to proceed?\ndialog.txt:2:❯ 1. Yes\ndialog.txt:3:  2. No\n$ ",
+            // A pager at the end of the file.
+            "Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel\n(END)\n",
+        ];
+        for screen in printed {
+            assert_eq!(dialog(screen), None, "{screen}");
+        }
+        // A dialog with more output under it than a statusline.
+        let mut screen = String::from("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+        for i in 0..=STATUS_ROWS_MAX {
+            screen.push_str(&format!("log line {i}\n"));
+        }
+        assert_eq!(dialog(&screen), None);
+    }
+
+    #[test]
+    fn a_prompt_line_without_a_dialog_never_reads_ask() {
+        for last in [
+            "2026-11-13 08:00:01 INFO user said: do you want to retry",
+            "2026-11-13 08:00:02 WARN press enter to continue was printed",
+            "Overwrite the file? (y/n)",
+            "Continue [Y/n]",
+            "Press enter to continue",
+        ] {
+            let screen = format!("2026-11-13 08:00:00 INFO starting\n{last}\n");
+            assert_eq!(dialog(&screen), None, "{last}");
+            // Still waiting for input, and still never typed into.
+            assert!(detect_awaiting_input(&screen) && blocks_typed_input(&screen));
+        }
+        // A menu with neither a question nor a footer, a single option, a quoted menu.
+        assert_eq!(dialog(MENU_TAIL), None);
+        assert_eq!(
+            dialog("Do you want to proceed?\n❯ 1. Yes\n──────── status ─\n"),
+            None
+        );
+        assert_eq!(
+            dialog(concat!(
+                "● The dialog offered these choices:\n",
+                "  Do you want to proceed?\n",
+                "  ❯ 1. Yes\n",
+                "    2. No\n",
+                "  Esc to cancel\n",
+                "\n",
+                "────────────────────────────────────────\n",
+                "❯ \n",
+                "────────────────────────────────────────\n",
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn verdict_separates_waiting_from_deciding() {
+        let v = verdict_for(PERMISSION_DIALOG, 42, 9_000);
+        assert_eq!((v.cursor, v.rendered_at), (42, 9_000));
+        assert!(v.awaiting && v.asking);
+        assert_eq!(v.kind, AskKind::Permission);
+        assert_eq!(v.question.as_deref(), Some("Do you want to proceed?"));
+        // A starship prompt waits for input but asks nothing.
+        let v = verdict_for("❯ ls\nsrc  target\n❯ ", 7, 0);
+        assert!(v.awaiting && !v.asking);
+        assert_eq!(v.question, None);
+        // So does a y/n line: it holds typed input, but only a dialog reads ASK.
+        let v = verdict_for("Applied 3 edits.\nRun the tests now? (y/n)", 8, 0);
+        assert!(v.awaiting && !v.asking);
+        assert_eq!(v.question, None);
+        let v = verdict_for(WORKING, 1, 0);
+        assert!(!v.awaiting && !v.asking);
     }
 
     #[test]

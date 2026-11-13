@@ -5,15 +5,31 @@
 import { Theme, GroupGlyph, SelectionHint } from "theme.slint";
 import { TabItem } from "types.slint";
 
-// Tab status indicator, shared by the top-bar TabChip and the docked VTabChip: three dots
+// Tab status indicator, shared by the top-bar TabChip and the docked VTabChip: an "ASK" badge
+// while a pane in the tab waits on a decision prompt (it wins over working); else three dots
 // (the lit one cycles with `dot-phase`; all lit and static under reduced motion) while any
-// pane in the tab is working, else "IDLE". Fixed width in both states, so the row never jumps.
+// pane in the tab is working; else "IDLE". Fixed width in every state, so the row never jumps.
 export component TabStatusSlot inherits Rectangle {
     in property <bool> working: false;
+    in property <bool> asking: false;
     in property <int> dot-phase: 0;
     in property <bool> reduce-motion: false;
     width: 26px;
-    if root.working : HorizontalLayout {
+    if root.asking : Rectangle {
+        width: 26px;
+        height: 13px;
+        border-radius: 3px;
+        background: Theme.warning;
+        Text {
+            text: "ASK";
+            color: Theme.on-warning;
+            font-size: 9px;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    if root.working && !root.asking : HorizontalLayout {
         alignment: center;
         spacing: 2px;
         for i in 3 : VerticalLayout {
@@ -28,7 +44,7 @@ export component TabStatusSlot inherits Rectangle {
             }
         }
     }
-    if !root.working : Text {
+    if !root.working && !root.asking : Text {
         text: "IDLE";
         color: Theme.subtext;
         font-size: 9px;
@@ -125,6 +141,7 @@ component VTabChip inherits Rectangle {
     in property <bool> bar-left: true;       // active bar on the edge facing the panes
     in property <bool> overflowing: false;   // list scrolls → plain wheel scrolls, Shift cycles
     in property <bool> working: false;       // any pane busy → dots; else IDLE (see TabStatusSlot)
+    in property <bool> asking: false;        // a pane waits on a decision → ASK (see TabStatusSlot)
     in property <int> dot-phase: 0;
     in property <bool> reduce-motion: false;
     callback select();
@@ -145,7 +162,7 @@ component VTabChip inherits Rectangle {
 
     height: 28px;
     accessible-role: tab;
-    accessible-label: (root.a11y-label != "" ? root.a11y-label : root.title) + (root.working ? ", working" : ", idle");
+    accessible-label: (root.a11y-label != "" ? root.a11y-label : root.title) + (root.asking ? ", needs input" : root.working ? ", working" : ", idle");
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
 
@@ -218,6 +235,7 @@ component VTabChip inherits Rectangle {
 
         TabStatusSlot {
             working: root.working;
+            asking: root.asking;
             dot-phase: root.dot-phase;
             reduce-motion: root.reduce-motion;
             visible: !root.editing;
@@ -385,6 +403,7 @@ export component TabColumn inherits Rectangle {
                     bar-left: root.tab-dock == 1;
                     overflowing: root.overflowing;
                     working: tab.working;
+                    asking: tab.asking;
                     dot-phase: root.tab-dot-phase;
                     reduce-motion: root.reduce-motion;
                     select => { root.select-tab(idx); }

@@ -136,6 +136,11 @@ pub async fn run(version: &str) -> io::Result<()> {
     // independently); the headless daemon runs it for the whole process lifetime. The reaper
     // ticker sweeps expired work-queue leases alongside it.
     tokio::spawn(server::run_activity_ticker(Arc::clone(&shared)));
+    // Screen classifier (awaiting / asking verdicts + ask episodes): independent of the control
+    // server, bounded to panes whose content changed (see `control::classifier`).
+    tokio::spawn(crate::control::classifier::run_screen_classifier(
+        Arc::clone(&sessions),
+    ));
     tokio::spawn(server::run_reaper_ticker(Arc::clone(&shared)));
     tokio::spawn(server::run_queue_flusher(Arc::clone(&shared)));
     // Per-pane "talk": default-off background loop that tails talking panes' Claude

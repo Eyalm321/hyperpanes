@@ -27,14 +27,16 @@ use crate::control::events::{ControlEvent, EventHub};
 use crate::control::inbox::MessageInbox;
 use crate::control::lock::PaneLocks;
 use crate::control::nudge::NudgeLedger;
-use crate::control::output::{blocks_typed_input, detect_awaiting_input};
-use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
+use crate::control::output::{blocks_typed_input, verdict_for};
+use crate::control::readmodel::{
+    Activity, Asking, PaneInfo, PaneLive, PaneRef, PaneStatus, ReadModel,
+};
 use crate::control::routes;
 use crate::control::speech_service::SpeechService;
 use crate::control::supervisor::{Decision, Supervisor};
 use crate::control::tokens::{random_token, TokenStore};
 use crate::control::work::WorkQueue;
-use crate::session::activity::ActivitySignal;
+use crate::session::activity::ScreenVerdict;
 use crate::session_manager::{SessionEvent, SessionManager};
 
 /// The renderer idle threshold (`useSettings.idleAlertSeconds`, default 10s): a running pane with
@@ -622,6 +624,16 @@ impl Shared {
             pane.status,
         )
     }
+
+    /// [`Self::compute_activity`] plus the pane's ask episode — what `/state` serializes.
+    pub fn compute_live(&self, pane: &PaneInfo) -> PaneLive {
+        live_for(
+            &self.sessions,
+            self.idle_threshold_ms,
+            &pane.session_uid,
+            pane.status,
+        )
+    }
 }
 
 /// Free-function core of [`Shared::compute_activity`], factored out so `dispatch::recoverPane`
@@ -675,48 +687,56 @@ pub fn activity_for(
     }
 }
 
-/// How long a pane's genuine output must have been quiet (while still inside the busy window)
-/// before the activity ticker classifies its screen for an awaiting-input prompt.
-pub const CLASSIFY_SETTLE_MS: i64 = 750;
-
-/// Whether the activity ticker should classify this pane's screen now: its genuine output went
-/// quiet at least [`CLASSIFY_SETTLE_MS`] ago, it would still read busy, and the cached verdict
-/// is missing or older than the current content.
-pub fn needs_classification(sig: &ActivitySignal, now: i64, idle_threshold_ms: i64) -> bool {
-    let Some(t) = sig.content_at else {
-        return false;
-    };
-    let quiet = now - t as i64;
-    (CLASSIFY_SETTLE_MS..idle_threshold_ms).contains(&quiet) && sig.classification_stale()
-}
-
-/// Classify the pane's current screen with [`detect_awaiting_input`] (the same detector a
-/// `mode:"screen"` read reports as `awaitingInput`) and cache the verdict under the content
-/// cursor read BEFORE rendering: output that lands mid-render leaves the cache stale (so the
-/// next tick re-classifies) instead of mislabelling newer content. Blocking (the daemon backend
-/// round-trips), so callers run it off the async runtime. `None` for an unknown or gone pane.
-pub fn classify_screen(sessions: &SessionManager, uid: &str) -> Option<bool> {
+/// Render the pane's current screen and cache its [`verdict_for`] (awaiting / asking / question)
+/// under the content cursor read BEFORE rendering: output that lands mid-render leaves the
+/// verdict stale (so it is re-classified) instead of mislabelling newer content. Blocking (the
+/// daemon backend round-trips), so callers run it off the async runtime. `None` for an unknown
+/// or gone pane, or a screen that could not be read.
+pub fn classify_screen(sessions: &SessionManager, uid: &str) -> Option<ScreenVerdict> {
     let cursor = sessions.activity_signal(uid)?.content_cursor;
     let text = sessions.render_screen(uid)?;
-    let awaiting = detect_awaiting_input(&text);
-    sessions.set_awaiting(uid, cursor, awaiting);
-    Some(awaiting)
+    let verdict = verdict_for(&text, cursor, now_ms() as u64);
+    sessions.set_verdict(uid, verdict.clone());
+    Some(verdict)
 }
 
 /// Whether text + Enter typed by the app into this pane would answer a decision prompt instead
-/// of reaching the agent's input box ([`blocks_typed_input`] over a fresh render). Blocking (the
-/// daemon backend round-trips). The inbox nudge checks it right before typing. A live pane whose
-/// screen cannot be read counts as blocked (never type blind); a gone pane does not (nothing
-/// typed reaches it). The render also refreshes the cached awaiting-input verdict.
+/// of reaching the agent's input box ([`blocks_typed_input`] over a FRESH render, never the
+/// cache). Blocking (the daemon backend round-trips). The inbox nudge checks it right before
+/// typing. A live pane whose screen cannot be read counts as blocked (never type blind); a gone
+/// pane does not (nothing typed reaches it). The render also refreshes the cached verdict.
 pub fn screen_blocks_typing(sessions: &SessionManager, uid: &str) -> bool {
     let cursor = sessions.activity_signal(uid).map(|s| s.content_cursor);
     let Some(text) = sessions.render_screen(uid) else {
         return sessions.has(uid);
     };
     if let Some(c) = cursor {
-        sessions.set_awaiting(uid, c, detect_awaiting_input(&text));
+        sessions.set_verdict(uid, verdict_for(&text, c, now_ms() as u64));
     }
     blocks_typed_input(&text)
+}
+
+/// A pane's liveness as `/state` and the tab chip report it: its [`activity_for`] plus, while it
+/// waits on a decision prompt (an ask episode, see `session::activity::AskEpisode`), since when
+/// and on which question. An exited pane never asks.
+pub fn live_for(
+    sessions: &SessionManager,
+    idle_threshold_ms: i64,
+    uid: &str,
+    status: PaneStatus,
+) -> PaneLive {
+    let activity = activity_for(sessions, idle_threshold_ms, uid, status);
+    let asking = if activity == Activity::Exited {
+        None
+    } else {
+        sessions.activity_signal(uid).and_then(|sig| {
+            sig.asking().map(|(since, question)| Asking {
+                since,
+                question: question.map(str::to_string),
+            })
+        })
+    };
+    PaneLive { activity, asking }
 }
 
 /// Map a computed [`Activity`] + liveness snapshot into a `liveness` frame. The `state`
@@ -1022,58 +1042,32 @@ fn master_token(shared: &Arc<Shared>) -> String {
 pub async fn run_activity_ticker(shared: Arc<Shared>) {
     let mut interval = tokio::time::interval(Duration::from_millis(ACTIVITY_TICK_MS));
     let mut last: HashMap<String, Activity> = HashMap::new();
-    // Session uids with a screen classification in flight (one at a time per pane).
-    let classifying: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
+    // Panes last seen asking, so an ask episode starting or ending pings `state` (the tab's
+    // status changes without any structural change).
+    let mut asking: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         interval.tick().await;
         let panes: Vec<PaneRef> = shared.model.lock().unwrap().panes();
         let mut seen = std::collections::HashSet::new();
-        // Panes that just went quiet inside the busy window: classify their screens off the
-        // runtime so a permission dialog reads awaiting-input on a following tick, not after
-        // the whole idle threshold. Marker-instrumented panes are owned by their markers.
-        let now = now_ms();
-        let to_classify: Vec<String> = {
-            let mut inflight = classifying.lock().unwrap();
-            panes
-                .iter()
-                .filter(|pr| pr.status != PaneStatus::Exited)
-                .filter(|pr| {
-                    !shared
-                        .sessions
-                        .liveness(&pr.session_uid)
-                        .is_some_and(|l| l.marker_seen)
-                })
-                .filter(|pr| {
-                    shared
-                        .sessions
-                        .activity_signal(&pr.session_uid)
-                        .is_some_and(|sig| {
-                            needs_classification(&sig, now, shared.idle_threshold_ms)
-                        })
-                })
-                .filter(|pr| inflight.insert(pr.session_uid.clone()))
-                .map(|pr| pr.session_uid.clone())
-                .collect()
-        };
-        if !to_classify.is_empty() {
-            let sessions = Arc::clone(&shared.sessions);
-            let classifying = Arc::clone(&classifying);
-            tokio::task::spawn_blocking(move || {
-                for uid in to_classify {
-                    // Leave the in-flight set even if the classification panics, or the pane
-                    // would never be classified again.
-                    struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, &'a str);
-                    impl Drop for Release<'_> {
-                        fn drop(&mut self) {
-                            if let Ok(mut set) = self.0.lock() {
-                                set.remove(self.1);
-                            }
-                        }
-                    }
-                    let _release = Release(&classifying, &uid);
-                    classify_screen(&sessions, &uid);
+        let mut ask_flipped = false;
+        for pr in &panes {
+            let now_asking = pr.status != PaneStatus::Exited
+                && shared
+                    .sessions
+                    .activity_signal(&pr.session_uid)
+                    .is_some_and(|sig| sig.asking().is_some());
+            let was = asking.contains(&pr.pane_id);
+            if now_asking != was {
+                ask_flipped = true;
+                if now_asking {
+                    asking.insert(pr.pane_id.clone());
+                } else {
+                    asking.remove(&pr.pane_id);
                 }
-            });
+            }
+        }
+        if ask_flipped {
+            notify_state(&shared);
         }
         for pr in &panes {
             seen.insert(pr.pane_id.clone());
@@ -1109,6 +1103,7 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
             }
         }
         last.retain(|id, _| seen.contains(id));
+        asking.retain(|id| seen.contains(id));
     }
 }
 
@@ -1561,37 +1556,6 @@ mod tests {
             }],
         });
         (shared, "u1".to_string())
-    }
-
-    #[test]
-    fn classification_runs_once_output_settles_inside_the_busy_window() {
-        let sig = |at: Option<u64>, awaiting: Option<(u64, bool)>| ActivitySignal {
-            content_at: at,
-            content_cursor: 7,
-            awaiting,
-        };
-        let now = 100_000;
-        let t = 10_000;
-        // Never produced genuine output: nothing to classify.
-        assert!(!needs_classification(&sig(None, None), now, t));
-        // Still streaming (quiet for less than the settle window).
-        assert!(!needs_classification(&sig(Some(99_500), None), now, t));
-        // Settled, still inside the busy window, no verdict yet: classify.
-        assert!(needs_classification(&sig(Some(99_000), None), now, t));
-        // A verdict for older content is stale: classify again.
-        assert!(needs_classification(
-            &sig(Some(99_000), Some((6, true))),
-            now,
-            t
-        ));
-        // A verdict for the current content: nothing to do.
-        assert!(!needs_classification(
-            &sig(Some(99_000), Some((7, false))),
-            now,
-            t
-        ));
-        // Past the idle threshold the pane reads idle anyway: no screen read.
-        assert!(!needs_classification(&sig(Some(80_000), None), now, t));
     }
 
     #[test]

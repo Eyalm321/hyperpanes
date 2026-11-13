@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::session::activity::{ActivitySignal, OutputGate};
+use crate::session::activity::{ActivitySignal, OutputGate, ScreenVerdict};
 use crate::session::batcher::DataBatcher;
 use crate::session::cwd::parse_osc_cwd;
 use crate::session::pty::{spawn_pty, Pty, PtyEvent, PtySpec};
@@ -549,13 +549,21 @@ impl SessionRegistry {
     /// classification), or `None` for an unknown uid.
     pub fn activity_signal(&self, uid: &str) -> Option<ActivitySignal> {
         let map = self.sessions.lock().unwrap();
-        map.get(uid).map(|s| *s.shared.activity.lock().unwrap())
+        map.get(uid)
+            .map(|s| s.shared.activity.lock().unwrap().clone())
     }
 
-    /// Cache an awaiting-input classification of the screen as it was at `content_cursor`.
-    pub fn set_awaiting(&self, uid: &str, content_cursor: u64, awaiting: bool) {
+    /// Cache a screen verdict (taken at `verdict.cursor`).
+    pub fn set_verdict(&self, uid: &str, verdict: ScreenVerdict) {
         if let Some(s) = self.sessions.lock().unwrap().get(uid) {
-            s.shared.activity.lock().unwrap().awaiting = Some((content_cursor, awaiting));
+            s.shared.activity.lock().unwrap().verdict = Some(verdict);
+        }
+    }
+
+    /// Step the pane's ask episode at `now` (see [`ActivitySignal::step_ask`]).
+    pub fn step_ask(&self, uid: &str, now: u64) {
+        if let Some(s) = self.sessions.lock().unwrap().get(uid) {
+            s.shared.activity.lock().unwrap().step_ask(now);
         }
     }
 
@@ -1067,12 +1075,20 @@ impl SessionManager {
         }
     }
 
-    /// Cache an awaiting-input classification of the pane's screen as it was when the content
-    /// cursor read `content_cursor`. It stays valid until the next genuine output.
-    pub fn set_awaiting(&self, uid: &str, content_cursor: u64, awaiting: bool) {
+    /// Cache a verdict on the pane's screen, taken when the content cursor read
+    /// `verdict.cursor`. It stays current until the next genuine output.
+    pub fn set_verdict(&self, uid: &str, verdict: ScreenVerdict) {
         match self {
-            SessionManager::InProcess(r) => r.set_awaiting(uid, content_cursor, awaiting),
-            SessionManager::Daemon(d) => d.set_awaiting(uid, content_cursor, awaiting),
+            SessionManager::InProcess(r) => r.set_verdict(uid, verdict),
+            SessionManager::Daemon(d) => d.set_verdict(uid, verdict),
+        }
+    }
+
+    /// Step the pane's ask episode at `now` (epoch ms) from its current verdict.
+    pub fn step_ask(&self, uid: &str, now: u64) {
+        match self {
+            SessionManager::InProcess(r) => r.step_ask(uid, now),
+            SessionManager::Daemon(d) => d.step_ask(uid, now),
         }
     }
 
@@ -1830,7 +1846,7 @@ mod tests {
             p.on_timer(t + 20);
             t += 500;
         }
-        let a = *sh.activity.lock().unwrap();
+        let a = sh.activity.lock().unwrap().clone();
         // Only the first two frames were new; the stamp stopped at the second one's flush.
         assert_eq!(a.content_at, Some(1_520));
         assert!(a.content_cursor < sh.output_bytes.load(Ordering::Relaxed));
@@ -1848,7 +1864,7 @@ mod tests {
             p.on_timer(t + 20);
             t += 100;
         }
-        let a = *sh.activity.lock().unwrap();
+        let a = sh.activity.lock().unwrap().clone();
         assert_eq!(a.content_at, Some(t - 100 + 20));
         assert_eq!(a.content_cursor, sh.output_bytes.load(Ordering::Relaxed));
     }
@@ -2094,7 +2110,7 @@ mod tests {
         }
         // Fresh output, not classified yet: busy (inside the 60 s window).
         assert_eq!(act(&mgr), Activity::Busy);
-        assert_eq!(classify_screen(&mgr, "u1"), Some(true));
+        assert_eq!(classify_screen(&mgr, "u1").map(|v| v.awaiting), Some(true));
         assert_eq!(act(&mgr), Activity::AwaitingInput);
         // More blinking is cosmetic: the verdict holds.
         for i in 0..6 {
@@ -2106,8 +2122,110 @@ mod tests {
         assert_eq!(act(&mgr), Activity::Busy);
         assert!(mgr.activity_signal("u1").unwrap().classification_stale());
         // Re-classifying the new screen finds no prompt.
-        assert_eq!(classify_screen(&mgr, "u1"), Some(false));
+        assert_eq!(classify_screen(&mgr, "u1").map(|v| v.awaiting), Some(false));
         assert_eq!(act(&mgr), Activity::Busy);
+    }
+
+    // A dialog on screen opens an ask episode (since when it appeared, with its kind and
+    // question) that `/state` and the tab chip read; once it is answered, the render that finds
+    // no dialog ends the episode at once.
+    #[tokio::test]
+    async fn a_dialog_opens_an_ask_episode_that_ends_once_it_is_answered() {
+        use crate::control::readmodel::{Activity, PaneStatus};
+        use crate::control::server::{classify_screen, live_for, now_ms};
+        use crate::session::activity::AskKind;
+        let (mgr, mut rx, sink) = make_session("u1");
+        feed(&sink, &mut rx, DIALOG).await;
+        let shown_at = mgr.activity_signal("u1").unwrap().content_at.unwrap();
+        let v = classify_screen(&mgr, "u1").unwrap();
+        assert!(v.asking);
+        let now = now_ms() as u64;
+        mgr.step_ask("u1", now);
+        assert_eq!(
+            mgr.activity_signal("u1").unwrap().ask.kind,
+            AskKind::Permission
+        );
+        let live = live_for(&mgr, 60_000, "u1", PaneStatus::Running);
+        assert_eq!(live.activity, Activity::AwaitingInput);
+        let asking = live.asking.expect("asking");
+        assert_eq!(asking.since, shown_at);
+        assert_eq!(asking.question.as_deref(), Some("Do you want to proceed?"));
+        // An exited pane never asks.
+        assert!(live_for(&mgr, 60_000, "u1", PaneStatus::Exited)
+            .asking
+            .is_none());
+        // Answered: real output follows. Until the new screen is classified the episode holds…
+        feed(&sink, &mut rx, "\x1b[2J\x1b[H\u{25cf} Build finished\r\n").await;
+        mgr.step_ask("u1", now + 500);
+        assert!(live_for(&mgr, 60_000, "u1", PaneStatus::Running)
+            .asking
+            .is_some());
+        // …and the render that finds no dialog ends it.
+        assert!(!classify_screen(&mgr, "u1").unwrap().asking);
+        mgr.step_ask("u1", now + 600);
+        assert!(live_for(&mgr, 60_000, "u1", PaneStatus::Running)
+            .asking
+            .is_none());
+    }
+
+    // The always-on classifier over a real manager: once every pane has a verdict for its
+    // current content, a tick plans no renders at all; changed panes are capped per tick.
+    #[tokio::test]
+    async fn classifier_tick_renders_nothing_for_unchanged_panes() {
+        use crate::control::classifier::{
+            plan_tick, ClassifierPlan, CLASSIFY_SETTLE_MS, MAX_RENDERS_PER_TICK,
+        };
+        use crate::control::server::{classify_screen, now_ms};
+        let (etx, mut erx) = unbounded_channel::<SessionEvent>();
+        let mgr = SessionManager::new(etx);
+        let mut sinks = Vec::new();
+        for i in 0..40 {
+            let slot: Arc<Mutex<Option<EventSink>>> = Arc::new(Mutex::new(None));
+            let slot2 = Arc::clone(&slot);
+            let factory: SpawnFn = Box::new(move |_spec, sink| {
+                *slot2.lock().unwrap() = Some(sink);
+                Ok(Box::new(MockPty::default()) as Box<dyn Pty>)
+            });
+            mgr.create_with(
+                SpawnOptions {
+                    uid: format!("p{i:02}"),
+                    ..Default::default()
+                },
+                factory,
+            )
+            .expect("create");
+            let sink = slot.lock().unwrap().clone().expect("sink captured");
+            feed(&sink, &mut erx, "$ \r\n").await;
+            sinks.push(sink);
+        }
+        for uid in mgr.uids() {
+            assert!(classify_screen(&mgr, &uid).is_some());
+        }
+        let later = now_ms() as u64 + CLASSIFY_SETTLE_MS + 60_000;
+        let mut plan = ClassifierPlan::default();
+        let none = std::collections::HashSet::new();
+        for tick in 0..10 {
+            assert!(
+                plan_tick(&mgr, &mut plan, &none, later + tick * 500).is_empty(),
+                "tick {tick} planned renders for unchanged panes"
+            );
+        }
+        // Six panes produce new output: at most MAX_RENDERS_PER_TICK of them per tick.
+        for sink in sinks.iter().take(6) {
+            feed(sink, &mut erx, "done\r\n").await;
+        }
+        let soon = now_ms() as u64 + CLASSIFY_SETTLE_MS + 10;
+        let first = plan_tick(&mgr, &mut plan, &none, soon);
+        assert_eq!(first.len(), MAX_RENDERS_PER_TICK);
+        for uid in &first {
+            classify_screen(&mgr, uid);
+        }
+        let second = plan_tick(&mgr, &mut plan, &none, soon + 500);
+        assert_eq!(second.len(), 2);
+        for uid in &second {
+            classify_screen(&mgr, uid);
+        }
+        assert!(plan_tick(&mgr, &mut plan, &none, soon + 1_000).is_empty());
     }
 
     // The inbox nudge's typing guard: a dialog on screen blocks it however old the dialog is
