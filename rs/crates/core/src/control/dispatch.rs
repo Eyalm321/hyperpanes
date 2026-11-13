@@ -1098,7 +1098,7 @@ fn resolve_project_into_spec(spec: &mut Value) -> Result<(), String> {
         Some(h) => h.to_string(),
         None => return Ok(()),
     };
-    let project = crate::persistence::projects::resolve(&handle)
+    let project = crate::persistence::projects::resolve_checked(&handle)?
         .ok_or_else(|| format!("unknown project: {handle}"))?;
     if let Value::Object(map) = spec {
         if !map.get("cwd").map(Value::is_string).unwrap_or(false) {

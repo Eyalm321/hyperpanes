@@ -118,6 +118,9 @@ pub(crate) struct MovedPane {
     /// the program is still waiting for, so [`State::place_moved_pane`] writes them once; the
     /// new grid itself is primed answered and never re-answers the history.
     pub pending_replies: Vec<u8>,
+    /// The stable uid of the tab it was lifted out of: where [`State::rescue_detached`] puts
+    /// it back when its destination is gone (`None` when that tab closed with the lift).
+    pub src_tab: Option<u64>,
 }
 
 /// A whole tab detached for re-hosting (the tab menu's "Move to New Window") or parked on the
@@ -5116,6 +5119,8 @@ impl State {
     /// reopen-closed-tab.
     fn adopt_into_tab(&mut self, mgr: &SessionManager, det: DetachedPane, ti: usize) {
         if ti >= self.tabs.len() {
+            // Never drop the session on the floor: give it a tab of its own.
+            self.rescue_detached(mgr, det, None, "adopt target tab out of range");
             return;
         }
         let palette = self.settings.frame_palette;
@@ -5605,6 +5610,9 @@ impl State {
         // The last take dropped the (now empty) group tab; it can only survive if it was the
         // sole tab, which `origin_ok` rules out.
         let Some(oi) = self.tabs.iter().position(|x| x.uid == origin) else {
+            for dp in dets {
+                self.rescue_detached(mgr, dp, None, "ungroup origin tab vanished");
+            }
             return;
         };
         let first = dets.first().map(|d| d.uid.clone());
@@ -5633,7 +5641,9 @@ impl State {
         {
             return None;
         }
+        let src_tab = Some(self.tabs[ti].uid);
         let (mut ps, _) = self.take_pane_in(ti, pi)?;
+        let src_tab = src_tab.filter(|u| self.tab_index_by_uid(*u).is_some());
         let pending_replies = ps.pane.take_replies();
         let (cwd, talk, ai_muted) = (ps.cwd.clone(), ps.talk, ps.ai_muted);
         // `into_detached` marks the replay answered: this grid has shown the session.
@@ -5643,7 +5653,51 @@ impl State {
             talk,
             ai_muted,
             pending_replies,
+            src_tab,
         })
+    }
+
+    /// Place a lifted pane in the tab with stable uid `tab_uid`; when that tab is gone, put it
+    /// back ([`Self::rescue_detached`]) instead of letting it fall out of the tab tree.
+    pub(crate) fn place_moved_pane_in(
+        &mut self,
+        mgr: &SessionManager,
+        mp: MovedPane,
+        tab_uid: u64,
+    ) {
+        match self.tab_index_by_uid(tab_uid) {
+            Some(ti) => self.place_moved_pane(mgr, mp, ti),
+            None => {
+                let src = mp.src_tab;
+                self.rescue_detached(mgr, mp.det, src, "move target tab vanished");
+            }
+        }
+    }
+
+    /// Last resort for a live session that was taken out of the tab tree and has nowhere to go:
+    /// re-host it in tab `src_tab` when that still exists, else in a new background tab titled
+    /// after the pane, and log it. A pane must never leave the tab tree without its session
+    /// being killed: a dropped pane orphans a running program nobody can see or reach.
+    /// Returns the tab index it landed in.
+    pub(crate) fn rescue_detached(
+        &mut self,
+        mgr: &SessionManager,
+        det: DetachedPane,
+        src_tab: Option<u64>,
+        why: &str,
+    ) -> usize {
+        let ti = match src_tab.and_then(|u| self.tab_index_by_uid(u)) {
+            Some(ti) => ti,
+            None => {
+                let title = det.title.to_string();
+                let uid = self.push_background_tab(&title, None, None, None);
+                self.tab_index_by_uid(uid).unwrap_or(self.tabs.len() - 1)
+            }
+        };
+        eprintln!("[panes] rescued live pane {} into tab {ti}: {why}", det.uid);
+        hyperpanes_core::persistence::session_log::record("rescue", &det.uid, why, None);
+        self.adopt_into_tab(mgr, det, ti);
+        ti
     }
 
     /// The index of the tab whose stable [`Tab::uid`] is `tab_uid`.
@@ -5693,6 +5747,8 @@ impl State {
     /// are written, once. Does not change the active tab.
     pub(crate) fn place_moved_pane(&mut self, mgr: &SessionManager, mp: MovedPane, ti: usize) {
         if ti >= self.tabs.len() {
+            let src = mp.src_tab;
+            self.rescue_detached(mgr, mp.det, src, "move target index out of range");
             return;
         }
         let uid = mp.det.uid.clone();
@@ -9170,6 +9226,54 @@ mod pane_group_tests {
         // JSON key is camelCase and absent for ordinary tabs.
         let json = serde_json::to_string(&groups).unwrap();
         assert!(json.contains("\"paneGroup\""));
+    }
+
+    fn all_uids(st: &State) -> Vec<String> {
+        let mut v: Vec<String> = st
+            .tabs
+            .iter()
+            .flat_map(|t| t.panes.iter().map(|p| p.uid.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Invariant: a lifted pane whose target tab is gone goes back to its source tab, never
+    /// out of the tab tree.
+    #[test]
+    fn lifted_pane_with_vanished_target_returns_to_its_source_tab() {
+        let (mut st, m) = with_panes(&["a", "b", "c"]);
+        let src = st.tabs[0].uid;
+        let mp = st.lift_pane("a").expect("lifts");
+        assert_eq!(mp.src_tab, Some(src));
+        st.place_moved_pane_in(&m, mp, 0xdead_beef);
+        assert_eq!(st.tabs.len(), 1);
+        assert_eq!(all_uids(&st), vec!["a", "b", "c"]);
+    }
+
+    /// Invariant: when the source tab closed with the lift (the pane was its only one) and the
+    /// target is gone too, the pane gets a background tab of its own.
+    #[test]
+    fn lifted_pane_with_no_source_and_no_target_gets_its_own_tab() {
+        let (mut st, m) = with_panes(&["a", "b"]);
+        // "a" alone in a second tab.
+        let t = st.push_background_tab("solo", None, None, None);
+        let mp = st.lift_pane("a").unwrap();
+        st.place_moved_pane_in(&m, mp, t);
+        assert_eq!(st.tabs.len(), 2);
+        // Lift it again: its tab closes with it.
+        let mp = st.lift_pane("a").unwrap();
+        assert_eq!(st.tabs.len(), 1);
+        assert_eq!(mp.src_tab, None);
+        st.place_moved_pane_in(&m, mp, t);
+        assert_eq!(st.tabs.len(), 2, "rescued into a new tab");
+        assert_eq!(st.active, 0, "a rescue never steals focus");
+        assert_eq!(uids(&st, 1), vec!["a".to_string()]);
+        assert_eq!(all_uids(&st), vec!["a", "b"]);
+        // An out-of-range index is rescued the same way.
+        let mp = st.lift_pane("a").unwrap();
+        st.place_moved_pane(&m, mp, 42);
+        assert_eq!(all_uids(&st), vec!["a", "b"]);
     }
 
     #[test]

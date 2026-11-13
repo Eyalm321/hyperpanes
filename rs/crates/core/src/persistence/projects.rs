@@ -368,10 +368,19 @@ pub fn upsert_project_by_root(root: &str) -> Project {
 }
 
 /// Resolve a remembered project from a handle: an exact `id` match first, then an exact
-/// `name` match (newest-opened wins on a name collision, since the list is sorted
-/// newest-first), then an absolute path naming the project's directory. Used by the control plane's `newPane { project }` to turn a project handle
-/// into its directory. `None` when nothing matches.
+/// `name` match, then an absolute path naming the project's directory. Used by the control
+/// plane's `newPane { project }` to turn a project handle into its directory. `None` when
+/// nothing matches, and also when the name is AMBIGUOUS (two projects share it): see
+/// [`resolve_checked`] for the reason.
 pub fn resolve(id_or_name: &str) -> Option<Project> {
+    resolve_checked(id_or_name).ok().flatten()
+}
+
+/// [`resolve`] that tells an ambiguous name apart from an unknown one: `Err` names every
+/// project the name matches, so the caller can ask for an id or a path instead. A name shared
+/// by two projects is never resolved by guessing (the newest-opened one used to win, which
+/// sent a pane to whichever project was touched last).
+pub fn resolve_checked(id_or_name: &str) -> Result<Option<Project>, String> {
     let mut list = load_from(&paths::projects_json());
     list.sort_by(|a, b| {
         b.last_opened_at
@@ -382,20 +391,30 @@ pub fn resolve(id_or_name: &str) -> Option<Project> {
 }
 
 /// Pure resolution over an already-loaded (newest-first) list — split out for tests.
-fn resolve_in(list: &[Project], id_or_name: &str) -> Option<Project> {
-    list.iter()
-        .find(|p| p.id == id_or_name)
-        .or_else(|| list.iter().find(|p| p.name == id_or_name))
-        .or_else(|| {
-            // A rooted path (e.g. a launcher's working folder) names the project there.
-            // `has_root`, not `is_absolute`: on Windows `/repo/x` has a root but no drive.
-            if !std::path::Path::new(id_or_name).has_root() {
-                return None;
-            }
-            let key = path_key(id_or_name);
-            list.iter().find(|p| path_key(&p.path) == key)
-        })
-        .cloned()
+fn resolve_in(list: &[Project], id_or_name: &str) -> Result<Option<Project>, String> {
+    if let Some(p) = list.iter().find(|p| p.id == id_or_name) {
+        return Ok(Some(p.clone()));
+    }
+    let named: Vec<&Project> = list.iter().filter(|p| p.name == id_or_name).collect();
+    match named.as_slice() {
+        [one] => return Ok(Some((*one).clone())),
+        [] => {}
+        many => {
+            let paths: Vec<&str> = many.iter().map(|p| p.path.as_str()).collect();
+            return Err(format!(
+                "project name {id_or_name:?} is ambiguous: {} projects have it ({}); pass the project's id or path",
+                many.len(),
+                paths.join(", ")
+            ));
+        }
+    }
+    // A rooted path (e.g. a launcher's working folder) names the project there.
+    // `has_root`, not `is_absolute`: on Windows `/repo/x` has a root but no drive.
+    if !std::path::Path::new(id_or_name).has_root() {
+        return Ok(None);
+    }
+    let key = path_key(id_or_name);
+    Ok(list.iter().find(|p| path_key(&p.path) == key).cloned())
 }
 
 /// Explicitly add a directory as a project (git repo not required); duplicate adds are a
@@ -682,17 +701,28 @@ mod tests {
             last_opened_at: Some(100),
         };
         let list = vec![newer.clone(), older.clone()];
+        let ok = |h: &str| resolve_in(&list, h).expect("not ambiguous");
         // Exact id → that exact project (even the older one).
-        assert_eq!(resolve_in(&list, "id-old").as_ref(), Some(&older));
-        // Name collision → newest-opened (first in the newest-first list).
-        assert_eq!(resolve_in(&list, "dup").as_ref(), Some(&newer));
+        assert_eq!(ok("id-old").as_ref(), Some(&older));
+        // Name collision → refused, naming both paths; never the newest-opened guess.
+        let err = resolve_in(&list, "dup").expect_err("ambiguous name");
+        assert!(
+            err.contains("/repo/new") && err.contains("/repo/old"),
+            "{err}"
+        );
+        // ...while an id or a path still picks either one exactly.
+        assert_eq!(ok("id-new").as_ref(), Some(&newer));
+        assert_eq!(ok("/repo/new").as_ref(), Some(&newer));
+        // A unique name resolves.
+        let solo = vec![older.clone()];
+        assert_eq!(resolve_in(&solo, "dup").unwrap().as_ref(), Some(&older));
         // No match → None.
-        assert_eq!(resolve_in(&list, "nope"), None);
+        assert_eq!(ok("nope"), None);
         // An absolute path names the project in that directory (a trailing slash is fine);
         // a relative one never matches by path.
-        assert_eq!(resolve_in(&list, "/repo/old").as_ref(), Some(&older));
-        assert_eq!(resolve_in(&list, "/repo/old/").as_ref(), Some(&older));
-        assert_eq!(resolve_in(&list, "repo/old"), None);
+        assert_eq!(ok("/repo/old").as_ref(), Some(&older));
+        assert_eq!(ok("/repo/old/").as_ref(), Some(&older));
+        assert_eq!(ok("repo/old"), None);
     }
 
     #[test]
