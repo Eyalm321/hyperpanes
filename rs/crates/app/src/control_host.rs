@@ -1069,12 +1069,23 @@ impl ControlHost {
         }
 
         // Control `closePane` removed it from the model: drop it from the GUI too (the PTY was
-        // already killed by `dispatch`, so detach without re-killing).
-        for (uid, _) in prev.iter() {
-            if state_uids.contains(uid) && !cur.contains_key(uid) {
-                remove_from_gui(windows, uid);
-                structural = true;
-            }
+        // already killed by `dispatch`, so detach without re-killing). Only a DEAD session's
+        // pane goes: a pane whose session is still alive leaving the model without a kill would
+        // orphan a running program with no pane, so it stays and the next publish puts
+        // it back in the model.
+        let (dropped, kept) = model_dropped_panes(prev.keys(), cur, &state_uids, |u| mgr.has(u));
+        for uid in &dropped {
+            remove_from_gui(windows, uid);
+            structural = true;
+        }
+        for uid in &kept {
+            eprintln!("[control] kept pane {uid}: the model dropped it but its session is alive");
+            hyperpanes_core::persistence::session_log::record(
+                "keep-live",
+                uid,
+                "model dropped a live pane without closePane",
+                None,
+            );
         }
 
         // Control tab-level changes (`setLayout`, tab rename) the model took since the last
@@ -1579,6 +1590,28 @@ fn apply_pane_chrome(windows: &[Rc<Window>], uid: &str, c: &ModelPane) {
 }
 
 /// Remove the GUI pane with `uid` without killing its (already-dead) session.
+/// The panes the model dropped since the last publish that the GUI still hosts, split into
+/// `(remove, keep)`: a pane goes only when its session is dead (`closePane` kills before it
+/// removes); one whose session is alive is kept (removing it orphans the program).
+fn model_dropped_panes<'a>(
+    prev: impl Iterator<Item = &'a String>,
+    cur: &HashMap<String, ModelPane>,
+    state_uids: &HashSet<String>,
+    alive: impl Fn(&str) -> bool,
+) -> (Vec<String>, Vec<String>) {
+    let (mut remove, mut keep) = (Vec::new(), Vec::new());
+    for uid in prev {
+        if state_uids.contains(uid) && !cur.contains_key(uid) {
+            if alive(uid) {
+                keep.push(uid.clone());
+            } else {
+                remove.push(uid.clone());
+            }
+        }
+    }
+    (remove, keep)
+}
+
 fn remove_from_gui(windows: &[Rc<Window>], uid: &str) {
     for w in windows {
         let has = w.state.borrow_mut().find_pane(uid).is_some();
@@ -1751,9 +1784,9 @@ pub(crate) fn apply_move_request(
         // An existing tab always resolved above.
         T::Tab { .. } => st.push_background_tab("", None, None, None),
     });
-    if let Some(ti) = st.tab_index_by_uid(tab_uid) {
-        st.place_moved_pane(mgr, mp, ti);
-    }
+    // A target tab that vanished between resolving and placing puts the pane back where it
+    // was (`place_moved_pane_in` → rescue) instead of dropping a live session.
+    st.place_moved_pane_in(mgr, mp, tab_uid);
     MoveOutcome::Moved
 }
 
@@ -2594,6 +2627,41 @@ mod tests {
         };
         assert!(!apply_pane_group_request(&mut st, &m, 7, &resolve, &one));
         assert_eq!(st.tabs.len(), 1);
+    }
+
+    /// A pane the model dropped leaves the GUI only when its session is dead; a live
+    /// one is kept (removing it would orphan the program with no pane).
+    #[test]
+    fn model_dropped_panes_keeps_live_sessions() {
+        let prev: Vec<String> = ["closed", "orphan", "still", "gone-gui"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cur: HashMap<String, ModelPane> = HashMap::new();
+        let mut cur = cur;
+        let still = ModelPane {
+            pane_id: "still".into(),
+            window_id: 0,
+            tab_id: "0:0".into(),
+            label: "s".into(),
+            color: "#888888".into(),
+            subtitle: None,
+            talk: false,
+            command: None,
+            args: None,
+            shell: None,
+            cwd: None,
+            meta: None,
+            env: None,
+        };
+        cur.insert("still".into(), still);
+        let gui: HashSet<String> = ["closed", "orphan", "still"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (remove, keep) = model_dropped_panes(prev.iter(), &cur, &gui, |u| u == "orphan");
+        assert_eq!(remove, vec!["closed".to_string()]);
+        assert_eq!(keep, vec!["orphan".to_string()]);
     }
 
     #[test]

@@ -1740,9 +1740,10 @@ fn pane_group_command(shared: &Arc<Shared>, info: &TokenInfo, kind: &str, cmd: &
     drop(m);
     let project = match cmd.get("project") {
         None | Some(Value::Null) => None,
-        Some(Value::String(h)) => match projects::resolve(h) {
-            Some(p) => Some(p.id),
-            None => return bad(format!("unknown project: {h}")),
+        Some(Value::String(h)) => match projects::resolve_checked(h) {
+            Ok(Some(p)) => Some(p.id),
+            Ok(None) => return bad(format!("unknown project: {h}")),
+            Err(e) => return bad(e),
         },
         Some(_) => return bad("project must be a string".into()),
     };
@@ -1839,8 +1840,10 @@ fn resolve_move_target(
     let Some(handle) = cmd.get("project").and_then(Value::as_str) else {
         return bad("project must be a string".into());
     };
-    let Some(p) = projects::resolve(handle) else {
-        return bad(format!("unknown project: {handle}"));
+    let p = match projects::resolve_checked(handle) {
+        Ok(Some(p)) => p,
+        Ok(None) => return bad(format!("unknown project: {handle}")),
+        Err(e) => return bad(e),
     };
     // Reuse the window's existing tab for the project when the model already shows one.
     if let Some(tab_id) = existing_project_tab(m, win, &p.id) {
