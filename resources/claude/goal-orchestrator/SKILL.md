@@ -85,8 +85,10 @@ For each goal you're given (free text):
      a couple of re-specs), or mark the goal `Blocked` and surface it. Never silently drop a goal.
    - `done` — verify the acceptance criteria yourself (see below), and only then mark `Done`.
 4. **Record the win.** On `Done`, note it in your ledger and (optional) append a milestone to the
-   project timeline. Tear down the spec-agent pane (`close_pane`) — the orchestrator stays, spec
-   agents are per-goal.
+   project timeline. Tear down the spec-agent pane (`close_pane`), or
+   `set_meta {hp.goalState:"done"}` on the spec pane and the app closes it after a short idle grace (it also closes spec panes idle 3 h with no
+   claimed task, no live worker and no open question; the close record and resume command land in
+   your inbox) — the orchestrator stays, spec agents are per-goal.
 
 Multiple goals run **concurrently** — one spec-agent pane each. Keep looping over all live goals.
 
@@ -275,3 +277,6 @@ its own `spawn_workers` calls.
   re-scan (`read_messages`, `list_panes`, `list_tasks`) — you are a daemon.
 - Keep your replies short: the running ledger + what you just did + what you're waiting on.
 - One project, many goals, forever. Surface — never swallow — anything you can't resolve.
+- When asked to write a handover, list goals + state, spec panes (pane id, session id), open PRs,
+  pending live proofs, unanswered consults, and your inbox read cursor
+  (`inbox-cursor: <latestSeq you have processed>`).

@@ -88,6 +88,10 @@ pub struct Peer {
     pub cwd: String,
     /// Self-reported turn state.
     pub status: PeerStatus,
+    /// When `status` last changed (`statusUpdatedAt`, epoch ms), when the record carries it.
+    pub status_updated_at: Option<i64>,
+    /// When the session started (`startedAt`, epoch ms), when the record carries it.
+    pub started_at: Option<i64>,
     /// Unix-domain socket other sessions deliver to. `None` when the session could not bind one.
     pub messaging_socket_path: Option<String>,
     /// Which account dir this record was found under — the discovery boundary. Two sessions can
@@ -119,6 +123,13 @@ fn process_is_live(_pid: u32) -> bool {
     true
 }
 
+/// A tolerant epoch-ms read: an integer or float, positive. Anything else is "absent".
+fn epoch_ms(v: Option<&serde_json::Value>) -> Option<i64> {
+    let v = v?;
+    let n = v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))?;
+    (n > 0).then_some(n)
+}
+
 /// Parse one `<pid>.json` record. `None` when the bytes are not a record we understand.
 ///
 /// Only `pid` is required. Everything else degrades: a record missing `name` or `cwd` is still
@@ -142,6 +153,8 @@ pub fn parse_record(bytes: &str, registry_dir: &Path) -> Option<Peer> {
         name_is_explicit: v.get("nameSource").and_then(|x| x.as_str()) == Some("user"),
         cwd: s("cwd"),
         status: PeerStatus::parse(v.get("status").and_then(|x| x.as_str())),
+        status_updated_at: epoch_ms(v.get("statusUpdatedAt")),
+        started_at: epoch_ms(v.get("startedAt")),
         messaging_socket_path: v
             .get("messagingSocketPath")
             .and_then(|x| x.as_str())
@@ -231,6 +244,20 @@ mod tests {
         );
         // `--name` took: a derived name here would mean the flag never reached the spawn.
         assert!(p.name_is_explicit);
+    }
+
+    #[test]
+    fn parses_status_and_start_timestamps_tolerantly() {
+        let p = parse_record(
+            r#"{"pid":3,"status":"idle","statusUpdatedAt":1700000000123,"startedAt":1699999990000.0}"#,
+            &dir(),
+        )
+        .unwrap();
+        assert_eq!(p.status_updated_at, Some(1_700_000_000_123));
+        assert_eq!(p.started_at, Some(1_699_999_990_000));
+        let bad =
+            parse_record(r#"{"pid":3,"statusUpdatedAt":"x","startedAt":-5}"#, &dir()).unwrap();
+        assert_eq!((bad.status_updated_at, bad.started_at), (None, None));
     }
 
     #[test]

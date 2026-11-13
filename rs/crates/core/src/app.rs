@@ -138,6 +138,7 @@ pub async fn run(version: &str) -> io::Result<()> {
     tokio::spawn(server::run_activity_ticker(Arc::clone(&shared)));
     tokio::spawn(server::run_reaper_ticker(Arc::clone(&shared)));
     tokio::spawn(server::run_queue_flusher(Arc::clone(&shared)));
+    tokio::spawn(server::run_spec_sweep_ticker(Arc::clone(&shared)));
     // Per-pane "talk": default-off background loop that tails talking panes' Claude
     // transcripts and speaks new assistant replies via local TTS.
     tokio::spawn(crate::control::speech_service::run_ticker(Arc::clone(

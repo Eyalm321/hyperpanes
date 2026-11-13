@@ -29,6 +29,7 @@ use crate::control::lock::PaneLocks;
 use crate::control::nudge::NudgeLedger;
 use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
 use crate::control::routes;
+use crate::control::spec_sweep::SweepLedger;
 use crate::control::speech_service::SpeechService;
 use crate::control::supervisor::{Decision, Supervisor};
 use crate::control::tokens::{random_token, TokenStore};
@@ -58,6 +59,8 @@ pub struct Shared {
     /// Inbox-nudge bookkeeping (`control::nudge`): which agent panes have unread mail and when
     /// they were last woken. The inbox itself stays pull-only; this is the opt-in wake-up.
     pub nudges: Mutex<NudgeLedger>,
+    /// Spec-pane sweeper bookkeeping (`control::spec_sweep`): reports, consults, hysteresis.
+    pub spec_sweep: Mutex<SweepLedger>,
     pub locks: Mutex<PaneLocks>,
     /// Durable, claimable work queue backing the `/queues` + `/tasks` routes
     /// (worker-pool phase-2). `rusqlite::Connection` is `Send` but not `Sync`, so —
@@ -266,6 +269,7 @@ impl Shared {
             tokens: Mutex::new(TokenStore::new()),
             inbox: Mutex::new(MessageInbox::new()),
             nudges: Mutex::new(NudgeLedger::new()),
+            spec_sweep: Mutex::new(SweepLedger::new()),
             locks: Mutex::new(PaneLocks::new()),
             work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
             work_mode: AtomicU8::new(WorkQueueMode::Memory as u8),
@@ -1044,6 +1048,21 @@ pub async fn run_reaper_ticker(shared: Arc<Shared>) {
                 crate::control::work::stranded_log_line(&queue, n, grace)
             );
         }
+    }
+}
+
+/// The spec-pane sweeper: once a minute, closes idle or finished goal spec panes whose work is
+/// over (see `control::spec_sweep`). The first tick is skipped so a fresh start never sweeps
+/// before panes have re-attached. The sweep does blocking /proc + file reads, so it runs on the
+/// blocking pool.
+pub async fn run_spec_sweep_ticker(shared: Arc<Shared>) {
+    let period = Duration::from_millis(crate::control::spec_sweep::SWEEP_TICK_MS);
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    loop {
+        interval.tick().await;
+        let s = Arc::clone(&shared);
+        let _ =
+            tokio::task::spawn_blocking(move || crate::control::spec_sweep::sweep_once(&s)).await;
     }
 }
 
