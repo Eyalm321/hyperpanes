@@ -55,19 +55,43 @@ a question above or an "Esc to cancel" footer below) even when a statusline or f
 under them. A menu that is only quoted in the chat, above the
 agent's visible input box, does not count.
 
-One render of the screen gives a verdict with three facts. `awaiting` comes from
-`detect_awaiting_input` and drives `AwaitingInput`. `asking` comes from
-`blocks_typed_input` (decision prompts only, never a plain `❯` shell prompt) and drives ASK.
-`question` is the prompt's question line. The verdict is cached under the output cursor of the
-last genuine chunk, so a blink does not invalidate it and the next real change does.
+One render of the screen gives a verdict. `awaiting` comes from `detect_awaiting_input` and
+drives `AwaitingInput`. `asking` comes from `control::output::decision_dialog` and drives ASK,
+with the dialog's kind (permission, folder trust, or another choice) and its question row. The
+verdict is cached under the output cursor of the last genuine chunk, so a blink does not
+invalidate it and the next real change does.
 
-A pane is in an **ask episode** from its first fresh asking verdict until 3 s pass without
-one. The grace bridges the short moment after a dialog's content changes but before it is
-re-classified, and ends the episode soon after the prompt is answered. While a pane is in an
-episode, `/state` adds two fields to it, both omitted otherwise:
+### What reads ASK
+
+ASK is stricter than the typing guard (`blocks_typed_input`, below). A screen that never changes
+keeps its verdict, so a false ASK would read ASK, and alert, forever. The guard may hold on a
+doubtful screen; ASK may not fire on one. Only a cursored selection dialog counts:
+
+- a `❯ N.` option in a block of at least two numbered options, with a question above it or a
+  key-hint footer ("Esc to cancel", "Enter to confirm") below it;
+- at the bottom of the screen: under the options only their own wrapped text, blank rows,
+  rules, key hints and at most three other rows (a statusline, a mode line) may follow, and
+  none of them may look like a shell or pager prompt. A dialog printed by `cat` or `grep` in a
+  shell has the prompt under it;
+- not quoted in the chat: an agent input box (a `❯` row under a rule) below it rules it out;
+- a side panel drawn beside the chat (a `│` column most rows share) is cut off first, so its
+  text neither fakes a dialog nor hides one.
+
+A bare y/n, "press enter" or "do you want" line never reads ASK: a log tail can end with one,
+and the rendered text cannot tell it from a live prompt. It still reads `awaiting-input` and
+still holds typed input.
+
+### Ask episodes
+
+A pane is in an **ask episode** from its first asking verdict until a verdict says the dialog
+is gone, which ends it at once. A verdict taken at older content still counts while it is
+recent: a dialog with a ticking element (a statusline clock, a spinner elsewhere on screen)
+never holds still, so its current content is never classified. With no current or recent
+verdict at all, the episode ends after 10 s. While a pane is in an episode, `/state` adds two
+fields to it, both omitted otherwise:
 
 - `askingSince`: epoch ms, when the prompt appeared;
-- `question`: the prompt line, when one was found.
+- `question`: the dialog's question row, when one was found.
 
 An episode starting or ending pings `state` on `/events`.
 
@@ -78,7 +102,7 @@ starts it at launch, whether or not the control server is enabled. It is bounded
 
 - a pane is rendered only when its content cursor moved since its last verdict, so an
   unchanged screen is never rendered again (a blink does not move the cursor);
-- only once its genuine output has been quiet for 750 ms;
+- once its genuine output has been quiet for 750 ms, or every 1.5 s while it never goes quiet;
 - at most 4 renders per 500 ms tick, served round-robin by pane;
 - a failed render is retried after 10 s, or sooner if the content changes.
 
@@ -87,10 +111,15 @@ A `mode:"screen"` read also refreshes the verdict.
 ### Needs-input alert
 
 Once a pane has been asking for 60 s, the app raises one desktop notification for that episode.
-Its title is "`<tab>` needs input" and its body is "`<pane label>`: `<question>`". It is sent
-through `org.freedesktop.Notifications` on Linux, and does nothing elsewhere. A new episode
-alerts again. Preferences → "Notify when a tab needs input" turns it off (setting
-`askNotify`, on by default).
+Its title is "`<tab>` needs input" and its body is "`<pane label>` is waiting on a permission
+prompt" (or "a folder trust prompt", "a choice"). The body never carries text from the screen:
+a notification can show on the lock screen and stays in the notification history. Panes that
+come due together share one notification ("3 panes need input", one line per pane). The minute
+also counts from when the app first saw the episode, so after a restart a pane that has sat on
+a dialog for hours alerts a minute later, not at once. Notifications go through
+`org.freedesktop.Notifications` on Linux, one at a time from one worker thread, each given up
+on after 5 s; elsewhere they do nothing. A new episode alerts again. Preferences → "Notify when
+a tab needs input" turns it off for that window's panes (setting `askNotify`, on by default).
 
 ## Never typing into a decision prompt
 

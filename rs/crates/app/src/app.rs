@@ -461,7 +461,7 @@ impl App {
             last_autosave_json: RefCell::new(String::new()),
             last_prompt_delivery: Cell::new(None),
             ask_alerts: RefCell::new(crate::ask_alert::AskAlerts::default()),
-            notifier: Box::new(crate::ask_alert::DesktopNotifier),
+            notifier: Box::new(crate::ask_alert::DesktopNotifier::default()),
             last_ask_poll: Cell::new(None),
             listen,
             listen_settings: RefCell::new(listen_settings),
@@ -611,8 +611,9 @@ impl App {
     }
 
     /// Raise the "needs input" desktop alert for each pane that has been asking (its tab reads
-    /// ASK) for a minute, once per ask episode (`ask_alert`). Once a second; cheap: one signal
-    /// read per local pane, no screen render (the classifier already did that).
+    /// ASK) for a minute, once per ask episode, panes due together in one notification
+    /// (`ask_alert`). Once a second; cheap: one signal read per local pane, no screen render (the
+    /// classifier already did that).
     fn alert_asking_panes(&self) {
         const EVERY: Duration = Duration::from_secs(1);
         let now = std::time::Instant::now();
@@ -626,35 +627,32 @@ impl App {
         self.last_ask_poll.set(Some(now));
         let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
         let mut asking = Vec::new();
-        let mut enabled = true;
-        for (i, w) in windows.iter().enumerate() {
+        for w in &windows {
             let st = w.state.borrow();
-            if i == 0 {
-                enabled = st.settings.ask_notify;
+            // Each window's own "Notify when a tab needs input" governs its panes.
+            if !st.settings.ask_notify {
+                continue;
             }
             for t in st.tabs.iter().filter(|t| t.remote.is_none()) {
                 for p in &t.panes {
                     let Some(sig) = self.mgr.activity_signal(&p.uid) else {
                         continue;
                     };
-                    if let Some((since, question)) = sig.asking() {
+                    if let Some((since, _)) = sig.asking() {
                         asking.push(crate::ask_alert::AskingPane {
                             uid: p.uid.clone(),
                             tab: t.title.to_string(),
                             label: p.title.to_string(),
                             since,
-                            question: question.map(str::to_string),
+                            kind: sig.ask.kind,
                         });
                     }
                 }
             }
         }
         let epoch_now = hyperpanes_core::control::server::now_ms() as u64;
-        for alert in self
-            .ask_alerts
-            .borrow_mut()
-            .poll(&asking, epoch_now, enabled)
-        {
+        let alert = self.ask_alerts.borrow_mut().poll(&asking, epoch_now);
+        if let Some(alert) = alert {
             self.notifier.notify(&alert);
         }
     }

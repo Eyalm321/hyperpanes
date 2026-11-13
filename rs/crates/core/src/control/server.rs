@@ -695,7 +695,7 @@ pub fn activity_for(
 pub fn classify_screen(sessions: &SessionManager, uid: &str) -> Option<ScreenVerdict> {
     let cursor = sessions.activity_signal(uid)?.content_cursor;
     let text = sessions.render_screen(uid)?;
-    let verdict = verdict_for(&text, cursor);
+    let verdict = verdict_for(&text, cursor, now_ms() as u64);
     sessions.set_verdict(uid, verdict.clone());
     Some(verdict)
 }
@@ -711,7 +711,7 @@ pub fn screen_blocks_typing(sessions: &SessionManager, uid: &str) -> bool {
         return sessions.has(uid);
     };
     if let Some(c) = cursor {
-        sessions.set_verdict(uid, verdict_for(&text, c));
+        sessions.set_verdict(uid, verdict_for(&text, c, now_ms() as u64));
     }
     blocks_typed_input(&text)
 }

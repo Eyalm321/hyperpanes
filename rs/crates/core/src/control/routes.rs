@@ -709,9 +709,14 @@ fn build_screen_body(
             // prompt above the tail window.
             let awaiting = detect_awaiting_input(&full);
             if let Some(c) = content_cursor {
-                shared
-                    .sessions
-                    .set_verdict(uid, crate::control::output::verdict_for(&full, c));
+                shared.sessions.set_verdict(
+                    uid,
+                    crate::control::output::verdict_for(
+                        &full,
+                        c,
+                        crate::control::server::now_ms() as u64,
+                    ),
+                );
             }
             let mut text = full;
             if let Some(tail) = tail_num(q.get("tail")) {

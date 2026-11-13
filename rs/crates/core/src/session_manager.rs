@@ -2126,13 +2126,14 @@ mod tests {
         assert_eq!(act(&mgr), Activity::Busy);
     }
 
-    // A dialog on screen opens an ask episode (since when it appeared, with its question) that
-    // `/state` and the tab chip read; answering it ends the episode after the grace.
+    // A dialog on screen opens an ask episode (since when it appeared, with its kind and
+    // question) that `/state` and the tab chip read; once it is answered, the render that finds
+    // no dialog ends the episode at once.
     #[tokio::test]
-    async fn a_dialog_opens_an_ask_episode_that_ends_after_it_is_answered() {
+    async fn a_dialog_opens_an_ask_episode_that_ends_once_it_is_answered() {
         use crate::control::readmodel::{Activity, PaneStatus};
         use crate::control::server::{classify_screen, live_for, now_ms};
-        use crate::session::activity::ASK_GRACE_MS;
+        use crate::session::activity::AskKind;
         let (mgr, mut rx, sink) = make_session("u1");
         feed(&sink, &mut rx, DIALOG).await;
         let shown_at = mgr.activity_signal("u1").unwrap().content_at.unwrap();
@@ -2140,6 +2141,10 @@ mod tests {
         assert!(v.asking);
         let now = now_ms() as u64;
         mgr.step_ask("u1", now);
+        assert_eq!(
+            mgr.activity_signal("u1").unwrap().ask.kind,
+            AskKind::Permission
+        );
         let live = live_for(&mgr, 60_000, "u1", PaneStatus::Running);
         assert_eq!(live.activity, Activity::AwaitingInput);
         let asking = live.asking.expect("asking");
@@ -2149,13 +2154,15 @@ mod tests {
         assert!(live_for(&mgr, 60_000, "u1", PaneStatus::Exited)
             .asking
             .is_none());
-        // Answered: real output follows and the screen is no longer asking.
+        // Answered: real output follows. Until the new screen is classified the episode holds…
         feed(&sink, &mut rx, "\x1b[2J\x1b[H\u{25cf} Build finished\r\n").await;
         mgr.step_ask("u1", now + 500);
         assert!(live_for(&mgr, 60_000, "u1", PaneStatus::Running)
             .asking
             .is_some());
-        mgr.step_ask("u1", now + ASK_GRACE_MS + 1);
+        // …and the render that finds no dialog ends it.
+        assert!(!classify_screen(&mgr, "u1").unwrap().asking);
+        mgr.step_ask("u1", now + 600);
         assert!(live_for(&mgr, 60_000, "u1", PaneStatus::Running)
             .asking
             .is_none());

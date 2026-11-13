@@ -567,6 +567,7 @@ pub fn resync(
             });
             // A manual tab colour (recolorTab) overrides the group/project colour.
             let stripe = tab_stripe_color(t.color, t.pane_group.as_ref());
+            let status = tab_status_for(t, mgr);
             TabItem {
                 title: t.title.clone(),
                 active: i == active,
@@ -576,8 +577,8 @@ pub fn resync(
                 group_color: stripe.unwrap_or(theme::GROUP_NEUTRAL),
                 a11y_label: group_a11y_label(&t.title, t.pane_group.is_some(), project.as_deref())
                     .into(),
-                working: tab_status_for(t, mgr) == TabStatus::Working,
-                asking: tab_status_for(t, mgr) == TabStatus::Asking,
+                working: status == TabStatus::Working,
+                asking: status == TabStatus::Asking,
             }
         })
         .collect();
@@ -1741,6 +1742,7 @@ mod tab_status_tests {
                 awaiting,
                 asking,
                 question: asking.then(|| "Do you want to proceed?".to_string()),
+                ..Default::default()
             },
         );
         mgr.step_ask(uid, hyperpanes_core::control::server::now_ms() as u64);

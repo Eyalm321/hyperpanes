@@ -7,8 +7,9 @@
 //! Bounded, so idle panes cost nothing:
 //! - a pane is rendered only when its content cursor moved since its last verdict: an unchanged
 //!   screen is never re-rendered (cosmetic redraws such as a blink do not move the cursor);
-//! - only once its genuine output has been quiet for [`CLASSIFY_SETTLE_MS`] (a pane that is
-//!   streaming has nothing settled to read yet);
+//! - once its genuine output has been quiet for [`CLASSIFY_SETTLE_MS`], or, while it never
+//!   goes quiet (a dialog with a ticking clock or spinner on screen), every
+//!   [`CLASSIFY_MAX_WAIT_MS`];
 //! - at most [`MAX_RENDERS_PER_TICK`] renders per [`CLASSIFIER_TICK_MS`] tick, served round-robin
 //!   by uid so a crowd of changed panes cannot starve any of them;
 //! - a render that fails (a gone pane, a daemon timeout) is retried after [`RETRY_AFTER_MS`],
@@ -30,6 +31,9 @@ pub const CLASSIFIER_TICK_MS: u64 = 500;
 pub const MAX_RENDERS_PER_TICK: usize = 4;
 /// How long a pane whose render failed waits before it is tried again (same content).
 pub const RETRY_AFTER_MS: u64 = 10_000;
+/// How often a pane whose output never goes quiet for [`CLASSIFY_SETTLE_MS`] is rendered
+/// anyway, so a dialog with a ticking element on screen still reads ASK.
+pub const CLASSIFY_MAX_WAIT_MS: u64 = 1_500;
 
 /// Whether this pane's screen should be classified at `now`: its content changed since its last
 /// verdict (or it never had one) and its genuine output has been quiet for
@@ -41,19 +45,24 @@ pub fn needs_classification(sig: &ActivitySignal, now: u64) -> bool {
     now.saturating_sub(t) >= CLASSIFY_SETTLE_MS && sig.classification_stale()
 }
 
-/// The classifier's memory between ticks: where the round-robin left off, and recent failures.
+/// The classifier's memory between ticks: where the round-robin left off, recent failures, and
+/// when each changing pane was last rendered.
 #[derive(Debug, Default)]
 pub struct ClassifierPlan {
     /// The last uid served, so the next tick starts after it.
     last_served: Option<String>,
     /// uid → (content cursor whose render failed, when to try that content again).
     failed: HashMap<String, (u64, u64)>,
+    /// uid → when it was last picked, or first seen changing without settling: the clock of
+    /// [`CLASSIFY_MAX_WAIT_MS`].
+    picked_at: HashMap<String, u64>,
 }
 
 impl ClassifierPlan {
     /// Choose this tick's renders among `panes` (uid, signal), skipping `inflight` ones: those
-    /// that [`needs_classification`], minus recent failures at the same content, in uid order
-    /// starting after the last uid served, at most `cap`.
+    /// that [`needs_classification`], or that changed and have waited [`CLASSIFY_MAX_WAIT_MS`]
+    /// without settling, minus recent failures at the same content, in uid order starting after
+    /// the last uid served, at most `cap`.
     pub fn pick(
         &mut self,
         panes: &[(String, ActivitySignal)],
@@ -63,16 +72,25 @@ impl ClassifierPlan {
     ) -> Vec<String> {
         let live: HashSet<&str> = panes.iter().map(|(u, _)| u.as_str()).collect();
         self.failed.retain(|u, _| live.contains(u.as_str()));
-        let mut due: Vec<&str> = panes
-            .iter()
-            .filter(|(uid, sig)| {
-                !inflight.contains(uid)
-                    && needs_classification(sig, now)
-                    && !matches!(self.failed.get(uid), Some(&(cursor, retry_at))
-                        if cursor == sig.content_cursor && now < retry_at)
-            })
-            .map(|(uid, _)| uid.as_str())
-            .collect();
+        self.picked_at.retain(|u, _| live.contains(u.as_str()));
+        let mut due: Vec<&str> = Vec::new();
+        for (uid, sig) in panes {
+            let changed = sig.content_at.is_some() && sig.classification_stale();
+            if !changed {
+                // Classified at its current content: a later change starts a fresh clock.
+                self.picked_at.remove(uid);
+                continue;
+            }
+            let waiting_since = *self.picked_at.entry(uid.clone()).or_insert(now);
+            let overdue = now.saturating_sub(waiting_since) >= CLASSIFY_MAX_WAIT_MS;
+            if !inflight.contains(uid)
+                && (needs_classification(sig, now) || overdue)
+                && !matches!(self.failed.get(uid), Some(&(cursor, retry_at))
+                    if cursor == sig.content_cursor && now < retry_at)
+            {
+                due.push(uid.as_str());
+            }
+        }
         due.sort_unstable();
         // Rotate so the first uid after the last one served comes first.
         let start = match &self.last_served {
@@ -83,6 +101,9 @@ impl ClassifierPlan {
         due.truncate(cap);
         if let Some(last) = due.last() {
             self.last_served = Some(last.to_string());
+        }
+        for uid in &due {
+            self.picked_at.insert(uid.to_string(), now);
         }
         due.into_iter().map(str::to_string).collect()
     }
@@ -278,6 +299,41 @@ mod tests {
         plan.note_failed("a", 3, now);
         let changed = vec![("a".to_string(), sig(Some(now - 1_000), 4, None))];
         assert_eq!(plan.pick(&changed, &HashSet::new(), now + 500, 4), ["a"]);
+    }
+
+    #[test]
+    fn a_pane_that_never_settles_is_rendered_every_max_wait() {
+        let mut plan = ClassifierPlan::default();
+        let start = 1_000_000;
+        let mut renders = Vec::new();
+        for tick in 0..20u64 {
+            let now = start + tick * CLASSIFIER_TICK_MS;
+            // Output every 200 ms (a ticking clock under a dialog): never quiet for the settle
+            // window, and the last verdict is always behind the content.
+            let one = vec![("a".to_string(), sig(Some(now - 100), tick + 10, Some(tick)))];
+            if !plan.pick(&one, &HashSet::new(), now, 4).is_empty() {
+                renders.push(now - start);
+            }
+        }
+        assert_eq!(renders, [1_500, 3_000, 4_500, 6_000, 7_500, 9_000]);
+        // Once classified at its current content it costs nothing, and a later change waits a
+        // full CLASSIFY_MAX_WAIT_MS again (or settles first).
+        let now = start + 20 * CLASSIFIER_TICK_MS;
+        let current = vec![("a".to_string(), sig(Some(now - 100), 50, Some(50)))];
+        assert!(plan.pick(&current, &HashSet::new(), now, 4).is_empty());
+        let changed = vec![("a".to_string(), sig(Some(now + 400), 51, Some(50)))];
+        assert!(plan
+            .pick(&changed, &HashSet::new(), now + 500, 4)
+            .is_empty());
+        assert_eq!(
+            plan.pick(
+                &changed,
+                &HashSet::new(),
+                now + 500 + CLASSIFY_MAX_WAIT_MS,
+                4
+            ),
+            ["a"]
+        );
     }
 
     #[test]

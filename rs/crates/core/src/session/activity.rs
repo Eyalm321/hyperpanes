@@ -64,54 +64,97 @@ impl OutputGate {
     }
 }
 
-/// How long an ask episode survives without a fresh "asking" verdict before it ends. Bridges the
-/// short stale windows a dialog screen with a ticking element causes (its content changed, the
-/// screen is re-classified ~1 s later), and ends the episode soon after the prompt is answered.
-pub const ASK_GRACE_MS: u64 = 3_000;
+/// How long an ask episode survives with no recent verdict at all before it ends: a dialog with a
+/// ticking element (a statusline clock, a spinner elsewhere on screen) keeps changing, and the
+/// classifier only re-renders it every so often (`control::classifier`). A verdict that says the
+/// prompt is gone ends the episode at once; this only bridges the gaps between renders.
+pub const ASK_GRACE_MS: u64 = 10_000;
+
+/// What kind of decision a pane waits on. It is all a "needs input" alert tells about the
+/// prompt: the screen's own text never leaves the app that way (an alert can reach the lock
+/// screen and the notification history).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AskKind {
+    /// A tool permission: "Do you want to proceed?", "Do you want to make this edit…?".
+    Permission,
+    /// Whether to trust a folder: "Do you trust the files in this folder?".
+    Trust,
+    /// Any other choice: a plan, model or account picker.
+    #[default]
+    Choice,
+}
 
 /// What one render of a pane's screen said, cached under the content cursor it was taken at.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScreenVerdict {
     /// The content cursor the screen was rendered at.
     pub cursor: u64,
+    /// When the screen was rendered (epoch ms).
+    pub rendered_at: u64,
     /// `detect_awaiting_input`: the screen waits for input (any prompt). Drives `AwaitingInput`.
     pub awaiting: bool,
-    /// `blocks_typed_input`: the screen waits on a DECISION (a permission / confirm dialog, a
-    /// picker, a y/n question). Drives the tab's ASK state and the "needs input" alerts.
+    /// `decision_dialog`: the screen ends in a decision dialog (a permission or trust dialog, a
+    /// picker). Drives the tab's ASK state and the "needs input" alerts.
     pub asking: bool,
-    /// The prompt's question line, when one was found.
+    /// The dialog's kind, while `asking`.
+    pub kind: AskKind,
+    /// The dialog's question row, when one was found.
     pub question: Option<String>,
 }
 
-/// One "waiting on a decision" episode of a pane: from the first fresh asking verdict until
-/// [`ASK_GRACE_MS`] pass without one. Stepped on a clock by the screen classifier.
+/// What the latest verdict says about a pane's prompt at one step of its [`AskEpisode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskSeen<'a> {
+    /// A dialog is up: seen at `at` (epoch ms), on content that appeared at `started_at`.
+    Asking {
+        at: u64,
+        started_at: u64,
+        kind: AskKind,
+        question: Option<&'a str>,
+    },
+    /// The screen was classified and shows no dialog: the prompt is gone.
+    NotAsking,
+    /// No verdict is current or recent: the content changed and was not classified again yet.
+    Unknown,
+}
+
+/// One "waiting on a decision" episode of a pane: from the first asking verdict until a verdict
+/// says the dialog is gone, or [`ASK_GRACE_MS`] pass with no verdict at all. Stepped on a clock
+/// by the screen classifier.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AskEpisode {
     /// When the episode began (epoch ms), or `None` while the pane is not asking.
     pub since: Option<u64>,
+    /// The latest kind of dialog seen during the episode.
+    pub kind: AskKind,
     /// The latest question seen during the episode.
     pub question: Option<String>,
-    /// When a fresh asking verdict was last seen (epoch ms).
-    last_fresh_at: u64,
+    /// When the dialog was last seen (epoch ms).
+    last_seen_at: u64,
 }
 
 impl AskEpisode {
-    /// Advance at `now`. `fresh` is the current verdict's question when the pane's CURRENT
-    /// content is classified as asking (`Some(None)` = asking, no question found), else `None`.
-    /// `started_at` is when that content appeared (the episode start on a new episode).
-    pub fn step(&mut self, fresh: Option<Option<&str>>, started_at: u64, now: u64) {
-        match fresh {
-            Some(question) => {
+    /// Advance at `now` with what the latest verdict says ([`AskSeen`]).
+    pub fn step(&mut self, seen: AskSeen<'_>, now: u64) {
+        match seen {
+            AskSeen::Asking {
+                at,
+                started_at,
+                kind,
+                question,
+            } => {
                 if self.since.is_none() {
                     self.since = Some(started_at.min(now));
                 }
-                self.last_fresh_at = now;
+                self.last_seen_at = self.last_seen_at.max(at);
+                self.kind = kind;
                 if let Some(q) = question {
                     self.question = Some(q.to_string());
                 }
             }
-            None => {
-                if self.since.is_some() && now.saturating_sub(self.last_fresh_at) > ASK_GRACE_MS {
+            AskSeen::NotAsking => *self = AskEpisode::default(),
+            AskSeen::Unknown => {
+                if self.since.is_some() && now.saturating_sub(self.last_seen_at) > ASK_GRACE_MS {
                     *self = AskEpisode::default();
                 }
             }
@@ -158,15 +201,35 @@ impl ActivitySignal {
         self.current_verdict().is_none()
     }
 
-    /// Step the ask episode at `now` from the current verdict.
+    /// Step the ask episode at `now` from the latest verdict. A verdict taken at the current
+    /// content holds now; one taken at older content still counts while it is recent (within
+    /// [`ASK_GRACE_MS`]): a dialog with a ticking element never holds still long enough for its
+    /// current content to be classified.
     pub fn step_ask(&mut self, now: u64) {
-        let fresh = self
-            .current_verdict()
-            .filter(|v| v.asking)
-            .map(|v| v.question.clone());
-        let started_at = self.content_at.unwrap_or(now);
-        self.ask
-            .step(fresh.as_ref().map(|q| q.as_deref()), started_at, now);
+        let seen = match &self.verdict {
+            Some(v)
+                if v.cursor == self.content_cursor
+                    || now.saturating_sub(v.rendered_at) <= ASK_GRACE_MS =>
+            {
+                let current = v.cursor == self.content_cursor;
+                if v.asking {
+                    AskSeen::Asking {
+                        at: if current { now } else { v.rendered_at },
+                        started_at: if current {
+                            self.content_at.unwrap_or(now)
+                        } else {
+                            v.rendered_at
+                        },
+                        kind: v.kind,
+                        question: v.question.as_deref(),
+                    }
+                } else {
+                    AskSeen::NotAsking
+                }
+            }
+            _ => AskSeen::Unknown,
+        };
+        self.ask.step(seen, now);
     }
 
     /// `(since, question)` while the pane is in an ask episode.
@@ -415,7 +478,20 @@ mod tests {
             cursor,
             awaiting,
             asking,
+            kind: if asking {
+                AskKind::Permission
+            } else {
+                AskKind::default()
+            },
             question: asking.then(|| "Do you want to proceed?".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn rendered(v: ScreenVerdict, at: u64) -> ScreenVerdict {
+        ScreenVerdict {
+            rendered_at: at,
+            ..v
         }
     }
 
@@ -437,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_episode_starts_on_a_fresh_verdict_and_ends_after_the_grace() {
+    fn ask_episode_lasts_as_long_as_the_dialog_and_ends_when_it_is_gone() {
         let mut s = ActivitySignal {
             content_at: Some(1_000),
             content_cursor: 10,
@@ -445,29 +521,61 @@ mod tests {
         };
         s.step_ask(1_200);
         assert_eq!(s.asking(), None);
-        s.verdict = Some(verdict(10, true, true));
+        s.verdict = Some(rendered(verdict(10, true, true), 1_900));
         s.step_ask(2_000);
         // The episode starts when the dialog's content appeared.
         assert_eq!(s.asking(), Some((1_000, Some("Do you want to proceed?"))));
-        // The content changes (a ticking element): stale for a moment, episode holds.
-        s.note_genuine(4_000, 11);
-        s.step_ask(4_500);
+        assert_eq!(s.ask.kind, AskKind::Permission);
+        // An unchanged screen keeps its verdict: three hours later it still asks.
+        s.step_ask(3 * 3_600_000);
         assert_eq!(s.asking().map(|a| a.0), Some(1_000));
-        // Re-classified as still asking: same episode.
-        s.verdict = Some(verdict(11, true, true));
-        s.step_ask(4_800);
-        assert_eq!(s.asking().map(|a| a.0), Some(1_000));
-        // Answered: new content, never re-classified as asking. Ends once the grace passes.
-        s.note_genuine(6_000, 20);
-        s.step_ask(4_800 + ASK_GRACE_MS);
-        assert!(s.asking().is_some());
-        s.step_ask(4_800 + ASK_GRACE_MS + 1);
+        // Answered: the new content is classified with no dialog, and the episode ends at once.
+        s.note_genuine(3 * 3_600_000 + 1_000, 20);
+        s.verdict = Some(rendered(verdict(20, false, false), 3 * 3_600_000 + 1_800));
+        s.step_ask(3 * 3_600_000 + 1_900);
         assert_eq!(s.asking(), None);
         // A later dialog is a new episode with its own start.
-        s.note_genuine(20_000, 30);
-        s.verdict = Some(verdict(30, true, true));
-        s.step_ask(21_000);
-        assert_eq!(s.asking().map(|a| a.0), Some(20_000));
+        let later = 4 * 3_600_000;
+        s.note_genuine(later, 30);
+        s.verdict = Some(rendered(verdict(30, true, true), later + 800));
+        s.step_ask(later + 1_000);
+        assert_eq!(s.asking().map(|a| a.0), Some(later));
+    }
+
+    // A dialog with a ticking element (a statusline clock) changes every 200 ms, so no verdict is
+    // ever current: each render is already one chunk behind. Renders every 1.4 s keep it in ONE
+    // episode; a render without the dialog ends it at once; no render at all ends it after the
+    // grace.
+    #[test]
+    fn a_ticking_dialog_stays_in_one_episode() {
+        let mut s = ActivitySignal::default();
+        let mut cursor = 0;
+        let mut since = None;
+        for now in (0..120_000u64).step_by(200) {
+            cursor += 1;
+            s.note_genuine(now, cursor);
+            if now % 1_400 == 0 {
+                s.verdict = Some(rendered(verdict(cursor - 1, true, true), now));
+            }
+            s.step_ask(now);
+            let at = s.asking().map(|a| a.0);
+            assert!(at.is_some(), "not asking at {now}");
+            assert_eq!(*since.get_or_insert(at), at, "episode restarted at {now}");
+        }
+        // Answered while ticking: the next render shows no dialog.
+        s.note_genuine(120_000, cursor + 1);
+        s.verdict = Some(rendered(verdict(cursor, false, false), 120_100));
+        s.step_ask(120_200);
+        assert_eq!(s.asking(), None);
+        // Renders stop (a backlog) on a new dialog: it holds through the grace, then ends.
+        s.verdict = Some(rendered(verdict(cursor, true, true), 130_000));
+        s.note_genuine(130_100, cursor + 2);
+        s.step_ask(130_200);
+        assert!(s.asking().is_some());
+        s.step_ask(130_000 + ASK_GRACE_MS);
+        assert!(s.asking().is_some());
+        s.step_ask(130_000 + ASK_GRACE_MS + 1);
+        assert_eq!(s.asking(), None);
     }
 
     #[test]

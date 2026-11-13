@@ -165,16 +165,17 @@ pub fn probe_timed(address: Option<String>, timeout: Duration) -> Result<(), Str
 }
 
 /// Raise a desktop notification through `org.freedesktop.Notifications` on the session bus and
-/// return its id. Blocking (connect, call, wait for the reply): call it off the UI thread. It
-/// drives zbus with this module's `block_on` plus zbus's own executor thread, never a Tokio
-/// runtime (the executor contract above).
+/// return its id. Blocking (connect, call, wait for the reply, which fails after `timeout`): call
+/// it off the UI thread. It drives zbus with this module's `block_on` plus zbus's own executor
+/// thread, never a Tokio runtime (the executor contract above).
 #[cfg(target_os = "linux")]
-pub fn notify(app_name: &str, summary: &str, body: &str) -> Result<u32, String> {
+pub fn notify(app_name: &str, summary: &str, body: &str, timeout: Duration) -> Result<u32, String> {
     use std::collections::HashMap;
     use zbus::zvariant::Value;
     block_on(async {
         let conn = zbus::connection::Builder::session()
             .map_err(|e| e.to_string())?
+            .method_timeout(timeout)
             .build()
             .await
             .map_err(|e| e.to_string())?;
