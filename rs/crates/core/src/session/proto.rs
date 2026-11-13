@@ -35,6 +35,10 @@ use serde::{Deserialize, Serialize};
 use crate::session::spawn::EnvMap;
 use crate::session_manager::{Integration, SessionEvent, SpawnOptions};
 
+/// The [`DaemonMsg::Hello`] feature a daemon advertises when it answers
+/// [`ClientMsg::ScreenSeed`] (issue #140).
+pub const FEATURE_SCREEN_SEED: &str = "screen_seed";
+
 /// Wire-protocol version, bumped on any incompatible change to the message shapes.
 /// Carried in the `Hello` handshake so a client can detect a stale daemon (M3 acts on
 /// the mismatch; M0 just transports it).
@@ -160,6 +164,12 @@ pub enum ClientMsg {
     KillAll,
     /// Serialize a session's current screen (→ [`DaemonMsg::Screen`]).
     RenderScreen { uid: String },
+    /// Serialize a session's screen for a re-attaching view (→ [`DaemonMsg::ScreenSeed`]).
+    ///
+    /// Added without a protocol bump, so a client sends it ONLY to a daemon whose `Hello`
+    /// listed [`FEATURE_SCREEN_SEED`]: an older daemon fails to decode an unknown variant and
+    /// drops the whole connection.
+    ScreenSeed { uid: String },
     /// Liveness probe (→ [`DaemonMsg::Pong`]).
     Ping,
     /// Ask the daemon to **shut down**: kill every session and exit the process cleanly,
@@ -174,7 +184,16 @@ pub enum ClientMsg {
 pub enum DaemonMsg {
     /// Handshake reply: the daemon's protocol version + its pid (for diagnostics / the
     /// future kill-on-mismatch path).
-    Hello { proto_ver: u32, daemon_pid: u32 },
+    ///
+    /// `features` names the optional requests this daemon answers (e.g.
+    /// [`FEATURE_SCREEN_SEED`]). Added without a protocol bump: an older daemon's reply decodes
+    /// with none, and an older client ignores the field.
+    Hello {
+        proto_ver: u32,
+        daemon_pid: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     /// Reply to [`ClientMsg::ListSessions`].
     Sessions(Vec<SessionMeta>),
     /// Reply to [`ClientMsg::Create`]: the (possibly daemon-minted) uid of the new
@@ -193,6 +212,11 @@ pub enum DaemonMsg {
         text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_line: Option<crate::session::screen::InputLine>,
+    },
+    /// Reply to [`ClientMsg::ScreenSeed`]: the seed, or `None` if the session is gone.
+    ScreenSeed {
+        uid: String,
+        seed: Option<crate::session::screen::ScreenSeed>,
     },
     /// A streamed live session event (Data / Cwd / Exit) for any session this connection
     /// has attached to (or all, per the daemon's broadcast policy).
@@ -370,6 +394,7 @@ mod tests {
             ClientMsg::Kill { uid: "s1".into() },
             ClientMsg::KillAll,
             ClientMsg::RenderScreen { uid: "s1".into() },
+            ClientMsg::ScreenSeed { uid: "s1".into() },
             ClientMsg::Ping,
             ClientMsg::Shutdown,
         ];
@@ -384,6 +409,20 @@ mod tests {
             DaemonMsg::Hello {
                 proto_ver: PROTO_VER,
                 daemon_pid: 4242,
+                features: vec![FEATURE_SCREEN_SEED.to_string()],
+            },
+            DaemonMsg::ScreenSeed {
+                uid: "s1".into(),
+                seed: Some(crate::session::screen::ScreenSeed {
+                    vt: "\u{1b}[?1049h\u{1b}[1;1Hx".into(),
+                    cols: 80,
+                    rows: 24,
+                    cursor: 99,
+                }),
+            },
+            DaemonMsg::ScreenSeed {
+                uid: "gone".into(),
+                seed: None,
             },
             DaemonMsg::Sessions(vec![SessionMeta {
                 uid: "s1".into(),
@@ -436,9 +475,11 @@ mod tests {
         let DaemonMsg::Hello {
             proto_ver,
             daemon_pid,
+            ..
         } = roundtrip_daemon(&DaemonMsg::Hello {
             proto_ver: PROTO_VER,
             daemon_pid: 77,
+            features: Vec::new(),
         })
         else {
             panic!("expected Hello");
@@ -578,5 +619,55 @@ mod tests {
                 text: Some("t".into())
             }
         );
+    }
+
+    // #140: `features` rides on `Hello` without a protocol bump. An older daemon's Hello (no
+    // field) decodes with none, so the client never sends it a `ScreenSeed`; an older client
+    // ignores the field on a newer daemon's Hello.
+    #[test]
+    fn hello_features_are_wire_compatible_both_ways() {
+        let old_hello = r#"{"Hello":{"proto_ver":1,"daemon_pid":7}}"#;
+        let decoded: DaemonMsg = serde_json::from_str(old_hello).unwrap();
+        assert_eq!(
+            decoded,
+            DaemonMsg::Hello {
+                proto_ver: 1,
+                daemon_pid: 7,
+                features: Vec::new(),
+            }
+        );
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), old_hello);
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        enum OldDaemonMsg {
+            Hello { proto_ver: u32, daemon_pid: u32 },
+        }
+        let new_hello = serde_json::to_string(&DaemonMsg::Hello {
+            proto_ver: 1,
+            daemon_pid: 7,
+            features: vec![FEATURE_SCREEN_SEED.to_string()],
+        })
+        .unwrap();
+        let old: OldDaemonMsg = serde_json::from_str(&new_hello).unwrap();
+        assert_eq!(
+            old,
+            OldDaemonMsg::Hello {
+                proto_ver: 1,
+                daemon_pid: 7
+            }
+        );
+    }
+
+    // Why the client gates `ScreenSeed` on the feature: an older daemon's `ClientMsg` has no
+    // such variant, so the frame fails to decode (and the daemon drops the connection).
+    #[test]
+    fn an_older_daemon_cannot_decode_a_screen_seed_request() {
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        enum OldClientMsg {
+            Hello { proto_ver: u32 },
+            Ping,
+        }
+        let frame = serde_json::to_string(&ClientMsg::ScreenSeed { uid: "s1".into() }).unwrap();
+        assert!(serde_json::from_str::<OldClientMsg>(&frame).is_err());
     }
 }

@@ -13,4 +13,5 @@ pub mod pty;
 pub mod replay;
 pub mod respawn;
 pub mod screen;
+pub(crate) mod screen_vt;
 pub mod spawn;

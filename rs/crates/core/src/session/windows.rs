@@ -49,7 +49,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 
-use crate::session::proto::{ClientMsg, DaemonMsg, SessionMeta, MAX_FRAME_LEN, PROTO_VER};
+use crate::session::proto::{
+    ClientMsg, DaemonMsg, SessionMeta, FEATURE_SCREEN_SEED, MAX_FRAME_LEN, PROTO_VER,
+};
 use crate::session_manager::{SessionEvent, SessionRegistry};
 
 // Re-use the same idle grace knob as the unix side (the env override is platform-agnostic).
@@ -333,6 +335,7 @@ impl Daemon {
                     .write_msg(&DaemonMsg::Hello {
                         proto_ver: PROTO_VER,
                         daemon_pid: std::process::id(),
+                        features: vec![FEATURE_SCREEN_SEED.to_string()],
                     })
                     .await;
             }
@@ -378,6 +381,10 @@ impl Daemon {
                         input_line,
                     })
                     .await;
+            }
+            ClientMsg::ScreenSeed { uid } => {
+                let seed = self.registry.screen_seed(&uid);
+                let _ = pc.write_msg(&DaemonMsg::ScreenSeed { uid, seed }).await;
             }
             ClientMsg::Ping => {
                 let _ = pc.write_msg(&DaemonMsg::Pong).await;

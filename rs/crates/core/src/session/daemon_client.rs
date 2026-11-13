@@ -54,7 +54,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[cfg(unix)]
-use crate::session::proto::{read_frame, write_frame, ClientMsg, DaemonMsg, SpawnSpec, PROTO_VER};
+use crate::session::proto::{
+    read_frame, write_frame, ClientMsg, DaemonMsg, SpawnSpec, FEATURE_SCREEN_SEED, PROTO_VER,
+};
 #[cfg(unix)]
 use crate::session::replay::Replay;
 #[cfg(unix)]
@@ -120,6 +122,10 @@ pub struct DaemonSessionManager {
     /// request/response is in flight at a time — which is fine: replies are all rare and off
     /// the hot path (only `render_screen` and the connect-time `ListSessions`/handshake).
     replies: Mutex<Receiver<DaemonMsg>>,
+    /// Whether the daemon's `Hello` listed [`FEATURE_SCREEN_SEED`]. An older daemon that
+    /// survived a GUI upgrade doesn't, and must never be sent a `ScreenSeed` (it would drop
+    /// the connection on the unknown request).
+    screen_seed: std::sync::atomic::AtomicBool,
     _reader: std::thread::JoinHandle<()>,
 }
 
@@ -190,6 +196,7 @@ impl DaemonSessionManager {
             write_half: Mutex::new(write_half),
             shadows,
             replies: Mutex::new(replies),
+            screen_seed: std::sync::atomic::AtomicBool::new(false),
             _reader: reader,
         };
 
@@ -198,12 +205,17 @@ impl DaemonSessionManager {
         mgr.send(&ClientMsg::Hello {
             proto_ver: PROTO_VER,
         })?;
-        let _ = mgr.request(
+        let hello = mgr.request(
             ClientMsg::Hello {
                 proto_ver: PROTO_VER,
             },
             |m| matches!(m, DaemonMsg::Hello { .. }),
         );
+        if let Some(DaemonMsg::Hello { features, .. }) = hello {
+            let seeds = features.iter().any(|f| f == FEATURE_SCREEN_SEED);
+            mgr.screen_seed
+                .store(seeds, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Seed the shadow from the daemon's live session set (the "+ one `ListSessions` on
         // connect" half of the has/uids strategy) AND re-attach each survivor so its replay
@@ -391,6 +403,27 @@ impl DaemonSessionManager {
             DaemonMsg::Screen {
                 text, input_line, ..
             } => text.map(|text| crate::session::screen::ScreenRead { text, input_line }),
+            _ => None,
+        }
+    }
+
+    /// The pane's screen serialized for a re-attaching view — a bounded `ScreenSeed`
+    /// round-trip, sent only to a daemon that advertised [`FEATURE_SCREEN_SEED`]. `None` from
+    /// an older daemon (nothing is sent), a gone session, or a timeout: the caller falls back
+    /// to the replay mirror.
+    pub fn screen_seed(&self, uid: &str) -> Option<crate::session::screen::ScreenSeed> {
+        if !self.screen_seed.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let want_uid = uid.to_string();
+        let reply = self.request(
+            ClientMsg::ScreenSeed {
+                uid: uid.to_string(),
+            },
+            move |m| matches!(m, DaemonMsg::ScreenSeed { uid: u, .. } if *u == want_uid),
+        )?;
+        match reply {
+            DaemonMsg::ScreenSeed { seed, .. } => seed,
             _ => None,
         }
     }
@@ -831,6 +864,9 @@ impl DaemonSessionManager {
         unreachable!("daemon backend is unix-only")
     }
     pub fn render_screen_read(&self, _uid: &str) -> Option<crate::session::screen::ScreenRead> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn screen_seed(&self, _uid: &str) -> Option<crate::session::screen::ScreenSeed> {
         unreachable!("daemon backend is unix-only")
     }
     pub fn write(&self, _uid: &str, _data: &str) {
@@ -1685,6 +1721,7 @@ mod tests {
                     &DaemonMsg::Hello {
                         proto_ver: PROTO_VER + 1,
                         daemon_pid: 4242,
+                        features: Vec::new(),
                     },
                 );
                 // Keep the connection open briefly so the client reads the reply.
@@ -1746,5 +1783,136 @@ mod tests {
             wait_until(Dur::from_secs(3), || daemon.is_shutting_down()),
             "shutdown_daemon brings the daemon down"
         );
+    }
+
+    // ---- #140: the screen seed a re-attaching view primes from ----
+
+    /// The fake full-screen program: switches to the alternate screen, draws, then diffs part
+    /// of it, and stays alive so the session is still there to seed.
+    const FAKE_TUI: &str = "printf '\\033[?1049h\\033[?2004h\\033[H\\033[2J\\033[1;31mTOP\\033[0m\\033[5;3H\\033[44mBOX\\033[0m\\033[1;2HX\\033[3;1HSEEDED'; sleep 30";
+
+    #[test]
+    fn a_daemon_offering_screen_seed_serializes_the_live_screen() {
+        let socket = temp_socket("seed");
+        let _daemon = spawn_in_process(&socket).expect("daemon binds");
+        let (mgr, mut rx) = connect_manager(&socket);
+        assert!(mgr.screen_seed.load(std::sync::atomic::Ordering::Relaxed));
+        mgr.create(SpawnOptions {
+            uid: "p1".into(),
+            shell: Some("/bin/sh".into()),
+            args: Some(vec!["-c".into(), FAKE_TUI.into()]),
+            cols: Some(40),
+            rows: Some(10),
+            ..Default::default()
+        })
+        .expect("create");
+        let saw = recv_event_until(
+            &mut rx,
+            Dur::from_secs(10),
+            |e| matches!(e, SessionEvent::Data { uid, data, .. } if uid == "p1" && data.contains("SEEDED")),
+        );
+        assert!(saw.is_some(), "the program's frame should stream");
+        let seed = mgr
+            .screen_seed("p1")
+            .expect("a seed from a daemon that offers it");
+        assert_eq!((seed.cols, seed.rows), (40, 10));
+        assert_eq!(Some(seed.cursor), mgr.output_bytes("p1"));
+        let mut rebuilt = crate::session::screen::Screen::new(seed.cols, seed.rows);
+        rebuilt.advance(seed.vt.as_bytes());
+        assert_eq!(Some(rebuilt.render()), mgr.render_screen("p1"));
+        assert!(rebuilt.render().starts_with("TXP"), "{}", rebuilt.render());
+        assert_eq!(mgr.screen_seed("gone"), None);
+        mgr.kill("p1");
+    }
+
+    /// A fake daemon on one end of a socket pair. `features` is what its `Hello` advertises;
+    /// it answers `ListSessions` (none), `Ping` and — only when `new_shape` — `ScreenSeed` with
+    /// `seed: None`. Like a real older daemon, a frame it can't decode closes the connection.
+    /// Returns the client end and a log of every request it received.
+    fn fake_daemon(
+        features: Vec<String>,
+        new_shape: bool,
+    ) -> (std::os::unix::net::UnixStream, Arc<Mutex<Vec<String>>>) {
+        #[derive(serde::Deserialize)]
+        enum OldClientMsg {
+            Hello { proto_ver: u32 },
+            ListSessions,
+            Ping,
+        }
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&log);
+        std::thread::spawn(move || loop {
+            let Ok(Some(raw)) = read_frame::<_, serde_json::Value>(&mut server) else {
+                return;
+            };
+            seen.lock().unwrap().push(raw.to_string());
+            let reply = if new_shape {
+                match serde_json::from_value::<ClientMsg>(raw) {
+                    Ok(ClientMsg::Hello { .. }) => DaemonMsg::Hello {
+                        proto_ver: PROTO_VER,
+                        daemon_pid: 1,
+                        features: features.clone(),
+                    },
+                    Ok(ClientMsg::ListSessions) => DaemonMsg::Sessions(Vec::new()),
+                    Ok(ClientMsg::ScreenSeed { uid }) => DaemonMsg::ScreenSeed { uid, seed: None },
+                    Ok(ClientMsg::Ping) => DaemonMsg::Pong,
+                    _ => continue,
+                }
+            } else {
+                match serde_json::from_value::<OldClientMsg>(raw) {
+                    Ok(OldClientMsg::Hello { proto_ver }) => DaemonMsg::Hello {
+                        proto_ver,
+                        daemon_pid: 1,
+                        features: features.clone(),
+                    },
+                    Ok(OldClientMsg::ListSessions) => DaemonMsg::Sessions(Vec::new()),
+                    Ok(OldClientMsg::Ping) => DaemonMsg::Pong,
+                    Err(_) => {
+                        seen.lock().unwrap().push("DROPPED".into());
+                        return; // an older daemon drops the connection
+                    }
+                }
+            };
+            if write_frame(&mut server, &reply).is_err() {
+                return;
+            }
+        });
+        (client, log)
+    }
+
+    #[test]
+    fn an_older_daemon_is_never_sent_a_screen_seed_request() {
+        let (stream, log) = fake_daemon(Vec::new(), false);
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = DaemonSessionManager::from_stream(stream, etx).expect("manager");
+        assert_eq!(
+            mgr.screen_seed("p1"),
+            None,
+            "no seed: fall back to the replay"
+        );
+        let log = log.lock().unwrap();
+        assert!(
+            !log.iter()
+                .any(|f| f.contains("ScreenSeed") || f == "DROPPED"),
+            "{log:?}"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_offers_no_seed_falls_back() {
+        // Advertises the feature but has no seed for the uid (a gone session): None, and the
+        // request did go out.
+        let (stream, log) = fake_daemon(vec![FEATURE_SCREEN_SEED.to_string()], true);
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = DaemonSessionManager::from_stream(stream, etx).expect("manager");
+        assert_eq!(mgr.screen_seed("p1"), None);
+        assert!(log.lock().unwrap().iter().any(|f| f.contains("ScreenSeed")));
+        // An unknown feature list (a future daemon) without screen_seed: nothing is sent.
+        let (stream, log) = fake_daemon(vec!["something_else".into()], true);
+        let (etx, _erx) = unbounded_channel::<SessionEvent>();
+        let mgr = DaemonSessionManager::from_stream(stream, etx).expect("manager");
+        assert_eq!(mgr.screen_seed("p1"), None);
+        assert!(!log.lock().unwrap().iter().any(|f| f.contains("ScreenSeed")));
     }
 }

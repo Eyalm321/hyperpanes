@@ -55,6 +55,21 @@ pub struct ScreenRead {
     pub input_line: Option<InputLine>,
 }
 
+/// A session's screen serialized for a re-attaching view (issue #140): a VT stream that rebuilds
+/// the visible grid, modes and cursor exactly (see [`crate::session::screen_vt`]), taken at the
+/// output cursor `cursor` (the same UTF-16 count `SessionEvent::Data::cursor` carries). Every
+/// output chunk ends at or before `cursor` (it is in the seed) or starts after it (it is not):
+/// a seed is taken under the lock that appends whole chunks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenSeed {
+    /// Feed this after any history (the replay, for scrollback) into a `cols`×`rows` grid.
+    pub vt: String,
+    pub cols: u16,
+    pub rows: u16,
+    /// `output_bytes` when the seed was taken: skip live `Data` whose cursor is `<=` this.
+    pub cursor: u64,
+}
+
 /// The prompt glyph Claude Code draws at the start of its input box.
 const PROMPT: char = '\u{276F}';
 
@@ -116,6 +131,17 @@ impl Screen {
         self.term.resize(TermSize::new(cols, rows));
         self.cols = cols;
         self.rows = rows;
+    }
+
+    /// Serialize the screen as a VT stream that rebuilds it in a fresh emulator of the same size
+    /// (cells, attributes, modes, cursor): see [`crate::session::screen_vt`].
+    pub fn snapshot_vt(&self) -> String {
+        crate::session::screen_vt::serialize(&self.term, Config::default().default_cursor_style)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn term(&self) -> &Term<VoidListener> {
+        &self.term
     }
 
     /// Serialize the visible grid to clean text: one line per screen row, trailing
