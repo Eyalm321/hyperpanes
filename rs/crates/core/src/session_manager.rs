@@ -2425,8 +2425,15 @@ mod tests {
 
         alive.store(false, Ordering::SeqCst);
         until("the deferred spawn", || new.count() == 1).await;
-        assert_eq!(new.input.lock().unwrap().as_slice(), b"typed early\r");
-        assert_eq!(*new.size.lock().unwrap(), Some((120, 40)));
+        // The spawn is counted inside the factory, before the respawn thread hands the new pty
+        // what the pane got meanwhile, so wait for that hand-over too (a slow CI host showed
+        // the gap: #148).
+        until("the buffered input and size to reach the new pty", || {
+            new.input.lock().unwrap().as_slice() == b"typed early\r"
+                && *new.size.lock().unwrap() == Some((120, 40))
+        })
+        .await;
+        assert_eq!(new.count(), 1, "exactly one spawn");
         reg.write("s2", "later");
         assert_eq!(new.input.lock().unwrap().as_slice(), b"typed early\rlater");
     }
