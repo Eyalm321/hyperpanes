@@ -1704,6 +1704,72 @@ mod tests {
         );
     }
 
+    /// restartPane kills the old session and spawns the same command right away. A program
+    /// of the old session that was still shutting down raced the new one: a launcher that
+    /// refuses to run beside its own previous run exited, and the pane closed. The new
+    /// session now starts only once every process of the old one is gone. Here the old
+    /// session leaves a child that ignores the hang-up and lives 1.5 s more.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn restart_pane_starts_the_new_session_only_once_the_old_one_has_exited() {
+        let dir = std::env::temp_dir().join(format!(
+            "hp-respawn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = r#"if [ "$PHASE" = 2 ]; then
+  if [ -e "$D/old-gone" ]; then echo "phase2:waited"; else echo "phase2:raced"; fi; sleep 30
+else
+  (trap '' HUP; sleep 1.5; touch "$D/old-gone") & echo "phase1:up"; wait
+fi"#;
+        let mut m = model_one_window();
+        let s = sessions();
+        let cmd = json!({ "type": "newPane", "windowId": 1, "pane": {
+            "command": script, "env": { "D": dir.to_str().unwrap() } } });
+        let r = handle_command(&mut m, &s, None, None, &cmd, &speech());
+        let id = r.body["result"].as_str().unwrap().to_string();
+        let old = m.pane(&id).unwrap().session_uid.clone();
+        assert!(wait_for_output(&s, &old, "phase1:up")
+            .await
+            .contains("phase1:up"));
+
+        let restarted = std::time::Instant::now();
+        let r = handle_command(
+            &mut m,
+            &s,
+            None,
+            None,
+            &json!({ "type": "restartPane", "paneId": id, "env": { "PHASE": "2" } }),
+            &speech(),
+        );
+        assert_eq!(r.status, 200);
+        let uid = m.pane(&id).unwrap().session_uid.clone();
+        assert_ne!(uid, old);
+        let out = wait_for_output(&s, &uid, "phase2:").await;
+        let took = restarted.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            out.contains("phase2:waited"),
+            "the new session ran before the old one exited: {out:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(4_500),
+            "it spawned when the old session exited, not at the 5 s bound: {took:?}"
+        );
+        handle_command(
+            &mut m,
+            &s,
+            None,
+            None,
+            &json!({ "type": "closePane", "paneId": id }),
+            &speech(),
+        );
+    }
+
     #[tokio::test]
     async fn new_pane_spawns_inserts_and_returns_the_pane_id() {
         let mut m = model_one_window();
