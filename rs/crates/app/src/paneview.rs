@@ -1460,6 +1460,13 @@ pub fn pump(
             let _ = ps.pane.take_dirty();
             continue;
         }
+        // A grid rebuilt from the replay buffer: once laid out (rect set by `place`), resize
+        // the pty one row short and back so the program repaints over it (see RepaintNudge).
+        if ps.remote.is_none() && ps.rect.2 > 0.0 {
+            if let Some((c, r)) = ps.repaint_nudge.step(Instant::now(), ps.applied) {
+                mgr.resize(&ps.uid, c, r);
+            }
+        }
         // Edge-autoscroll: if a selection drag is held at the top/bottom edge, scroll one line and
         // grow the selection into off-screen scrollback. It marks the grid dirty (so the surface
         // re-renders below) and warrants the fast cadence while it's moving.
@@ -1622,6 +1629,7 @@ mod tab_status_tests {
         DetachedPane {
             uid: uid.into(),
             replay_answered: false,
+            live: Default::default(),
             title: uid.into(),
             subtitle: None,
             pinned_accent: None,

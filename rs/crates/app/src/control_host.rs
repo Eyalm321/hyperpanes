@@ -1455,6 +1455,7 @@ fn snapshot_tabs(model: &ReadModel) -> TabSnaps {
 fn detached_pane_from_model(uid: &str, c: &ModelPane, font_px: f32) -> DetachedPane {
     DetachedPane {
         replay_answered: false,
+        live: Default::default(),
         uid: uid.to_string(),
         title: c.label.clone().into(),
         subtitle: c.subtitle.clone().map(Into::into),
@@ -2387,6 +2388,7 @@ mod tests {
         let m = SessionManager::new(tx);
         let det = |n: &str| crate::state::DetachedPane {
             replay_answered: true,
+            live: Default::default(),
             uid: n.into(),
             title: format!("{n} title").into(),
             subtitle: Some(format!("{n} sub").into()),
@@ -2571,6 +2573,7 @@ mod tests {
                 &m,
                 crate::state::DetachedPane {
                     replay_answered: true,
+                    live: Default::default(),
                     uid: n.into(),
                     title: n.into(),
                     subtitle: None,
