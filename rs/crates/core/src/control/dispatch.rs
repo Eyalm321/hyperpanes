@@ -348,7 +348,9 @@ fn exec(
                         panes,
                         pane_group: None,
                     };
-                    if !model.insert_tab(window_id, tab) {
+                    // Pending until the GUI adopts its panes into a tab under this id, so the
+                    // returned TAB id stays addressable across any GUI republish before that.
+                    if !model.insert_pending_tab(window_id, tab) {
                         return Err(format!("window not found: {window_id}"));
                     }
                     tab_ids.push(Value::String(tab_id));

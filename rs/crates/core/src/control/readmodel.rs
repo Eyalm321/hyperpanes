@@ -199,6 +199,25 @@ pub struct ReadModel {
     /// Old pane id → live pane id, for panes that were re-spawned under a new id by a full
     /// restore. Consulted only after a live id/uid lookup misses.
     aliases: HashMap<String, String>,
+    /// Tabs the control plane created and already answered with an id (`movePane` `newTab` /
+    /// `project`, `attach as:tab`) that the GUI host has not published yet. Each GUI republish
+    /// keeps them in the model until the GUI's own tree shows the id (it adopts the id the API
+    /// returned) or [`PENDING_TAB_TTL`] passes, so the returned id is addressable at once.
+    pending_tabs: Vec<PendingTab>,
+}
+
+/// How long a control-created tab is kept in the model while the GUI has not published it. The
+/// GUI normally makes it on its next tick; this only bounds a request the GUI dropped.
+pub const PENDING_TAB_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A control-created tab awaiting its first GUI publish (see [`ReadModel::pending_tabs`]).
+#[derive(Debug, Clone)]
+struct PendingTab {
+    window_id: i64,
+    /// The tab as created, WITHOUT panes: a republish re-inserts it empty, and any of its
+    /// not-yet-adopted panes are carried back into it by the orphan re-home.
+    tab: TabInfo,
+    since: std::time::Instant,
 }
 
 impl ReadModel {
@@ -262,6 +281,7 @@ impl ReadModel {
         for w in windows {
             self.add_window(w);
         }
+        self.restore_pending_tabs();
         let mut carried = Vec::new();
         for (wid, tab_id, p) in orphans {
             // The rebuilt tree may legitimately hold the pane already (adopted this cycle).
@@ -282,6 +302,23 @@ impl ReadModel {
             }
         }
         carried
+    }
+
+    /// Re-insert, after a GUI republish, every control-created tab the GUI has not published
+    /// yet. A tab the GUI now shows (same id), whose window is gone, or that outlived
+    /// [`PENDING_TAB_TTL`] stops being pending.
+    fn restore_pending_tabs(&mut self) {
+        let pending = std::mem::take(&mut self.pending_tabs);
+        for p in pending {
+            if self.tab_to_window.contains_key(&p.tab.id)
+                || p.since.elapsed() >= PENDING_TAB_TTL
+                || !self.has_window(p.window_id)
+            {
+                continue;
+            }
+            self.insert_tab(p.window_id, p.tab.clone());
+            self.pending_tabs.push(p);
+        }
     }
 
     /// Rebuild the reverse indexes from the tree. Runs only on structure change.
@@ -475,6 +512,31 @@ impl ReadModel {
             return true;
         }
         false
+    }
+
+    /// Append a control-created tab the GUI host will materialize later (under the same id), and
+    /// keep it in the model across GUI republishes until it does, so the id the API answers with
+    /// is addressable at once. Returns false if the window is unknown.
+    pub fn insert_pending_tab(&mut self, window_id: i64, tab: TabInfo) -> bool {
+        let template = TabInfo {
+            panes: Vec::new(),
+            ..tab.clone()
+        };
+        if !self.insert_tab(window_id, tab) {
+            return false;
+        }
+        self.pending_tabs.retain(|p| p.tab.id != template.id);
+        self.pending_tabs.push(PendingTab {
+            window_id,
+            tab: template,
+            since: std::time::Instant::now(),
+        });
+        true
+    }
+
+    /// Whether `tab_id` is a control-created tab the GUI has not published yet.
+    pub fn is_pending_tab(&self, tab_id: &str) -> bool {
+        self.pending_tabs.iter().any(|p| p.tab.id == tab_id)
     }
 
     /// Remove a pane; returns its session uid so the caller can kill the pty. The host tab is

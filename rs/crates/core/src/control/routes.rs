@@ -1885,7 +1885,7 @@ fn move_target_tab_id(t: &MoveTarget) -> &str {
 /// another tab, so (like `groupPanes`) a headless server leaves the request queued, unapplied.
 fn move_pane_command(shared: &Arc<Shared>, info: &TokenInfo, cmd: &Value) -> Response {
     let bad = |status: u16, msg: String| jstatus(status, json!({ "error": msg }));
-    let m = shared.model.lock().unwrap();
+    let mut m = shared.model.lock().unwrap();
     let Some(pane_id) = cmd.get("paneId").and_then(Value::as_str) else {
         return bad(400, "movePane needs a paneId".into());
     };
@@ -1920,16 +1920,72 @@ fn move_pane_command(shared: &Arc<Shared>, info: &TokenInfo, cmd: &Value) -> Res
             format!("pane {pane_id} is the only pane in its window; open another first"),
         );
     }
-    drop(m);
+    // A new tab (`newTab`, or a project tab the window doesn't have) is created in the read
+    // model right here, under the same model lock as the queued move: the id we answer with is
+    // addressable at once (an immediate `movePane {tabId}` / `newPane {tabId}` to it works), and
+    // the GUI sync tick, which holds this lock across apply → republish, sees the tab and its
+    // move together. The GUI makes the tab under this same id; until it publishes it, the model
+    // keeps the tab as pending ([`ReadModel::insert_pending_tab`]).
+    let created = pending_move_tab(&to).is_some_and(|tab| m.insert_pending_tab(window_id, tab));
     shared.queue_pane_group_request(PaneGroupRequest::Move {
         pane_id: pane_id.to_string(),
         window_id,
         to,
     });
+    drop(m);
+    if created {
+        notify_state(shared);
+    }
     jstatus(
         200,
         json!({ "ok": true, "tabId": tab_id, "result": { "tabId": tab_id } }),
     )
+}
+
+/// The read-model tab a queued move creates, mirroring what the GUI will make for it
+/// (`apply_move_request`): a `newTab` carries its manual colour, a project tab its pane-group
+/// marker. `None` for a move into an existing tab.
+fn pending_move_tab(to: &MoveTarget) -> Option<crate::control::readmodel::TabInfo> {
+    use crate::control::readmodel::{PaneGroupInfo, TabInfo};
+    let (id, title, color, pane_group) = match to {
+        MoveTarget::Tab { .. } => return None,
+        MoveTarget::NewTab {
+            tab_id,
+            title,
+            color,
+        } => (
+            tab_id,
+            title.clone().unwrap_or_default(),
+            color
+                .as_deref()
+                .and_then(crate::control::dispatch::normalize_hex_color),
+            None,
+        ),
+        MoveTarget::Project {
+            tab_id,
+            project_id,
+            title,
+            color,
+        } => (
+            tab_id,
+            title.clone(),
+            None,
+            Some(PaneGroupInfo {
+                project: Some(project_id.clone()),
+                color: color
+                    .as_deref()
+                    .and_then(crate::control::dispatch::normalize_hex_color),
+            }),
+        ),
+    };
+    Some(TabInfo {
+        id: id.clone(),
+        title,
+        color,
+        layout: "auto".into(),
+        panes: Vec::new(),
+        pane_group,
+    })
 }
 
 /// `newPane`'s opt-in `pane.projectTab`: `Ok(Some(project handle))` when set (it needs
@@ -2554,6 +2610,160 @@ mod golden {
             assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()));
         }
         assert!(s.shared.take_pane_group_requests().is_empty());
+    }
+
+    /// Issue #125: the `tabId` a `movePane {newTab}` answers with is addressable at once (a
+    /// second `movePane {tabId}` right after succeeds), and the tab stays in the model across GUI
+    /// republishes until the GUI publishes it under that id.
+    #[tokio::test]
+    async fn move_pane_new_tab_id_is_addressable_at_once() {
+        use crate::control::server::{MoveTarget, PaneGroupRequest};
+        let s = boot(true).await;
+        {
+            let mut m = s.shared.model.lock().unwrap();
+            m.insert_pane(1, pane("a", "ua"));
+            m.insert_pane(1, pane("b", "ub"));
+            m.insert_pane(1, pane("c", "uc"));
+        }
+        let (st, v) = post_cmd(
+            &s,
+            json!({"type":"movePane","paneId":"a","newTab":{"title":"x","color":"#A5F"}}),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        let tab_id = v["tabId"].as_str().unwrap().to_string();
+        // At once, before any GUI tick.
+        let (st, v) = post_cmd(&s, json!({"type":"movePane","paneId":"b","tabId":tab_id})).await;
+        assert_eq!(st, 200, "an immediate movePane into the returned tab: {v}");
+        assert_eq!(v["tabId"], json!(tab_id));
+        // The tab is in /state, as the GUI will make it (title, normalized colour).
+        {
+            let m = s.shared.model.lock().unwrap();
+            assert_eq!(m.tab_window(&tab_id), Some(1));
+            let t = m.tabs().find(|(_, t)| t.id == tab_id).unwrap().1;
+            assert_eq!(t.title, "x");
+            assert_eq!(t.color.as_deref(), Some("#aa55ff"));
+            assert!(m.is_pending_tab(&tab_id));
+        }
+        // Both moves queued in order; the GUI makes the tab with the first, fills it with the second.
+        assert_eq!(
+            s.shared.take_pane_group_requests(),
+            vec![
+                PaneGroupRequest::Move {
+                    pane_id: "a".into(),
+                    window_id: 1,
+                    to: MoveTarget::NewTab {
+                        tab_id: tab_id.clone(),
+                        title: Some("x".into()),
+                        color: Some("#A5F".into()),
+                    },
+                },
+                PaneGroupRequest::Move {
+                    pane_id: "b".into(),
+                    window_id: 1,
+                    to: MoveTarget::Tab {
+                        tab_id: tab_id.clone()
+                    },
+                },
+            ]
+        );
+        // A newPane straight into the returned tab also works at once.
+        let (st, v) = post_cmd(
+            &s,
+            json!({"type":"newPane","tabId":tab_id,"pane":{"command":"true"}}),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        let new_id = v["result"].as_str().unwrap().to_string();
+
+        // A GUI republish that doesn't show the tab yet keeps it (and the not-yet-adopted pane in it).
+        let gui_tree = |tabs: Vec<TabInfo>| {
+            vec![WindowInfo {
+                window_id: 1,
+                active_tab_id: Some("t1".into()),
+                tabs,
+            }]
+        };
+        let t1 = |panes: Vec<PaneInfo>| TabInfo {
+            id: "t1".into(),
+            title: "Tab 1".into(),
+            color: None,
+            layout: "auto".into(),
+            panes,
+            pane_group: None,
+        };
+        let hosted: std::collections::HashSet<String> =
+            ["ua", "ub", "uc"].iter().map(|u| u.to_string()).collect();
+        {
+            let mut m = s.shared.model.lock().unwrap();
+            m.publish_replace(
+                &[1],
+                gui_tree(vec![t1(vec![
+                    pane("a", "ua"),
+                    pane("b", "ub"),
+                    pane("c", "uc"),
+                ])]),
+                &hosted,
+            );
+            assert_eq!(
+                m.tab_window(&tab_id),
+                Some(1),
+                "pending tab survives a republish"
+            );
+            assert_eq!(m.coords_of(&new_id).unwrap().tab_id, tab_id);
+        }
+        let (st, v) = post_cmd(&s, json!({"type":"movePane","paneId":"c","tabId":tab_id})).await;
+        assert_eq!(st, 200, "still addressable after a republish: {v}");
+        // The GUI publishes the tab under the same id: it is no longer pending.
+        {
+            let mut m = s.shared.model.lock().unwrap();
+            let mut made = t1(vec![pane("c", "uc")]);
+            made.id = tab_id.clone();
+            made.panes = vec![pane("a", "ua"), pane("b", "ub")];
+            m.publish_replace(
+                &[1],
+                gui_tree(vec![t1(vec![pane("c", "uc")]), made]),
+                &hosted,
+            );
+            assert!(!m.is_pending_tab(&tab_id));
+            assert_eq!(m.tab_window(&tab_id), Some(1));
+            // ... so once the GUI drops it, so does the model.
+            m.publish_replace(&[1], gui_tree(vec![t1(vec![pane("c", "uc")])]), &hosted);
+            assert_eq!(m.tab_window(&tab_id), None);
+        }
+    }
+
+    /// `attach` answers with TAB ids; each stays addressable across GUI republishes until the GUI
+    /// adopts the group's panes into a tab under that id.
+    #[tokio::test]
+    async fn attach_tab_ids_survive_a_republish_before_adoption() {
+        let s = boot(true).await;
+        let (st, v) = post_cmd(
+            &s,
+            json!({"type":"attach","windowId":1,"groups":[{"title":"g","panes":[{"command":"true"}]}]}),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+        let tab_id = v["result"][0].as_str().unwrap().to_string();
+        let mut m = s.shared.model.lock().unwrap();
+        let pane_id = m.tabs().find(|(_, t)| t.id == tab_id).unwrap().1.panes[0]
+            .id
+            .clone();
+        m.publish_replace(
+            &[1],
+            vec![WindowInfo {
+                window_id: 1,
+                active_tab_id: Some("t1".into()),
+                tabs: vec![bare_tab("t1", None)],
+            }],
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(m.tab_window(&tab_id), Some(1));
+        assert_eq!(
+            m.coords_of(&pane_id).unwrap().tab_id,
+            tab_id,
+            "the not-yet-adopted pane is carried back into its own tab"
+        );
     }
 
     fn bare_tab(id: &str, pane_group: Option<crate::control::readmodel::PaneGroupInfo>) -> TabInfo {
