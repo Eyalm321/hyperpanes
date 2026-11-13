@@ -41,6 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+use crate::session::activity::{ActivitySignal, OutputGate};
 use crate::session::batcher::DataBatcher;
 use crate::session::cwd::parse_osc_cwd;
 use crate::session::pty::{spawn_pty, Pty, PtyEvent, PtySpec};
@@ -188,6 +189,10 @@ struct Shared {
     output_bytes: AtomicU64,
     /// Epoch-ms of the last flush, or 0 if no output yet.
     last_output_at: AtomicU64,
+    /// Genuine-output stamp + cursor and the cached awaiting-input classification (see
+    /// [`crate::session::activity`]). Written by the pipeline on genuine flushes and by the
+    /// control layer's classifier; read by `control::server::activity_for`.
+    activity: Mutex<ActivitySignal>,
     /// Set by a manual kill so the natural-exit `Exit` event is suppressed.
     killed: AtomicBool,
     /// Phase-4 liveness mirror, fed by the OSC-133 / OSC-9;hp sniff so the *pull-based*
@@ -457,6 +462,7 @@ impl SessionRegistry {
             screen_pending: Mutex::new(Vec::new()),
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
+            activity: Mutex::new(ActivitySignal::default()),
             killed: AtomicBool::new(false),
             prompt_ready: AtomicBool::new(false),
             command_running: AtomicBool::new(false),
@@ -524,6 +530,32 @@ impl SessionRegistry {
     pub fn set_last_output_at_for_test(&self, uid: &str, ms: u64) {
         if let Some(s) = self.sessions.lock().unwrap().get(uid) {
             s.shared.last_output_at.store(ms, Ordering::Relaxed);
+            let mut a = s.shared.activity.lock().unwrap();
+            let cursor = s.shared.output_bytes.load(Ordering::Relaxed);
+            a.note_genuine(ms, cursor);
+        }
+    }
+
+    /// Test-only hook: stamp ONLY the raw last-output time, as a cosmetic redraw (a blink)
+    /// does, leaving the genuine-output stamp alone.
+    #[doc(hidden)]
+    pub fn note_raw_output_for_test(&self, uid: &str, ms: u64) {
+        if let Some(s) = self.sessions.lock().unwrap().get(uid) {
+            s.shared.last_output_at.store(ms, Ordering::Relaxed);
+        }
+    }
+
+    /// The pane's activity inputs (genuine-output stamp, content cursor, cached
+    /// classification), or `None` for an unknown uid.
+    pub fn activity_signal(&self, uid: &str) -> Option<ActivitySignal> {
+        let map = self.sessions.lock().unwrap();
+        map.get(uid).map(|s| *s.shared.activity.lock().unwrap())
+    }
+
+    /// Cache an awaiting-input classification of the screen as it was at `content_cursor`.
+    pub fn set_awaiting(&self, uid: &str, content_cursor: u64, awaiting: bool) {
+        if let Some(s) = self.sessions.lock().unwrap().get(uid) {
+            s.shared.activity.lock().unwrap().awaiting = Some((content_cursor, awaiting));
         }
     }
 
@@ -536,11 +568,16 @@ impl SessionRegistry {
     /// [`render_screen`](Self::render_screen) plus the prompt-box classification
     /// ([`crate::session::screen::InputLine`]), from the same synced grid.
     pub fn render_screen_read(&self, uid: &str) -> Option<crate::session::screen::ScreenRead> {
-        let map = self.sessions.lock().unwrap();
-        map.get(uid).map(|s| {
-            s.shared.sync_screen();
-            s.shared.screen.lock().unwrap().render_read()
-        })
+        // Clone the session handle out and release the sessions lock before parsing: the parse
+        // can chew through a large pending-output buffer, and every other pane op (the GUI's
+        // status poll included) takes that lock.
+        let shared = {
+            let map = self.sessions.lock().unwrap();
+            Arc::clone(&map.get(uid)?.shared)
+        };
+        shared.sync_screen();
+        let read = shared.screen.lock().unwrap().render_read();
+        Some(read)
     }
 
     /// The pane's screen as a [`ScreenSeed`](crate::session::screen::ScreenSeed) for a
@@ -941,11 +978,21 @@ impl SessionManager {
         }
     }
 
-    /// Test-only hook (in-process backend only): stamp a pane's last-output time.
+    /// Test-only hook (in-process backend only): stamp a pane's last-output time (both the raw
+    /// stamp and the genuine-output stamp, as real output does).
     #[doc(hidden)]
     pub fn set_last_output_at_for_test(&self, uid: &str, ms: u64) {
         if let SessionManager::InProcess(r) = self {
             r.set_last_output_at_for_test(uid, ms);
+        }
+    }
+
+    /// Test-only hook (in-process backend only): stamp ONLY the raw last-output time, as a
+    /// cosmetic redraw (a blinking indicator) does.
+    #[doc(hidden)]
+    pub fn note_raw_output_for_test(&self, uid: &str, ms: u64) {
+        if let SessionManager::InProcess(r) = self {
+            r.note_raw_output_for_test(uid, ms);
         }
     }
 
@@ -1006,6 +1053,26 @@ impl SessionManager {
         match self {
             SessionManager::InProcess(r) => r.liveness(uid),
             SessionManager::Daemon(_) => None,
+        }
+    }
+
+    /// The pane's activity inputs: when it last produced GENUINE output (cosmetic redraws such
+    /// as a blinking indicator excluded, see [`crate::session::activity`]), the output cursor at
+    /// that point, and the cached awaiting-input classification. `None` for an unknown uid.
+    /// Both backends compute it locally from the `Data` stream (no daemon round-trip).
+    pub fn activity_signal(&self, uid: &str) -> Option<ActivitySignal> {
+        match self {
+            SessionManager::InProcess(r) => r.activity_signal(uid),
+            SessionManager::Daemon(d) => d.activity_signal(uid),
+        }
+    }
+
+    /// Cache an awaiting-input classification of the pane's screen as it was when the content
+    /// cursor read `content_cursor`. It stays valid until the next genuine output.
+    pub fn set_awaiting(&self, uid: &str, content_cursor: u64, awaiting: bool) {
+        match self {
+            SessionManager::InProcess(r) => r.set_awaiting(uid, content_cursor, awaiting),
+            SessionManager::Daemon(d) => d.set_awaiting(uid, content_cursor, awaiting),
         }
     }
 
@@ -1233,6 +1300,8 @@ struct SessionPipeline {
     last_cwd: Option<String>,
     /// Carry for an incomplete trailing UTF-8 sequence split across pty reads.
     utf8_carry: Vec<u8>,
+    /// Tells genuine flushes from cosmetic redraws (blinks) for the activity stamp.
+    gate: OutputGate,
     ended: bool,
     shared: Arc<Shared>,
 }
@@ -1246,6 +1315,7 @@ impl SessionPipeline {
             marker_carry: String::new(),
             last_cwd: None,
             utf8_carry: Vec::new(),
+            gate: OutputGate::new(),
             ended: false,
             shared,
         }
@@ -1361,6 +1431,13 @@ impl SessionPipeline {
         self.shared
             .last_output_at
             .store(now_epoch_ms, Ordering::Relaxed);
+        if self.gate.observe(data.as_bytes(), now_epoch_ms) {
+            self.shared
+                .activity
+                .lock()
+                .unwrap()
+                .note_genuine(now_epoch_ms, cursor);
+        }
         out.push(SessionEvent::Data {
             uid: self.uid.clone(),
             data,
@@ -1439,6 +1516,7 @@ mod tests {
             screen_pending: Mutex::new(Vec::new()),
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
+            activity: Mutex::new(ActivitySignal::default()),
             killed: AtomicBool::new(false),
             prompt_ready: AtomicBool::new(false),
             command_running: AtomicBool::new(false),
@@ -1723,6 +1801,58 @@ mod tests {
         assert!(p.on_data("late", 1, 101).is_empty());
     }
 
+    // ---- activity gate wiring: cosmetic redraws never stamp the genuine-output time ----
+
+    // A tool bullet blinking under a permission dialog (recorded byte shape).
+    const BLINK: [&str; 2] = [
+        "\x1b[H\r\x1b[53B\x1b[38;2;153;153;153m\u{25cf}\x1b[39m\x1b[81;1H\x1b[77;2H",
+        "\x1b[H\r\x1b[53B\x1b[38;2;153;153;153m \x1b[39m\x1b[81;1H\x1b[77;2H",
+    ];
+
+    fn spinner_frame(i: usize) -> String {
+        let glyphs = [
+            "\u{b7}", "\u{2722}", "\u{2733}", "\u{2736}", "\u{273b}", "\u{273d}",
+        ];
+        format!(
+            "\x1b[H\r\x1b[20B\x1b[38;2;215;119;87m{}\x1b[39m Working\u{2026} ({}s)\x1b[24;3H",
+            glyphs[i % glyphs.len()],
+            i / 10
+        )
+    }
+
+    #[test]
+    fn pipeline_blink_frames_do_not_advance_the_genuine_stamp() {
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        let mut t = 1_000u64;
+        for i in 0..20 {
+            p.on_data(BLINK[i % 2], t, t);
+            p.on_timer(t + 20);
+            t += 500;
+        }
+        let a = *sh.activity.lock().unwrap();
+        // Only the first two frames were new; the stamp stopped at the second one's flush.
+        assert_eq!(a.content_at, Some(1_520));
+        assert!(a.content_cursor < sh.output_bytes.load(Ordering::Relaxed));
+        // The raw stamp kept moving with every frame.
+        assert_eq!(sh.last_output_at.load(Ordering::Relaxed), t - 500 + 20);
+    }
+
+    #[test]
+    fn pipeline_spinner_frames_keep_stamping() {
+        let sh = shared();
+        let mut p = SessionPipeline::new("u1".into(), Arc::clone(&sh));
+        let mut t = 1_000u64;
+        for i in 0..30 {
+            p.on_data(&spinner_frame(i), t, t);
+            p.on_timer(t + 20);
+            t += 100;
+        }
+        let a = *sh.activity.lock().unwrap();
+        assert_eq!(a.content_at, Some(t - 100 + 20));
+        assert_eq!(a.content_cursor, sh.output_bytes.load(Ordering::Relaxed));
+    }
+
     // ---- end-to-end manager wiring via a mock pty (no ConPTY) ----
 
     #[derive(Default)]
@@ -1876,6 +2006,133 @@ mod tests {
         ));
         // render_screen must lazily sync the buffered output before serializing.
         assert_eq!(mgr.render_screen("u1").as_deref(), Some("abc\ndef"));
+    }
+
+    // Push one chunk through the mock pty and wait for its flush, so every chunk is its own
+    // `Data` batch (as distinct writes 50+ ms apart are in a real pane).
+    async fn feed(
+        sink: &EventSink,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+        bytes: &str,
+    ) {
+        sink(PtyEvent::Data(bytes.as_bytes().to_vec()));
+        assert!(matches!(recv(rx).await, Some(SessionEvent::Data { .. })));
+    }
+
+    // Idle threshold for the timing tests below (ms): short, so the tests stay fast.
+    const QUICK_IDLE_MS: i64 = 300;
+
+    #[tokio::test]
+    async fn blink_only_pane_goes_idle_despite_continuous_output() {
+        use crate::control::readmodel::{Activity, PaneStatus};
+        use crate::control::server::{activity_for, now_ms};
+        let (mgr, mut rx, sink) = make_session("u1");
+        feed(&sink, &mut rx, "Running the build script\r\n").await;
+        // ~1 s of nothing but the blink: far past the threshold, with fresh raw output.
+        for i in 0..20 {
+            feed(&sink, &mut rx, BLINK[i % 2]).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let raw_age = now_ms() - mgr.last_output_at("u1").unwrap() as i64;
+        assert!(
+            raw_age < QUICK_IDLE_MS,
+            "the blink keeps raw output fresh ({raw_age} ms)"
+        );
+        assert_eq!(
+            activity_for(&mgr, QUICK_IDLE_MS, "u1", PaneStatus::Running),
+            Activity::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn spinner_with_a_changing_timer_keeps_the_pane_busy() {
+        use crate::control::readmodel::{Activity, PaneStatus};
+        use crate::control::server::activity_for;
+        let (mgr, mut rx, sink) = make_session("u1");
+        for i in 0..20 {
+            feed(&sink, &mut rx, &spinner_frame(i)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            activity_for(&mgr, QUICK_IDLE_MS, "u1", PaneStatus::Running),
+            Activity::Busy
+        );
+    }
+
+    // A permission dialog on an 80x24 screen (synthetic content), and the tool bullet on its
+    // row 2 blinking while the dialog waits.
+    const DIALOG: &str = concat!(
+        "\x1b[2J\x1b[H",
+        "> run the build\r\n",
+        "\u{25cf} Running the build script\r\n",
+        "\r\n",
+        " Bash command\r\n",
+        "   ./build.sh\r\n",
+        "\r\n",
+        " Do you want to proceed?\r\n",
+        " \u{276f} 1. Yes\r\n",
+        "   2. No\r\n",
+        "\r\n",
+        " Esc to cancel \u{b7} Tab to amend\r\n",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} status \u{2500}\u{2500}",
+    );
+    const BULLET: [&str; 2] = [
+        "\x1b[2;1H\x1b[38;2;153;153;153m\u{25cf}\x1b[39m\x1b[12;1H",
+        "\x1b[2;1H\x1b[38;2;153;153;153m \x1b[39m\x1b[12;1H",
+    ];
+
+    #[tokio::test]
+    async fn permission_dialog_reads_awaiting_input_until_the_screen_changes() {
+        use crate::control::readmodel::{Activity, PaneStatus};
+        use crate::control::server::{activity_for, classify_screen};
+        let act = |m: &SessionManager| activity_for(m, 60_000, "u1", PaneStatus::Running);
+        let (mgr, mut rx, sink) = make_session("u1");
+        feed(&sink, &mut rx, DIALOG).await;
+        // The bullet starts blinking: two new frames, then repeats.
+        for i in 0..4 {
+            feed(&sink, &mut rx, BULLET[i % 2]).await;
+        }
+        // Fresh output, not classified yet: busy (inside the 60 s window).
+        assert_eq!(act(&mgr), Activity::Busy);
+        assert_eq!(classify_screen(&mgr, "u1"), Some(true));
+        assert_eq!(act(&mgr), Activity::AwaitingInput);
+        // More blinking is cosmetic: the verdict holds.
+        for i in 0..6 {
+            feed(&sink, &mut rx, BULLET[i % 2]).await;
+        }
+        assert_eq!(act(&mgr), Activity::AwaitingInput);
+        // The dialog is answered and real output follows: busy again, verdict stale.
+        feed(&sink, &mut rx, "\x1b[2J\x1b[H\u{25cf} Build finished\r\n").await;
+        assert_eq!(act(&mgr), Activity::Busy);
+        assert!(mgr.activity_signal("u1").unwrap().classification_stale());
+        // Re-classifying the new screen finds no prompt.
+        assert_eq!(classify_screen(&mgr, "u1"), Some(false));
+        assert_eq!(act(&mgr), Activity::Busy);
+    }
+
+    // The inbox nudge's typing guard: a dialog on screen blocks it however old the dialog is
+    // (the pane itself may read idle); a shell prompt does not.
+    #[tokio::test]
+    async fn nudge_guard_blocks_on_a_dialog_screen_only() {
+        use crate::control::readmodel::{Activity, PaneStatus};
+        use crate::control::server::{activity_for, screen_blocks_typing};
+        let (mgr, mut rx, sink) = make_session("u1");
+        feed(&sink, &mut rx, DIALOG).await;
+        mgr.set_last_output_at_for_test("u1", 1);
+        assert_eq!(
+            activity_for(&mgr, 10_000, "u1", PaneStatus::Running),
+            Activity::Idle
+        );
+        assert!(screen_blocks_typing(&mgr, "u1"));
+        // The render refreshed the cached verdict too: the pane now reads awaiting input.
+        assert_eq!(
+            activity_for(&mgr, 10_000, "u1", PaneStatus::Running),
+            Activity::AwaitingInput
+        );
+        feed(&sink, &mut rx, "\x1b[2J\x1b[H$ \r\n").await;
+        assert!(!screen_blocks_typing(&mgr, "u1"));
+        // A gone pane is not blocked (nothing typed reaches it).
+        assert!(!screen_blocks_typing(&mgr, "nope"));
     }
 
     #[tokio::test]

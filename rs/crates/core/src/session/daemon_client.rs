@@ -54,6 +54,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[cfg(unix)]
+use crate::session::activity::{ActivitySignal, OutputGate};
+#[cfg(unix)]
 use crate::session::proto::{
     read_frame, write_frame, ClientMsg, DaemonMsg, SpawnSpec, FEATURE_SCREEN_SEED, PROTO_VER,
 };
@@ -89,6 +91,11 @@ struct Shadow {
     last_output_at: Option<u64>,
     /// Last sniffed cwd (from `Cwd` events), if any.
     cwd: Option<String>,
+    /// Tells genuine `Data` chunks from cosmetic redraws (see [`crate::session::activity`]).
+    gate: OutputGate,
+    /// Genuine-output stamp + cursor and the cached awaiting-input classification — the
+    /// client-side counterpart of the in-process `Shared::activity`.
+    activity: ActivitySignal,
 }
 
 #[cfg(unix)]
@@ -99,6 +106,8 @@ impl Shadow {
             output_bytes: 0,
             last_output_at: None,
             cwd: None,
+            gate: OutputGate::new(),
+            activity: ActivitySignal::default(),
         }
     }
 }
@@ -274,6 +283,13 @@ impl DaemonSessionManager {
                 let shadow = shadows.entry(meta.uid.clone()).or_insert_with(Shadow::new);
                 shadow.output_bytes = meta.output_bytes;
                 shadow.last_output_at = meta.last_output_at;
+                // The daemon only knows raw output: seed the genuine stamp from it (a blinking
+                // pane reads busy until its blink repeats, then the gate takes over).
+                if shadow.activity.content_at.is_none() {
+                    if let Some(at) = meta.last_output_at {
+                        shadow.activity.note_genuine(at, meta.output_bytes);
+                    }
+                }
                 if meta.cwd.is_some() {
                     shadow.cwd = meta.cwd.clone();
                 }
@@ -382,6 +398,18 @@ impl DaemonSessionManager {
             .unwrap()
             .get(uid)
             .and_then(|s| s.last_output_at)
+    }
+
+    /// The pane's activity inputs — from the shadow (no I/O); `None` for an unknown uid.
+    pub fn activity_signal(&self, uid: &str) -> Option<ActivitySignal> {
+        self.shadows.lock().unwrap().get(uid).map(|s| s.activity)
+    }
+
+    /// Cache an awaiting-input classification in the shadow (no I/O).
+    pub fn set_awaiting(&self, uid: &str, content_cursor: u64, awaiting: bool) {
+        if let Some(s) = self.shadows.lock().unwrap().get_mut(uid) {
+            s.activity.awaiting = Some((content_cursor, awaiting));
+        }
     }
 
     /// Serialize the pane's current screen — a bounded `RenderScreen`/`Screen` round-trip
@@ -540,7 +568,12 @@ fn apply_event_to_shadow(shadows: &Mutex<HashMap<String, Shadow>>, ev: &SessionE
             if let Some(shadow) = shadows.get_mut(uid) {
                 shadow.replay.append(data);
                 shadow.output_bytes += data.encode_utf16().count() as u64;
-                shadow.last_output_at = Some(epoch_ms());
+                let now = epoch_ms();
+                shadow.last_output_at = Some(now);
+                if shadow.gate.observe(data.as_bytes(), now) {
+                    let cursor = shadow.output_bytes;
+                    shadow.activity.note_genuine(now, cursor);
+                }
             }
         }
         SessionEvent::Cwd { uid, cwd } => {
@@ -860,6 +893,12 @@ impl DaemonSessionManager {
     pub fn last_output_at(&self, _uid: &str) -> Option<u64> {
         unreachable!("daemon backend is unix-only")
     }
+    pub fn activity_signal(&self, _uid: &str) -> Option<crate::session::activity::ActivitySignal> {
+        unreachable!("daemon backend is unix-only")
+    }
+    pub fn set_awaiting(&self, _uid: &str, _content_cursor: u64, _awaiting: bool) {
+        unreachable!("daemon backend is unix-only")
+    }
     pub fn render_screen(&self, _uid: &str) -> Option<String> {
         unreachable!("daemon backend is unix-only")
     }
@@ -946,6 +985,47 @@ mod tests {
         let s: Arc<Mutex<HashMap<String, Shadow>>> = Arc::default();
         s.lock().unwrap().insert("u1".into(), Shadow::new());
         s
+    }
+
+    #[test]
+    fn blink_data_does_not_advance_the_genuine_stamp() {
+        // A pane blinking an indicator (two frames toggling the same cell) keeps streaming
+        // `Data`, but only the first two frames are new: the genuine cursor stops there while
+        // the raw counters keep moving, so the pane goes idle (session::activity).
+        let s = shadows();
+        let frames = [
+            "\x1b[H\r\x1b[53B\x1b[38;2;153;153;153m\u{25cf}\x1b[39m\x1b[81;1H\x1b[77;2H",
+            "\x1b[H\r\x1b[53B\x1b[38;2;153;153;153m \x1b[39m\x1b[81;1H\x1b[77;2H",
+        ];
+        let data = |i: usize| SessionEvent::Data {
+            uid: "u1".into(),
+            data: frames[i % 2].into(),
+            cursor: 0,
+        };
+        apply_event_to_shadow(&s, &data(0));
+        apply_event_to_shadow(&s, &data(1));
+        let after_two = s.lock().unwrap()["u1"].activity;
+        assert!(after_two.content_at.is_some());
+        for i in 2..20 {
+            apply_event_to_shadow(&s, &data(i));
+        }
+        {
+            let map = s.lock().unwrap();
+            let sh = &map["u1"];
+            assert_eq!(sh.activity.content_cursor, after_two.content_cursor);
+            assert!(sh.output_bytes > after_two.content_cursor);
+        }
+        // Real output moves it again.
+        apply_event_to_shadow(
+            &s,
+            &SessionEvent::Data {
+                uid: "u1".into(),
+                data: "done\r\n".into(),
+                cursor: 0,
+            },
+        );
+        let map = s.lock().unwrap();
+        assert_eq!(map["u1"].activity.content_cursor, map["u1"].output_bytes);
     }
 
     #[test]

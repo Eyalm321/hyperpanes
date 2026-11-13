@@ -696,12 +696,21 @@ fn build_screen_body(
         .output_bytes(uid)
         .map(|b| b as i64)
         .unwrap_or(0);
+    // The content cursor BEFORE rendering keys the cached classification (see
+    // `server::classify_screen`), so the activity read-out reuses this read's verdict.
+    let content_cursor = shared
+        .sessions
+        .activity_signal(uid)
+        .map(|sig| sig.content_cursor);
     match shared.sessions.render_screen_read(uid) {
         Some(read) => {
             let full = read.text;
             // Prompt detection runs on the FULL screen so a clipping `tail` can't hide a blocked
             // prompt above the tail window.
             let awaiting = detect_awaiting_input(&full);
+            if let Some(c) = content_cursor {
+                shared.sessions.set_awaiting(uid, c, awaiting);
+            }
             let mut text = full;
             if let Some(tail) = tail_num(q.get("tail")) {
                 text = tail_lines(&text, tail);
@@ -1022,6 +1031,20 @@ fn arm_inbox_nudge(shared: &Arc<Shared>, pane_id: &str, seq: u64) {
             let Some((busy, form)) = watched else {
                 shared.nudges.lock().unwrap().drop_pane(&pane_id);
                 return;
+            };
+            // Never type into a decision prompt (a permission dialog, a y/n question): the
+            // nudge's Enter would answer it. Such a pane reads idle once its output is only
+            // cosmetic (a blinking indicator), so check the screen itself before typing, with
+            // the same predicate the queued-prompt and goal deliveries use.
+            let busy = busy || {
+                let sessions = Arc::clone(&shared.sessions);
+                let owned = uid.clone();
+                // A failed check (the blocking task panicked) must not type: treat it as busy.
+                tokio::task::spawn_blocking(move || {
+                    crate::control::server::screen_blocks_typing(&sessions, &owned)
+                })
+                .await
+                .unwrap_or(true)
             };
             let step = shared
                 .nudges
