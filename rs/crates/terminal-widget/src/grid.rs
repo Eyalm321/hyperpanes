@@ -21,6 +21,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{ClipboardType, Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 /// A single resolved cell ready for rasterization.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,7 +102,11 @@ impl alacritty_terminal::grid::Dimensions for TermSize {
 struct ProxyListener {
     tx: Sender<Vec<u8>>,
     clip_tx: Sender<String>,
+    color_tx: Sender<ColorRequest>,
 }
+
+/// An OSC 4/10/11/12 colour query: the palette-or-named index plus the crate's reply formatter.
+type ColorRequest = (usize, Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>);
 impl EventListener for ProxyListener {
     fn send_event(&self, event: Event) {
         match event {
@@ -110,6 +115,11 @@ impl EventListener for ProxyListener {
             }
             Event::ClipboardStore(ClipboardType::Clipboard, text) => {
                 let _ = self.clip_tx.send(text);
+            }
+            // Colour queries are answered from the live palette in `TermGrid::feed`, which
+            // the listener cannot see.
+            Event::ColorRequest(index, fmt) => {
+                let _ = self.color_tx.send((index, fmt));
             }
             // Primary-selection stores have no counterpart on Windows/macOS; ignore them.
             // `ClipboardLoad` is never honoured (see above).
@@ -124,7 +134,13 @@ pub struct TermGrid {
     term: Term<ProxyListener>,
     parser: Processor,
     resp_rx: Receiver<Vec<u8>>,
+    reply_tx: Sender<Vec<u8>>,
     clip_rx: Receiver<String>,
+    color_rx: Receiver<ColorRequest>,
+    /// Mode 2031 (colour-scheme change notifications) enabled by the application.
+    scheme_updates: bool,
+    /// Last bytes of the previous feed, so a mode/query sequence split across reads is seen.
+    scan_tail: Vec<u8>,
     palette: [Rgb; 256],
     size: TermSize,
     dirty: bool,
@@ -139,21 +155,27 @@ impl TermGrid {
         };
         let (resp_tx, resp_rx) = channel::<Vec<u8>>();
         let (clip_tx, clip_rx) = channel::<String>();
+        let (color_tx, color_rx) = channel::<ColorRequest>();
         // `Config::default()` has `osc52 = OnlyCopy`: stores are emitted, loads are denied by
         // the terminal itself (belt and braces with the listener above).
         let term = Term::new(
             Config::default(),
             &size,
             ProxyListener {
-                tx: resp_tx,
+                tx: resp_tx.clone(),
                 clip_tx,
+                color_tx,
             },
         );
         TermGrid {
             term,
             parser: Processor::new(),
             resp_rx,
+            reply_tx: resp_tx,
             clip_rx,
+            color_rx,
+            scheme_updates: false,
+            scan_tail: Vec::new(),
             palette: default_palette(),
             size,
             dirty: true,
@@ -172,6 +194,50 @@ impl TermGrid {
             };
         }
         self.dirty = true;
+        if self.scheme_updates {
+            let report = self.scheme_report();
+            self.queue_reply(report);
+        }
+    }
+
+    fn queue_reply(&self, bytes: Vec<u8>) {
+        // Same channel the parser's DSR/DA replies use, so ordering is preserved.
+        self.reply_tx.send(bytes).ok();
+    }
+
+    /// `CSI ? 997 ; 1 n` (dark) or `; 2 n` (light), by the default background's luminance.
+    fn scheme_report(&self) -> Vec<u8> {
+        let b = self.palette[0];
+        let lum = 0.2126 * f32::from(b.r) + 0.7152 * f32::from(b.g) + 0.0722 * f32::from(b.b);
+        let mode = if lum > 127.5 { 2 } else { 1 };
+        format!("\x1b[?997;{mode}n").into_bytes()
+    }
+
+    /// Track mode 2031 and answer `CSI ? 996 n`, scanning `bytes` (plus the previous tail).
+    fn scan_scheme_sequences(&mut self, bytes: &[u8]) {
+        const SET: &[u8] = b"\x1b[?2031h";
+        const RST: &[u8] = b"\x1b[?2031l";
+        const QRY: &[u8] = b"\x1b[?996n";
+        let mut buf = std::mem::take(&mut self.scan_tail);
+        // A match must end in the new bytes: one lying whole in the kept tail was seen last time.
+        let seen = buf.len();
+        buf.extend_from_slice(bytes);
+        let mut i = 0;
+        while i < buf.len() {
+            let rest = &buf[i..];
+            let ends_new = |pat: &[u8]| i + pat.len() > seen;
+            if rest.starts_with(SET) && ends_new(SET) {
+                self.scheme_updates = true;
+            } else if rest.starts_with(RST) && ends_new(RST) {
+                self.scheme_updates = false;
+            } else if rest.starts_with(QRY) && ends_new(QRY) {
+                let report = self.scheme_report();
+                self.queue_reply(report);
+            }
+            i += 1;
+        }
+        let keep = buf.len().saturating_sub(SET.len() - 1);
+        self.scan_tail = buf[keep..].to_vec();
     }
 
     /// Advance the VTE parser with a chunk of raw session output. Marks the grid dirty.
@@ -179,8 +245,19 @@ impl TermGrid {
         if bytes.is_empty() {
             return;
         }
+        self.scan_scheme_sequences(bytes);
         self.parser.advance(&mut self.term, bytes);
         self.dirty = true;
+        // Answer OSC 4/10/11/12 queries from the live palette.
+        while let Ok((index, fmt)) = self.color_rx.try_recv() {
+            let rgb = match index {
+                0..=255 => self.palette[index],
+                257 => self.palette[0],
+                // Foreground (256), cursor (258) and anything else: the default foreground.
+                _ => self.palette[7],
+            };
+            self.queue_reply(fmt(rgb).into_bytes());
+        }
     }
 
     /// Drain any terminal-originated replies (DSR/DA/etc.) the parser queued while
@@ -1076,5 +1153,86 @@ mod tests {
         // A CPR reply looks like ESC [ <row> ; <col> R.
         assert_eq!(reply[0], 0x1b);
         assert_eq!(*reply.last().unwrap(), b'R');
+    }
+
+    fn reply_str(g: &mut TermGrid) -> String {
+        String::from_utf8(g.take_replies()).unwrap()
+    }
+
+    fn light_base() -> [[u8; 3]; 16] {
+        let mut b = [[0x20u8, 0x20, 0x20]; 16];
+        b[0] = [0xff, 0xff, 0xff];
+        b[7] = [0x10, 0x10, 0x10];
+        b[1] = [0xaa, 0x01, 0x02];
+        b
+    }
+
+    #[test]
+    fn osc_color_queries_use_the_live_palette() {
+        let mut g = TermGrid::new(20, 3);
+        let mut base = [[0u8; 3]; 16];
+        base[0] = [0x12, 0x34, 0x56];
+        base[1] = [0xab, 0xcd, 0xef];
+        base[7] = [0x01, 0x02, 0x03];
+        g.set_base16(base);
+        g.feed(b"\x1b]11;?\x07");
+        assert_eq!(reply_str(&mut g), "\x1b]11;rgb:1212/3434/5656\x07");
+        g.feed(b"\x1b]4;1;?\x1b\\");
+        assert_eq!(reply_str(&mut g), "\x1b]4;1;rgb:abab/cdcd/efef\x1b\\");
+        g.feed(b"\x1b]10;?\x07");
+        assert_eq!(reply_str(&mut g), "\x1b]10;rgb:0101/0202/0303\x07");
+        g.feed(b"\x1b]12;?\x07");
+        assert!(reply_str(&mut g).starts_with("\x1b]12;rgb:"));
+        g.set_base16(light_base());
+        g.feed(b"\x1b]11;?\x07");
+        assert_eq!(reply_str(&mut g), "\x1b]11;rgb:ffff/ffff/ffff\x07");
+        g.feed(b"\x1b]4;1;?\x07");
+        assert_eq!(reply_str(&mut g), "\x1b]4;1;rgb:aaaa/0101/0202\x07");
+    }
+
+    #[test]
+    fn osc_query_split_across_feeds() {
+        let mut g = TermGrid::new(20, 3);
+        g.feed(b"\x1b]1");
+        g.feed(b"1;?\x07");
+        assert!(reply_str(&mut g).starts_with("\x1b]11;rgb:"));
+    }
+
+    #[test]
+    fn mode_2031_reports_scheme_changes() {
+        let mut g = TermGrid::new(20, 3);
+        g.set_base16(light_base());
+        assert!(g.take_replies().is_empty(), "off: nothing emitted");
+        g.feed(b"\x1b[?20");
+        g.feed(b"31h");
+        g.set_base16(light_base());
+        assert_eq!(reply_str(&mut g), "\x1b[?997;2n");
+        g.set_base16([[0u8; 3]; 16]);
+        assert_eq!(reply_str(&mut g), "\x1b[?997;1n");
+        g.feed(b"\x1b[?2031l");
+        g.set_base16(light_base());
+        assert!(g.take_replies().is_empty(), "disabled again");
+    }
+
+    #[test]
+    fn scheme_query_996_is_answered() {
+        let mut g = TermGrid::new(20, 3);
+        g.set_base16(light_base());
+        g.feed(b"\x1b[?996n");
+        assert_eq!(reply_str(&mut g), "\x1b[?997;2n");
+        // The query sits whole in the kept tail: the next feed must not answer it again.
+        g.feed(b"x");
+        assert!(g.take_replies().is_empty(), "answered once");
+    }
+
+    #[test]
+    fn scheme_query_996_split_across_feeds() {
+        let mut g = TermGrid::new(20, 3);
+        g.feed(b"\x1b[?99");
+        assert!(g.take_replies().is_empty());
+        g.feed(b"6n");
+        assert_eq!(reply_str(&mut g), "\x1b[?997;1n");
+        g.feed(b"y");
+        assert!(g.take_replies().is_empty(), "answered once");
     }
 }
