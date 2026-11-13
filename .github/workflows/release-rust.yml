@@ -97,6 +97,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.workspace }}
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       - name: Test
         run: cd ${{ matrix.workspace }} && cargo test --all
@@ -133,6 +135,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rs/crates/app
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       - name: Install NSIS
         run: choco install nsis -y --no-progress
@@ -170,6 +174,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rs/crates/app
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       - name: Build AppImage
         run: bash rs/packaging/appimage.sh "${{ needs.version.outputs.version }}"
@@ -208,6 +214,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rs/crates/app
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       - name: Build DMG bundle
         run: bash rs/packaging/macos/bundle.sh "${{ needs.version.outputs.version }}"

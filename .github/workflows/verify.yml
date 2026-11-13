@@ -86,6 +86,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.ws }}
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       - name: Test (HARD)
         run: cd ${{ matrix.ws }} && cargo test --all --no-fail-fast
@@ -121,6 +123,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.ws }}
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       # No continue-on-error here — these are blocking for the auto-merge gate.
       - name: Rustfmt (check)
@@ -182,6 +186,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rs/crates/app
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       # zbus with its `tokio` feature panics on every thread outside a Tokio runtime, which is
       # how the AT-SPI thread crashed every Linux launch. Feature resolution only, no compile.

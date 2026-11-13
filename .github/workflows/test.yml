@@ -89,6 +89,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.workspace }}
+          # A self-hosted runner keeps its own ~/.cargo/bin; caching it lets the post-job cleanup delete rustup there.
+          cache-bin: ${{ runner.environment != 'self-hosted' }}
 
       - name: Test
         run: cd ${{ matrix.workspace }} && cargo test --all
