@@ -71,6 +71,14 @@ pub trait Pty: Send + Sync {
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
     /// Terminate the child. The reader thread then observes EOF and emits `Exit`.
     fn kill(&self) -> io::Result<()>;
+    /// The child's OS process id, when known. On unix the child leads its own session
+    /// (portable-pty `setsid`s it), so this pid is also the session id that every process it
+    /// started inside the terminal shares. A respawn of the same pane waits on that session
+    /// ([`crate::session::respawn`]). The default is `None`, for a pty with no OS child (a
+    /// test mock).
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// `portable-pty` (conpty) implementation of [`Pty`]. The writer is `Arc`-shared with
@@ -79,6 +87,7 @@ struct PortablePty {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    pid: Option<u32>,
 }
 
 impl Pty for PortablePty {
@@ -103,6 +112,10 @@ impl Pty for PortablePty {
 
     fn kill(&self) -> io::Result<()> {
         self.killer.lock().unwrap().kill()
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.pid
     }
 }
 
@@ -324,6 +337,7 @@ pub fn spawn_pty(
     // can signal independently of the thread blocked in `wait()`.
     let child = child;
     let killer = child.clone_killer();
+    let pid = child.process_id();
     let _ = child_tx.send(child);
 
     // Dropping `pair.slave` closes the slave handle so the reader sees EOF when the
@@ -334,6 +348,7 @@ pub fn spawn_pty(
         master: Mutex::new(pair.master),
         writer,
         killer: Mutex::new(killer),
+        pid,
     }))
 }
 

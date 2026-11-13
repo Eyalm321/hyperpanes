@@ -11,5 +11,6 @@ pub mod osc133;
 pub mod proto;
 pub mod pty;
 pub mod replay;
+pub mod respawn;
 pub mod screen;
 pub mod spawn;

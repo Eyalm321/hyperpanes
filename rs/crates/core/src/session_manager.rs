@@ -45,6 +45,7 @@ use crate::session::batcher::DataBatcher;
 use crate::session::cwd::parse_osc_cwd;
 use crate::session::pty::{spawn_pty, Pty, PtyEvent, PtySpec};
 use crate::session::replay::Replay;
+use crate::session::respawn::{DeferredPty, Dying, DyingSessions, RespawnPolicy};
 use crate::session::screen::Screen;
 use crate::session::spawn::{
     build_env, default_shell, resolve_control_file, resolve_spawn, resolve_windows_command,
@@ -310,6 +311,11 @@ pub(crate) type SpawnFn = Box<dyn FnOnce(&PtySpec, EventSink) -> io::Result<Box<
 struct Session {
     pty: Box<dyn Pty>,
     shared: Arc<Shared>,
+    /// The pane id the session was spawned for (`SpawnOptions::pane_id`).
+    pane_id: Option<String>,
+    /// The killed predecessor a deferred spawn waits on ([`crate::session::respawn`]). A kill
+    /// before the spawn hands it on to the pane's next respawn.
+    awaiting: Option<Dying>,
 }
 
 /// The reusable, transport-agnostic per-uid session store + operations — the heart of
@@ -336,15 +342,29 @@ pub struct SessionRegistry {
     events: UnboundedSender<SessionEvent>,
     /// Monotonic uid source for daemon-assigned sessions (see [`mint_uid`]).
     next_uid: Arc<AtomicU64>,
+    /// Killed sessions whose processes may still be exiting, by pane id: a respawn of the
+    /// same pane waits on them ([`crate::session::respawn`]).
+    dying: Arc<Mutex<DyingSessions>>,
+    respawn: RespawnPolicy,
 }
 
 impl SessionRegistry {
     /// Create a registry that emits [`SessionEvent`]s on `events`.
     pub fn new(events: UnboundedSender<SessionEvent>) -> Self {
+        Self::with_respawn_policy(events, RespawnPolicy::default())
+    }
+
+    /// [`new`](Self::new) with its own respawn wait (a test's probe and bound).
+    pub(crate) fn with_respawn_policy(
+        events: UnboundedSender<SessionEvent>,
+        respawn: RespawnPolicy,
+    ) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             events,
             next_uid: Arc::new(AtomicU64::new(1)),
+            dying: Arc::new(Mutex::new(DyingSessions::default())),
+            respawn,
         }
     }
 
@@ -363,18 +383,48 @@ impl SessionRegistry {
 
     /// Spawn a session using a custom pty `factory` (tests inject a mock). The resolved
     /// [`PtySpec`] is built from `opts` exactly as the production path does.
+    ///
+    /// A respawn of a pane whose previous session was just killed and still has live
+    /// processes returns at once, but the pty spawns only once those processes are gone or
+    /// the bound passes ([`crate::session::respawn`]). Until then the session buffers writes
+    /// and resizes.
     pub fn create_with(&self, opts: SpawnOptions, factory: SpawnFn) -> io::Result<()> {
         let spec = build_spec(&opts);
+        let (cols, rows) = (spec.cols, spec.rows);
 
         let (ptx, prx) = unbounded_channel::<PtyEvent>();
         let sink: EventSink = Arc::new(move |ev| {
             let _ = ptx.send(ev);
         });
-        let pty = factory(&spec, sink)?;
+        let awaiting = opts
+            .pane_id
+            .as_deref()
+            .and_then(|pane| self.dying.lock().unwrap().take(pane, self.respawn.bound))
+            .filter(|d| (self.respawn.probe)(d.leader));
+        let pty: Box<dyn Pty> = match awaiting {
+            None => factory(&spec, sink)?,
+            Some(dying) => {
+                crate::persistence::session_log::record(
+                    "respawn-wait",
+                    &opts.uid,
+                    "previous session of the pane still running; spawn deferred",
+                    opts.pane_id.as_deref(),
+                );
+                Box::new(DeferredPty::spawn_after(
+                    dying,
+                    self.respawn.clone(),
+                    spec,
+                    sink,
+                    factory,
+                    opts.uid.clone(),
+                    opts.pane_id.clone(),
+                )?)
+            }
+        };
 
         let shared = Arc::new(Shared {
             replay: Mutex::new(Replay::new()),
-            screen: Mutex::new(Screen::new(spec.cols, spec.rows)),
+            screen: Mutex::new(Screen::new(cols, rows)),
             screen_pending: Mutex::new(Vec::new()),
             output_bytes: AtomicU64::new(0),
             last_output_at: AtomicU64::new(0),
@@ -391,10 +441,15 @@ impl SessionRegistry {
         let uid = opts.uid.clone();
         tokio::spawn(drive_session(pipeline, prx, events, sessions, uid));
 
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(opts.uid.clone(), Session { pty, shared });
+        self.sessions.lock().unwrap().insert(
+            opts.uid.clone(),
+            Session {
+                pty,
+                shared,
+                pane_id: opts.pane_id.clone(),
+                awaiting,
+            },
+        );
         Ok(())
     }
 
@@ -517,8 +572,32 @@ impl SessionRegistry {
         if let Some(s) = removed {
             s.shared.killed.store(true, Ordering::SeqCst);
             crate::persistence::session_log::record("kill", uid, "registry kill", None);
+            self.note_dying(&s);
             let _ = s.pty.kill();
         }
+    }
+
+    /// Remember a killed session's leader by pane id, so a respawn of that pane waits for
+    /// its processes. A session killed before its own deferred spawn hands on the
+    /// predecessor it waited on. Read before the kill: a killed deferred pty has no pid.
+    fn note_dying(&self, s: &Session) {
+        let Some(pane) = s.pane_id.as_deref() else {
+            return;
+        };
+        let dying = match s.pty.pid() {
+            Some(leader) => Dying {
+                leader,
+                killed_at: Instant::now(),
+            },
+            None => match s.awaiting {
+                Some(d) => d,
+                None => return,
+            },
+        };
+        self.dying
+            .lock()
+            .unwrap()
+            .record(pane, dying, self.respawn.bound);
     }
 
     /// Kill every live pane and clear the map.
@@ -1734,5 +1813,205 @@ mod tests {
             a,
             "the counter is process-global across managers"
         );
+    }
+
+    // ---- a respawn waits for the pane's previous session (session::respawn) ----
+
+    /// A mock pty with an OS pid that records what it is sent.
+    struct PidPty {
+        pid: u32,
+        input: Arc<Mutex<Vec<u8>>>,
+        size: Arc<Mutex<Option<(u16, u16)>>>,
+    }
+    impl Pty for PidPty {
+        fn write(&self, data: &[u8]) -> io::Result<()> {
+            self.input.lock().unwrap().extend_from_slice(data);
+            Ok(())
+        }
+        fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+            *self.size.lock().unwrap() = Some((cols, rows));
+            Ok(())
+        }
+        fn kill(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn pid(&self) -> Option<u32> {
+            Some(self.pid)
+        }
+    }
+
+    /// Counts the spawns of one session and keeps what its pty is sent. It holds the event
+    /// sink as a real pty's reader thread does: once every sender is gone, the driver task
+    /// ends and drops the session.
+    #[derive(Clone, Default)]
+    struct Spawns {
+        count: Arc<AtomicU64>,
+        input: Arc<Mutex<Vec<u8>>>,
+        size: Arc<Mutex<Option<(u16, u16)>>>,
+        sinks: Arc<Mutex<Vec<EventSink>>>,
+    }
+    impl Spawns {
+        fn factory(&self, pid: u32) -> SpawnFn {
+            let me = self.clone();
+            Box::new(move |_spec, sink| {
+                me.sinks.lock().unwrap().push(sink);
+                me.count.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(PidPty {
+                    pid,
+                    input: Arc::clone(&me.input),
+                    size: Arc::clone(&me.size),
+                }) as Box<dyn Pty>)
+            })
+        }
+        fn count(&self) -> u64 {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    fn pane_opts(uid: &str, pane: Option<&str>) -> SpawnOptions {
+        SpawnOptions {
+            uid: uid.into(),
+            pane_id: pane.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The pid of every old session these tests kill.
+    const OLD: u32 = 4100;
+
+    /// A registry whose respawn probe reports [`OLD`]'s session live while the flag holds,
+    /// and its event receiver (held so the driver tasks' channel stays open).
+    fn respawn_registry(
+        bound_ms: u64,
+    ) -> (
+        SessionRegistry,
+        Arc<AtomicBool>,
+        UnboundedReceiver<SessionEvent>,
+    ) {
+        let (etx, erx) = unbounded_channel::<SessionEvent>();
+        let alive = Arc::new(AtomicBool::new(true));
+        let probe_alive = Arc::clone(&alive);
+        let policy = RespawnPolicy {
+            probe: Arc::new(move |pid| pid == OLD && probe_alive.load(Ordering::SeqCst)),
+            bound: Duration::from_millis(bound_ms),
+            poll: Duration::from_millis(5),
+        };
+        (
+            SessionRegistry::with_respawn_policy(etx, policy),
+            alive,
+            erx,
+        )
+    }
+
+    async fn until(what: &str, check: impl Fn() -> bool) {
+        for _ in 0..400 {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test]
+    async fn respawn_waits_for_the_old_session_then_spawns_with_what_the_pane_got_meanwhile() {
+        let (reg, alive, _events) = respawn_registry(5_000);
+        reg.create_with(pane_opts("s1", Some("p1")), Spawns::default().factory(OLD))
+            .unwrap();
+        reg.kill("s1");
+        let new = Spawns::default();
+        reg.create_with(pane_opts("s2", Some("p1")), new.factory(4200))
+            .unwrap();
+        assert!(reg.has("s2"), "the session exists while its spawn waits");
+        reg.write("s2", "typed early\r");
+        reg.resize("s2", 120, 40);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(new.count(), 0, "no spawn while the old session runs");
+
+        alive.store(false, Ordering::SeqCst);
+        until("the deferred spawn", || new.count() == 1).await;
+        assert_eq!(new.input.lock().unwrap().as_slice(), b"typed early\r");
+        assert_eq!(*new.size.lock().unwrap(), Some((120, 40)));
+        reg.write("s2", "later");
+        assert_eq!(new.input.lock().unwrap().as_slice(), b"typed early\rlater");
+    }
+
+    #[tokio::test]
+    async fn respawn_spawns_at_the_bound_when_the_old_session_lingers() {
+        let (reg, _alive, _events) = respawn_registry(80);
+        reg.create_with(pane_opts("s1", Some("p1")), Spawns::default().factory(OLD))
+            .unwrap();
+        let killed = Instant::now();
+        reg.kill("s1");
+        let new = Spawns::default();
+        reg.create_with(pane_opts("s2", Some("p1")), new.factory(4200))
+            .unwrap();
+        assert_eq!(new.count(), 0);
+        until("the spawn at the bound", || new.count() == 1).await;
+        assert!(killed.elapsed() >= Duration::from_millis(80));
+    }
+
+    #[tokio::test]
+    async fn a_kill_during_the_respawn_wait_cancels_that_spawn_and_hands_the_wait_on() {
+        let (reg, alive, _events) = respawn_registry(5_000);
+        reg.create_with(pane_opts("s1", Some("p1")), Spawns::default().factory(OLD))
+            .unwrap();
+        reg.kill("s1");
+        let cancelled = Spawns::default();
+        reg.create_with(pane_opts("s2", Some("p1")), cancelled.factory(4200))
+            .unwrap();
+        reg.kill("s2");
+        assert!(!reg.has("s2"));
+        let third = Spawns::default();
+        reg.create_with(pane_opts("s3", Some("p1")), third.factory(4300))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            third.count(),
+            0,
+            "the next respawn still waits on the old session"
+        );
+
+        alive.store(false, Ordering::SeqCst);
+        until("the third spawn", || third.count() == 1).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            cancelled.count(),
+            0,
+            "a killed deferred session never spawns"
+        );
+    }
+
+    #[tokio::test]
+    async fn respawn_is_immediate_for_a_gone_old_session_another_pane_or_no_pane() {
+        let (reg, alive, _events) = respawn_registry(5_000);
+        // Another pane, or no pane id, never waits on p1's old session.
+        reg.create_with(pane_opts("s1", Some("p1")), Spawns::default().factory(OLD))
+            .unwrap();
+        reg.kill("s1");
+        for (uid, pane) in [("s2", Some("p2")), ("s3", None)] {
+            let other = Spawns::default();
+            reg.create_with(pane_opts(uid, pane), other.factory(4200))
+                .unwrap();
+            assert_eq!(other.count(), 1, "{uid} spawned at once");
+        }
+        // kill_all records nothing to wait on.
+        reg.create_with(pane_opts("s4", Some("p3")), Spawns::default().factory(OLD))
+            .unwrap();
+        reg.kill_all();
+        let after_all = Spawns::default();
+        reg.create_with(pane_opts("s5", Some("p3")), after_all.factory(4200))
+            .unwrap();
+        assert_eq!(after_all.count(), 1);
+        // Once the old session is gone, its pane respawns at once.
+        alive.store(false, Ordering::SeqCst);
+        reg.kill("s5");
+        reg.create_with(pane_opts("s6", Some("p1")), Spawns::default().factory(OLD))
+            .unwrap();
+        let gone = Spawns::default();
+        reg.kill("s6");
+        reg.create_with(pane_opts("s7", Some("p1")), gone.factory(4200))
+            .unwrap();
+        assert_eq!(gone.count(), 1);
     }
 }
