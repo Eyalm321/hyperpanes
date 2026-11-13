@@ -215,17 +215,63 @@ jobs:
       - name: Bundled personas match the skills repo
         run: bash scripts/check-persona-sync.sh
 
+  # Public-hygiene gate: this repo is public, so a change must not ADD home paths, private-range
+  # IPs (RFC 1918, 100.64/10), private project names (.github/public-guard/denylist.txt plus
+  # the PUBLIC_GUARD_DENYLIST repository variable) to lines, file paths or commit messages.
+  # Commits are checked one by one, because a merge keeps every intermediate commit.
+  # The guard and its lists are read from the BASE commit, so a PR cannot loosen the guard
+  # that judges it (a PR that first adds the guard falls back to its own copy).
+  public-guard:
+    name: public-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Guard self-test
+        run: bash .github/public-guard/test.sh
+      - name: Scan added content
+        env:
+          PUBLIC_GUARD_DENYLIST: ${{ vars.PUBLIC_GUARD_DENYLIST }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MQ_BASE: ${{ github.event.merge_group.base_sha }}
+          MQ_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) base=$PR_BASE head=$PR_HEAD ;;
+            merge_group)  base=$MQ_BASE head=$MQ_HEAD ;;
+            *)            base=$PUSH_BEFORE head=$PUSH_AFTER ;;
+          esac
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git rev-parse "$head^")   # new branch / force push: check the tip commit
+          fi
+          cfg=$RUNNER_TEMP/public-guard
+          mkdir -p "$cfg"
+          if git cat-file -e "$base:.github/public-guard/guard.py" 2>/dev/null; then
+            for f in guard.py denylist.txt allowlist.txt; do
+              git show "$base:.github/public-guard/$f" > "$cfg/$f" 2>/dev/null || : > "$cfg/$f"
+            done
+          else
+            cp .github/public-guard/guard.py .github/public-guard/*.txt "$cfg/"
+          fi
+          python3 "$cfg/guard.py" "$base" "$head" --config-dir "$cfg"
+
   # Umbrella gate: the ONLY required status check (context name `verify`). It aggregates
   # the matrix legs so the ruleset never has to enumerate per-OS / per-workspace contexts.
   verify:
-    needs: [changes, test, lint, build-gui, persona-sync]
+    needs: [changes, test, lint, build-gui, persona-sync, public-guard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Gate on upstream job results
         run: |
-          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }} lint=${{ needs.lint.result }} build-gui=${{ needs.build-gui.result }} persona-sync=${{ needs.persona-sync.result }}"
+          echo "changes=${{ needs.changes.result }} test=${{ needs.test.result }} lint=${{ needs.lint.result }} build-gui=${{ needs.build-gui.result }} persona-sync=${{ needs.persona-sync.result }} public-guard=${{ needs.public-guard.result }}"
           # build-gui is intentionally skipped on PRs that don't touch any Rust crate; treat
           # skipped as pass, but fail on any failure/cancellation. `changes` must succeed —
           # if the path filter breaks, build-gui skips and we must NOT silently pass the GUI gate.
@@ -234,4 +280,5 @@ jobs:
           [[ "${{ needs.lint.result }}" == "success" ]] || { echo "::error::lint gate failed"; exit 1; }
           [[ "${{ needs.build-gui.result }}" =~ ^(success|skipped)$ ]] || { echo "::error::build-gui gate failed"; exit 1; }
           [[ "${{ needs.persona-sync.result }}" =~ ^(success|skipped)$ ]] || { echo "::error::persona-sync gate failed — bundled personas drifted from the skills repo"; exit 1; }
+          [[ "${{ needs.public-guard.result }}" == "success" ]] || { echo "::error::public-guard failed — the change adds private material (home path, private IP or denylisted name)"; exit 1; }
           echo "all required gates green"

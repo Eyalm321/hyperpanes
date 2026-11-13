@@ -1,0 +1,8 @@
+# public-guard denylist: one case-insensitive Python regex per line ("#" starts a comment).
+# A change that ADDS a line, file path or commit message matching any entry fails the
+# `public-guard` check. Names that must not be published even here go in the repository
+# variable PUBLIC_GUARD_DENYLIST instead (same format, newline-separated; Settings → Secrets
+# and variables → Actions → Variables). The guard never echoes those entries.
+
+# Private project names are not listed here (this file is public): they live in the
+# PUBLIC_GUARD_DENYLIST repository variable.

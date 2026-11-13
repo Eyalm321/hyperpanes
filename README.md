@@ -28,11 +28,10 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
 [Agents & the Control API](#agents--the-control-api-mcp)).
 
 > [!NOTE]
-> **Status: early days (native v0.0.9).** Hyperpanes was rebuilt from scratch as a **native Rust
-> app** (Slint · `alacritty_terminal` · `portable-pty`) — one self‑contained binary for **Windows,
-> Linux, and macOS**, replacing the original Electron build. Every feature below is implemented;
-> expect rough edges on the newer cross‑platform ports, and please file issues. Prebuilt downloads
-> are on the [Releases page](https://github.com/Eyalm321/hyperpanes/releases).
+> **Status: early days.** Hyperpanes was rebuilt from scratch as a **native Rust app** (Slint ·
+> `alacritty_terminal` · `portable-pty`) — one self‑contained binary for **Windows, Linux, and
+> macOS**, replacing the original Electron build. Expect rough edges on the newer cross‑platform
+> ports, and please [file issues](https://github.com/Eyalm321/hyperpanes/issues/new/choose).
 
 ## Features
 
@@ -135,13 +134,64 @@ MCP** lets an agent — or a whole recursive agent org — watch and drive your 
 
 ## Install
 
-Grab a prebuilt binary from the [**Releases page**](https://github.com/Eyalm321/hyperpanes/releases):
+Every [release](https://github.com/Eyalm321/hyperpanes/releases/latest) ships these files
+(`<ver>` is the version, e.g. `0.0.45`):
 
-- **Linux** — `hyperpanes-<ver>-x86_64.AppImage` (`chmod +x` and run), or the `.deb` / `.rpm`.
-- **macOS** — `hyperpanes-<ver>.dmg`.
-- **Windows** — `hyperpanes-<ver>-setup.exe`.
+| Platform | File | Install |
+|---|---|---|
+| Linux x86_64, any distro | `hyperpanes-<ver>-x86_64.AppImage` | `chmod +x hyperpanes-*.AppImage && ./hyperpanes-*.AppImage` |
+| Debian / Ubuntu x86_64 | `hyperpanes_<ver>_amd64.deb` | `sudo apt install ./hyperpanes_*_amd64.deb` |
+| Fedora / RHEL / openSUSE x86_64 | `hyperpanes-<ver>-1.x86_64.rpm` | `sudo dnf install ./hyperpanes-*.x86_64.rpm` (or `zypper install`) |
+| macOS (Apple Silicon) | `hyperpanes-<ver>.dmg` | Open it and drag **Hyperpanes** to Applications. See [unsigned builds](#unsigned-builds). |
+| Windows x64 | `Hyperpanes-<ver>-setup.exe` | Run the installer. See [unsigned builds](#unsigned-builds). |
+| Android (mobile client) | `hyperpanes-mobile-<ver>.apk` | Sideload it: open the file on the phone, or `adb install hyperpanes-mobile-*.apk`. |
+| iOS (mobile client) | `hyperpanes-mobile-ios-<ver>-unsigned.zip` | An unsigned `Runner.app`; re-sign and install it with Xcode, AltStore or Sideloadly. |
 
-Builds are currently unsigned, so your OS may warn on first launch.
+- **Linux runtime libraries:** the `.deb` and `.rpm` pull in fontconfig, freetype and libxkbcommon.
+  The AppImage expects them on the system, plus Mesa (`libgl1`/`libegl1`) and, on X11,
+  `libxkbcommon-x11`. If the AppImage won't start because FUSE is missing, run it with
+  `--appimage-extract-and-run` or install `libfuse2`. Details:
+  [`rs/packaging/linux/README.md`](rs/packaging/linux/README.md).
+- **Mobile clients** are remote heads for a desktop Hyperpanes, not standalone terminals. Pair
+  them as described in [`mobile/hyperpanes_mobile/README.md`](mobile/hyperpanes_mobile/README.md).
+- **Updates:** on Windows the app can download and run the new installer itself (Preferences);
+  on Linux and macOS it tells you a new release is out and links here.
+
+### Unsigned builds
+
+The release binaries are **not code-signed or notarized** yet; that needs paid Apple and
+Windows certificates. Each file is built by the public
+[release workflow](.github/workflows/release-rust.yml) from the tagged commit, so you can read
+exactly how it was made, or [build from source](#build-from-source). Until then, your OS will
+warn on first launch:
+
+- **macOS** (Gatekeeper says the app is "damaged" or "can't be verified"): after copying it to
+  Applications, right-click the app → **Open** → **Open**, or use System Settings → Privacy &
+  Security → **Open Anyway**. Or clear the quarantine flag once:
+  `xattr -dr com.apple.quarantine /Applications/Hyperpanes.app`.
+- **Windows** (SmartScreen "Windows protected your PC"): click **More info** → **Run anyway**.
+- **Android:** the APK is debug-signed, so allow installs from your browser or file manager
+  when Android asks. It is not on Google Play.
+- **iOS:** an unsigned app cannot be installed as is. Sign it with your own Apple ID in Xcode,
+  AltStore or Sideloadly. A free Apple ID's signature expires after 7 days.
+
+## Quickstart
+
+1. Launch **Hyperpanes** from your app menu, or run `hyperpanes` in a terminal.
+2. Press **`Ctrl/Cmd+Shift+P`** for the command palette, then **New pane**. Give the pane a
+   label, a frame color and an optional command.
+3. Rearrange: pick a layout preset (`columns`, `rows`, `grid`, `main-stack`) from the palette,
+   drag a pane onto another tab, or drag a tab out of the window to tear it off.
+4. Save the setup as a [workspace file](#workspace-files) and reopen it any time:
+
+   ```bash
+   hyperpanes ./my-workspace.json
+   ```
+
+   Or describe panes inline: `hyperpanes -c "npm run dev" --label server -c "htop"` (see
+   [Launch from the command line](#launch-from-the-command-line)).
+5. To let an AI agent watch and drive your panes, set up the
+   [MCP server](#agents--the-control-api-mcp).
 
 ## Build from source
 
@@ -365,6 +415,40 @@ See [`docs/cli-multiwindow-mcp-plan.md`](docs/cli-multiwindow-mcp-plan.md) and
 [`docs/agent-orchestration-plan.md`](docs/agent-orchestration-plan.md) for the design and status.
 
 To drive another machine's panes from the desktop app over a VPN, see [`docs/remote-attach.md`](docs/remote-attach.md).
+
+### Set up the MCP server
+
+The companion MCP server, [**hyperpanes-mcp**](https://github.com/Eyalm321/hyperpanes-mcp)
+([npm](https://www.npmjs.com/package/hyperpanes-mcp)), exposes all of this to Claude, Cursor or
+any MCP client over stdio. It needs Node.js 20 or newer.
+
+1. In Hyperpanes, turn on Preferences → General → **Control API (agents / MCP)** → *Allow agent
+   control*. Also turn on *allow input* if the agent may type into shells.
+2. Register the server with your client.
+
+   **Claude Code:**
+
+   ```bash
+   claude mcp add hyperpanes -- npx -y hyperpanes-mcp
+   ```
+
+   **Claude Desktop, Cursor and other clients** (their MCP config file):
+
+   ```json
+   {
+     "mcpServers": {
+       "hyperpanes": { "command": "npx", "args": ["-y", "hyperpanes-mcp"] }
+     }
+   }
+   ```
+
+3. Ask the agent to call `control_status`. It reports whether the running app is reachable.
+
+The server finds the running app through the `control.json` file the app writes when the
+Control API is on. Typing into shells (`send_input`) stays off on the MCP side as well until
+you set `HYPERPANES_ALLOW_INPUT=1` in the server's `env`. The
+[hyperpanes-mcp README](https://github.com/Eyalm321/hyperpanes-mcp#configuration) lists every
+tool and option.
 
 ## Architecture
 
