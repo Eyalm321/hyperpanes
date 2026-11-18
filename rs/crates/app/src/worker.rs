@@ -947,28 +947,20 @@ fn run_child(
     // thread only gives up when the lease is lost (409) or the task is gone (404).
     let stop = Arc::new(AtomicBool::new(false));
     let heartbeat = task.visibility_deadline.map(|deadline| {
-        let lease_ms = (deadline - now_ms()).max(2_000);
-        let interval_ms = (lease_ms / 2).max(1_000) as u64;
+        let plan = HeartbeatPlan::for_lease((deadline - now_ms()).max(2_000));
         let stop = Arc::clone(&stop);
         let ctl = Arc::clone(ctl);
         let id = task.id.clone();
         let fence = task.fencing_token;
         std::thread::spawn(move || {
-            let mut known = deadline;
-            let mut wait = interval_ms;
-            while !sleep_interruptible(&stop, wait) {
-                wait = interval_ms;
-                let extra = extend_extra_ms(known, now_ms(), lease_ms);
-                if extra <= 0 {
-                    continue;
-                }
-                match ctl.extend_once(&id, fence, extra) {
-                    ExtendResult::Renewed(d) => known = d.unwrap_or(known + extra),
-                    ExtendResult::Transient => wait = RETRY_MS,
-                    ExtendResult::Lost => return, // fenced out / task gone — the ack will surface it
-                    ExtendResult::Other => {}
-                }
-            }
+            // Fenced out / task gone ends the loop; the ack then tells.
+            heartbeat_loop(
+                plan,
+                deadline,
+                &now_ms,
+                &|ms| sleep_interruptible(&stop, ms),
+                &mut |extra| ctl.extend_once(&id, fence, extra, plan.call_timeout()),
+            );
         })
     });
 
@@ -1177,6 +1169,71 @@ fn one_line(s: &str, max: usize) -> String {
 }
 
 /// Sleep up to `ms`, waking early and returning `true` if `stop` gets set; `false` on timeout.
+/// How the lease heartbeat runs (#12, T1866). The claim's lease is the server default (30 s) unless the task set its own;
+/// under host load a renewal at half of it, through a client whose timeout (30 s) outlasted the lease, let one slow
+/// request lapse the lease of a task that was still running. Now:
+/// - the first renewal comes at a third of the lease, and every renewal at most every `interval_ms`;
+/// - each extend call gives up after `call_timeout_ms` (a few seconds), so a stalled request leaves room for retries
+///   (every [`RETRY_MS`]) before the deadline;
+/// - each renewal asks for `target_ms` ahead: at least [`HEARTBEAT_CUSHION_MS`], so a running task keeps minutes of
+///   slack once one renewal lands. A dead runner's claim is still freed at once by the worker-exit requeue, else by
+///   the sweep once that cushion passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeartbeatPlan {
+    target_ms: i64,
+    interval_ms: u64,
+    call_timeout_ms: u64,
+}
+
+/// The least lease a heartbeat keeps ahead of now while its task runs.
+const HEARTBEAT_CUSHION_MS: i64 = 120_000;
+/// The longest one extend call may take before the heartbeat retries it.
+const EXTEND_CALL_TIMEOUT_MS: u64 = 5_000;
+
+impl HeartbeatPlan {
+    fn for_lease(lease_ms: i64) -> Self {
+        let lease_ms = lease_ms.max(2_000);
+        let interval_ms = (lease_ms / 3).max(1_000) as u64;
+        HeartbeatPlan {
+            target_ms: lease_ms.max(HEARTBEAT_CUSHION_MS),
+            interval_ms,
+            call_timeout_ms: EXTEND_CALL_TIMEOUT_MS.min((interval_ms / 2).max(500)),
+        }
+    }
+
+    fn call_timeout(&self) -> Duration {
+        Duration::from_millis(self.call_timeout_ms)
+    }
+}
+
+/// The heartbeat's loop over injected time (`now`; `sleep` returns true once told to stop) and one extend attempt per
+/// beat: keeps the lease about `plan.target_ms` ahead, retries a transient failure in [`RETRY_MS`], and ends when
+/// stopped or the lease is lost (409/404). Returns the last deadline it knows of.
+fn heartbeat_loop(
+    plan: HeartbeatPlan,
+    deadline: i64,
+    now: &dyn Fn() -> i64,
+    sleep: &dyn Fn(u64) -> bool,
+    extend: &mut dyn FnMut(i64) -> ExtendResult,
+) -> i64 {
+    let mut known = deadline;
+    let mut wait = plan.interval_ms;
+    while !sleep(wait) {
+        wait = plan.interval_ms;
+        let extra = extend_extra_ms(known, now(), plan.target_ms);
+        if extra <= 0 {
+            continue;
+        }
+        match extend(extra) {
+            ExtendResult::Renewed(d) => known = d.unwrap_or(known + extra),
+            ExtendResult::Transient => wait = RETRY_MS,
+            ExtendResult::Lost => return known,
+            ExtendResult::Other => {}
+        }
+    }
+    known
+}
+
 fn sleep_interruptible(stop: &AtomicBool, ms: u64) -> bool {
     let step = 200u64;
     let mut waited = 0u64;
@@ -1327,13 +1384,26 @@ impl Control {
 
     /// One POST. Transport errors and 401 refresh the discovery and report `Transient`.
     fn post_once(&self, path: &str, body: &serde_json::Value) -> Attempt {
+        self.post_once_within(path, body, None)
+    }
+
+    /// One POST that gives up after `timeout` when given (else the client's own), as a transport error.
+    fn post_once_within(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> Attempt {
         let (base, token) = self.snapshot();
-        let sent = self
+        let mut req = self
             .client
             .post(format!("{base}{path}"))
             .header("Authorization", format!("Bearer {token}"))
-            .json(body)
-            .send();
+            .json(body);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
+        let sent = req.send();
         match sent {
             Err(e) => {
                 self.refresh();
@@ -1383,10 +1453,10 @@ impl Control {
         }
     }
 
-    /// POST /tasks/{id}/extend — a single attempt (heartbeat, #12).
-    fn extend_once(&self, id: &str, fence: u64, extra_ms: i64) -> ExtendResult {
+    /// POST /tasks/{id}/extend — a single attempt (heartbeat, #12), given up after `timeout` (T1866).
+    fn extend_once(&self, id: &str, fence: u64, extra_ms: i64, timeout: Duration) -> ExtendResult {
         let body = serde_json::json!({ "fencingToken": fence, "extraMs": extra_ms });
-        match self.post_once(&format!("/tasks/{id}/extend"), &body) {
+        match self.post_once_within(&format!("/tasks/{id}/extend"), &body, Some(timeout)) {
             Attempt::Transient(_) => ExtendResult::Transient,
             Attempt::Resp(r) => match classify(Some(r.status().as_u16())) {
                 Class::Success => {
@@ -1928,6 +1998,73 @@ mod tests {
         assert_eq!(classify(Some(200)), Class::Success);
         assert_eq!(classify(Some(500)), Class::Error);
         assert_eq!(classify(Some(400)), Class::Error);
+    }
+
+    #[test]
+    fn heartbeat_plan_renews_early_with_short_calls_and_a_cushion() {
+        // T1866: the server default 30 s lease.
+        let p = HeartbeatPlan::for_lease(30_000);
+        assert_eq!(p.interval_ms, 10_000, "a third of the lease, not half");
+        assert_eq!(p.call_timeout_ms, 5_000, "one call never eats the lease");
+        assert_eq!(p.target_ms, HEARTBEAT_CUSHION_MS);
+        // A task that set a longer lease keeps it.
+        assert_eq!(HeartbeatPlan::for_lease(900_000).target_ms, 900_000);
+        // A short test lease still renews and times out within its interval.
+        let short = HeartbeatPlan::for_lease(2_000);
+        assert!(short.call_timeout_ms <= short.interval_ms);
+    }
+
+    /// Runs the heartbeat in virtual time against a server that stalls from `stall_from` to `stall_to` (each extend
+    /// then takes the call timeout and fails), and reports each deadline the server held when the task ended at `end`,
+    /// or the first moment the lease lapsed.
+    fn simulate(lease: i64, stall_from: i64, stall_to: i64, end: i64) -> Result<i64, i64> {
+        use std::cell::Cell;
+        let plan = HeartbeatPlan::for_lease(lease);
+        let clock = Cell::new(0i64);
+        let server_deadline = Cell::new(lease);
+        let lapsed = Cell::new(None::<i64>);
+        let check = |t: i64| {
+            if lapsed.get().is_none() && t > server_deadline.get() {
+                lapsed.set(Some(server_deadline.get()));
+            }
+        };
+        let sleep = |ms: u64| {
+            let t = clock.get() + ms as i64;
+            check(t.min(end));
+            clock.set(t);
+            t >= end
+        };
+        let mut extend = |extra: i64| {
+            let t = clock.get();
+            if t >= stall_from && t < stall_to {
+                let t2 = t + plan.call_timeout_ms as i64;
+                check(t2);
+                clock.set(t2);
+                return ExtendResult::Transient;
+            }
+            if t > server_deadline.get() {
+                return ExtendResult::Lost; // the sweep already took it
+            }
+            server_deadline.set(server_deadline.get() + extra);
+            ExtendResult::Renewed(Some(server_deadline.get()))
+        };
+        heartbeat_loop(plan, lease, &|| clock.get(), &sleep, &mut extend);
+        match lapsed.get() {
+            Some(at) => Err(at),
+            None => Ok(server_deadline.get()),
+        }
+    }
+
+    #[test]
+    fn heartbeat_survives_a_control_api_stall_under_load() {
+        // T1866: the control API answers nothing for 18 s right when the first renewal is due (10 s): the retries
+        // every RETRY_MS after each 5 s call still land before the 30 s deadline, and the cushion then holds.
+        assert!(simulate(30_000, 9_000, 27_000, 600_000).is_ok());
+        // Once one renewal landed, a much longer stall (90 s) is covered by the 2 min cushion.
+        assert!(simulate(30_000, 20_000, 110_000, 600_000).is_ok());
+        // The old plan (renew at half, one call blocking up to the client's 30 s) lapsed on the first stall; the new
+        // plan only lapses when the API is gone past the whole lease.
+        assert!(simulate(30_000, 0, 40_000, 600_000).is_err());
     }
 
     #[test]
