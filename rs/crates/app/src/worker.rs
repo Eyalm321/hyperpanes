@@ -508,7 +508,50 @@ fn run_prune_cache(args: &WorkerArgs) -> Result<(), Box<dyn Error>> {
         args.dry_run,
         &|l| println!("{l}"),
     );
+    sweep_shared_targets(args.dry_run, &|l| println!("{l}"));
     Ok(())
+}
+
+/// Age out the host's shared cargo targets (`hyperpanes_core::shared_targets`): stale incremental
+/// sessions and targets idle past their age, never one cargo is building in. Logs one line per
+/// removal and a total; silent when there is nothing to do.
+fn sweep_shared_targets(dry_run: bool, log: &dyn Fn(String)) {
+    use hyperpanes_core::shared_targets;
+    let root = shared_targets::root_from_env();
+    let rep = shared_targets::sweep(
+        &root,
+        std::time::SystemTime::now(),
+        shared_targets::SweepAges::default(),
+        dry_run,
+    );
+    let verb = if dry_run { "would remove" } else { "removed" };
+    for (p, n) in rep.idle_targets.iter() {
+        log(format!(
+            "shared-targets: {verb} idle target {} ({})",
+            p.display(),
+            fmt_bytes(*n)
+        ));
+    }
+    for (p, n) in rep.incremental.iter() {
+        log(format!(
+            "shared-targets: {verb} stale incremental {} ({})",
+            p.display(),
+            fmt_bytes(*n)
+        ));
+    }
+    for p in rep.busy.iter() {
+        log(format!(
+            "shared-targets: kept {} (cargo is building in it)",
+            p.display()
+        ));
+    }
+    if rep.freed() > 0 {
+        log(format!(
+            "shared-targets: {verb} {} under {}",
+            fmt_bytes(rep.freed()),
+            root.display()
+        ));
+    }
 }
 
 fn size_or_off(n: u64) -> String {
@@ -1577,6 +1620,7 @@ impl WtStore {
         worktree_store::write_repo_file(&key_dir, &common)
             .map_err(|e| format!("worktree: cannot create {}: {e}", key_dir.display()))?;
         let rep = worktree_store::sweep(&cwd, &key_dir);
+        sweep_shared_targets(false, &|l| eprintln!("worker: {l}"));
         eprintln!(
             "worker: worktrees under {} (cache slots in {}{}), min free {}",
             key_dir.display(),
