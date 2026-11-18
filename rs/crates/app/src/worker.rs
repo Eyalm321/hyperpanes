@@ -518,12 +518,22 @@ fn run_prune_cache(args: &WorkerArgs) -> Result<(), Box<dyn Error>> {
 fn sweep_shared_targets(dry_run: bool, log: &dyn Fn(String)) {
     use hyperpanes_core::shared_targets;
     let root = shared_targets::root_from_env();
+    let home = shared_targets::home_dir();
     let rep = shared_targets::sweep(
         &root,
+        home.as_deref(),
         std::time::SystemTime::now(),
         shared_targets::SweepAges::default(),
         dry_run,
     );
+    if let Some(why) = rep.refused.as_deref() {
+        log(format!(
+            "shared-targets: refused to sweep {}: {why} (set {} to a dir of cargo targets)",
+            root.display(),
+            shared_targets::ROOT_ENV
+        ));
+        return;
+    }
     let verb = if dry_run { "would remove" } else { "removed" };
     for (p, n) in rep.idle_targets.iter() {
         log(format!(
@@ -537,6 +547,12 @@ fn sweep_shared_targets(dry_run: bool, log: &dyn Fn(String)) {
             "shared-targets: {verb} stale incremental {} ({})",
             p.display(),
             fmt_bytes(*n)
+        ));
+    }
+    for p in rep.not_targets.iter() {
+        log(format!(
+            "shared-targets: left {} alone (no cargo target: CACHEDIR.TAG and a debug/ or release/ dir)",
+            p.display()
         ));
     }
     for p in rep.busy.iter() {

@@ -269,6 +269,11 @@ The root stays bounded with no daemon. The runner at each start, and `hyperpanes
 | an `incremental/<crate>-<hash>/` session | untouched for 3 days |
 | a whole target | its profiles and `.fingerprint` untouched for 30 days |
 | a target cargo is building in (a held `<profile>/.cargo-lock`) | never, it is skipped |
+| a dir that is no cargo target (no `CACHEDIR.TAG` with cargo's signature, or no `debug/`/`release/`) | never, it is left alone and named in the log |
+
+A root that is not absolute, a filesystem root, the home dir or an ancestor of it is refused
+outright: one log line and no sweep. A wrong `$HYPERPANES_SHARED_TARGETS` (say `~` or `~/.cache`)
+must never age out a home's month-old directories.
 
 ## Disk guard
 
