@@ -180,10 +180,11 @@ disk under the hyperpanes cache dir (not `/tmp`). The runner sweeps crashed runn
 start, gives each task a warm build-cache slot (`HP_WORKTREE_CACHE_DIR`), and nacks a claim when
 the root is low on disk (see `docs/worker-worktree-disk.md`). It also bounds those slots itself
 (hyperpanes#74: slot cap, cache budget, soft floor; `hyperpanes worker --prune-cache [--dry-run]` prunes on
-demand). Builds outside the runner are not covered. Any build you or a spec agent runs directly
-(verify, integrate) uses ONE target dir per goal, never one per branch. Check `df` before a cold
-build. Under 40G free, delete `<target>/*/incremental`; still under, report `blocked disk` instead
-of building. Delete the dir when the goal is done (SPEC.md section 3). The queue is durable and self-recovering (see the
+demand). Any build you or a spec agent runs directly (verify, integrate) uses the host's shared
+target of the repo, `CARGO_TARGET_DIR=~/.cache/hyperpanes/targets/<name>` with `CARGO_INCREMENTAL=0`,
+never a target per goal, task or branch (SPEC.md section 3); the runner ages those out too. Check
+`df` before a cold build. Under 40G free, run `hyperpanes worker --prune-cache`; still under, report
+`blocked disk` instead of building. The queue is durable and self-recovering (see the
 plan doc), so you don't babysit individual tasks — you watch goals and health.
 
 **Impl-agent pane budget:** fan-out is soft-capped at **16 worker panes** — the spec agent sets
