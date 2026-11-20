@@ -685,6 +685,56 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// The program a goal orchestrator pane runs (directly, with [`goal_orchestrator_args`] as its
+/// argv — never through the pane's shell).
+const GOAL_ORCHESTRATOR_PROGRAM: &str = "claude";
+
+/// A goal orchestrator's launch: the program, its verbatim argv, and the spawn env.
+struct GoalOrchestratorLaunch {
+    program: String,
+    args: Vec<String>,
+    env: hyperpanes_core::session::spawn::EnvMap,
+}
+
+/// The argv (after the program) of a goal orchestrator launch.
+///
+/// Built as a vector and spawned directly, so every path stays exactly one argument whatever it
+/// holds. A shell line built with `format!` split a persona path under `C:\Users\my name` or
+/// `~/Library/Application Support` in two, and the orchestrator started without its persona
+/// (hyperpanes#159).
+fn goal_orchestrator_args(
+    persona: &std::path::Path,
+    orch_model: &str,
+    session_name: &str,
+    mcp_config: Option<&std::path::Path>,
+    settings: Option<&std::path::Path>,
+) -> Vec<String> {
+    // `--dangerously-skip-permissions`: the whole goal org runs unattended 24/7 — a permission
+    // prompt would wedge it (and swallow the delivered goal text).
+    let mut args = vec![
+        "--dangerously-skip-permissions".to_string(),
+        "--append-system-prompt-file".to_string(),
+        persona.to_string_lossy().into_owned(),
+        "--model".to_string(),
+        orch_model.to_string(),
+        "--name".to_string(),
+        session_name.to_string(),
+    ];
+    if let Some(path) = mcp_config {
+        // `--strict-mcp-config`: load ONLY the hyperpanes server from our config, never merge
+        // whatever `.mcp.json` / user-scoped servers the goal's project cwd happens to carry.
+        // Keeps the goal agent's tool pool small and deterministic (just `mcp__hyperpanes__*`).
+        args.push("--mcp-config".to_string());
+        args.push(path.to_string_lossy().into_owned());
+        args.push("--strict-mcp-config".to_string());
+    }
+    if let Some(path) = settings {
+        args.push("--settings".to_string());
+        args.push(path.to_string_lossy().into_owned());
+    }
+    args
+}
+
 /// Build the contents of a goal settings blob.
 ///
 /// Carries three things, and each is load-bearing for an unattended pane:
@@ -944,6 +994,133 @@ mod goals_mcp_config_tests {
         assert_eq!(super::shell_quote("/a b/it's"), "'/a b/it'\\''s'");
     }
 
+    // ---- hyperpanes#159: orchestrator launch paths with a space / quote ----
+
+    const SPACED_PERSONA: &str = "/home/user/a b/it's/goal-orchestrator/SKILL.md";
+    const SPACED_MCP: &str = "/home/user/a b/it's/state/goals-mcp.json";
+    const SPACED_SETTINGS: &str = "/home/user/a b/it's/state/goals-settings.json";
+
+    fn spaced_orchestrator_args(persona: &str, mcp: &str, settings: &str) -> Vec<String> {
+        super::goal_orchestrator_args(
+            std::path::Path::new(persona),
+            "opus[1m]",
+            "goals-myapp",
+            Some(std::path::Path::new(mcp)),
+            Some(std::path::Path::new(settings)),
+        )
+    }
+
+    /// `flag`'s value in `argv`: exactly one occurrence of the flag, and the element after it.
+    fn flag_value<'a>(argv: &'a [String], flag: &str) -> &'a str {
+        let at: Vec<usize> = argv
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == flag)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 1, "{flag} once in {argv:?}");
+        argv.get(at[0] + 1)
+            .unwrap_or_else(|| panic!("{flag} has a value in {argv:?}"))
+    }
+
+    fn assert_paths_whole(argv: &[String], persona: &str, mcp: &str, settings: &str) {
+        assert_eq!(flag_value(argv, "--append-system-prompt-file"), persona);
+        assert_eq!(flag_value(argv, "--mcp-config"), mcp);
+        assert_eq!(flag_value(argv, "--settings"), settings);
+        for p in [persona, mcp, settings] {
+            assert_eq!(
+                argv.iter().filter(|a| a.as_str() == p).count(),
+                1,
+                "{p:?} is exactly one argv element in {argv:?}"
+            );
+        }
+        // No stray fragment of a split path anywhere.
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.starts_with("b/") || a == "/home/user/a"),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_args_keep_spaced_and_quoted_paths_whole() {
+        let args = spaced_orchestrator_args(SPACED_PERSONA, SPACED_MCP, SPACED_SETTINGS);
+        assert_paths_whole(&args, SPACED_PERSONA, SPACED_MCP, SPACED_SETTINGS);
+        assert_eq!(flag_value(&args, "--model"), "opus[1m]");
+        assert_eq!(flag_value(&args, "--name"), "goals-myapp");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    /// What the pty actually execs on a POSIX host: the program directly, never `$SHELL -c` with
+    /// a line the shell would split.
+    #[test]
+    fn orchestrator_spawn_execs_claude_directly_with_whole_paths() {
+        let args = spaced_orchestrator_args(SPACED_PERSONA, SPACED_MCP, SPACED_SETTINGS);
+        let spawn = hyperpanes_core::session::spawn::resolve_spawn_with(
+            "/bin/bash",
+            Some(super::GOAL_ORCHESTRATOR_PROGRAM),
+            Some(&args),
+            None,
+            None,
+            false,
+            &|_| false,
+        );
+        assert_eq!(spawn.file, "claude");
+        assert_paths_whole(&spawn.args, SPACED_PERSONA, SPACED_MCP, SPACED_SETTINGS);
+    }
+
+    /// The Windows default install sits under the user profile (`C:\Users\my name\…`). The
+    /// spawn resolves `claude` on PATH and hands the paths over as argv — no cmd/pwsh re-parse.
+    #[test]
+    fn orchestrator_spawn_on_windows_keeps_profile_paths_whole() {
+        let persona = r"C:\Users\my o'name\AppData\Local\Programs\hyperpanes\resources\claude\goal-orchestrator\SKILL.md";
+        let mcp = r"C:\Users\my o'name\AppData\Local\hyperpanes\goals-mcp.json";
+        let settings = r"C:\Users\my o'name\AppData\Local\hyperpanes\goals-settings.json";
+        let args = spaced_orchestrator_args(persona, mcp, settings);
+        let env: hyperpanes_core::session::spawn::EnvMap = [
+            ("PATH".to_string(), r"C:\bin".to_string()),
+            ("PATHEXT".to_string(), ".EXE".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let spawn = hyperpanes_core::session::spawn::resolve_spawn_with(
+            "pwsh.exe",
+            Some(super::GOAL_ORCHESTRATOR_PROGRAM),
+            Some(&args),
+            None,
+            Some(&env),
+            true,
+            &|p| p.eq_ignore_ascii_case(r"C:\bin\claude.exe"),
+        );
+        assert!(
+            spawn.file.to_ascii_lowercase().ends_with("claude.exe"),
+            "{}",
+            spawn.file
+        );
+        assert_paths_whole(&spawn.args, persona, mcp, settings);
+    }
+
+    /// A restored / restarted orchestrator is resumed by re-launching its argv with `--resume`:
+    /// the spaced paths must come back whole, not re-split.
+    #[test]
+    fn orchestrator_resume_keeps_spaced_paths_whole() {
+        let args = spaced_orchestrator_args(SPACED_PERSONA, SPACED_MCP, SPACED_SETTINGS);
+        let plan = super::plan_claude_resume(
+            Some(super::GOAL_ORCHESTRATOR_PROGRAM.to_string()),
+            Some(args),
+            "sess-1",
+            None,
+            None,
+            &hyperpanes_core::claude_panes::RecordedArgv::Absent,
+        );
+        assert_eq!(plan.command.as_deref(), Some("claude"));
+        let argv = plan.args.expect("a direct-argv launch resumes as argv");
+        assert_paths_whole(&argv, SPACED_PERSONA, SPACED_MCP, SPACED_SETTINGS);
+        assert_eq!(flag_value(&argv, "--resume"), "sess-1");
+    }
+
     #[test]
     fn session_names_are_mentionable_without_quoting() {
         // `@`-mention typeahead takes [A-Za-z0-9_-] unquoted; everything else must fold away.
@@ -1010,6 +1187,10 @@ pub struct NewPaneOpts {
     pub cwd: Option<String>,
     /// A command to run instead of an interactive shell (empty → interactive).
     pub command: Option<String>,
+    /// With `command`: run it DIRECTLY as the program with this verbatim argv — no shell, no
+    /// re-parse, so an argument holding a space or a quote stays one argument. `None` (or empty)
+    /// ⇒ `command` is a line run through the pane's shell.
+    pub args: Option<Vec<String>>,
     /// Shell token override ("" / `None` → the default-shell preference).
     pub shell: Option<String>,
     /// The chosen accent (the swatch). `None` = the by-slot palette color (a plain new pane).
@@ -1992,6 +2173,11 @@ impl State {
         let accent = opts.accent;
         // A command to run instead of an interactive shell ("" → interactive).
         let command = opts.command.filter(|c| !c.is_empty());
+        // A direct argv only means something alongside a program.
+        let args = opts
+            .args
+            .filter(|a| !a.is_empty())
+            .filter(|_| command.is_some());
         // Shell: an explicit pick from the dialog is used verbatim; otherwise honour the
         // default-shell preference ("" = prefer pwsh when available, else core's default).
         let shell = match opts.shell {
@@ -2034,6 +2220,7 @@ impl State {
                 // relaunch snapshot.
                 shell: shell.clone(),
                 command: command.clone(),
+                args: args.clone(),
                 env: opts.env.clone(),
                 integration,
                 ..Default::default()
@@ -2099,9 +2286,9 @@ impl State {
             // The resolved shell program → its short header badge (computed once here).
             shell_label: shell_label(&shell_path),
             // Remember the spawn spec so the relaunch snapshot can re-run this program. A New
-            // Pane dialog carries no argv, so `spawn_args` stays None.
+            // Pane dialog carries no argv, so `spawn_args` stays None there.
             spawn_command: command,
-            spawn_args: None,
+            spawn_args: args,
             spawn_shell: shell,
             remote: None,
         })
@@ -4128,7 +4315,7 @@ impl State {
         spec_model: &str,
         impl_model: &str,
         account: GoalAccount,
-    ) -> Option<(String, hyperpanes_core::session::spawn::EnvMap)> {
+    ) -> Option<GoalOrchestratorLaunch> {
         let proj_name = proj_name.to_string();
         let proj_color = proj_color.to_string();
         // Locate the goal-orchestrator persona `SKILL.md`. Bundled with the app under
@@ -4180,12 +4367,6 @@ impl State {
         // spec/impl tiers ride in as env so the persona spawns those agents with the chosen
         // models. The goal is NOT set as `startup` (that fires mid-boot, when Claude swallows it);
         // it's queued for marker-gated delivery once the pane's Claude is ready.
-        // `--dangerously-skip-permissions`: the whole goal org runs unattended 24/7 — a
-        // permission prompt would wedge it (and swallow the delivered goal text).
-        let mut command = format!(
-            "claude --dangerously-skip-permissions --append-system-prompt-file {} --model {orch_model}",
-            persona.display()
-        );
         // Give the session a stable, addressable name. Claude Code otherwise derives one from the
         // cwd basename, so every agent in a goal org — orchestrator, spec, and up to 16 impl
         // workers, often in the SAME worktree — ends up as `<project>-<2 hex chars>`, which is
@@ -4194,28 +4375,23 @@ impl State {
         // `self.goal_orchestrators`, which restore re-registers), so `goals-<project>` stays
         // unique across relaunches too.
         let session_name = goal_session_name("goals", &proj_name);
-        command.push_str(&format!(" --name {session_name}"));
         // Account rotation hides the user-scoped hyperpanes MCP registration (it only lives in
         // the default `~/.claude.json`), so hand every spawned claude an explicit config that
         // re-registers it. Best-effort: a write failure just drops the flag, not the spawn.
-        if let Some(mcp_config_path) = write_goals_mcp_config() {
-            // `--strict-mcp-config`: load ONLY the hyperpanes server from our config, never merge
-            // whatever `.mcp.json` / user-scoped servers the goal's project cwd happens to carry.
-            // Keeps the goal agent's tool pool small and deterministic (just `mcp__hyperpanes__*`).
-            command.push_str(&format!(
-                " --mcp-config {} --strict-mcp-config",
-                mcp_config_path.display()
-            ));
-        }
+        let mcp_config_path = write_goals_mcp_config();
         // The user's statusLine lives only in the default `~/.claude/settings.json`; account
         // rotation points CLAUDE_CONFIG_DIR at per-account dirs that don't carry it, so agents
         // fall back to Claude's built-in statusline. Inject it via `--settings` (same
         // rotation-blindness fix as `--mcp-config`) and hand the path down as HP_GOAL_SETTINGS so
         // the persona's spec/impl spawns inherit it too. Best-effort: no statusLine ⇒ no flag.
         let goals_settings = write_goals_settings_config();
-        if let Some(ref settings_path) = goals_settings {
-            command.push_str(&format!(" --settings {}", settings_path.display()));
-        }
+        let args = goal_orchestrator_args(
+            &persona,
+            orch_model,
+            &session_name,
+            mcp_config_path.as_deref(),
+            goals_settings.as_deref(),
+        );
         let mut env: hyperpanes_core::session::spawn::EnvMap = std::collections::HashMap::new();
         env.insert("HP_GOAL_SPEC_MODEL".to_string(), spec_model.to_string());
         env.insert("HP_GOAL_IMPL_MODEL".to_string(), impl_model.to_string());
@@ -4314,7 +4490,11 @@ impl State {
                 std::env::set_var(key, val);
             }
         }
-        Some((command, env))
+        Some(GoalOrchestratorLaunch {
+            program: GOAL_ORCHESTRATOR_PROGRAM.to_string(),
+            args,
+            env,
+        })
     }
 
     /// Goals system: hand a free-text goal to the project's goals orchestrator, spawning one if
@@ -4382,14 +4562,16 @@ impl State {
             self.goal_orchestrators.remove(project_path); // stale (pane closed) — respawn below
         }
 
-        let Some((command, env)) = self.build_goal_orchestrator_launch(
-            &proj_name,
-            &proj_color,
-            orch_model,
-            spec_model,
-            impl_model,
-            GoalAccount::Rotate,
-        ) else {
+        let Some(GoalOrchestratorLaunch { program, args, env }) = self
+            .build_goal_orchestrator_launch(
+                &proj_name,
+                &proj_color,
+                orch_model,
+                spec_model,
+                impl_model,
+                GoalAccount::Rotate,
+            )
+        else {
             return false;
         };
         let opts = NewPaneOpts {
@@ -4399,7 +4581,8 @@ impl State {
                 proj_name.clone()
             }),
             cwd: Some(project_path.to_string()),
-            command: Some(command),
+            command: Some(program),
+            args: Some(args),
             accent: (!proj_color.is_empty()).then(|| parse_hex(&proj_color)),
             show_frame: (!proj_color.is_empty()).then_some(true),
             show_dot: (!proj_color.is_empty()).then_some(true),
@@ -4445,7 +4628,17 @@ impl State {
     /// normalized to its latest-tracking alias.
     fn restored_goal_orchestrator(&self, spec: &PaneSpec) -> Option<(String, [String; 3])> {
         let meta = spec.meta.as_ref();
-        let command = spec.command.as_deref().unwrap_or("");
+        // The launch line as one string: the saved command plus a direct-argv launch's args (an
+        // orchestrator launched as program + argv keeps its persona path in `args`).
+        let command = match spec.args.as_deref().filter(|a| !a.is_empty()) {
+            Some(args) => format!(
+                "{} {}",
+                spec.command.as_deref().unwrap_or(""),
+                args.join(" ")
+            ),
+            None => spec.command.clone().unwrap_or_default(),
+        };
+        let command = command.as_str();
         let project = match meta.and_then(|m| m.get(GOAL_META_PROJECT)) {
             Some(p) => p.clone(),
             None => {
@@ -4697,7 +4890,30 @@ pub(crate) struct ResumePlan {
 /// `resume_launch` (shared with restartPane/recoverPane): born-with flags kept, earlier
 /// session-selection flags dropped, `--resume <id>` added once. Any other program ignores the
 /// marker.
+#[cfg(test)]
 pub(crate) fn plan_claude_resume(
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    id: &str,
+    resume_cwd: Option<&str>,
+    config_dir: Option<&str>,
+    recorded_argv: &hyperpanes_core::claude_panes::RecordedArgv,
+) -> ResumePlan {
+    plan_claude_resume_for_shell(
+        None,
+        command,
+        args,
+        id,
+        resume_cwd,
+        config_dir,
+        recorded_argv,
+    )
+}
+
+/// [`plan_claude_resume`] for a pane whose command line runs under `shell` (`None` = the default
+/// shell): the shell decides how a command string's quotes pair when it is rewritten.
+pub(crate) fn plan_claude_resume_for_shell(
+    shell: Option<&str>,
     command: Option<String>,
     args: Option<Vec<String>>,
     id: &str,
@@ -4722,8 +4938,12 @@ pub(crate) fn plan_claude_resume(
     // original flag is kept, earlier session-selection flags (`--resume <old>`, `--continue`,
     // `--session-id <id>`, ...) are dropped, and `--resume <id>` is added exactly once. A pane
     // running some other program is left alone (`None`).
-    match hyperpanes_core::control::dispatch::resume_launch(command.as_deref(), args.as_deref(), id)
-    {
+    match hyperpanes_core::control::dispatch::resume_launch_for_shell(
+        command.as_deref(),
+        args.as_deref(),
+        id,
+        shell,
+    ) {
         Some(l) => ResumePlan {
             command: Some(l.command),
             args: l.args,
@@ -6706,7 +6926,7 @@ impl State {
         if let Some((project, models)) = &restored_goal {
             let (name, color) = self.restored_goal_identity(spec, project);
             if !reattach {
-                if let Some((cmd, env)) = self.build_goal_orchestrator_launch(
+                if let Some(launch) = self.build_goal_orchestrator_launch(
                     &name,
                     &color,
                     &models[0],
@@ -6714,9 +6934,9 @@ impl State {
                     &models[2],
                     GoalAccount::Fixed(resume_config_dir.clone()),
                 ) {
-                    spawn_command = Some(cmd);
-                    spawn_args = None;
-                    goal_env = Some(env);
+                    spawn_command = Some(launch.program);
+                    spawn_args = Some(launch.args);
+                    goal_env = Some(launch.env);
                 }
             }
             if self.goal_orchestrators.contains_key(project) {
@@ -6731,7 +6951,8 @@ impl State {
         let mut startup = None;
         let mut config_dir_env: Option<String> = None;
         if let Some(id) = &resume_id {
-            let r = plan_claude_resume(
+            let r = plan_claude_resume_for_shell(
+                Some(shell_path.as_str()),
                 spawn_command.take(),
                 spawn_args.take(),
                 id,
@@ -8738,6 +8959,33 @@ mod goal_restore_tests {
         assert_eq!(command_model("claude --model"), None);
     }
 
+    /// An orchestrator launched as program + argv keeps its persona path in `args`; the
+    /// meta-less fallback must still recognise it (and read its `--model`) from there.
+    #[test]
+    fn an_argv_launch_without_meta_is_recognised() {
+        let mut st = fresh();
+        st.projects = vec![project("/home/user/dev/myapp", "myapp")];
+        let args = goal_orchestrator_args(
+            std::path::Path::new("/home/user/a b/goal-orchestrator/SKILL.md"),
+            "opus[1m]",
+            "goals-myapp",
+            None,
+            None,
+        );
+        let spec = PaneSpec {
+            label: Some("myapp".to_string()),
+            cwd: Some("/home/user/dev/myapp".to_string()),
+            command: Some(GOAL_ORCHESTRATOR_PROGRAM.to_string()),
+            args: Some(args),
+            ..Default::default()
+        };
+        let (proj, models) = st
+            .restored_goal_orchestrator(&spec)
+            .expect("is an orchestrator");
+        assert_eq!(proj, "/home/user/dev/myapp");
+        assert_eq!(models[0], "opus[1m]");
+    }
+
     /// The case actually sitting on disk: a pre-fix snapshot with no `goals.*` meta. Recognised by
     /// its persona path; the project recovered from the pane label because a resumed orchestrator's
     /// cwd was observed to be `$HOME`; the dated model normalized.
@@ -8964,7 +9212,9 @@ mod goal_restore_tests {
             st.goal_account_cursor, before,
             "a restore must not advance rotation"
         );
-        if let Some((cmd, env)) = built {
+        if let Some(GoalOrchestratorLaunch { program, args, env }) = built {
+            assert_eq!(program, "claude");
+            let cmd = args.join(" ");
             assert!(cmd.contains("--model opus[1m]"), "{cmd}");
             assert!(cmd.contains("--name goals-myapp"), "{cmd}");
             assert_eq!(
