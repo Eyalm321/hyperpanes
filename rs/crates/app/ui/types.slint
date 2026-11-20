@@ -137,6 +137,8 @@ export struct TabItem {
     a11y-label: string,
     // any pane in the tab is busy (the shared core tab_status) → animated dots, else IDLE
     working: bool,
+    // a pane waits on a decision prompt (core TabStatus::Asking) → the ASK badge, over working
+    asking: bool,
 }
 
 // A draggable resize seam (vertical column / horizontal row / main-stack main).

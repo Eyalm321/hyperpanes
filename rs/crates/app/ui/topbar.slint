@@ -70,6 +70,7 @@ component TabChip inherits Rectangle {
     in property <color> group-color: Theme.subtext;
     in property <string> a11y-label: "";
     in property <bool> working: false;        // any pane busy → dots; else IDLE
+    in property <bool> asking: false;         // a pane waits on a decision → ASK badge
     in property <int> dot-phase: 0;           // which of the 3 dots is raised (0..2)
     in property <bool> reduce-motion: false;  // static equal dots
     callback select();
@@ -106,7 +107,7 @@ component TabChip inherits Rectangle {
     border-width: root.spring-hover ? 2px : (root.active ? 1px : 0px);
     border-color: root.spring-hover ? Theme.brand : Theme.border;
     accessible-role: tab;
-    accessible-label: (root.a11y-label != "" ? root.a11y-label : root.title) + (root.working ? ", working" : ", idle");
+    accessible-label: (root.a11y-label != "" ? root.a11y-label : root.title) + (root.asking ? ", needs input" : root.working ? ", working" : ", idle");
     accessible-item-selected: root.active;
     accessible-action-default => { root.select(); }
 
@@ -170,6 +171,7 @@ component TabChip inherits Rectangle {
         // status slot (shared with the vertical tab rows) — fixed width in both states
         TabStatusSlot {
             working: root.working;
+            asking: root.asking;
             dot-phase: root.dot-phase;
             reduce-motion: root.reduce-motion;
             visible: !root.editing;
@@ -372,6 +374,7 @@ export component TopBar inherits Rectangle {
                         group-color: tab.group-color;
                         a11y-label: tab.a11y-label;
                         working: tab.working;
+                        asking: tab.asking;
                         dot-phase: root.tab-dot-phase;
                         reduce-motion: root.reduce-motion;
                         editing: root.editing-tab == idx;

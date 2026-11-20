@@ -1,0 +1,16 @@
+# gitleaks config: the default rules plus an allowlist for two well-known PUBLIC sample
+# values that appear in tests. Nothing else is allowlisted; keep it that way.
+#   gitleaks git .   (history)      gitleaks dir .   (working tree)
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public sample values used as test fixtures"
+regexTarget = "match"
+regexes = [
+  # The jwt.io sample token (HS256, sub "1234567890"): redactor tests.
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkw''',
+  # The RFC 6455 sample Sec-WebSocket-Key ("the sample nonce"): control server tests.
+  '''dGhlIHNhbXBsZSBub25jZQ==''',
+]

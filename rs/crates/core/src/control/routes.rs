@@ -7,6 +7,7 @@
 //!                                (control::output cores); cursor ALWAYS present
 //!   POST /panes/{id}/input       allowInput gate (403); data|keys (control::input); submit; lock 423
 //!   GET|POST /panes/{id}/messages durable inbox (control::inbox)
+//!   GET /panes/{id}/open-consults       unanswered needs-decision consults (control::spec_sweep)
 //!   POST|DELETE /panes/{id}/lock  advisory lock (control::lock)
 //!   POST /command                dispatch
 //!   GET  /events                 WS upgrade (token via header or ?token=)
@@ -71,6 +72,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/panes/{id}/messages",
             get(messages_get).post(messages_post),
         )
+        .route("/panes/{id}/open-consults", get(open_consults_get))
         .route("/panes/{id}/lock", post(lock_post).delete(lock_delete))
         // ---- work queue (worker-pool phase-2/3) ----
         .route("/queues", get(queues_list))
@@ -254,7 +256,7 @@ async fn state(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Respons
     };
     let out = {
         let m = shared.model.lock().unwrap();
-        m.state_for_scope_with_dims(info.scope.as_ref(), &|p| shared.compute_activity(p), &|p| {
+        m.state_for_scope_with_dims(info.scope.as_ref(), &|p| shared.compute_live(p), &|p| {
             shared.sessions.dims(&p.session_uid)
         })
     };
@@ -696,12 +698,28 @@ fn build_screen_body(
         .output_bytes(uid)
         .map(|b| b as i64)
         .unwrap_or(0);
+    // The content cursor BEFORE rendering keys the cached classification (see
+    // `server::classify_screen`), so the activity read-out reuses this read's verdict.
+    let content_cursor = shared
+        .sessions
+        .activity_signal(uid)
+        .map(|sig| sig.content_cursor);
     match shared.sessions.render_screen_read(uid) {
         Some(read) => {
             let full = read.text;
             // Prompt detection runs on the FULL screen so a clipping `tail` can't hide a blocked
             // prompt above the tail window.
             let awaiting = detect_awaiting_input(&full);
+            if let Some(c) = content_cursor {
+                shared.sessions.set_verdict(
+                    uid,
+                    crate::control::output::verdict_for(
+                        &full,
+                        c,
+                        crate::control::server::now_ms() as u64,
+                    ),
+                );
+            }
             let mut text = full;
             if let Some(tail) = tail_num(q.get("tail")) {
                 text = tail_lines(&text, tail);
@@ -905,6 +923,32 @@ async fn messages_get(
     ok_json(out)
 }
 
+/// `GET /panes/{id}/open-consults`: needs-decision messages addressed to the pane by spec panes
+/// that it has not answered yet. Same auth + scope as reading its messages.
+async fn open_consults_get(
+    State(shared): State<Arc<Shared>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let info = match authorize(&shared, &headers) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let id = match find_pane_scoped(&shared, info.scope.as_ref(), &id) {
+        Ok(f) => f.pane_id,
+        Err(e) => return e,
+    };
+    let open: Vec<Value> = shared
+        .spec_sweep
+        .lock()
+        .unwrap()
+        .open_consults(&id)
+        .into_iter()
+        .map(|c| json!({ "from": c.from, "seq": c.seq, "ts": c.ts }))
+        .collect();
+    jstatus(200, json!({ "ok": true, "paneId": id, "open": open }))
+}
+
 async fn messages_post(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
@@ -945,6 +989,8 @@ async fn messages_post(
         let msg = inbox.post(&id, &from, &msg_body, now_ms());
         (msg, inbox.epoch())
     };
+    // Feed the spec-pane sweeper (reports, inbound timestamps, open consults).
+    crate::control::spec_sweep::record_post(&shared, &id, &from, msg.seq, &msg_body, msg.ts);
     // Wake an opted-in agent pane (goals org): the durable read stays the source of truth, but a
     // TUI agent parked at its prompt would never perform that read on its own.
     if nudge {
@@ -1022,6 +1068,20 @@ fn arm_inbox_nudge(shared: &Arc<Shared>, pane_id: &str, seq: u64) {
             let Some((busy, form)) = watched else {
                 shared.nudges.lock().unwrap().drop_pane(&pane_id);
                 return;
+            };
+            // Never type into a decision prompt (a permission dialog, a y/n question): the
+            // nudge's Enter would answer it. Such a pane reads idle once its output is only
+            // cosmetic (a blinking indicator), so check the screen itself before typing, with
+            // the same predicate the queued-prompt and goal deliveries use.
+            let busy = busy || {
+                let sessions = Arc::clone(&shared.sessions);
+                let owned = uid.clone();
+                // A failed check (the blocking task panicked) must not type: treat it as busy.
+                tokio::task::spawn_blocking(move || {
+                    crate::control::server::screen_blocks_typing(&sessions, &owned)
+                })
+                .await
+                .unwrap_or(true)
             };
             let step = shared
                 .nudges

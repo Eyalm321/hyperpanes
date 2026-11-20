@@ -8,9 +8,11 @@ pub mod lock;
 pub mod nudge;
 pub mod output;
 pub mod scope;
+pub mod spec_sweep;
 pub mod work;
 pub mod work_lock;
 
+pub mod classifier;
 pub mod discovery_guard;
 pub mod dispatch;
 pub mod endpoints;

@@ -251,19 +251,45 @@ mod tests {
         Shared::new(sessions, false, "0.0.0", control, speech)
     }
 
-    /// A live process that LOOKS like hyperpanes: `sleep` behind a symlink named
-    /// `hyperpanes` (comm and argv0 follow the invoked path). A symlink, not a copy:
-    /// copying opens the target for write, and that fd inherited across another
-    /// test's concurrent fork makes exec fail with ETXTBSY. Kill+reap when done.
+    /// Tells this test binary, re-run by `fake_hyperpanes`, how long to live.
+    #[cfg(unix)]
+    const FAKE_OWNER_SECS: &str = "HYPERPANES_TEST_FAKE_OWNER_SECS";
+
+    /// Not a check: the body of the process `fake_hyperpanes` starts. Run by name in a
+    /// re-run of this test binary, it stays alive for `FAKE_OWNER_SECS` seconds; in a
+    /// normal run it is ignored, and under `--ignored` alone it returns at once.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "the fake hyperpanes owner, run by name from fake_hyperpanes"]
+    fn fake_owner_process() {
+        if let Ok(secs) = std::env::var(FAKE_OWNER_SECS) {
+            std::thread::sleep(Duration::from_secs(secs.parse().expect("whole seconds")));
+        }
+    }
+
+    /// A live process that LOOKS like hyperpanes: this test binary re-run through a
+    /// symlink named `hyperpanes` (comm and argv0 follow the invoked path), running only
+    /// `fake_owner_process`. Not `sleep`: a multi-call coreutils (uutils, as on Ubuntu
+    /// 26.04) dispatches on argv0 and refuses to run as `hyperpanes`, so the owner would
+    /// exit at once. A symlink, not a copy: copying opens the target for write, and that
+    /// fd inherited across another test's concurrent fork makes exec fail with ETXTBSY.
+    /// Kill+reap when done.
     #[cfg(unix)]
     fn fake_hyperpanes(dir: &Path, secs: &str) -> std::process::Child {
-        let sleep_bin = ["/usr/bin/sleep", "/bin/sleep"]
-            .iter()
-            .find(|p| Path::new(p).exists())
-            .expect("no sleep binary");
+        let test_bin = std::env::current_exe().expect("the test binary's path");
         let fake = dir.join("hyperpanes");
-        std::os::unix::fs::symlink(sleep_bin, &fake).unwrap();
-        std::process::Command::new(&fake).arg(secs).spawn().unwrap()
+        std::os::unix::fs::symlink(test_bin, &fake).unwrap();
+        // libtest names a test by its path without the crate.
+        let module = module_path!().split_once("::").expect("crate::module").1;
+        std::process::Command::new(&fake)
+            .args(["--exact", &format!("{module}::fake_owner_process")])
+            .args(["--ignored", "--test-threads=1"])
+            .env(FAKE_OWNER_SECS, secs)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
     }
 
     // Claim instantly: no retry budget needed for the claimable cases.

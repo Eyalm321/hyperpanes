@@ -8,7 +8,7 @@
 //! ```text
 //! C:\hyperpanes                          -> C--hyperpanes
 //! C:\hyperpanes.fanout\track19-history   -> C--hyperpanes-fanout-track19-history
-//! C:\canora\.claude-worktrees\festive-…  -> C--canora--claude-worktrees-festive-…
+//! C:\myrepo\.claude-worktrees\festive-…  -> C--myrepo--claude-worktrees-festive-…
 //! ```
 //!
 //! Note the `.` in `hyperpanes.fanout` is encoded too (the folder is `…hyperpanes-fanout…`,
@@ -534,8 +534,8 @@ mod tests {
         );
         // Runs are not collapsed: `\` then `.` becomes `--`.
         assert_eq!(
-            encode_path_str("C:\\canora\\.claude-worktrees\\festive-swartz-147488"),
-            "C--canora--claude-worktrees-festive-swartz-147488"
+            encode_path_str("C:\\myrepo\\.claude-worktrees\\festive-swartz-147488"),
+            "C--myrepo--claude-worktrees-festive-swartz-147488"
         );
         // Forward slashes / underscores / spaces all map to `-` as well.
         assert_eq!(

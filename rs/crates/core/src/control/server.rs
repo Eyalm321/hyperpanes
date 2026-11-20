@@ -27,12 +27,17 @@ use crate::control::events::{ControlEvent, EventHub};
 use crate::control::inbox::MessageInbox;
 use crate::control::lock::PaneLocks;
 use crate::control::nudge::NudgeLedger;
-use crate::control::readmodel::{Activity, PaneInfo, PaneRef, PaneStatus, ReadModel};
+use crate::control::output::{blocks_typed_input, verdict_for};
+use crate::control::readmodel::{
+    Activity, Asking, PaneInfo, PaneLive, PaneRef, PaneStatus, ReadModel,
+};
 use crate::control::routes;
+use crate::control::spec_sweep::SweepLedger;
 use crate::control::speech_service::SpeechService;
 use crate::control::supervisor::{Decision, Supervisor};
 use crate::control::tokens::{random_token, TokenStore};
 use crate::control::work::WorkQueue;
+use crate::session::activity::ScreenVerdict;
 use crate::session_manager::{SessionEvent, SessionManager};
 
 /// The renderer idle threshold (`useSettings.idleAlertSeconds`, default 10s): a running pane with
@@ -58,6 +63,8 @@ pub struct Shared {
     /// Inbox-nudge bookkeeping (`control::nudge`): which agent panes have unread mail and when
     /// they were last woken. The inbox itself stays pull-only; this is the opt-in wake-up.
     pub nudges: Mutex<NudgeLedger>,
+    /// Spec-pane sweeper bookkeeping (`control::spec_sweep`): reports, consults, hysteresis.
+    pub spec_sweep: Mutex<SweepLedger>,
     pub locks: Mutex<PaneLocks>,
     /// Durable, claimable work queue backing the `/queues` + `/tasks` routes
     /// (worker-pool phase-2). `rusqlite::Connection` is `Send` but not `Sync`, so —
@@ -266,6 +273,7 @@ impl Shared {
             tokens: Mutex::new(TokenStore::new()),
             inbox: Mutex::new(MessageInbox::new()),
             nudges: Mutex::new(NudgeLedger::new()),
+            spec_sweep: Mutex::new(SweepLedger::new()),
             locks: Mutex::new(PaneLocks::new()),
             work: Mutex::new(WorkQueue::open_in_memory().expect("open in-memory work queue")),
             work_mode: AtomicU8::new(WorkQueueMode::Memory as u8),
@@ -609,11 +617,21 @@ impl Shared {
     }
 
     /// Resolve a pane's liveness from the session manager + the idle threshold. Mirrors the TS
-    /// `status==='exited' ? 'exited' : idle ? 'idle' : 'busy'` with idle = "no output for the
-    /// threshold"; a never-output pane reads `busy` (the renderer's `markActivity` only fires on
-    /// output).
+    /// `status==='exited' ? 'exited' : idle ? 'idle' : 'busy'` with idle = "no genuine output
+    /// for the threshold" (a blink is not output, see `session::activity`); a never-output pane
+    /// reads `busy` (the renderer's `markActivity` only fires on output).
     pub fn compute_activity(&self, pane: &PaneInfo) -> Activity {
         activity_for(
+            &self.sessions,
+            self.idle_threshold_ms,
+            &pane.session_uid,
+            pane.status,
+        )
+    }
+
+    /// [`Self::compute_activity`] plus the pane's ask episode — what `/state` serializes.
+    pub fn compute_live(&self, pane: &PaneInfo) -> PaneLive {
+        live_for(
             &self.sessions,
             self.idle_threshold_ms,
             &pane.session_uid,
@@ -653,12 +671,76 @@ pub fn activity_for(
                 };
             }
         }
-        // Fallback: the legacy 10s output-silence heuristic (labeled, unchanged).
-        match sessions.last_output_at(uid) {
+        // Fallback: the 10s output-silence heuristic over GENUINE output only. Cosmetic redraws
+        // (a blinking indicator, an app-drawn cursor toggling the same cells) never stamp
+        // `content_at` (see `session::activity`), so a pane that only blinks goes idle.
+        let Some(sig) = sessions.activity_signal(uid) else {
+            // Unknown session: nothing has been seen from it, which reads busy (as before).
+            return Activity::Busy;
+        };
+        // A screen classified as blocked on a decision (a permission dialog, a y/n prompt) is
+        // awaiting input even inside the busy window. The verdict is cached per genuine-output
+        // cursor, so it holds until the screen really changes.
+        if sig.awaiting_now() {
+            return Activity::AwaitingInput;
+        }
+        match sig.content_at {
             Some(t) if now_ms() - (t as i64) >= idle_threshold_ms => Activity::Idle,
             _ => Activity::Busy,
         }
     }
+}
+
+/// Render the pane's current screen and cache its [`verdict_for`] (awaiting / asking / question)
+/// under the content cursor read BEFORE rendering: output that lands mid-render leaves the
+/// verdict stale (so it is re-classified) instead of mislabelling newer content. Blocking (the
+/// daemon backend round-trips), so callers run it off the async runtime. `None` for an unknown
+/// or gone pane, or a screen that could not be read.
+pub fn classify_screen(sessions: &SessionManager, uid: &str) -> Option<ScreenVerdict> {
+    let cursor = sessions.activity_signal(uid)?.content_cursor;
+    let text = sessions.render_screen(uid)?;
+    let verdict = verdict_for(&text, cursor, now_ms() as u64);
+    sessions.set_verdict(uid, verdict.clone());
+    Some(verdict)
+}
+
+/// Whether text + Enter typed by the app into this pane would answer a decision prompt instead
+/// of reaching the agent's input box ([`blocks_typed_input`] over a FRESH render, never the
+/// cache). Blocking (the daemon backend round-trips). The inbox nudge checks it right before
+/// typing. A live pane whose screen cannot be read counts as blocked (never type blind); a gone
+/// pane does not (nothing typed reaches it). The render also refreshes the cached verdict.
+pub fn screen_blocks_typing(sessions: &SessionManager, uid: &str) -> bool {
+    let cursor = sessions.activity_signal(uid).map(|s| s.content_cursor);
+    let Some(text) = sessions.render_screen(uid) else {
+        return sessions.has(uid);
+    };
+    if let Some(c) = cursor {
+        sessions.set_verdict(uid, verdict_for(&text, c, now_ms() as u64));
+    }
+    blocks_typed_input(&text)
+}
+
+/// A pane's liveness as `/state` and the tab chip report it: its [`activity_for`] plus, while it
+/// waits on a decision prompt (an ask episode, see `session::activity::AskEpisode`), since when
+/// and on which question. An exited pane never asks.
+pub fn live_for(
+    sessions: &SessionManager,
+    idle_threshold_ms: i64,
+    uid: &str,
+    status: PaneStatus,
+) -> PaneLive {
+    let activity = activity_for(sessions, idle_threshold_ms, uid, status);
+    let asking = if activity == Activity::Exited {
+        None
+    } else {
+        sessions.activity_signal(uid).and_then(|sig| {
+            sig.asking().map(|(since, question)| Asking {
+                since,
+                question: question.map(str::to_string),
+            })
+        })
+    };
+    PaneLive { activity, asking }
 }
 
 /// Map a computed [`Activity`] + liveness snapshot into a `liveness` frame. The `state`
@@ -964,10 +1046,33 @@ fn master_token(shared: &Arc<Shared>) -> String {
 pub async fn run_activity_ticker(shared: Arc<Shared>) {
     let mut interval = tokio::time::interval(Duration::from_millis(ACTIVITY_TICK_MS));
     let mut last: HashMap<String, Activity> = HashMap::new();
+    // Panes last seen asking, so an ask episode starting or ending pings `state` (the tab's
+    // status changes without any structural change).
+    let mut asking: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         interval.tick().await;
         let panes: Vec<PaneRef> = shared.model.lock().unwrap().panes();
         let mut seen = std::collections::HashSet::new();
+        let mut ask_flipped = false;
+        for pr in &panes {
+            let now_asking = pr.status != PaneStatus::Exited
+                && shared
+                    .sessions
+                    .activity_signal(&pr.session_uid)
+                    .is_some_and(|sig| sig.asking().is_some());
+            let was = asking.contains(&pr.pane_id);
+            if now_asking != was {
+                ask_flipped = true;
+                if now_asking {
+                    asking.insert(pr.pane_id.clone());
+                } else {
+                    asking.remove(&pr.pane_id);
+                }
+            }
+        }
+        if ask_flipped {
+            notify_state(&shared);
+        }
         for pr in &panes {
             seen.insert(pr.pane_id.clone());
             let act = activity_for(
@@ -1002,6 +1107,7 @@ pub async fn run_activity_ticker(shared: Arc<Shared>) {
             }
         }
         last.retain(|id, _| seen.contains(id));
+        asking.retain(|id| seen.contains(id));
     }
 }
 
@@ -1044,6 +1150,21 @@ pub async fn run_reaper_ticker(shared: Arc<Shared>) {
                 crate::control::work::stranded_log_line(&queue, n, grace)
             );
         }
+    }
+}
+
+/// The spec-pane sweeper: once a minute, closes idle or finished goal spec panes whose work is
+/// over (see `control::spec_sweep`). The first tick is skipped so a fresh start never sweeps
+/// before panes have re-attached. The sweep does blocking /proc + file reads, so it runs on the
+/// blocking pool.
+pub async fn run_spec_sweep_ticker(shared: Arc<Shared>) {
+    let period = Duration::from_millis(crate::control::spec_sweep::SWEEP_TICK_MS);
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    loop {
+        interval.tick().await;
+        let s = Arc::clone(&shared);
+        let _ =
+            tokio::task::spawn_blocking(move || crate::control::spec_sweep::sweep_once(&s)).await;
     }
 }
 

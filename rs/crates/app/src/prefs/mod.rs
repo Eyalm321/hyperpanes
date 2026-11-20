@@ -194,6 +194,10 @@ pub struct Settings {
     /// Reduced motion: the tab-status dots stay static instead of animating. When the key was
     /// never saved, [`load`] seeds it from the desktop's animation setting (Linux/GNOME).
     pub reduce_motion: bool,
+    /// Whether a pane that has waited on a decision prompt (its tab reads ASK) for a minute
+    /// raises a desktop notification, once per episode. ON by default; Linux only (no-op
+    /// elsewhere).
+    pub ask_notify: bool,
 }
 
 impl Default for Settings {
@@ -218,6 +222,7 @@ impl Default for Settings {
             keep_alive: true,
             osc52_clipboard: true,
             reduce_motion: false,
+            ask_notify: true,
         }
     }
 }
@@ -414,6 +419,7 @@ mod tests {
             keep_alive: false,      // non-default (defaults to true)
             osc52_clipboard: false, // non-default (defaults to true)
             reduce_motion: true,    // non-default (defaults to false)
+            ask_notify: false,      // non-default (defaults to true)
         }
     }
 

@@ -1,0 +1,8 @@
+# public-guard allowlist: exact strings that look private but are deliberately public.
+# One per line ("#" starts a comment). Prefer the documentation ranges
+# (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) and placeholder users (/home/user,
+# /Users/you, C:\Users\me) in new docs and tests; they never need an entry here.
+# 100.64.0.1 and 100.100.100.100 (documented Tailscale examples) are built in.
+
+# Android emulator alias for the host machine's loopback.
+10.0.2.2

@@ -61,6 +61,10 @@ use super::holder::{self, Holder};
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Default lease length minted on claim when the caller passes `lease_ms <= 0`.
 pub const DEFAULT_VISIBILITY_MS: i64 = 30_000;
+
+/// The reason the visibility-timeout sweep records on a claim it requeues or dead-letters. A late ack with that claim's
+/// own fencing token still lands while no one has claimed the task since (T1866): see [`WorkQueue::ack`].
+pub const LEASE_EXPIRED: &str = "visibility timeout: lease expired";
 /// Backoff base: first retry waits ~this long (doc 01 §2.3).
 pub const BACKOFF_BASE_MS: i64 = 1_000;
 /// Backoff ceiling so exponential growth can't run away.
@@ -698,13 +702,22 @@ impl WorkQueue {
                 LeaseOutcome::Conflict
             };
         }
-        if task.state != TaskState::Claimed || task.fencing_token != Some(fencing_token) {
+        // A late ack (T1866): the sweep requeued or dead-lettered this claim for a lapsed lease (a loaded host
+        // renewed too late) and nobody claimed it since — a new claim mints a new token, so the token still
+        // matching proves that. The work is finished: it lands as `done`, instead of being run a second time.
+        let reaped_unclaimed = matches!(task.state, TaskState::Queued | TaskState::Dead)
+            && task.fencing_token == Some(fencing_token)
+            && task.error.as_deref() == Some(LEASE_EXPIRED);
+        if !reaped_unclaimed
+            && (task.state != TaskState::Claimed || task.fencing_token != Some(fencing_token))
+        {
             return LeaseOutcome::Conflict;
         }
         let _ = self.conn.execute(
-            "UPDATE tasks SET state='done', result=?2, visibility_deadline=NULL, updated_at=?3
+            "UPDATE tasks SET state='done', result=?2, visibility_deadline=NULL, updated_at=?3,
+                 error = CASE WHEN ?4 THEN NULL ELSE error END
              WHERE id=?1",
-            params![id, result, now],
+            params![id, result, now, reaped_unclaimed],
         );
         self.changed.insert(task.queue.clone());
         LeaseOutcome::Ok(
@@ -793,7 +806,7 @@ impl WorkQueue {
             "visibility_deadline IS NOT NULL AND visibility_deadline <= ?1",
             params![now],
         );
-        self.requeue_or_dead_letter(ids, now, "visibility timeout: lease expired")
+        self.requeue_or_dead_letter(ids, now, LEASE_EXPIRED)
     }
 
     /// Fast requeue on worker exit (doc 01 §6): immediately recover a dead pane's in-flight
@@ -937,10 +950,12 @@ impl WorkQueue {
                 );
                 Disposition::DeadLettered
             } else {
+                // The reason is kept on a requeue too: a late ack of this claim reads it (T1866), and a fresh
+                // claim's ack/nack overwrites it.
                 let _ = self.conn.execute(
                     "UPDATE tasks SET state='queued', claimed_by=NULL, visibility_deadline=NULL,
-                         available_at=?2, updated_at=?2 WHERE id=?1",
-                    params![id, now],
+                         available_at=?2, error=?3, updated_at=?2 WHERE id=?1",
+                    params![id, now, reason],
                 );
                 Disposition::Requeued
             };
@@ -1421,6 +1436,86 @@ mod tests {
             wq.ack(&b.task.id, b.fencing_token, None, 1500),
             LeaseOutcome::Ok(_)
         ));
+    }
+
+    #[test]
+    fn late_ack_after_a_lapsed_lease_lands_while_no_one_claimed_it_since() {
+        // T1866: a loaded host renewed too late; the sweep requeued the claim, the worker finished and acks with its
+        // own token. Nobody claimed the task since, so the ack lands instead of the work running twice.
+        let mut wq = q();
+        enq(&mut wq, "build", "j", 0);
+        let a = wq.claim("build", "A", 100, 1000).unwrap();
+        let reaped = wq.reap_expired(1200);
+        assert_eq!(reaped[0].disposition, Disposition::Requeued);
+        assert_eq!(reaped[0].task.error.as_deref(), Some(LEASE_EXPIRED));
+        match wq.ack(&a.task.id, a.fencing_token, Some("ok"), 1300) {
+            LeaseOutcome::Ok(t) => {
+                assert_eq!(t.state, TaskState::Done);
+                assert_eq!(t.result.as_deref(), Some("ok"));
+                assert!(t.error.is_none());
+            }
+            other => panic!("expected the late ack to land, got {other:?}"),
+        }
+        assert!(
+            wq.claim("build", "B", 100, 1400).is_none(),
+            "nothing left to run twice"
+        );
+    }
+
+    #[test]
+    fn late_ack_lands_on_a_claim_the_sweep_dead_lettered() {
+        let mut wq = q();
+        wq.enqueue(
+            "build",
+            "j",
+            EnqueueOpts {
+                max_attempts: 1,
+                ..Default::default()
+            },
+            0,
+        );
+        let a = wq.claim("build", "A", 100, 1000).unwrap();
+        assert_eq!(
+            wq.reap_expired(1200)[0].disposition,
+            Disposition::DeadLettered
+        );
+        assert!(matches!(
+            wq.ack(&a.task.id, a.fencing_token, None, 1300),
+            LeaseOutcome::Ok(Task {
+                state: TaskState::Done,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn late_ack_stays_fenced_out_once_someone_else_claimed_or_after_a_nack() {
+        let mut wq = q();
+        enq(&mut wq, "build", "j", 0);
+        let a = wq.claim("build", "A", 100, 1000).unwrap();
+        wq.reap_expired(1200);
+        let b = wq.claim("build", "B", 100, 1300).unwrap();
+        assert_eq!(
+            wq.ack(&a.task.id, a.fencing_token, None, 1400),
+            LeaseOutcome::Conflict,
+            "B's claim wins"
+        );
+        // B nacks with requeue: the row is queued with B's token but no lease-expiry reason, so a stray ack of B's
+        // old claim is not a late ack of a lapsed lease.
+        wq.nack(
+            &b.task.id,
+            b.fencing_token,
+            NackOpts {
+                requeue: true,
+                delay_ms: Some(0),
+                error: Some("boom".into()),
+            },
+            1500,
+        );
+        assert_eq!(
+            wq.ack(&b.task.id, b.fencing_token, None, 1600),
+            LeaseOutcome::Conflict
+        );
     }
 
     #[test]

@@ -346,6 +346,8 @@ pub enum Setting {
     Osc52Clipboard(bool),
     /// Toggle reduced motion (static tab-status dots).
     ReduceMotion(bool),
+    /// Toggle the desktop notification for a pane asking for a minute.
+    AskNotify(bool),
     /// Set the editor-command template used to open clicked paths ("" = auto).
     EditorCommand(String),
     /// Toggle the idle-glow (AI-pane quiescence glow).
@@ -3518,6 +3520,7 @@ impl State {
             | Setting::CopyOnSelect(_)
             | Setting::Osc52Clipboard(_)
             | Setting::ReduceMotion(_)
+            | Setting::AskNotify(_)
             | Setting::EditorCommand(_)
             | Setting::IdleAlert(_)
             | Setting::IdleEffect(_)
@@ -3642,6 +3645,7 @@ impl State {
             Setting::CopyOnSelect(on) => self.settings.copy_on_select = on,
             Setting::Osc52Clipboard(on) => self.settings.osc52_clipboard = on,
             Setting::ReduceMotion(on) => self.settings.reduce_motion = on,
+            Setting::AskNotify(on) => self.settings.ask_notify = on,
             Setting::EditorCommand(cmd) => self.settings.editor_command = cmd,
             Setting::IdleAlert(on) => self.settings.idle_alert = on,
             Setting::IdleEffect(idx) => {

@@ -1,11 +1,12 @@
 //! D-Bus session-bus health, and the guards that stop a missing or misbehaving bus from crashing
 //! the app.
 //!
-//! hyperpanes has no D-Bus code of its own. Its dependencies use D-Bus through `zbus`, on Linux
-//! only:
+//! hyperpanes' own D-Bus code is one call: [`notify`], the "needs input" desktop notification
+//! (`crate::ask_alert`). Its dependencies use D-Bus through `zbus` too, on Linux only:
 //!
 //! | zbus user | What it does | Where it drives zbus |
 //! |---|---|---|
+//! | [`notify`] (`crate::ask_alert`) | `org.freedesktop.Notifications.Notify` for a tab that needs input | a short-lived `std::thread`, this module's `block_on`, zbus's own executor thread |
 //! | `accesskit_unix` + `atspi` (slint `accessibility`) | AT-SPI bridge: exposes the UI and the terminal text to screen readers | its own `std::thread`, `futures_lite::block_on` + `async_executor` |
 //! | i-slint-backend-winit `xdg_desktop_settings` | color scheme, accent, cursor blink and font size from the Settings portal | `spawn_local` on the UI thread |
 //! | `ashpd` (rfd `xdg-portal`) | Open/Save dialogs through the FileChooser portal (falls back to `zenity` on error) | `pollster::block_on` on the calling (UI) thread |
@@ -161,6 +162,45 @@ pub fn probe_timed(address: Option<String>, timeout: Duration) -> Result<(), Str
             Ok(()) => "the probe thread exited without an answer".into(),
         }),
     }
+}
+
+/// Raise a desktop notification through `org.freedesktop.Notifications` on the session bus and
+/// return its id. Blocking (connect, call, wait for the reply, which fails after `timeout`): call
+/// it off the UI thread. It drives zbus with this module's `block_on` plus zbus's own executor
+/// thread, never a Tokio runtime (the executor contract above).
+#[cfg(target_os = "linux")]
+pub fn notify(app_name: &str, summary: &str, body: &str, timeout: Duration) -> Result<u32, String> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+    block_on(async {
+        let conn = zbus::connection::Builder::session()
+            .map_err(|e| e.to_string())?
+            .method_timeout(timeout)
+            .build()
+            .await
+            .map_err(|e| e.to_string())?;
+        let hints: HashMap<&str, Value<'_>> = HashMap::new();
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "Notify",
+                &(
+                    app_name,
+                    0u32,
+                    "",
+                    summary,
+                    body,
+                    Vec::<&str>::new(),
+                    hints,
+                    -1i32,
+                ),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        reply.body().deserialize::<u32>().map_err(|e| e.to_string())
+    })
 }
 
 /// Minimal `block_on` that parks the current thread between polls. Deliberately not

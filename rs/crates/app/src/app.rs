@@ -21,6 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hyperpanes_core::control::output::blocks_typed_input;
 use hyperpanes_core::layout::presets::DividerKind;
 use hyperpanes_core::session_manager::{SessionEvent, SessionManager};
 use hyperpanes_terminal_widget::{encode_key, keys};
@@ -397,6 +398,10 @@ pub struct App {
     last_autosave_json: RefCell<String>,
     /// Throttle for the queued-prompt delivery tick (claude-resume speak-first).
     last_prompt_delivery: Cell<Option<std::time::Instant>>,
+    /// "Needs input" alerts: the once-per-episode policy, its notifier, and its tick throttle.
+    ask_alerts: RefCell<crate::ask_alert::AskAlerts>,
+    notifier: Box<dyn crate::ask_alert::Notifier>,
+    last_ask_poll: Cell<Option<std::time::Instant>>,
     /// Push-to-talk dictation: the mic-capture + transcribe worker (core::listen). Always
     /// spawned (one idle thread); `ready()` is false until both backends exist, which is what
     /// the toast tells the user about.
@@ -420,6 +425,11 @@ const SPRING_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 impl App {
     pub fn new(mgr: Arc<SessionManager>, erx: UnboundedReceiver<SessionEvent>) -> Rc<Self> {
         let control = crate::control_host::ControlHost::new(&mgr);
+        // The screen classifier (awaiting / asking verdicts and ask episodes behind the tab's ASK
+        // state and the "needs input" alerts) runs whether or not the control server is on.
+        tokio::spawn(hyperpanes_core::control::classifier::run_screen_classifier(
+            Arc::clone(&mgr),
+        ));
         let listen_settings =
             hyperpanes_core::listen::load(&hyperpanes_core::persistence::paths::listen_json());
         let listen = hyperpanes_core::listen::engine::ListenEngine::spawn(&listen_settings);
@@ -450,6 +460,9 @@ impl App {
             last_autosave: Cell::new(None),
             last_autosave_json: RefCell::new(String::new()),
             last_prompt_delivery: Cell::new(None),
+            ask_alerts: RefCell::new(crate::ask_alert::AskAlerts::default()),
+            notifier: Box::new(crate::ask_alert::DesktopNotifier::default()),
+            last_ask_poll: Cell::new(None),
             listen,
             listen_settings: RefCell::new(listen_settings),
             remote: crate::remote::Hub::new(),
@@ -552,13 +565,14 @@ impl App {
                 .control
                 .uid_for_pane_id(pane_id)
                 .unwrap_or_else(|| pane_id.to_string());
-            // Hold while an interactive selector (trust prompt, model picker…) is on screen —
-            // typed text would land in the form and be swallowed. The queue keeps the prompt.
+            // Hold while a decision prompt (trust prompt, model picker, permission dialog, y/n
+            // question…) is on screen — typed text would land in the form and its Enter would
+            // answer it. The queue keeps the prompt. Same predicate as the inbox nudge.
             if self
                 .mgr
                 .render_screen(&uid)
                 .as_deref()
-                .is_some_and(screen_shows_option_form)
+                .is_some_and(blocks_typed_input)
             {
                 continue;
             }
@@ -593,6 +607,53 @@ impl App {
                     std::thread::sleep(Duration::from_millis(400));
                 }
             });
+        }
+    }
+
+    /// Raise the "needs input" desktop alert for each pane that has been asking (its tab reads
+    /// ASK) for a minute, once per ask episode, panes due together in one notification
+    /// (`ask_alert`). Once a second; cheap: one signal read per local pane, no screen render (the
+    /// classifier already did that).
+    fn alert_asking_panes(&self) {
+        const EVERY: Duration = Duration::from_secs(1);
+        let now = std::time::Instant::now();
+        if self
+            .last_ask_poll
+            .get()
+            .is_some_and(|last| now.duration_since(last) < EVERY)
+        {
+            return;
+        }
+        self.last_ask_poll.set(Some(now));
+        let windows: Vec<Rc<Window>> = self.windows.borrow().clone();
+        let mut asking = Vec::new();
+        for w in &windows {
+            let st = w.state.borrow();
+            // Each window's own "Notify when a tab needs input" governs its panes.
+            if !st.settings.ask_notify {
+                continue;
+            }
+            for t in st.tabs.iter().filter(|t| t.remote.is_none()) {
+                for p in &t.panes {
+                    let Some(sig) = self.mgr.activity_signal(&p.uid) else {
+                        continue;
+                    };
+                    if let Some((since, _)) = sig.asking() {
+                        asking.push(crate::ask_alert::AskingPane {
+                            uid: p.uid.clone(),
+                            tab: t.title.to_string(),
+                            label: p.title.to_string(),
+                            since,
+                            kind: sig.ask.kind,
+                        });
+                    }
+                }
+            }
+        }
+        let epoch_now = hyperpanes_core::control::server::now_ms() as u64;
+        let alert = self.ask_alerts.borrow_mut().poll(&asking, epoch_now);
+        if let Some(alert) = alert {
+            self.notifier.notify(&alert);
         }
     }
 
@@ -638,14 +699,14 @@ impl App {
                         .is_some_and(|age| age.as_secs() >= READY_AGE_SECS);
                     let timed_out = g.queued_at.elapsed().as_secs() >= FALLBACK_SECS;
                     if marker_ready || timed_out {
-                        // Hold while an interactive selector is on screen — writing now would
-                        // type the goal into the form (swallowed on the user's next pick).
-                        // No timeout on this hold: the goal outlives the form.
+                        // Hold while a decision prompt is on screen — writing now would type
+                        // the goal into the form (and its Enter would answer it). No timeout
+                        // on this hold: the goal outlives the form.
                         if self
                             .mgr
                             .render_screen(&g.uid)
                             .as_deref()
-                            .is_some_and(screen_shows_option_form)
+                            .is_some_and(blocks_typed_input)
                         {
                             return true;
                         }
@@ -1529,6 +1590,7 @@ impl App {
         //     the restartApp control command). Both throttled/cheap no-ops in the common case.
         self.deliver_queued_prompts();
         self.deliver_pending_goals();
+        self.alert_asking_panes();
         self.service_restart_request();
 
         // ---- adaptive idle cadence (#3) ----
@@ -3904,6 +3966,7 @@ impl App {
                     21 => crate::state::Setting::CopyOnSelect(arg != 0),
                     22 => crate::state::Setting::Osc52Clipboard(arg != 0),
                     23 => crate::state::Setting::ReduceMotion(arg != 0),
+                    24 => crate::state::Setting::AskNotify(arg != 0),
                     // idle-glow settings — apply immediately (not drafted).
                     10 => crate::state::Setting::IdleAlert(arg != 0),
                     11 => crate::state::Setting::IdleEffect(arg.max(0) as usize),
@@ -4093,36 +4156,6 @@ fn find_window<'a>(windows: &'a [Rc<Window>], uid: &str) -> Option<&'a Rc<Window
         .find(|w| w.state.borrow_mut().hosts_session(uid))
 }
 
-/// True when a Claude-style interactive multi-option form is on the pane's rendered screen —
-/// the trust-folder prompt, theme/model pickers, permission dialogs, `/login` account select.
-/// Those render a `❯`-pointed row over a numbered option list ("❯ 1. Yes, proceed" / "2. No…");
-/// anything typed while one is up lands in the form and is swallowed on the user's next pick,
-/// so goal delivery holds while this returns true. The ordinary Claude input box (`>` prompt)
-/// has no `❯` pointer, so it never matches.
-fn screen_shows_option_form(screen: &str) -> bool {
-    let mut pointer = false;
-    let mut numbered = 0;
-    for line in screen.lines() {
-        // Forms may render inside a box border — strip a leading `│` before testing.
-        let t = line
-            .trim_start()
-            .trim_start_matches(['│', '║'])
-            .trim_start();
-        let opt = match t.strip_prefix('❯') {
-            Some(rest) => {
-                pointer = true;
-                rest.trim_start()
-            }
-            None => t,
-        };
-        let digits = opt.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits > 0 && opt.chars().nth(digits) == Some('.') {
-            numbered += 1;
-        }
-    }
-    pointer && numbered >= 2
-}
-
 /// Decode an image file (any of the goal picker's formats) to RGBA8 and place it on the OS
 /// clipboard, so a following Ctrl+V into a Claude pane pastes the actual image. Returns `false`
 /// (a no-op) on a read/decode/clipboard error — the goal's text already carries the file path,
@@ -4238,36 +4271,6 @@ mod control_status_line_tests {
             control_status_line(true, false, Some(41419), &remote),
             "Running · http://127.0.0.1:41419 · input blocked · Remote: wg0 → 100.64.0.1:41419 ✓, tun9 ✗ interface not found"
         );
-    }
-}
-
-#[cfg(test)]
-mod option_form_tests {
-    use super::screen_shows_option_form;
-
-    #[test]
-    fn detects_claude_style_selectors() {
-        // Trust-folder prompt (pointer on the highlighted row, numbered options).
-        let trust =
-            "Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n";
-        assert!(screen_shows_option_form(trust));
-        // Boxed permission dialog (rows inside a │ border).
-        let boxed = "│ Do you want to proceed?      │\n│ ❯ 1. Yes                     │\n│   2. No, and tell Claude why │\n";
-        assert!(screen_shows_option_form(boxed));
-    }
-
-    #[test]
-    fn ignores_the_ordinary_input_box_and_plain_output() {
-        // Claude's normal prompt box — a `>` prompt, no `❯` pointer.
-        let prompt =
-            "╭─────────────────╮\n│ > Try \"help\"    │\n╰─────────────────╯\n  ? for shortcuts\n";
-        assert!(!screen_shows_option_form(prompt));
-        // A numbered list in ordinary output (no pointer) is not a form.
-        let list = "Plan:\n 1. do a thing\n 2. do another\n";
-        assert!(!screen_shows_option_form(list));
-        // A stray `❯` shell prompt without numbered options is not a form.
-        let shell = "❯ ls\nsrc  target\n";
-        assert!(!screen_shows_option_form(shell));
     }
 }
 
