@@ -22,8 +22,9 @@ pub fn submit_newlines(data: &str, platform: &str) -> String {
 // treats text + "\r" arriving in ONE pty read as a paste — the CR lands in the
 // input box instead of submitting. Splitting them into two writes a beat apart
 // makes the CR a distinct keystroke. ~40 ms is enough for conpty to deliver them
-// as separate reads without a human-perceptible lag (live finding, 2026-06-05).
-pub const SUBMIT_DELAY_MS: u64 = 40;
+// as separate reads; 250 ms (the inbox nudge cadence) keeps the CR out of the paste window
+// when the host is loaded (a 40 ms CR was folded into the paste at load ~60).
+pub const SUBMIT_DELAY_MS: u64 = 250;
 
 // Named-key vocabulary for `send_keys`: a stable, terminal-agnostic name → the
 // byte sequence a VT/xterm pty expects. Menus and prompts need real keystrokes
@@ -119,6 +120,11 @@ pub fn keys_to_bytes(keys: &[&str]) -> KeysResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_submit_gap_matches_the_nudge_cadence() {
+        assert_eq!(SUBMIT_DELAY_MS, 250);
+    }
 
     // ── submitNewlines ──────────────────────────────────────────────────────
     #[test]

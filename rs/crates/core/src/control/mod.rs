@@ -9,6 +9,7 @@ pub mod nudge;
 pub mod output;
 pub mod scope;
 pub mod spec_sweep;
+pub mod submit;
 pub mod work;
 pub mod work_lock;
 
