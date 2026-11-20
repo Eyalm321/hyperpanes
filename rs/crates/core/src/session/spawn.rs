@@ -73,6 +73,26 @@ pub fn build_args(shell: &str, command: Option<&str>, base_args: Option<&[String
     vec!["-c".into(), command.to_string()]
 }
 
+/// Whether a pane's `command` line is run by a POSIX shell (`sh -c`), as [`build_args`] decides
+/// it: `shell` is the pane's shell, `None` = [`default_shell`]. PowerShell and (on Windows) any
+/// non-POSIX shell such as cmd are not POSIX; their quoting has no `\"` escape.
+pub fn runs_posix(shell: Option<&str>) -> bool {
+    let shell = shell
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_shell);
+    runs_posix_with(&shell, cfg!(windows))
+}
+
+/// Injectable core of [`runs_posix`] (`windows` = the host platform).
+pub fn runs_posix_with(shell: &str, windows: bool) -> bool {
+    let lower = shell.to_ascii_lowercase();
+    if lower.contains("powershell") || lower.contains("pwsh") {
+        return false;
+    }
+    is_posix_shell(&lower) || !windows
+}
+
 // Mirror of the TS regex `/(?:^|[\\/])(?:bash|zsh|fish|sh|dash|ash)(?:\.exe)?$/`:
 // a POSIX shell basename, optionally `.exe`, at the end of the (lowercased) path.
 fn is_posix_shell(lower: &str) -> bool {
@@ -299,6 +319,10 @@ fn mcp_config_value_end(command: &str, from: usize) -> Option<usize> {
                 // Inside double quotes a backslash escapes the next char (possibly multi-byte;
                 // a continuation byte never equals an ASCII quote, so skipping two is safe).
                 b'\\' if quote == b'"' => i += 2,
+                // POSIX `'\''` (an apostrophe inside a single-quoted path, as `shell_quote`
+                // writes it): the quote closes, an escaped `'` follows, and a new quote opens —
+                // all one value. Stopping at the first `'` would insert the flag mid-path.
+                b'\'' if quote == b'\'' && bytes[i + 1..].starts_with(b"\\''") => i += 4,
                 b if b == quote => return Some(i + 1),
                 _ => i += 1,
             }
@@ -984,6 +1008,17 @@ mod tests {
     }
 
     #[test]
+    fn runs_posix_mirrors_build_args() {
+        assert!(runs_posix_with("/bin/bash", false));
+        assert!(runs_posix_with("/usr/bin/zsh", false));
+        assert!(runs_posix_with("/bin/fish", false));
+        assert!(runs_posix_with(r"C:\Program Files\Git\bin\bash.exe", true));
+        assert!(!runs_posix_with("pwsh.exe", true));
+        assert!(!runs_posix_with("/usr/bin/pwsh", false));
+        assert!(!runs_posix_with(r"C:\Windows\System32\cmd.exe", true));
+    }
+
+    #[test]
     fn is_posix_shell_matches_only_posix_basenames() {
         assert!(is_posix_shell("/bin/bash"));
         assert!(is_posix_shell("c:\\program files\\git\\bin\\bash.exe"));
@@ -1004,6 +1039,18 @@ mod tests {
             "got {out}"
         );
         assert!(out.ends_with(" -p hello"), "got {out}");
+    }
+
+    /// A single-quoted path holding a space and an apostrophe (`'\''`, as POSIX `shell_quote`
+    /// writes it) is one value: the flag goes after all of it, never mid-path (hyperpanes#159).
+    #[test]
+    fn strict_mcp_config_keeps_an_escaped_quote_path_whole() {
+        let cmd = r"claude --mcp-config '/home/user/a b/it'\''s/mcp.json' -p hi";
+        let out = ensure_strict_mcp_config(cmd);
+        assert_eq!(
+            out,
+            r"claude --mcp-config '/home/user/a b/it'\''s/mcp.json' --strict-mcp-config -p hi"
+        );
     }
 
     #[test]
