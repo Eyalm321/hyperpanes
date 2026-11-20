@@ -840,24 +840,35 @@ async fn input(
 
     let data = b.get("data").and_then(Value::as_str).unwrap_or("");
     let platform = if cfg!(windows) { "win32" } else { "linux" };
+    let submit = b.get("submit").and_then(Value::as_bool) == Some(true);
+    // Transcript baseline BEFORE typing, so a record the submit produces is seen as new.
+    let (tpath, before) = if submit {
+        crate::control::submit::snapshot(&found.pane_id)
+    } else {
+        (None, None)
+    };
     shared
         .sessions
         .write(&uid, &submit_newlines(data, platform));
     // submit (A1): a bare CR as a SEPARATE pty write a beat later, so bracketed-paste TUIs read it
-    // as Enter, not pasted content.
-    if b.get("submit").and_then(Value::as_bool) == Some(true) {
+    // as Enter, not pasted content; then verified in the background (one insurance CR only if
+    // the text is still in the box AND the transcript shows no new prompt).
+    if submit {
         let delay = b
             .get("submitDelayMs")
             .and_then(Value::as_i64)
             .filter(|&d| d >= 0)
             .map(|d| d as u64)
             .unwrap_or(SUBMIT_DELAY_MS);
-        let sessions = Arc::clone(&shared.sessions);
-        let uid2 = uid.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
-            sessions.write(&uid2, "\r");
-        });
+        tokio::spawn(crate::control::submit::submit_after_text(
+            Arc::clone(&shared.sessions),
+            uid.clone(),
+            found.pane_id.clone(),
+            data.to_string(),
+            delay,
+            before,
+            tpath,
+        ));
     }
     jstatus(200, json!({ "ok": true }))
 }
@@ -1094,14 +1105,16 @@ fn arm_inbox_nudge(shared: &Arc<Shared>, pane_id: &str, seq: u64) {
                     tokio::time::sleep(Duration::from_millis(nudge::POLL_MS)).await;
                 }
                 nudge::Step::Send(text) => {
-                    // Same cadence the goal/resume delivery uses: text, gap, CR, insurance CR —
-                    // a bracketed-paste TUI reads text+CR in one read as a paste otherwise.
-                    let sessions = Arc::clone(&shared.sessions);
-                    sessions.write(&uid, &text);
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    sessions.write(&uid, "\r");
-                    tokio::time::sleep(Duration::from_millis(600)).await;
-                    sessions.write(&uid, "\r");
+                    // Same cadence as send_input submit: text, 250 ms, CR, then a verified
+                    // (not blind) insurance CR.
+                    crate::control::submit::verified_submit(
+                        Arc::clone(&shared.sessions),
+                        uid.clone(),
+                        pane_id.clone(),
+                        text,
+                        250,
+                    )
+                    .await;
                     return;
                 }
             }
