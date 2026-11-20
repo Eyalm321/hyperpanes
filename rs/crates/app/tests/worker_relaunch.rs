@@ -17,9 +17,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// (request path, Authorization header, body), in arrival order.
 type Records = Arc<Mutex<Vec<(String, String, String)>>>;
 
+/// One served extend: (arrival time ms, requested extraMs, deadline the mock answered).
+type Extends = Arc<Mutex<Vec<(i64, i64, i64)>>>;
+
 struct Mock {
     port: u16,
     records: Records,
+    extends: Extends,
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -31,10 +35,19 @@ impl Mock {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().unwrap().port();
         let records: Records = Arc::new(Mutex::new(Vec::new()));
+        let extends: Extends = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let claims = Arc::new(Mutex::new(std::collections::VecDeque::from(claims)));
         let want = format!("Bearer {token}");
-        let (rec, stop2) = (Arc::clone(&records), Arc::clone(&stop));
+        let (rec, ext, stop2) = (
+            Arc::clone(&records),
+            Arc::clone(&extends),
+            Arc::clone(&stop),
+        );
+        // The served claim's lease deadline, which an extend moves like the real server does:
+        // `deadline += extraMs`. `None` until this mock serves a claim (an extend then answers
+        // now+3000).
+        let mut deadline: Option<i64> = None;
         let handle = std::thread::spawn(move || {
             for conn in listener.incoming() {
                 if stop2.load(Ordering::SeqCst) {
@@ -44,25 +57,44 @@ impl Mock {
                 let Some((path, auth, body)) = read_request(&mut s) else {
                     continue;
                 };
-                rec.lock().unwrap().push((path.clone(), auth.clone(), body));
+                rec.lock()
+                    .unwrap()
+                    .push((path.clone(), auth.clone(), body.clone()));
                 let (status, resp) = if auth != want {
                     (
                         "401 Unauthorized",
                         r#"{"error":"unauthorized"}"#.to_string(),
                     )
                 } else if path.contains("/claim") {
-                    (
-                        "200 OK",
-                        claims
-                            .lock()
-                            .unwrap()
-                            .pop_front()
-                            .unwrap_or_else(|| r#"{"tasks":[]}"#.to_string()),
-                    )
+                    let resp = claims
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| r#"{"tasks":[]}"#.to_string());
+                    let served = serde_json::from_str::<serde_json::Value>(&resp)
+                        .ok()
+                        .and_then(|v| v["tasks"][0]["visibilityDeadline"].as_i64());
+                    if served.is_some() {
+                        deadline = served;
+                    }
+                    ("200 OK", resp)
                 } else if path.ends_with("/extend") {
+                    let now = now_ms();
+                    let extra = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v["extraMs"].as_i64())
+                        .unwrap_or(0);
+                    let d = match deadline.as_mut() {
+                        Some(d) => {
+                            *d += extra;
+                            *d
+                        }
+                        None => now + 3000,
+                    };
+                    ext.lock().unwrap().push((now, extra, d));
                     (
                         "200 OK",
-                        format!(r#"{{"ok":true,"visibilityDeadline":{}}}"#, now_ms() + 3000),
+                        format!(r#"{{"ok":true,"visibilityDeadline":{d}}}"#),
                     )
                 } else if path.ends_with("/nack") {
                     ("200 OK", r#"{"state":"queued"}"#.to_string())
@@ -79,6 +111,7 @@ impl Mock {
         Mock {
             port,
             records,
+            extends,
             stop,
             handle: Some(handle),
         }
@@ -95,6 +128,10 @@ impl Mock {
 
     fn recs(&self) -> Vec<(String, String, String)> {
         self.records.lock().unwrap().clone()
+    }
+
+    fn extends(&self) -> Vec<(i64, i64, i64)> {
+        self.extends.lock().unwrap().clone()
     }
 }
 
@@ -279,8 +316,12 @@ fn worker_gives_up_after_reconnect_window() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Test c: over several beats the requested extraMs keeps the deadline near now+L instead of
-/// growing (the server adds extraMs to the current deadline).
+/// The heartbeat's lease cushion: a renewal keeps the deadline at least this far ahead (the
+/// worker's `HEARTBEAT_CUSHION_MS`).
+const HEARTBEAT_CUSHION_MS: i64 = 120_000;
+
+/// Test c: over several beats the requested extraMs keeps the deadline near
+/// now + max(L, cushion) instead of growing (the server adds extraMs to the current deadline).
 #[test]
 fn extend_does_not_creep() {
     let dir = scratch("c");
@@ -301,14 +342,24 @@ fn extend_does_not_creep() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
 
-    // The mock reports deadline = now+3000 per extend. Lease L=3000, beats every ~1500ms, so a
-    // non-creeping request is ≈1500 (never the old full-lease 3000).
-    for (p, _, b) in m.recs().iter().filter(|(p, _, _)| p.ends_with("/extend")) {
-        let v: serde_json::Value = serde_json::from_str(b).unwrap();
-        let extra = v["extraMs"].as_i64().unwrap();
+    // Lease L=3000, so every renewal targets the cushion: the deadline the server lands on stays
+    // at about arrival + cushion, every beat. A heartbeat that asked for a full target each beat
+    // instead of topping up would push it a whole cushion further per beat.
+    let extends = m.extends();
+    assert!(extends.len() >= 4, "{extends:?}");
+    for (i, &(at, extra, deadline)) in extends.iter().enumerate() {
+        assert!(extra > 0, "extend {i} asks for time: {extends:?}");
         assert!(
-            (0..=2200).contains(&extra),
-            "extra {extra} should be ≈L/2, not a full lease ({p})"
+            deadline <= at + HEARTBEAT_CUSHION_MS + 2200,
+            "extend {i} crept past now + cushion: deadline {} ms ahead ({extends:?})",
+            deadline - at
+        );
+        assert!(
+            // Loose: the worker reads its clock before the request travels; the point is minutes
+            // of slack, never the bare 3 s lease.
+            deadline >= at + HEARTBEAT_CUSHION_MS - 10_000,
+            "extend {i} keeps the cushion: deadline {} ms ahead ({extends:?})",
+            deadline - at
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
