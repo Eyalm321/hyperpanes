@@ -54,6 +54,13 @@ For each goal you're given (free text):
    dialog); otherwise `opus[1m]` for a hard/large goal, `fable[1m]` for a
    lighter one. Pass the impl-agent model down to the spec agent too (env `HP_GOAL_IMPL_MODEL`, or
    tell it in the prompt) so it fans out impl agents on the chosen tier.
+   **Launch profile:** when `hyperpanes launch-profile --tier spec` prints JSON (the app has the
+   subcommand), start the spec agent with `command:"hyperpanes", args:["launch-profile","--tier",
+   "spec","--exec","--","--model","<spec model>"]` instead: it adds the goal-org plugin, `SPEC.md`,
+   the MCP config with `--strict-mcp-config`, the settings file, `--dangerously-skip-permissions`
+   and the env (persona and plugin dirs included), so the spec agent can start its workers the same
+   way. Still set `CLAUDE_CONFIG_DIR` (account rotation) and `HP_GOAL_IMPL_MODEL` /
+   `HP_GOAL_ACCOUNTS` in the pane `env`.
    `set_meta` the pane: `role=spec`, `project=<path>`, `parent=<your pane id>`, `goal=<goal id>`.
    Then `prompt_pane` it the goal intent + acceptance criteria + your pane id + the goal's queue
    name (e.g. `g1`) so it can `send_to_parent` and fan out.

@@ -100,6 +100,16 @@ prompt wedges the pane).
     and friends in the command are empty unless you pass them in `env` as above (or inline the
     literal values). A missing persona dir fails every claim (`Append system prompt file not
     found: /IMPL.md`) and burns the task's attempts.
+  - **Launch profile (shorter, and nothing to thread).** When `hyperpanes launch-profile --tier
+    worker` prints JSON (the app has the subcommand), use it instead of the long command above:
+    `command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"}
+    hyperpanes launch-profile --tier worker --exec -- -p \"$HP_TASK_PAYLOAD\" --output-format
+    stream-json --verbose --model <impl model>'"`. The profile adds what the app owns: the goal-org
+    plugin (`--plugin-dir`), `IMPL.md`, the MCP config with `--strict-mcp-config`, the worker settings
+    file, `--dangerously-skip-permissions` and the env (`ENABLE_TOOL_SEARCH=false`, the control file),
+    so `env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS}` is no longer needed (inline the impl model,
+    or keep `HP_GOAL_IMPL_MODEL` in `env`). Keep `stream:true`, `accounts`, `project`/`projectTab`
+    and `base` as above. An app without the subcommand: the long form.
   - **Disk and build cache.** Task worktrees live on disk under the hyperpanes cache dir
     (`~/.cache/hyperpanes/worktrees/<repo>-<hash>/` on Linux), never `/tmp`. Override with
     `env:{HYPERPANES_WORKTREE_ROOT:…}`. Each task also gets `HP_WORKTREE_CACHE_DIR`, a warm build
@@ -167,8 +177,10 @@ prompt wedges the pane).
   exactly what poisons a transcript.
 - **Your own builds: one target dir per goal, and you clean it up.** Builds you run yourself
   (verify, integrate, acceptance) share ONE ad-hoc target dir for the whole goal (e.g.
-  `CARGO_TARGET_DIR=~/.cache/hyperpanes/<goal>-target`). Never make one per branch, and never put
-  it in `/tmp` or inside a worktree. Before a cold build, check free space
+  `CARGO_TARGET_DIR=~/.cache/hyperpanes/<goal>-target`, or the host's shared warm target per repo
+  when it has one). Never make one per branch, and never put it in `/tmp` or inside a worktree. Your
+  Claude Code scratchpad is under `/tmp` too: never clone or build there; a clone you review or
+  integrate in goes in a worktree under `~/.cache/hyperpanes`. Before a cold build, check free space
   (`df -BG --output=avail <dir>`). Under 40G, delete `<target>/*/incremental` first. If it's still
   under 40G, don't build: report `blocked disk <free>G`. When the goal is done, delete the whole
   dir. The worker runner bounds its own cache slots (hyperpanes#74: slot cap, cache budget, soft floor; `hyperpanes
