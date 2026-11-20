@@ -114,11 +114,29 @@ fn transcript_path(pane_id: &str) -> Option<PathBuf> {
     )
 }
 
-fn user_records(path: &Option<PathBuf>) -> Option<usize> {
-    let p = path.as_ref()?;
-    std::fs::read_to_string(p)
-        .ok()
-        .map(|s| count_user_records(&s))
+/// The transcript's length in bytes now: the baseline a later [`advanced_since`] reads from.
+fn transcript_len(path: &Option<PathBuf>) -> Option<u64> {
+    std::fs::metadata(path.as_ref()?).ok().map(|m| m.len())
+}
+
+/// Did a real user prompt land in the transcript after byte offset `before`? Reads only the
+/// appended tail, never the whole (often multi-MB) file.
+fn advanced_since(path: &Option<PathBuf>, before: Option<u64>) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let (Some(p), Some(off)) = (path.as_ref(), before) else {
+        return false;
+    };
+    let Ok(mut f) = std::fs::File::open(p) else {
+        return false;
+    };
+    if f.seek(SeekFrom::Start(off)).is_err() {
+        return false;
+    }
+    let mut tail = String::new();
+    if f.read_to_string(&mut tail).is_err() {
+        return false;
+    }
+    count_user_records(&tail) > 0
 }
 
 /// Write `text`, wait `gap_ms`, write the CR, then verify in this task (callers spawn it) and
@@ -130,8 +148,7 @@ pub async fn verified_submit(
     text: String,
     gap_ms: u64,
 ) {
-    let path = transcript_path(&pane_id);
-    let before = user_records(&path);
+    let (path, before) = snapshot(&pane_id);
     sessions.write(&uid, &text);
     tokio::time::sleep(Duration::from_millis(gap_ms)).await;
     sessions.write(&uid, "\r");
@@ -143,7 +160,7 @@ pub async fn verify_after_cr(
     sessions: &Arc<SessionManager>,
     uid: &str,
     path: &Option<PathBuf>,
-    before: Option<usize>,
+    before: Option<u64>,
     text: &str,
 ) {
     let mut elapsed = 0u64;
@@ -153,11 +170,10 @@ pub async fn verify_after_cr(
         let (s, u, p) = (Arc::clone(sessions), uid.to_string(), path.clone());
         let probe = tokio::task::spawn_blocking(move || {
             let line = s.render_screen_read(&u).and_then(|r| r.input_line);
-            (line, user_records(&p))
+            (line, advanced_since(&p, before))
         })
         .await;
-        let Ok((line, now)) = probe else { return };
-        let advanced = matches!((before, now), (Some(b), Some(n)) if n > b);
+        let Ok((line, advanced)) = probe else { return };
         match decide(text, line.as_ref(), advanced, elapsed) {
             Verdict::Wait => {}
             Verdict::Retry => {
@@ -174,23 +190,22 @@ pub async fn verify_after_cr(
 pub async fn submit_after_text(
     sessions: Arc<SessionManager>,
     uid: String,
-    pane_id: String,
     text: String,
     gap_ms: u64,
-    before: Option<usize>,
+    before: Option<u64>,
     path: Option<PathBuf>,
 ) {
     tokio::time::sleep(Duration::from_millis(gap_ms)).await;
     sessions.write(&uid, "\r");
     verify_after_cr(&sessions, &uid, &path, before, &text).await;
-    let _ = pane_id;
 }
 
-/// Snapshot taken BEFORE the text is typed: (transcript path, user-record count).
-pub fn snapshot(pane_id: &str) -> (Option<PathBuf>, Option<usize>) {
+/// Snapshot taken BEFORE the text is typed: (transcript path, its byte length). Cheap: one
+/// marker read and one stat, so it is fine on the request path.
+pub fn snapshot(pane_id: &str) -> (Option<PathBuf>, Option<u64>) {
     let path = transcript_path(pane_id);
-    let n = user_records(&path);
-    (path, n)
+    let len = transcript_len(&path);
+    (path, len)
 }
 
 #[cfg(test)]
@@ -259,5 +274,33 @@ mod tests {
             "not json \"user\"\n",
         );
         assert_eq!(count_user_records(j), 2);
+    }
+
+    #[test]
+    fn advanced_since_reads_only_the_appended_tail() {
+        let dir = std::env::temp_dir().join(format!("hp-submit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("t.jsonl");
+        std::fs::write(
+            &f,
+            "{\"type\":\"user\",\"message\":{\"content\":\"old\"}}\n",
+        )
+        .unwrap();
+        let path = Some(f.clone());
+        let before = transcript_len(&path);
+        assert!(!advanced_since(&path, before), "an old prompt is not new");
+        let mut s = std::fs::read_to_string(&f).unwrap();
+        s.push_str("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\"}]}}\n");
+        std::fs::write(&f, &s).unwrap();
+        assert!(
+            !advanced_since(&path, before),
+            "a tool result is not a prompt"
+        );
+        s.push_str("{\"type\":\"user\",\"message\":{\"content\":\"new\"}}\n");
+        std::fs::write(&f, &s).unwrap();
+        assert!(advanced_since(&path, before));
+        assert!(!advanced_since(&None, before));
+        assert!(!advanced_since(&path, None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

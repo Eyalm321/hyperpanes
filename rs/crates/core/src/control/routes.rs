@@ -863,7 +863,6 @@ async fn input(
         tokio::spawn(crate::control::submit::submit_after_text(
             Arc::clone(&shared.sessions),
             uid.clone(),
-            found.pane_id.clone(),
             data.to_string(),
             delay,
             before,
