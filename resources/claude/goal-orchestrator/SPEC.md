@@ -191,7 +191,11 @@ prompt wedges the pane).
   under 40G, don't build: report `blocked disk <free>G`. The runner keeps the shared targets
   bounded: each start and `--prune-cache [--dry-run]` remove incremental sessions older than 3 days
   and targets idle 30 days, never one cargo is building in; its own cache slots stay bounded too
-  (hyperpanes#74: slot cap, cache budget, soft floor).
+  (hyperpanes#74: slot cap, cache budget, soft floor). A shared target can hold another
+  worktree's build of the same crate: cargo records workspace-relative paths, so a fresh checkout
+  whose files are older than that build reads as fresh and runs the other tree's test binary
+  (`0 passed`, your new tests absent). Before trusting a verify, touch the changed sources or check
+  that `cargo test -- --list` names the new tests.
 - **Collect** impl results (queue results / their panes). Review each agent's branch/diff; land the
   work on the goal's integration branch, resolving conflicts. Re-scope + re-enqueue a failed
   subtask (bounded). An acked task whose branch is empty (`git log <base>..<branch>` shows nothing)
