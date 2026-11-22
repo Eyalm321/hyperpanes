@@ -45,15 +45,23 @@ For each goal you're given (free text):
    that must exist, or a rubric to judge). If acceptance is unclear, infer the tightest reasonable
    check and state it; don't block.
 2. **Spawn a spec agent** — one dedicated pane per goal (`open_pane`, NOT a subagent), in the
-   project cwd, running `claude --dangerously-skip-permissions` with the spec-agent persona via
-   `--append-system-prompt-file $HP_GOAL_PERSONA_DIR/SPEC.md` (the app hands you
-   `HP_GOAL_PERSONA_DIR` in your env — the on-disk dir that holds `SKILL.md`, `SPEC.md`,
-   `IMPL.md`; pass it down to every spec agent so its `spawn_workers` can point impl agents at
-   `$HP_GOAL_PERSONA_DIR/IMPL.md`). Model:
+   project cwd. **`hyperpanes launch-profile` is the only spawn path**: never hand-build the spec
+   agent's `claude` argv. Check once that the app has the subcommand (`hyperpanes launch-profile
+   --tier spec` prints JSON), then start it with `command:"hyperpanes", args:["launch-profile",
+   "--tier","spec","--exec","--","--model","<spec model>"]`. The profile adds the goal-org plugin,
+   `SPEC.md`, the MCP config with `--strict-mcp-config`, the settings file,
+   `--dangerously-skip-permissions` and the env (persona and plugin dirs included), so the spec
+   agent starts its workers the same way. Set in the pane `env` only what the profile can't know:
+   `CLAUDE_CONFIG_DIR` (account rotation), `HP_GOAL_IMPL_MODEL` and `HP_GOAL_ACCOUNTS`. Model:
    use **`$HP_GOAL_SPEC_MODEL`** if it's set in your env (the user picked it in the New-goal
    dialog); otherwise `opus[1m]` for a hard/large goal, `fable[1m]` for a
    lighter one. Pass the impl-agent model down to the spec agent too (env `HP_GOAL_IMPL_MODEL`, or
    tell it in the prompt) so it fans out impl agents on the chosen tier.
+   **Only for an app without `launch-profile`:** run `claude --dangerously-skip-permissions` with
+   the spec-agent persona via `--append-system-prompt-file $HP_GOAL_PERSONA_DIR/SPEC.md` plus the
+   MCP flags below (the app hands you `HP_GOAL_PERSONA_DIR` in your env — the on-disk dir that
+   holds `SKILL.md`, `SPEC.md`, `IMPL.md`; pass it down so the spec agent's `spawn_workers` can
+   point impl agents at `$HP_GOAL_PERSONA_DIR/IMPL.md`). That form carries no goal-org plugin.
    `set_meta` the pane: `role=spec`, `project=<path>`, `parent=<your pane id>`, `goal=<goal id>`.
    Then `prompt_pane` it the goal intent + acceptance criteria + your pane id + the goal's queue
    name (e.g. `g1`) so it can `send_to_parent` and fan out.
@@ -204,11 +212,9 @@ every `mcp__hyperpanes__*` tool. `--strict-mcp-config` stops `claude` merging wh
 account dir or the worktree's `.mcp.json` registers: code-index servers (tokensave, serena) index
 the whole repo **per agent** because every agent sits in its own worktree, so a few agents on a big
 repo cost tens of GB. Goal agents run on hyperpanes tools + the built-ins only. The app already
-appends both flags on your own spawn; pass them down the same way when you spawn a spec agent,
-and tell the spec agent to do the same in its `spawn_workers` command, e.g.:
-`spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120, project:"<project name>", projectTab:true, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} claude --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
-(worker panes are spawned by the app and don't inherit the spec agent's env, hence the `env` map;
-the `CARGO_TARGET_DIR` prefix points cargo at the per-task warm cache slot the runner exports)
+appends both flags on your own spawn, and `hyperpanes launch-profile` adds them for every tier,
+so a spec agent or worker started from it needs nothing more. Pass them by hand only in the long
+form for an app without the subcommand (`SPEC.md` section 2 has the worker command).
 
 `--mcp-config` connects the server, but that does not make its tools callable. When the account
 enables tool search (`ENABLE_TOOL_SEARCH`, often set in the account's `settings.json` env, which
