@@ -108,7 +108,8 @@ already sets `CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target`. Keep it (do
 override it), and look for binaries in `$CARGO_TARGET_DIR/debug/`, not `<worktree>/target/`.
 Never put a target dir inside the worktree, where a stray `git add` would commit it, and never
 create an ad-hoc target dir of your own: `$HP_WORKTREE_CACHE_DIR` is the one the runner sizes and
-prunes.
+prunes. Your Claude Code scratchpad is under `/tmp` too (`/tmp/claude-<uid>/…`): a note or a short
+script there is fine; a clone, a `node_modules` or any build output is not.
 
 ## Booting a dev/test instance of hyperpanes
 

@@ -60,14 +60,20 @@ prompt wedges the pane).
   put every requirement in the payload. If a spec change can't wait: nack the task or close its pane
   and re-enqueue a corrected payload, or hand-apply the change at integration. Never assume a sent
   correction landed. Check the diff, and the `seq` the agent names in its commit message.
-- `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
+- **Start workers with `hyperpanes launch-profile`, the only spawn path.** Never hand-build the
+  worker's `claude` argv: a hand-built one misses the goal-org plugin and whatever else the app adds
+  later. Check once that the app has the subcommand (`hyperpanes launch-profile --tier worker`
+  prints JSON), then:
+  `spawn_workers {queue, count:N, isolation:"worktree", base:"<fork committish>", stream:true, lingerSecs:120,
   project: $HP_GOAL_PROJECT_NAME, projectTab:true, subtitle:"<goal id>: <one-liner>", accounts: <HP_GOAL_ACCOUNTS
-  split on newlines>, env:{HP_GOAL_PERSONA_DIR, HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <your
-  values>}, command:"sh -c 'env ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"}
-  claude --dangerously-skip-permissions --mcp-config
-  <state-dir>/goals-mcp.json --strict-mcp-config -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
-  --append-system-prompt-file $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings
-  $HP_GOAL_WORKER_SETTINGS} --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
+  split on newlines>, env:{HP_GOAL_IMPL_MODEL: <your value>}, command:"sh -c 'env
+  ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} hyperpanes
+  launch-profile --tier worker --exec -- -p \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose
+  --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"}`
+  The profile adds what the app owns: the goal-org plugin (`--plugin-dir`), `IMPL.md`, the MCP config
+  with `--strict-mcp-config`, the worker settings file, `--dangerously-skip-permissions` and the env
+  (`ENABLE_TOOL_SEARCH=false`, the control file, the persona and plugin dirs). You add only the task:
+  the payload, the output format and the model.
   — **keep the visibility trio**: `stream:true` + `--output-format stream-json --verbose` makes the
   impl agent's turn readable in its pane (a bare `claude -p` prints nothing until it exits, so the
   pane looks dead for the whole build), and `lingerSecs` holds the pane open after the queue drains
@@ -75,31 +81,38 @@ prompt wedges the pane).
   `logDir:"<state-dir>/worker-logs"` when you want the raw transcript to outlive the pane.
   `spawn_workers` gives each worker **its own pane** by default (`layout:"pane-per-worker"`), so
   `count:N` = N readable panes; `layout:"single-pane"` multiplexes them into one if you'd rather.
-  The `--mcp-config` flag is required (see `SKILL.md` "MCP config on every spawned claude");
-  without it, account rotation hides `mcp__hyperpanes__*` tools from the impl agent.
-  `--strict-mcp-config` is required too: without it the worker also loads every code-index MCP
-  server (tokensave, serena) the account dir / worktree registers, and each one indexes the repo
-  separately per worktree — a handful of workers on a big repo eats tens of GB.
-  `${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS}` likewise carries the user's statusline
-  — note this is the **worker** settings file, NOT the `$HP_GOAL_SETTINGS` you run under. It
-  additionally sets `crossSessionInbound: "accept"` (an unattended `-p` pane otherwise HOLDS
-  incoming messages behind an approval dialog it cannot show, and they expire in 5 minutes) and
-  denies `SendMessage`/`ListAgents`: those tools are UNSCOPED, so a worker holding them could
-  enumerate and message every Claude session on the machine, straight around the control
-  plane's capability scoping. Workers consult you over the scoped bus (`send_message` to the
-  `advisor` pane id stamped on their payload) — that path is unchanged.
-  (see `SKILL.md` "Statusline on every spawned claude") — harmless when the var is unset.
-  (or the bare `hyperpanes worker --queue <q> --count N --worktree --base <committish> -- …`).
+  (or the bare `hyperpanes worker --queue <q> --count N --worktree --base <committish> -- …` with the
+  same `hyperpanes launch-profile` command after `--`).
   Impl agents run on
   `$HP_GOAL_IMPL_MODEL` (the tier the user picked in the New-goal dialog; default
   `sonnet[1m]`), each in its own git worktree forked from the `base` you pass — always
   explicit, never the shared checkout's HEAD (`--worktree` refuses to run without `--base`):
   `main` for a first wave, the goal's integration branch for a dependent wave (resolved per task
   claim, so a branch that advances mid-run is picked up). See `docs/worker-worktree-base.md`.
-  - **Worker panes don't inherit your env.** The app spawns them, not you, so `$HP_GOAL_PERSONA_DIR`
-    and friends in the command are empty unless you pass them in `env` as above (or inline the
-    literal values). A missing persona dir fails every claim (`Append system prompt file not
-    found: /IMPL.md`) and burns the task's attempts.
+  - **Worker panes don't inherit your env.** The app spawns them, not you, so anything the command
+    reads from env (`$HP_GOAL_IMPL_MODEL`) must be passed in `env` as above, or inlined.
+  - **Only for an app without `launch-profile`** (the subcommand errors or prints no JSON): the long
+    form, which threads by hand what the profile adds. `env:{HP_GOAL_PERSONA_DIR,
+    HP_GOAL_WORKER_SETTINGS, HP_GOAL_IMPL_MODEL: <your values>}`, command:`"sh -c 'env
+    ${HP_WORKTREE_CACHE_DIR:+\"CARGO_TARGET_DIR=$HP_WORKTREE_CACHE_DIR/cargo-target\"} claude
+    --dangerously-skip-permissions --mcp-config <state-dir>/goals-mcp.json --strict-mcp-config -p
+    \"$HP_TASK_PAYLOAD\" --output-format stream-json --verbose --append-system-prompt-file
+    $HP_GOAL_PERSONA_DIR/IMPL.md ${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS}
+    --model ${HP_GOAL_IMPL_MODEL:-sonnet[1m]}'"`. Every flag in it is load-bearing:
+    `--mcp-config` (see `SKILL.md` "MCP config on every spawned claude"), without which account
+    rotation hides `mcp__hyperpanes__*` tools from the impl agent; `--strict-mcp-config`, without
+    which the worker also loads every code-index MCP server (tokensave, serena) the account dir /
+    worktree registers, each indexing the repo separately per worktree — a handful of workers on a
+    big repo eats tens of GB; `${HP_GOAL_WORKER_SETTINGS:+--settings $HP_GOAL_WORKER_SETTINGS}`,
+    the **worker** settings file (NOT the `$HP_GOAL_SETTINGS` you run under), which carries the
+    user's statusline, sets `crossSessionInbound: "accept"` (an unattended `-p` pane otherwise HOLDS
+    incoming messages behind an approval dialog it cannot show, and they expire in 5 minutes) and
+    denies `SendMessage`/`ListAgents`: those tools are UNSCOPED, so a worker holding them could
+    enumerate and message every Claude session on the machine, straight around the control plane's
+    capability scoping. Workers consult you over the scoped bus (`send_message` to the `advisor`
+    pane id stamped on their payload). A missing `HP_GOAL_PERSONA_DIR` in `env` fails every claim
+    (`Append system prompt file not found: /IMPL.md`) and burns the task's attempts. The long form
+    carries no goal-org plugin; say so in your report.
   - **Disk and build cache.** Task worktrees live on disk under the hyperpanes cache dir
     (`~/.cache/hyperpanes/worktrees/<repo>-<hash>/` on Linux), never `/tmp`. Override with
     `env:{HYPERPANES_WORKTREE_ROOT:…}`. Each task also gets `HP_WORKTREE_CACHE_DIR`, a warm build
@@ -167,8 +180,10 @@ prompt wedges the pane).
   exactly what poisons a transcript.
 - **Your own builds: one target dir per goal, and you clean it up.** Builds you run yourself
   (verify, integrate, acceptance) share ONE ad-hoc target dir for the whole goal (e.g.
-  `CARGO_TARGET_DIR=~/.cache/hyperpanes/<goal>-target`). Never make one per branch, and never put
-  it in `/tmp` or inside a worktree. Before a cold build, check free space
+  `CARGO_TARGET_DIR=~/.cache/hyperpanes/<goal>-target`, or the host's shared warm target per repo
+  when it has one). Never make one per branch, and never put it in `/tmp` or inside a worktree. Your
+  Claude Code scratchpad is under `/tmp` too: never clone or build there; a clone you review or
+  integrate in goes in a worktree under `~/.cache/hyperpanes`. Before a cold build, check free space
   (`df -BG --output=avail <dir>`). Under 40G, delete `<target>/*/incremental` first. If it's still
   under 40G, don't build: report `blocked disk <free>G`. When the goal is done, delete the whole
   dir. The worker runner bounds its own cache slots (hyperpanes#74: slot cap, cache budget, soft floor; `hyperpanes
