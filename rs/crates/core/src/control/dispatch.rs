@@ -864,10 +864,11 @@ fn respawn_resuming(
     // instead (the shell-pane path below) would drop all of them: the agent would come back
     // tool-less, prompt-wedged, and persona-less. When we rebuild the launch we also anchor
     // the pane at the conversation's own cwd and skip the typed line.
-    let resume_launch = resume_launch(
+    let resume_launch = resume_launch_for_shell(
         pane.command.as_deref(),
         pane.args.as_deref(),
         &target.session_id,
+        pane.shell.as_deref(),
     );
     let resume_cwd = crate::claude_panes::valid_resume_cwd(&target.cwd).then(|| target.cwd.clone());
     let opts = SpawnOptions {
@@ -1443,17 +1444,37 @@ fn keep_after_stripping_session_flags(tokens: &[&str]) -> Vec<bool> {
 }
 
 /// Byte spans of the whitespace-separated tokens of `s`, treating a `'…'` or `"…"` run as part
-/// of its token so a quoted path with spaces stays whole.
-fn shell_token_spans(s: &str) -> Vec<(usize, usize)> {
+/// of its token so a quoted path with spaces stays whole. `posix` = the line is run by a POSIX
+/// shell (see [`crate::session::spawn::runs_posix`]).
+///
+/// An escaped quote outside quotes is not a quote: `\'` / `\"` (POSIX `shell_quote`'s `'\''`
+/// idiom for a path holding an apostrophe). Without that, the `'` after the backslash opened a
+/// quote that never closed and swallowed the rest of the line, so a resume kept the old
+/// `-c`/`--resume` and appended a second one (hyperpanes#159).
+///
+/// Inside double quotes `\"` is an escaped quote for a POSIX shell only. sh/bash/zsh keep the
+/// string open there, so pairing the quotes differently would let a resume rewrite cut a quoted
+/// argument in half and turn quoted data into shell code or flags. pwsh and cmd have no `\"`
+/// escape (`"C:\proj\"` is a closed string), so for them the backslash is literal. Any other
+/// backslash is literal too, so a Windows path (`C:\Users\…`) tokenizes as before.
+fn shell_token_spans(s: &str, posix: bool) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut start: Option<usize> = None;
     let mut quote: Option<char> = None;
-    for (i, ch) in s.char_indices() {
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
         match quote {
+            Some('"') if posix && ch == '\\' && matches!(chars.peek(), Some((_, '"' | '\\'))) => {
+                chars.next();
+            }
             Some(q) => {
                 if ch == q {
                     quote = None;
                 }
+            }
+            None if ch == '\\' && matches!(chars.peek(), Some((_, '\'' | '"'))) => {
+                start.get_or_insert(i);
+                chars.next();
             }
             None if ch == '\'' || ch == '"' => {
                 quote = Some(ch);
@@ -1512,6 +1533,33 @@ pub fn resume_launch(
     args: Option<&[String]>,
     session_id: &str,
 ) -> Option<ResumeLaunch> {
+    resume_launch_for_shell(command, args, session_id, None)
+}
+
+/// [`resume_launch`] for a pane whose command line runs under `shell` (`None` = the default
+/// shell). The shell decides how a command string's quotes pair (see [`shell_token_spans`]).
+pub fn resume_launch_for_shell(
+    command: Option<&str>,
+    args: Option<&[String]>,
+    session_id: &str,
+    shell: Option<&str>,
+) -> Option<ResumeLaunch> {
+    resume_launch_with(
+        command,
+        args,
+        session_id,
+        crate::session::spawn::runs_posix(shell),
+    )
+}
+
+/// Injectable core of [`resume_launch_for_shell`]: `posix` = the command string is run by a
+/// POSIX shell.
+pub fn resume_launch_with(
+    command: Option<&str>,
+    args: Option<&[String]>,
+    session_id: &str,
+    posix: bool,
+) -> Option<ResumeLaunch> {
     let command = command?.trim();
     // Direct argv: the program is the whole `command`, the flags live in `args`.
     if let Some(args) = args.filter(|a| !a.is_empty()) {
@@ -1534,7 +1582,7 @@ pub fn resume_launch(
         });
     }
     // Command string: only rewrite a direct claude invocation; never append flags to a shell.
-    let spans = shell_token_spans(command);
+    let spans = shell_token_spans(command, posix);
     let toks: Vec<&str> = spans.iter().map(|&(a, b)| &command[a..b]).collect();
     let prog = toks.iter().position(|t| is_claude_program(t))?;
     // Only the tokens after the program are flags (an env prefix or wrapper before it is kept).
@@ -2523,6 +2571,21 @@ fi"#;
                 "claude --settings '/my dir/s.json' --resume S",
                 None,
             ),
+            // A quoted path holding a space AND a quote (POSIX `'\''` escape) and a
+            // double-quoted Windows profile path each stay one token (hyperpanes#159).
+            (
+                "claude --append-system-prompt-file '/a b/it'\\''s/SKILL.md' -c --settings \"C:\\Users\\my name\\s.json\"",
+                None,
+                "claude --append-system-prompt-file '/a b/it'\\''s/SKILL.md' --settings \"C:\\Users\\my name\\s.json\" --resume S",
+                None,
+            ),
+            // POSIX `'\''` inside a single-quoted value: one token, old --resume replaced.
+            (
+                r"claude --settings '/home/user/it'\''s/s.json' --resume OLD --model x",
+                None,
+                r"claude --settings '/home/user/it'\''s/s.json' --model x --resume S",
+                None,
+            ),
             ("claude", None, "claude --resume S", None),
             ("claude", Some(vec![]), "claude --resume S", None),
         ];
@@ -2532,6 +2595,56 @@ fi"#;
             assert_eq!(got.command, want_cmd, "command for {cmd:?} {args:?}");
             assert_eq!(got.args, want_args, "args for {cmd:?} {args:?}");
         }
+    }
+
+    /// pwsh/cmd: a double-quoted Windows path ending in a backslash is a closed string (no `\"`
+    /// escape), so the old --resume / -c after it are still replaced.
+    #[test]
+    fn resume_launch_windows_shell_has_no_backslash_quote_escape() {
+        for (cmd, want) in [
+            (
+                r#"claude --add-dir "C:\proj\" --resume OLD --model x"#,
+                r#"claude --add-dir "C:\proj\" --model x --resume S"#,
+            ),
+            (
+                r#"claude --add-dir "C:\proj\" -c"#,
+                r#"claude --add-dir "C:\proj\" --resume S"#,
+            ),
+        ] {
+            let got = resume_launch_with(Some(cmd), None, "S", false).expect(cmd);
+            assert_eq!(got.command, want, "{cmd}");
+        }
+    }
+
+    /// sh/bash/zsh: `\"` inside double quotes keeps the string open. Pairing it as a close would
+    /// cut a quoted argument in half on resume and turn quoted data into shell code or flags.
+    #[test]
+    fn resume_launch_posix_shell_keeps_escaped_quotes_inside_double_quotes() {
+        for (cmd, want) in [
+            (
+                r#"claude --add-dir "/a \"b\" c" --resume OLD"#,
+                r#"claude --add-dir "/a \"b\" c" --resume S"#,
+            ),
+            (r#"claude --resume "x\" y" -c"#, "claude --resume S"),
+            (r#"claude --resume "x\" ;touch pwn;#""#, "claude --resume S"),
+            // An escaped backslash closes nothing either: `"a\\"` is a closed string.
+            (
+                r#"claude --add-dir "/a b\\" --resume OLD"#,
+                r#"claude --add-dir "/a b\\" --resume S"#,
+            ),
+        ] {
+            let got = resume_launch_with(Some(cmd), None, "S", true).expect(cmd);
+            assert_eq!(got.command, want, "{cmd}");
+        }
+        // The shell decides: a POSIX pane shell gets the POSIX pairing on every host.
+        let got = resume_launch_for_shell(
+            Some(r#"claude --resume "x\" ;touch pwn;#""#),
+            None,
+            "S",
+            Some("/bin/bash"),
+        )
+        .unwrap();
+        assert_eq!(got.command, "claude --resume S");
     }
 
     #[test]
