@@ -247,6 +247,34 @@ everything for a repo by hand, stop its runners and `rm -rf <root>/<repo>-<hash8
   a new slot is only created when every existing slot is busy, so a seed only beats slots when
   concurrency exceeds the previous peak.
 
+## Builds outside the runner: one shared target per repo
+
+A spec agent's own builds (verify, integrate, acceptance) and the packaging scripts are not worker
+tasks, so they get no slot. Each goal used to make an ad-hoc target dir of its own
+(`<goal>-target`, `t<N>-target`), and briefs named more. Nothing deleted them, and the same crates
+were built into four or more dirs per repo. On one host that was about 134G of the 283G written in
+a week, with 35G of it `incremental/` sessions in a single target.
+
+These builds now share one warm target per repo or workspace under the shared targets root,
+`~/.cache/hyperpanes/targets/<name>` on Linux (`$HYPERPANES_SHARED_TARGETS` overrides the root).
+For hyperpanes, `<name>` is `core` for `rs/` and `app` for `rs/crates/app`. They run with
+`CARGO_INCREMENTAL=0`, since a verify build of each branch only leaves sessions nobody reuses.
+The goal personas say so (SPEC.md section 3).
+
+The root stays bounded with no daemon. The runner at each start, and `hyperpanes worker
+--prune-cache [--dry-run]`, sweep it (`hyperpanes_core::shared_targets`):
+
+| what | removed when |
+|---|---|
+| an `incremental/<crate>-<hash>/` session | untouched for 3 days |
+| a whole target | its profiles and `.fingerprint` untouched for 30 days |
+| a target cargo is building in (a held `<profile>/.cargo-lock`) | never, it is skipped |
+| a dir that is no cargo target (no `CACHEDIR.TAG` with cargo's signature, or no `debug/`/`release/`) | never, it is left alone and named in the log |
+
+A root that is not absolute, a filesystem root, the home dir or an ancestor of it is refused
+outright: one log line and no sweep. A wrong `$HYPERPANES_SHARED_TARGETS` (say `~` or `~/.cache`)
+must never age out a home's month-old directories.
+
 ## Disk guard
 
 After claiming a task and **before** creating its worktree, the runner checks free space on the
