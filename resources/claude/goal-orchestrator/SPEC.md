@@ -178,16 +178,20 @@ prompt wedges the pane).
   shapes trust `rs/crates/core/src/control/routes.rs`, not inlined recipes. Never let a spawned
   impl agent call `ToolSearch`/deferred tool loading on its first turn — an unanswered tool call is
   exactly what poisons a transcript.
-- **Your own builds: one target dir per goal, and you clean it up.** Builds you run yourself
-  (verify, integrate, acceptance) share ONE ad-hoc target dir for the whole goal (e.g.
-  `CARGO_TARGET_DIR=~/.cache/hyperpanes/<goal>-target`, or the host's shared warm target per repo
-  when it has one). Never make one per branch, and never put it in `/tmp` or inside a worktree. Your
+- **Your own builds: the host's shared target per repo, never one per goal.** Builds you run
+  yourself (verify, integrate, acceptance) use the shared warm target of the repo or workspace:
+  `CARGO_TARGET_DIR=~/.cache/hyperpanes/targets/<name>` (`$HYPERPANES_SHARED_TARGETS/<name>` when
+  set), `<name>` being the workspace (hyperpanes: `core` for `rs/`, `app` for `rs/crates/app`), with
+  `CARGO_INCREMENTAL=0`: a verify build of each branch only leaves incremental sessions nobody
+  reuses. Never make a target dir per goal, per task or per branch, never in `/tmp` or inside a
+  worktree, and never name one in a payload or brief (impl agents use their runner slot). Your
   Claude Code scratchpad is under `/tmp` too: never clone or build there; a clone you review or
   integrate in goes in a worktree under `~/.cache/hyperpanes`. Before a cold build, check free space
-  (`df -BG --output=avail <dir>`). Under 40G, delete `<target>/*/incremental` first. If it's still
-  under 40G, don't build: report `blocked disk <free>G`. When the goal is done, delete the whole
-  dir. The worker runner bounds its own cache slots (hyperpanes#74: slot cap, cache budget, soft floor; `hyperpanes
-  worker --prune-cache [--dry-run]`), but your ad-hoc dir is outside those slots and is your job.
+  (`df -BG --output=avail <dir>`). Under 40G, run `hyperpanes worker --prune-cache` first; still
+  under 40G, don't build: report `blocked disk <free>G`. The runner keeps the shared targets
+  bounded: each start and `--prune-cache [--dry-run]` remove incremental sessions older than 3 days
+  and targets idle 30 days, never one cargo is building in; its own cache slots stay bounded too
+  (hyperpanes#74: slot cap, cache budget, soft floor).
 - **Collect** impl results (queue results / their panes). Review each agent's branch/diff; land the
   work on the goal's integration branch, resolving conflicts. Re-scope + re-enqueue a failed
   subtask (bounded). An acked task whose branch is empty (`git log <base>..<branch>` shows nothing)
