@@ -239,12 +239,19 @@ fn lock_target(profiles: &[PathBuf], dry_run: bool) -> Option<Vec<File>> {
     let mut held = Vec::new();
     for p in profiles {
         let lock = p.join(".cargo-lock");
-        let opened = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(!dry_run)
-            .truncate(false)
-            .open(&lock);
+        // A symlinked lock would put the open (and its create) outside the target: busy.
+        if std::fs::symlink_metadata(&lock).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(!dry_run).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Closes the race with the check above: a link swapped in now fails the open.
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let opened = opts.open(&lock);
         match opened {
             Ok(f) => match f.try_lock() {
                 Ok(()) => held.push(f),
@@ -370,7 +377,12 @@ fn sweep_with(
             continue;
         }
         for profile in &profiles {
-            for session in subdirs(&profile.join("incremental")) {
+            // Only a real dir: a symlinked `incremental` would lead the removals out of the target.
+            let incremental = profile.join("incremental");
+            if !is_dir(&incremental) {
+                continue;
+            }
+            for session in subdirs(&incremental) {
                 if older_than(mtime(&session), now, ages.incremental) {
                     let size = slot_usage(&session);
                     if dry_run || remove(&session) {
@@ -1125,6 +1137,47 @@ mod tests {
         assert_eq!(rep.pruned.len(), 1, "{rep:?}");
         assert!(outside.join("keep.bin").exists(), "the link target stays");
         assert!(!keys.iter().any(|k| present(&debug, k).contains(&true)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_incremental_dir_is_never_followed() {
+        let root = scratch("inc-link");
+        let now = SystemTime::now();
+        let t = target(&root, "app", now - DAY, now - 4 * DAY);
+        // Incremental state moved elsewhere (another disk, say) and linked back in.
+        let outside = scratch("inc-link-out");
+        std::fs::create_dir_all(outside.join("old-3/s-c")).unwrap();
+        touch_dir(&outside.join("old-3"), now - 10 * DAY);
+        let inc = t.join("debug/incremental");
+        std::fs::remove_dir_all(&inc).unwrap();
+        std::os::unix::fs::symlink(&outside, &inc).unwrap();
+        for dry_run in [true, false] {
+            let rep = sweep(&root, None, now, SweepAges::default(), dry_run);
+            assert!(rep.incremental.is_empty(), "{rep:?}");
+            assert!(outside.join("old-3/s-c").exists(), "the link target stays");
+            assert!(inc.is_symlink());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cargo_lock_reads_as_busy_and_creates_nothing() {
+        let root = scratch("lock-link");
+        let now = SystemTime::now();
+        let t = target(&root, "app", now - 40 * DAY, now - 40 * DAY);
+        let outside = scratch("lock-link-out");
+        let lock = t.join("debug/.cargo-lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::os::unix::fs::symlink(outside.join("made-by-sweep"), &lock).unwrap();
+        touch_dir(&t.join("debug"), now - 40 * DAY);
+        let rep = sweep(&root, None, now, SweepAges::default(), false);
+        assert_eq!(rep.busy, vec![t.clone()], "{rep:?}");
+        assert!(t.exists(), "a doubt never deletes");
+        assert!(
+            !outside.join("made-by-sweep").exists(),
+            "nothing is created where the link points"
+        );
     }
 
     #[test]
