@@ -282,7 +282,9 @@ size:
   as `48h`, `2d`, `90m`, `30s` or plain seconds. Default **2d**.
 
 A unit's last use is the newest atime (or mtime, when the atime is older or unavailable) of its
-files. Sizes are on-disk usage with a hardlinked file counted once, and symlinks are never followed.
+files. With the usual `relatime` mount option the atime lags by at most a day, well inside the 2-day
+window. On a `noatime` mount the atime never moves, so the order falls back to least recently
+*built*: often-linked dependencies built long ago go first and are rebuilt on the next build. Sizes are on-disk usage with a hardlinked file counted once, and symlinks are never followed.
 A pruned target logs one line, e.g. `app: pruned 45.6 GiB in 812 units unused >2d (111.4 GiB > cap
 40.0 GiB), now 65.8 GiB`. An invalid value logs a warning and uses the defaults.
 

@@ -398,10 +398,17 @@ fn split_key(s: &str) -> Option<(&str, &str)> {
     (!name.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some((name, hash))
 }
 
-/// Unit key of a `deps/` entry: `lib` prefix stripped, `-` and `_` unified.
+/// Unit key of a `deps/` entry: `-` and `_` unified, and the `lib` prefix stripped from library
+/// files only (`.rlib`, `.rmeta`, `.so`, `.dylib`, `.a`). Cargo names a crate's `.d` file and its
+/// binaries without that prefix, so a crate whose own name starts with `lib` (e.g. `libc`:
+/// `liblibc-<hash>.rlib`, `libc-<hash>.d`) still forms one unit.
 fn unit_key(file_name: &str, strip_lib: bool) -> Option<String> {
     let (name, hash) = split_key(file_name)?;
-    let name = if strip_lib {
+    let lib_file = matches!(
+        file_name.rsplit_once('.').map(|(_, ext)| ext),
+        Some("rlib" | "rmeta" | "so" | "dylib" | "a")
+    );
+    let name = if strip_lib && lib_file {
         name.strip_prefix("lib")
             .filter(|n| !n.is_empty())
             .unwrap_or(name)
@@ -872,13 +879,18 @@ mod tests {
 
     /// Stamps atime and mtime of `p` and everything under it (symlinks left alone).
     fn stamp(p: &Path, t: SystemTime) {
+        stamp_times(p, t, t);
+    }
+
+    /// Stamps `p` and everything under it with separate access and modification times.
+    fn stamp_times(p: &Path, accessed: SystemTime, modified: SystemTime) {
         let md = std::fs::symlink_metadata(p).unwrap();
         if md.file_type().is_symlink() {
             return;
         }
         if md.is_dir() {
             for e in std::fs::read_dir(p).unwrap().flatten() {
-                stamp(&e.path(), t);
+                stamp_times(&e.path(), accessed, modified);
             }
         }
         #[cfg(windows)]
@@ -892,8 +904,12 @@ mod tests {
         };
         #[cfg(not(windows))]
         let f = File::open(p).unwrap();
-        f.set_times(std::fs::FileTimes::new().set_accessed(t).set_modified(t))
-            .unwrap();
+        f.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(accessed)
+                .set_modified(modified),
+        )
+        .unwrap();
     }
 
     const KEY_LEN: usize = 16;
@@ -990,6 +1006,56 @@ mod tests {
         assert_eq!(rep.pruned[0].units, 0);
         assert!(rep.pruned[0].still_over);
         assert!(keys.iter().all(|k| present(&debug, k) == [true; 4]));
+    }
+
+    #[test]
+    fn a_unit_read_recently_is_kept_although_built_long_ago() {
+        // Least recently USED, not least recently built: a dependency built 10 days ago but read by
+        // every build has an old mtime and a fresh atime, and must outlive a unit last used 5 days ago.
+        let now = SystemTime::now();
+        let root = scratch("cap-atime");
+        let t = target(&root, "app", now - DAY, now - DAY);
+        let debug = t.join("debug");
+        let read = unit(&debug, "myapp", 1, now - 10 * DAY);
+        stamp_times(
+            &debug.join("deps").join(format!("lib{read}.rlib")),
+            now - DAY / 4,
+            now - 10 * DAY,
+        );
+        let stale = unit(&debug, "myapp", 2, now - 5 * DAY);
+        let rep = sweep(&root, None, now, capped(150 * 1024), false);
+        assert_eq!(rep.pruned.len(), 1, "{rep:?}");
+        assert_eq!(rep.pruned[0].units, 1, "{rep:?}");
+        assert_eq!(
+            present(&debug, &read),
+            [true; 4],
+            "the recently read unit went"
+        );
+        assert_eq!(present(&debug, &stale), [false; 4], "the stale unit stayed");
+    }
+
+    #[test]
+    fn unit_keys_group_a_crates_files() {
+        let h = "0123456789abcdef";
+        let key = |n: &str| unit_key(n, true).unwrap();
+        assert_eq!(
+            key(&format!("libmy_app-{h}.rlib")),
+            key(&format!("my_app-{h}.d"))
+        );
+        assert_eq!(
+            key(&format!("libmy_app-{h}.rmeta")),
+            key(&format!("my-app-{h}"))
+        );
+        // A crate whose own name starts with `lib`: only the library file carries the extra prefix.
+        assert_eq!(
+            key(&format!("liblibc-{h}.rlib")),
+            key(&format!("libc-{h}.d"))
+        );
+        assert_eq!(
+            key(&format!("libc-{h}.d")),
+            unit_key(&format!("libc-{h}"), false).unwrap()
+        );
+        assert_eq!(unit_key("not-a-unit.d", true), None);
     }
 
     #[test]
