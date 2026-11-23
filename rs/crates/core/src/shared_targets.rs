@@ -944,7 +944,7 @@ mod tests {
         let t = target(&root, "app", now - DAY, now - DAY);
         let debug = t.join("debug");
         let keys = (0..5u32)
-            .map(|i| unit(&debug, "myapp", i, now - (10 - i as u32) * DAY))
+            .map(|i| unit(&debug, "myapp", i, now - (10 - i) * DAY))
             .collect();
         (root, debug, keys)
     }
