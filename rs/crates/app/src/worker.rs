@@ -519,11 +519,15 @@ fn sweep_shared_targets(dry_run: bool, log: &dyn Fn(String)) {
     use hyperpanes_core::shared_targets;
     let root = shared_targets::root_from_env();
     let home = shared_targets::home_dir();
+    let ages = shared_targets::SweepAges::from_env().unwrap_or_else(|e| {
+        log(format!("shared-targets: {e}; using the defaults"));
+        shared_targets::SweepAges::default()
+    });
     let rep = shared_targets::sweep(
         &root,
         home.as_deref(),
         std::time::SystemTime::now(),
-        shared_targets::SweepAges::default(),
+        ages,
         dry_run,
     );
     if let Some(why) = rep.refused.as_deref() {
@@ -548,6 +552,36 @@ fn sweep_shared_targets(dry_run: bool, log: &dyn Fn(String)) {
             p.display(),
             fmt_bytes(*n)
         ));
+    }
+    for p in rep.pruned.iter() {
+        let name = p
+            .target
+            .file_name()
+            .map_or_else(|| p.target.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let secs = p.min_idle.as_secs();
+        let idle = match secs {
+            s if s > 0 && s % 86400 == 0 => format!("{}d", s / 86400),
+            s if s > 0 && s % 3600 == 0 => format!("{}h", s / 3600),
+            s => format!("{s}s"),
+        };
+        if p.units > 0 {
+            log(format!(
+                "shared-targets: {name}: {} {} in {} units unused >{idle} ({} > cap {}), now {}",
+                if dry_run { "would prune" } else { "pruned" },
+                fmt_bytes(p.freed),
+                p.units,
+                fmt_bytes(p.before),
+                fmt_bytes(p.cap),
+                fmt_bytes(p.after)
+            ));
+        }
+        if p.still_over {
+            log(format!(
+                "shared-targets: {name}: still over cap {} at {}: the rest was used within {idle}",
+                fmt_bytes(p.cap),
+                fmt_bytes(p.after)
+            ));
+        }
     }
     for p in rep.not_targets.iter() {
         log(format!(
