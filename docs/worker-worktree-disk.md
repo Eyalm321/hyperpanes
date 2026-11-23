@@ -247,6 +247,51 @@ everything for a repo by hand, stop its runners and `rm -rf <root>/<repo>-<hash8
   a new slot is only created when every existing slot is busy, so a seed only beats slots when
   concurrency exceeds the previous peak.
 
+## Builds outside the runner: one shared target per repo
+
+A spec agent's own builds (verify, integrate, acceptance) and the packaging scripts are not worker
+tasks, so they get no slot. Each goal used to make an ad-hoc target dir of its own
+(`<goal>-target`, `t<N>-target`), and briefs named more. Nothing deleted them, and the same crates
+were built into four or more dirs per repo. On one host that was about 134G of the 283G written in
+a week, with 35G of it `incremental/` sessions in a single target.
+
+These builds now share one warm target per repo or workspace under the shared targets root,
+`~/.cache/hyperpanes/targets/<name>` on Linux (`$HYPERPANES_SHARED_TARGETS` overrides the root).
+For hyperpanes, `<name>` is `core` for `rs/` and `app` for `rs/crates/app`. They run with
+`CARGO_INCREMENTAL=0`, since a verify build of each branch only leaves sessions nobody reuses.
+The goal personas say so (SPEC.md section 3).
+
+The root stays bounded with no daemon. The runner at each start, and `hyperpanes worker
+--prune-cache [--dry-run]`, sweep it (`hyperpanes_core::shared_targets`):
+
+| what | removed when |
+|---|---|
+| an `incremental/<crate>-<hash>/` session | untouched for 3 days |
+| a whole target | its profiles and `.fingerprint` untouched for 30 days |
+| a unit (`<name>-<16 hex>`: its `deps/`, `build/` and `.fingerprint/` entries) of a target over its size cap | unused for the min-idle window (default 2 days), least recently used first, until the target fits the cap; units used within the window are never removed, and the log says the target is still over |
+| a target cargo is building in (a held `<profile>/.cargo-lock`) | never, it is skipped |
+| a dir that is no cargo target (no `CACHEDIR.TAG` with cargo's signature, or no `debug/`/`release/`) | never, it is left alone and named in the log |
+
+Cargo never deletes old artifact variants (every branch, version or feature change adds a new
+`-<hash>` unit), so age alone does not bound a target that is built in daily. Two knobs bound it by
+size:
+
+- `HYPERPANES_SHARED_TARGET_MAX`: per-target cap, bytes or `K/M/G/T` (binary units, optional
+  `B`/`iB`). Default **40G**; `0` turns size pruning off.
+- `HYPERPANES_SHARED_TARGET_MIN_IDLE`: how long a unit must be unused before the cap may remove it,
+  as `48h`, `2d`, `90m`, `30s` or plain seconds. Default **2d**.
+
+A unit's last use is the newest atime (or mtime, when the atime is older or unavailable) of its
+files. With the usual `relatime` mount option the atime lags by at most a day, well inside the 2-day
+window. On a `noatime` mount the atime never moves, so the order falls back to least recently
+*built*: often-linked dependencies built long ago go first and are rebuilt on the next build. Sizes are on-disk usage with a hardlinked file counted once, and symlinks are never followed.
+A pruned target logs one line, e.g. `app: pruned 45.6 GiB in 812 units unused >2d (111.4 GiB > cap
+40.0 GiB), now 65.8 GiB`. An invalid value logs a warning and uses the defaults.
+
+A root that is not absolute, a filesystem root, the home dir or an ancestor of it is refused
+outright: one log line and no sweep. A wrong `$HYPERPANES_SHARED_TARGETS` (say `~` or `~/.cache`)
+must never age out a home's month-old directories.
+
 ## Disk guard
 
 After claiming a task and **before** creating its worktree, the runner checks free space on the

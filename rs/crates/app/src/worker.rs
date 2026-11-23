@@ -508,7 +508,100 @@ fn run_prune_cache(args: &WorkerArgs) -> Result<(), Box<dyn Error>> {
         args.dry_run,
         &|l| println!("{l}"),
     );
+    sweep_shared_targets(args.dry_run, &|l| println!("{l}"));
     Ok(())
+}
+
+/// Age out the host's shared cargo targets (`hyperpanes_core::shared_targets`): stale incremental
+/// sessions and targets idle past their age, never one cargo is building in. Logs one line per
+/// removal and a total; silent when there is nothing to do.
+fn sweep_shared_targets(dry_run: bool, log: &dyn Fn(String)) {
+    use hyperpanes_core::shared_targets;
+    let root = shared_targets::root_from_env();
+    let home = shared_targets::home_dir();
+    let ages = shared_targets::SweepAges::from_env().unwrap_or_else(|e| {
+        log(format!("shared-targets: {e}; using the defaults"));
+        shared_targets::SweepAges::default()
+    });
+    let rep = shared_targets::sweep(
+        &root,
+        home.as_deref(),
+        std::time::SystemTime::now(),
+        ages,
+        dry_run,
+    );
+    if let Some(why) = rep.refused.as_deref() {
+        log(format!(
+            "shared-targets: refused to sweep {}: {why} (set {} to a dir of cargo targets)",
+            root.display(),
+            shared_targets::ROOT_ENV
+        ));
+        return;
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    for (p, n) in rep.idle_targets.iter() {
+        log(format!(
+            "shared-targets: {verb} idle target {} ({})",
+            p.display(),
+            fmt_bytes(*n)
+        ));
+    }
+    for (p, n) in rep.incremental.iter() {
+        log(format!(
+            "shared-targets: {verb} stale incremental {} ({})",
+            p.display(),
+            fmt_bytes(*n)
+        ));
+    }
+    for p in rep.pruned.iter() {
+        let name = p
+            .target
+            .file_name()
+            .map_or_else(|| p.target.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let secs = p.min_idle.as_secs();
+        let idle = match secs {
+            s if s > 0 && s % 86400 == 0 => format!("{}d", s / 86400),
+            s if s > 0 && s % 3600 == 0 => format!("{}h", s / 3600),
+            s => format!("{s}s"),
+        };
+        if p.units > 0 {
+            log(format!(
+                "shared-targets: {name}: {} {} in {} units unused >{idle} ({} > cap {}), now {}",
+                if dry_run { "would prune" } else { "pruned" },
+                fmt_bytes(p.freed),
+                p.units,
+                fmt_bytes(p.before),
+                fmt_bytes(p.cap),
+                fmt_bytes(p.after)
+            ));
+        }
+        if p.still_over {
+            log(format!(
+                "shared-targets: {name}: still over cap {} at {}: the rest was used within {idle}",
+                fmt_bytes(p.cap),
+                fmt_bytes(p.after)
+            ));
+        }
+    }
+    for p in rep.not_targets.iter() {
+        log(format!(
+            "shared-targets: left {} alone (no cargo target: CACHEDIR.TAG and a debug/ or release/ dir)",
+            p.display()
+        ));
+    }
+    for p in rep.busy.iter() {
+        log(format!(
+            "shared-targets: kept {} (cargo is building in it)",
+            p.display()
+        ));
+    }
+    if rep.freed() > 0 {
+        log(format!(
+            "shared-targets: {verb} {} under {}",
+            fmt_bytes(rep.freed()),
+            root.display()
+        ));
+    }
 }
 
 fn size_or_off(n: u64) -> String {
@@ -1647,6 +1740,7 @@ impl WtStore {
         worktree_store::write_repo_file(&key_dir, &common)
             .map_err(|e| format!("worktree: cannot create {}: {e}", key_dir.display()))?;
         let rep = worktree_store::sweep(&cwd, &key_dir);
+        sweep_shared_targets(false, &|l| eprintln!("worker: {l}"));
         eprintln!(
             "worker: worktrees under {} (cache slots in {}{}), min free {}",
             key_dir.display(),
