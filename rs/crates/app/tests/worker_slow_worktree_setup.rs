@@ -264,7 +264,11 @@ fn worktree_setup_slower_than_the_lease_keeps_the_claim_and_acks_once() {
         t.claimed_by,
         t.error
     );
-    assert!(t.error.is_none(), "a clean run leaves no error: {:?}", t.error);
+    assert!(
+        t.error.is_none(),
+        "a clean run leaves no error: {:?}",
+        t.error
+    );
     let lines: Vec<String> = std::fs::read_to_string(&runs)
         .unwrap_or_default()
         .lines()
