@@ -37,8 +37,9 @@
 //! for queues whose tasks legitimately produce no commit (read-only checks, reports).
 //! `--retry-window <secs>` keeps
 //! polling after the queue empties so backoff retries get reclaimed, and `--nack-delay <ms>`
-//! overrides the retry backoff (#13). A lease heartbeat renews the lease while a task runs so a
-//! long task isn't reclaimed mid-flight (#12).
+//! overrides the retry backoff (#13). A lease heartbeat renews the lease from the claim to the
+//! ack/nack, worktree setup and teardown included, so neither a long task nor a slow
+//! `git worktree add` gets it reclaimed mid-flight (#12).
 //!
 //! Visibility flags (a headless `claude -p` child prints nothing until it exits, and the pane
 //! auto-closes the moment the queue drains, so a run could finish leaving no trace):
@@ -801,6 +802,9 @@ fn drain(
             task.fencing_token,
             task.title
         );
+        // Renew the lease from the claim to the ack/nack: the disk guard, the worktree setup and
+        // teardown and the result check all run under it, not only the child.
+        let heartbeat = Heartbeat::start(ctl, &task);
 
         // Disk guard: a worktree (and its build cache) needs real free space. Short on it, first
         // evict idle cache slots (least recently used first, any repo under the root) so slots
@@ -830,6 +834,7 @@ fn drain(
                         );
                         eprintln!("[{worker}] !! {reason}");
                         eprintln!("[{worker}] !! child NOT run — stopping this worker");
+                        heartbeat.stop();
                         let state = nack(
                             ctl,
                             &task.id,
@@ -864,6 +869,7 @@ fn drain(
                     let reason = format!("worktree create failed (base {fork_base}): {e}");
                     eprintln!("[{worker}] !! {reason}");
                     eprintln!("[{worker}] !! child NOT run — refusing to execute without the requested isolation");
+                    heartbeat.stop();
                     let state = nack(
                         ctl,
                         &task.id,
@@ -926,7 +932,6 @@ fn drain(
             child,
             &task,
             queue,
-            ctl,
             wt.as_ref(),
             cache_dir.as_deref(),
             worker,
@@ -959,6 +964,8 @@ fn drain(
         }
 
         let allow_empty = store.is_some_and(|st| st.allow_empty_result);
+        // Stop renewing before the ack/nack, so a finished task is never extended.
+        heartbeat.stop();
         match verdict(&outcome, settled.as_ref(), allow_empty) {
             Verdict::Ack { warn } => {
                 if let Some(w) = warn {
@@ -1021,42 +1028,76 @@ impl ChildOutput {
     }
 }
 
-/// Run the child command with the task in its environment, while a background heartbeat renews
-/// the lease (#12) so a long-running task is not reclaimed mid-flight. Returns Ok(true) on exit 0.
-#[allow(clippy::too_many_arguments)]
+/// The lease heartbeat of one claimed task (#12): renews the lease from the claim until
+/// [`stop`](Self::stop), which the drain loop calls right before the task's ack/nack. So every
+/// step in between runs under it: the disk guard, the worktree setup (a `git worktree add` on a
+/// big checkout under load can outlast the default 30 s lease by itself), the child, the result
+/// check and the worktree teardown. A lease nobody renews in one of those steps lapses, the
+/// reaper requeues the task, another runner claims it under a new fence, and this runner's ack is
+/// refused after it ran the child anyway. Dropping the guard stops it too, so an early return
+/// never leaves a thread renewing a task this runner has let go.
+struct Heartbeat {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    /// Start renewing `task`'s lease. One extend attempt per beat (never a blocking retry loop:
+    /// [`stop`](Self::stop) joins the thread, so it must stay responsive); transient failures
+    /// retry in ~1 s and the thread only gives up when the lease is lost (409) or the task is gone
+    /// (404). A task with no lease deadline gets an idle guard.
+    fn start(ctl: &Arc<Control>, task: &Task) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = task.visibility_deadline.map(|deadline| {
+            let plan = HeartbeatPlan::for_lease((deadline - now_ms()).max(2_000));
+            let stop = Arc::clone(&stop);
+            let ctl = Arc::clone(ctl);
+            let id = task.id.clone();
+            let fence = task.fencing_token;
+            std::thread::spawn(move || {
+                // Fenced out / task gone ends the loop; the ack then tells.
+                heartbeat_loop(
+                    plan,
+                    deadline,
+                    &now_ms,
+                    &|ms| sleep_interruptible(&stop, ms),
+                    &mut |extra| ctl.extend_once(&id, fence, extra, plan.call_timeout()),
+                );
+            })
+        });
+        Heartbeat { stop, thread }
+    }
+
+    /// Stop renewing and wait for the thread to end, before the task's ack/nack.
+    fn stop(mut self) {
+        self.halt();
+    }
+
+    fn halt(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+/// Run the child command with the task in its environment. Returns Ok(true) on exit 0. The lease
+/// is renewed around it, from the claim to the ack/nack (see [`Heartbeat`]).
 fn run_child(
     child: &[String],
     task: &Task,
     queue: &str,
-    ctl: &Arc<Control>,
     wt: Option<&Worktree>,
     cache: Option<&Path>,
     worker: &str,
     out: &ChildOutput,
 ) -> Result<bool, Box<dyn Error>> {
-    // Heartbeat: while the child runs, keep the lease in about [now+L/2, now+L]. One extend
-    // attempt per beat (never a blocking retry loop: this thread is joined right after the child
-    // exits, so it must stay responsive to `stop`); transient failures retry in ~1s and the
-    // thread only gives up when the lease is lost (409) or the task is gone (404).
-    let stop = Arc::new(AtomicBool::new(false));
-    let heartbeat = task.visibility_deadline.map(|deadline| {
-        let plan = HeartbeatPlan::for_lease((deadline - now_ms()).max(2_000));
-        let stop = Arc::clone(&stop);
-        let ctl = Arc::clone(ctl);
-        let id = task.id.clone();
-        let fence = task.fencing_token;
-        std::thread::spawn(move || {
-            // Fenced out / task gone ends the loop; the ack then tells.
-            heartbeat_loop(
-                plan,
-                deadline,
-                &now_ms,
-                &|ms| sleep_interruptible(&stop, ms),
-                &mut |extra| ctl.extend_once(&id, fence, extra, plan.call_timeout()),
-            );
-        })
-    });
-
     let mut cmd = Command::new(&child[0]);
     cmd.args(&child[1..])
         .env("HP_TASK_ID", &task.id)
@@ -1096,12 +1137,6 @@ fn run_child(
             .map(|s| s.success())
             .map_err(|e| format!("failed to spawn '{}': {e}", child[0]))
     };
-
-    // Stop the heartbeat before ack/nack so we never extend a finished task.
-    stop.store(true, Ordering::Relaxed);
-    if let Some(h) = heartbeat {
-        let _ = h.join();
-    }
     Ok(result?)
 }
 

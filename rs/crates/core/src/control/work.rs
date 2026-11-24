@@ -178,7 +178,7 @@ pub struct Task {
     /// Recorded on `ack`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
-    /// Recorded on `nack` / dead-letter.
+    /// Recorded on `nack` / lease expiry / dead-letter; cleared by the next claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Optional idempotent-enqueue key (collapses duplicate enqueues while live).
@@ -653,11 +653,13 @@ impl WorkQueue {
         };
         let deadline = now + lease;
         // Always overwrite the holder columns (NULL when none), so a previous claim's holder
-        // can never be mistaken for this one's.
+        // can never be mistaken for this one's. Clear the last attempt's error too: a lapsed
+        // lease's or a nack's reason belongs to that attempt, and this one starts clean (its own
+        // nack or the sweep records its own; a plain ack leaves the row without one).
         tx.execute(
             "UPDATE tasks SET state='claimed', claimed_by=?2, fencing_token=?3,
                  attempts = attempts + 1, visibility_deadline=?4, updated_at=?5,
-                 holder_pid=?6, holder_start=?7
+                 holder_pid=?6, holder_start=?7, error=NULL
              WHERE id=?1 AND state='queued'",
             params![
                 id,
@@ -950,8 +952,8 @@ impl WorkQueue {
                 );
                 Disposition::DeadLettered
             } else {
-                // The reason is kept on a requeue too: a late ack of this claim reads it (T1866), and a fresh
-                // claim's ack/nack overwrites it.
+                // The reason is kept on a requeue too: a late ack of this claim reads it, and the next claim
+                // clears it.
                 let _ = self.conn.execute(
                     "UPDATE tasks SET state='queued', claimed_by=NULL, visibility_deadline=NULL,
                          available_at=?2, error=?3, updated_at=?2 WHERE id=?1",
