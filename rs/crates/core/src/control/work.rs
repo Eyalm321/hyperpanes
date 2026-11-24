@@ -178,7 +178,7 @@ pub struct Task {
     /// Recorded on `ack`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
-    /// Recorded on `nack` / dead-letter.
+    /// Recorded on `nack` / lease expiry / dead-letter; cleared by the next claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Optional idempotent-enqueue key (collapses duplicate enqueues while live).
@@ -653,11 +653,13 @@ impl WorkQueue {
         };
         let deadline = now + lease;
         // Always overwrite the holder columns (NULL when none), so a previous claim's holder
-        // can never be mistaken for this one's.
+        // can never be mistaken for this one's. Clear the last attempt's error too: a lapsed
+        // lease's or a nack's reason belongs to that attempt, and this one starts clean (its own
+        // nack or the sweep records its own; a plain ack leaves the row without one).
         tx.execute(
             "UPDATE tasks SET state='claimed', claimed_by=?2, fencing_token=?3,
                  attempts = attempts + 1, visibility_deadline=?4, updated_at=?5,
-                 holder_pid=?6, holder_start=?7
+                 holder_pid=?6, holder_start=?7, error=NULL
              WHERE id=?1 AND state='queued'",
             params![
                 id,
@@ -950,8 +952,8 @@ impl WorkQueue {
                 );
                 Disposition::DeadLettered
             } else {
-                // The reason is kept on a requeue too: a late ack of this claim reads it (T1866), and a fresh
-                // claim's ack/nack overwrites it.
+                // The reason is kept on a requeue too: a late ack of this claim reads it, and the next claim
+                // clears it.
                 let _ = self.conn.execute(
                     "UPDATE tasks SET state='queued', claimed_by=NULL, visibility_deadline=NULL,
                          available_at=?2, error=?3, updated_at=?2 WHERE id=?1",
@@ -1516,6 +1518,56 @@ mod tests {
             wq.ack(&b.task.id, b.fencing_token, None, 1600),
             LeaseOutcome::Conflict
         );
+    }
+
+    #[test]
+    fn a_new_claim_starts_without_the_last_attempts_error() {
+        // A lease-expiry requeue records LEASE_EXPIRED on the row. The next claim is a fresh attempt: neither it
+        // nor the done row its ack leaves may still show the lapsed lease's reason.
+        let mut wq = q();
+        let id = enq(&mut wq, "build", "j", 0).id;
+        wq.claim("build", "A", 100, 1000).unwrap();
+        assert_eq!(
+            wq.reap_expired(1200)[0].task.error.as_deref(),
+            Some(LEASE_EXPIRED)
+        );
+        let b = wq.claim("build", "B", 100, 1300).unwrap();
+        assert_eq!(b.task.error, None, "the new claim kept the old reason");
+        match wq.ack(&id, b.fencing_token, Some("ok"), 1350) {
+            LeaseOutcome::Ok(t) => {
+                assert_eq!(t.state, TaskState::Done);
+                assert_eq!(t.error, None, "a done row shows a lapsed lease's error");
+            }
+            other => panic!("expected B's ack to land, got {other:?}"),
+        }
+
+        // The same for a nack's reason: the retry starts clean, and its own nack records its own reason.
+        let id = enq(&mut wq, "build", "k", 2000).id;
+        let c = wq.claim("build", "C", 100, 2000).unwrap();
+        wq.nack(
+            &id,
+            c.fencing_token,
+            NackOpts {
+                requeue: true,
+                delay_ms: Some(0),
+                error: Some("boom".into()),
+            },
+            2050,
+        );
+        assert_eq!(wq.get(&id).unwrap().error.as_deref(), Some("boom"));
+        let d = wq.claim("build", "D", 100, 2100).unwrap();
+        assert_eq!(d.task.error, None);
+        wq.nack(
+            &id,
+            d.fencing_token,
+            NackOpts {
+                requeue: true,
+                delay_ms: Some(0),
+                error: Some("bust".into()),
+            },
+            2150,
+        );
+        assert_eq!(wq.get(&id).unwrap().error.as_deref(), Some("bust"));
     }
 
     #[test]
