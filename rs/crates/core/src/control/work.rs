@@ -1519,6 +1519,56 @@ mod tests {
     }
 
     #[test]
+    fn a_new_claim_starts_without_the_last_attempts_error() {
+        // A lease-expiry requeue records LEASE_EXPIRED on the row. The next claim is a fresh attempt: neither it
+        // nor the done row its ack leaves may still show the lapsed lease's reason.
+        let mut wq = q();
+        let id = enq(&mut wq, "build", "j", 0).id;
+        wq.claim("build", "A", 100, 1000).unwrap();
+        assert_eq!(
+            wq.reap_expired(1200)[0].task.error.as_deref(),
+            Some(LEASE_EXPIRED)
+        );
+        let b = wq.claim("build", "B", 100, 1300).unwrap();
+        assert_eq!(b.task.error, None, "the new claim kept the old reason");
+        match wq.ack(&id, b.fencing_token, Some("ok"), 1350) {
+            LeaseOutcome::Ok(t) => {
+                assert_eq!(t.state, TaskState::Done);
+                assert_eq!(t.error, None, "a done row shows a lapsed lease's error");
+            }
+            other => panic!("expected B's ack to land, got {other:?}"),
+        }
+
+        // The same for a nack's reason: the retry starts clean, and its own nack records its own reason.
+        let id = enq(&mut wq, "build", "k", 2000).id;
+        let c = wq.claim("build", "C", 100, 2000).unwrap();
+        wq.nack(
+            &id,
+            c.fencing_token,
+            NackOpts {
+                requeue: true,
+                delay_ms: Some(0),
+                error: Some("boom".into()),
+            },
+            2050,
+        );
+        assert_eq!(wq.get(&id).unwrap().error.as_deref(), Some("boom"));
+        let d = wq.claim("build", "D", 100, 2100).unwrap();
+        assert_eq!(d.task.error, None);
+        wq.nack(
+            &id,
+            d.fencing_token,
+            NackOpts {
+                requeue: true,
+                delay_ms: Some(0),
+                error: Some("bust".into()),
+            },
+            2150,
+        );
+        assert_eq!(wq.get(&id).unwrap().error.as_deref(), Some("bust"));
+    }
+
+    #[test]
     fn nack_requeues_with_backoff_then_dead_letters_when_exhausted() {
         let mut wq = q();
         wq.enqueue(
