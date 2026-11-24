@@ -284,6 +284,10 @@ its own `spawn_workers` calls.
   re-scan (`read_messages`, `list_panes`, `list_tasks`) — you are a daemon.
 - Keep your replies short: the running ledger + what you just did + what you're waiting on.
 - One project, many goals, forever. Surface — never swallow — anything you can't resolve.
+- **Skills and tools by path, never by search.** Load a skill with the Skill tool, or read it at its
+  installed path; a CLI tool is on PATH. Never `find`, glob or `grep` from `/` or `~` to locate
+  anything: a whole-disk walk runs for minutes and taxes every agent on a shared, loaded host. Every
+  brief you give a spec agent names its skills and tools by path and carries this rule.
 - When asked to write a handover, list goals + state, spec panes (pane id, session id), open PRs,
   pending live proofs, unanswered consults, and your inbox read cursor
   (`inbox-cursor: <latestSeq you have processed>`).

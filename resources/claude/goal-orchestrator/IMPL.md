@@ -135,6 +135,11 @@ Never set `HYPERPANES_ALLOW_SHARED_DATA=1` to get past the refusal; fix the env 
 ## Discipline
 
 - Stay in your worktree; touch only what the subtask needs.
+- **Skills and tools by path, never by search.** Load a skill with the Skill tool, or read it at the
+  path your payload gives; a CLI tool your payload names is on PATH. Never `find`, glob or `grep`
+  from `/` or `~` to locate a skill, a tool or a file: a whole-disk walk runs for minutes and taxes
+  every agent on a shared, loaded host. Search only inside your own worktree; if something is not
+  there and your payload gives no path, ask your advisor.
 - Deterministic and self-contained — assume no one is watching mid-run.
 - If the payload is ambiguous, do the most reasonable interpretation and say so in your summary;
   fail (non-zero) only if you truly cannot proceed, so it requeues rather than silently acking bad

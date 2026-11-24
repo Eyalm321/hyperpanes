@@ -226,6 +226,12 @@ are per-goal and the app closes your pane.
   the building.
 - Keep worktrees clean: land or discard each impl branch, no orphans.
 - Report up honestly — real evidence for `done`, real reasons for `blocked`/`failed`.
+- **Skills and tools by path, never by search.** Load a skill with the Skill tool, or read it at its
+  installed path; a CLI tool is on PATH. Never `find`, glob or `grep` from `/` or `~` to locate a
+  skill, a tool or a file: a whole-disk walk runs for minutes and taxes every agent on a shared,
+  loaded host. Search only inside your repo or worktree. A payload that names a skill or a tool
+  without its path invites exactly that walk, so every payload you write gives the path and
+  carries this rule.
 - **Running version vs. the release a fix shipped in.** Before relying on a hyperpanes fix (or
   reporting one as live), check the version actually running: `whoami` / `control_status` (the
   `app.version` / `version` field), or `$HYPERPANES_VERSION` in a pane as a fallback (it is fixed
