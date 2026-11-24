@@ -1592,6 +1592,10 @@ pub struct State {
     /// The base font (loaded at the configured `font_px`) — the template a new pane copies its
     /// size from; per-pane rendering uses each pane's own [`PaneState::font`].
     pub font: hyperpanes_terminal_widget::Font,
+    /// Font value → loadable font path ([`prefs::resolve_or_default`]). On Linux a family name
+    /// resolves by running `fc-list`/`fc-match`, so the pump must not call it on every pass.
+    /// A field so tests can count calls without running fontconfig.
+    font_resolver: fn(&str) -> String,
     /// The DPI scale of the last pump tick, so pane fonts (created/zoomed outside the pump,
     /// where the scale isn't known) can be loaded at the right physical size.
     pub last_scale: f32,
@@ -1661,7 +1665,7 @@ pub struct State {
     preview_pane: TerminalPane,
     /// The font the preview renders with, reloaded when the drafted family/size/scale change.
     preview_font: Option<Font>,
-    /// Cache key for `preview_font`: `(font_path, px, scale)`.
+    /// Cache key for `preview_font`: `(font value, px, scale)`.
     preview_key: (String, f32, f32),
     /// Last terminal-theme index applied to the preview pane (-1 = none yet).
     preview_theme: i32,
@@ -1869,6 +1873,7 @@ impl State {
     pub fn new(font: hyperpanes_terminal_widget::Font) -> Self {
         let mut s = State {
             font,
+            font_resolver: prefs::resolve_or_default,
             last_scale: 1.0,
             tabs: Vec::new(),
             active: 0,
@@ -1968,21 +1973,24 @@ impl State {
     /// returning the freshly-rendered image when anything changed (else `None`). Called by the
     /// pump while Preferences is open; `scale` is the window DPI scale.
     pub fn render_preview(&mut self, scale: f32, cursor_on: bool) -> Option<Image> {
-        let (font_path, px, theme_idx) = match &self.prefs_draft {
-            Some(d) => (
-                prefs::resolve_or_default(&d.font_family),
-                d.font_px,
-                d.terminal_theme,
-            ),
+        let (font, px, theme_idx) = match &self.prefs_draft {
+            Some(d) => (d.font_family.as_str(), d.font_px, d.terminal_theme),
             None => (
-                self.settings.font_path(),
+                self.settings.font_family.as_str(),
                 self.settings.font_px,
                 self.settings.terminal_theme,
             ),
         };
-        let key = (font_path.clone(), px, scale);
         let mut changed = false;
-        if self.preview_font.is_none() || self.preview_key != key {
+        // Keyed on the font VALUE, not its resolved path: this runs on every pass while
+        // Preferences is open, and resolving runs fontconfig on Linux.
+        if self.preview_font.is_none()
+            || self.preview_key.0 != font
+            || self.preview_key.1 != px
+            || self.preview_key.2 != scale
+        {
+            let key = (font.to_string(), px, scale);
+            let font_path = (self.font_resolver)(font);
             self.preview_font = Some(theme::load_font_at(&font_path, px, scale));
             self.preview_key = key;
             changed = true;
@@ -3665,12 +3673,12 @@ impl State {
     }
 
     /// The appearance values the dialog should display: the draft while Preferences is open,
-    /// else the committed settings. Returns `(resolved_font_path, frame_palette, terminal_theme,
-    /// font_px, show_frame, show_dot)`.
-    pub fn appearance_view(&self) -> (String, usize, usize, f32, bool, bool) {
+    /// else the committed settings. Returns `(frame_palette, terminal_theme, font_px, show_frame,
+    /// show_dot)`. No font path: resync calls this on every dirty pass, and resolving one runs
+    /// fontconfig on Linux.
+    pub fn appearance_view(&self) -> (usize, usize, f32, bool, bool) {
         match &self.prefs_draft {
             Some(d) => (
-                prefs::resolve_or_default(&d.font_family),
                 d.frame_palette,
                 d.terminal_theme,
                 d.font_px,
@@ -3678,7 +3686,6 @@ impl State {
                 d.show_dot,
             ),
             None => (
-                self.settings.font_path(),
                 self.settings.frame_palette,
                 self.settings.terminal_theme,
                 self.settings.font_px,
@@ -3942,7 +3949,7 @@ impl State {
     /// (resets each pane's `applied`). Called by the pump (which owns the scale) on a DPI
     /// change or when `font_reload` is set (a font-family / base-size pref change).
     pub fn reload_font(&mut self, scale: f32) {
-        let path = self.settings.font_path();
+        let path = (self.font_resolver)(&self.settings.font_family);
         self.font = theme::load_font_at(&path, self.settings.font_px, scale);
         for t in &mut self.tabs {
             for p in &mut t.panes {
@@ -3953,6 +3960,29 @@ impl State {
         }
         self.font_reload = false;
         self.dirty = true;
+    }
+
+    /// Per-pane zoom: reload each pane marked `font_dirty` (a Ctrl± change) at DPI `scale` and
+    /// force it to re-grid. The pump calls this on every pass, before resync, so the font is
+    /// resolved only when some pane is dirty: resolving runs fontconfig on Linux.
+    pub fn reload_dirty_pane_fonts(&mut self, scale: f32) {
+        if !self
+            .tabs
+            .iter()
+            .any(|t| t.panes.iter().any(|p| p.font_dirty))
+        {
+            return;
+        }
+        let path = (self.font_resolver)(&self.settings.font_family);
+        for t in &mut self.tabs {
+            for p in &mut t.panes {
+                if p.font_dirty {
+                    p.font = theme::load_font_at(&path, p.font_px, scale);
+                    p.font_dirty = false;
+                    p.applied = (0, 0); // force a reflow + repaint at the new cell size
+                }
+            }
+        }
     }
 
     // ---- clickable paths (terminal link hover / activation) ----
@@ -10106,5 +10136,136 @@ mod pane_group_tests {
         let mut solo = with_panes(&["x"]).0;
         assert!(solo.lift_pane("x").is_none());
         assert!(st.lift_pane("nope").is_none());
+    }
+}
+
+#[cfg(test)]
+mod font_resolve_per_pass_tests {
+    //! The pump runs every pass, and on Linux resolving a font family runs `fc-list`
+    //! (`fc-match` for the default). A pass that changes no font must resolve nothing; a font
+    //! change must still be resolved. The resolver is swapped for a counter, so nothing here
+    //! asserts on what fontconfig returns.
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        static REAL: String = crate::prefs::resolve_or_default("");
+    }
+
+    fn counting(font: &str) -> String {
+        CALLS.with(|c| c.borrow_mut().push(font.to_string()));
+        REAL.with(|r| r.clone())
+    }
+
+    fn calls() -> Vec<String> {
+        CALLS.with(|c| c.borrow().clone())
+    }
+
+    /// A state with two adopted panes and the counting resolver installed.
+    fn two_panes() -> State {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let m = SessionManager::new(tx);
+        let mut st = State::new(theme::load_font(1.0));
+        for uid in ["a", "b"] {
+            st.adopt_pane(
+                &m,
+                DetachedPane {
+                    replay_answered: false,
+                    live: Default::default(),
+                    uid: uid.into(),
+                    title: uid.into(),
+                    subtitle: None,
+                    pinned_accent: None,
+                    show_frame: None,
+                    show_dot: None,
+                    font_px: 14.0,
+                    spawn_command: None,
+                    spawn_args: None,
+                    spawn_shell: None,
+                    spawn_env: None,
+                },
+            );
+        }
+        st.font_resolver = counting;
+        CALLS.with(|c| c.borrow_mut().clear());
+        st
+    }
+
+    fn draft(st: &State, family: &str) -> PrefsDraft {
+        PrefsDraft {
+            font_family: family.into(),
+            frame_palette: st.settings.frame_palette,
+            terminal_theme: st.settings.terminal_theme,
+            font_px: st.settings.font_px,
+            show_frame: st.settings.show_frame,
+            show_dot: st.settings.show_dot,
+        }
+    }
+
+    #[test]
+    fn a_pump_pass_with_no_dirty_pane_resolves_no_font() {
+        let mut st = two_panes();
+        for _ in 0..3 {
+            st.reload_dirty_pane_fonts(1.0);
+        }
+        assert_eq!(calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_resync_reads_the_appearance_without_resolving_a_font() {
+        let mut st = two_panes();
+        let _ = st.appearance_view();
+        st.prefs_draft = Some(draft(&st, "Draft Family"));
+        let _ = st.appearance_view();
+        assert_eq!(calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_zoomed_pane_resolves_the_font_once_and_only_it_reloads() {
+        let mut st = two_panes();
+        for p in &mut st.active_tab_mut().panes {
+            p.applied = (80, 24);
+        }
+        st.font_zoom(2);
+        st.reload_dirty_pane_fonts(1.0);
+        st.reload_dirty_pane_fonts(1.0);
+        assert_eq!(calls().len(), 1);
+        let panes = &st.active_tab().panes;
+        assert!(panes.iter().all(|p| !p.font_dirty));
+        assert_eq!(panes.iter().filter(|p| p.applied == (0, 0)).count(), 1);
+    }
+
+    #[test]
+    fn a_font_family_change_is_resolved_on_the_next_font_load() {
+        let mut st = two_panes();
+        st.settings.font_family = "Family B".into();
+        st.font_zoom(2);
+        st.reload_dirty_pane_fonts(1.0);
+        st.font_reload = true;
+        st.reload_font(1.0);
+        assert_eq!(
+            calls(),
+            vec!["Family B".to_string(), "Family B".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_preview_resolves_its_font_only_when_the_family_size_or_scale_changes() {
+        let mut st = two_panes();
+        st.prefs_draft = Some(draft(&st, "Family A"));
+        for _ in 0..3 {
+            st.render_preview(1.0, false);
+        }
+        assert_eq!(calls(), vec!["Family A".to_string()]);
+        st.prefs_draft.as_mut().unwrap().font_family = "Family B".into();
+        st.render_preview(1.0, false);
+        st.render_preview(1.0, false);
+        assert_eq!(calls().last().map(String::as_str), Some("Family B"));
+        assert_eq!(calls().len(), 2);
+        st.prefs_draft.as_mut().unwrap().font_px += 2.0;
+        st.render_preview(1.0, false);
+        st.render_preview(2.0, false);
+        assert_eq!(calls().len(), 4);
     }
 }

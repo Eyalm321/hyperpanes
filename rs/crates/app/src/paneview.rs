@@ -759,8 +759,7 @@ pub fn resync(
 
     // Appearance controls reflect the DRAFT while Preferences is open (so edits preview
     // without touching the live panes), else the committed settings.
-    let (_view_font, view_palette, view_theme, view_px, view_frame, view_dot) =
-        state.appearance_view();
+    let (view_palette, view_theme, view_px, view_frame, view_dot) = state.appearance_view();
 
     // Font family: the fixed option list (mirrors the renderer) + a trailing "Custom…"
     // entry. Active = the option whose value matches the drafted raw value, or Custom when
@@ -1313,18 +1312,7 @@ pub fn pump(
     }
     // Per-pane zoom: reload any focused-pane Ctrl± change (marked via `font_dirty`) at the
     // current scale BEFORE resync, so relayout re-grids that pane at its new cell metrics.
-    {
-        let path = state.settings.font_path();
-        for t in &mut state.tabs {
-            for p in &mut t.panes {
-                if p.font_dirty {
-                    p.font = theme::load_font_at(&path, p.font_px, scale);
-                    p.font_dirty = false;
-                    p.applied = (0, 0); // force a reflow + repaint at the new cell size
-                }
-            }
-        }
-    }
+    state.reload_dirty_pane_fonts(scale);
     state.last_scale = scale;
 
     // Whether this pass warrants staying at the fast cadence (#3). A structural resync, a
