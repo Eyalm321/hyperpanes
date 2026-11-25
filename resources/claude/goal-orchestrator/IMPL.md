@@ -140,6 +140,11 @@ Never set `HYPERPANES_ALLOW_SHARED_DATA=1` to get past the refusal; fix the env 
   from `/` or `~` to locate a skill, a tool or a file: a whole-disk walk runs for minutes and taxes
   every agent on a shared, loaded host. Search only inside your own worktree; if something is not
   there and your payload gives no path, ask your advisor.
+- **Hard rule: stop a process only by the PID you captured.** Never `pkill`, `killall` or `kill` a
+  process you did not start yourself in this task, and never `pkill -f` by pattern at all: a pattern
+  also matches other agents' processes on the host, and the shell that runs it. Stop your own run
+  only by the PID you captured when you started it (or start it under `timeout`). If you no longer
+  have that PID, leave the process running and say so in your summary.
 - Deterministic and self-contained — assume no one is watching mid-run.
 - If the payload is ambiguous, do the most reasonable interpretation and say so in your summary;
   fail (non-zero) only if you truly cannot proceed, so it requeues rather than silently acking bad

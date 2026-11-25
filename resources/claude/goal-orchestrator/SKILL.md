@@ -288,6 +288,14 @@ its own `spawn_workers` calls.
   installed path; a CLI tool is on PATH. Never `find`, glob or `grep` from `/` or `~` to locate
   anything: a whole-disk walk runs for minutes and taxes every agent on a shared, loaded host. Every
   brief you give a spec agent names its skills and tools by path and carries this rule.
+- **Hard rule: stop a process only by the PID you captured.** Never `pkill`, `killall` or `kill` a
+  process you did not start yourself in this session, and never `pkill -f` by pattern at all: a
+  pattern also matches other agents' processes on the host, and the shell that runs it. Stop your own
+  run only by the PID you captured when you started it. A captured PID is often a wrapper shell whose
+  children outlive it, so start the run under `timeout`, or with `setsid` and stop its process group
+  (`kill -- -<pid>`). If you no longer have that PID, leave the process running and report it. Closing
+  or restarting a pane you opened, through its own pane tools (`close_pane`, `restart_pane`), is not
+  this. Every brief you give a spec agent carries this rule.
 - When asked to write a handover, list goals + state, spec panes (pane id, session id), open PRs,
   pending live proofs, unanswered consults, and your inbox read cursor
   (`inbox-cursor: <latestSeq you have processed>`).
