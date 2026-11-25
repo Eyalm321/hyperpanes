@@ -230,13 +230,25 @@ fn profile_dirs(target: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Cargo's build locks a sweep holds; dropping it unlocks them. Closing the files alone would not: a
+/// flock belongs to the open file, and a child forked meanwhile holds a copy of the fd until it execs.
+struct Held(Vec<File>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        for lock in &self.0 {
+            let _ = lock.unlock();
+        }
+    }
+}
+
 /// Takes cargo's build lock (`.cargo-lock`) of every profile of a target and keeps it, so a cargo
 /// that starts while the target is swept waits ("Blocking waiting for file lock") instead of
 /// building in a dir being removed. `None` when cargo holds one (or one cannot be opened or
 /// locked): the target is busy, and a doubt never deletes. Outside a dry run a profile with no lock
 /// file yet gets one, as cargo itself would create it; a dry run creates nothing and skips it.
-fn lock_target(profiles: &[PathBuf], dry_run: bool) -> Option<Vec<File>> {
-    let mut held = Vec::new();
+fn lock_target(profiles: &[PathBuf], dry_run: bool) -> Option<Held> {
+    let mut held = Held(Vec::new());
     for p in profiles {
         let lock = p.join(".cargo-lock");
         // A symlinked lock would put the open (and its create) outside the target: busy.
@@ -254,7 +266,7 @@ fn lock_target(profiles: &[PathBuf], dry_run: bool) -> Option<Vec<File>> {
         let opened = opts.open(&lock);
         match opened {
             Ok(f) => match f.try_lock() {
-                Ok(()) => held.push(f),
+                Ok(()) => held.0.push(f),
                 Err(_) => return None,
             },
             Err(e) if dry_run && e.kind() == std::io::ErrorKind::NotFound => {}
@@ -869,6 +881,25 @@ mod tests {
                 .is_ok(),
             "released after the sweep"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_lock_s_fd_in_a_forked_child_does_not_outlive_the_sweep_s_hold() {
+        let root = scratch("copy");
+        let now = SystemTime::now();
+        let t = target(&root, "app", now - DAY, now - 5 * DAY);
+        let held = lock_target(&[t.join("debug")], false).unwrap();
+        // A child forked while the sweep holds the lock has a copy of its fd until it execs.
+        let copy = held.0[0].try_clone().unwrap();
+        drop(held);
+        let fresh = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(t.join("debug/.cargo-lock"))
+            .unwrap();
+        assert!(fresh.try_lock().is_ok(), "a new cargo need not wait");
+        drop(copy);
     }
 
     #[test]
