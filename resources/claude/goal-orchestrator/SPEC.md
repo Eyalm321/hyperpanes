@@ -232,6 +232,11 @@ are per-goal and the app closes your pane.
   loaded host. Search only inside your repo or worktree. A payload that names a skill or a tool
   without its path invites exactly that walk, so every payload you write gives the path and
   carries this rule.
+- **Hard rule: stop a process only by the PID you captured.** Never `pkill`, `killall` or `kill` a
+  process you did not start yourself in this task, and never `pkill -f` by pattern at all: a pattern
+  also matches other agents' processes on the host, and the shell that runs it. Stop your own run
+  only by the PID you captured when you started it. If you no longer have that PID, leave the process
+  running and report it. Copy this rule into every worker payload you write.
 - **Running version vs. the release a fix shipped in.** Before relying on a hyperpanes fix (or
   reporting one as live), check the version actually running: `whoami` / `control_status` (the
   `app.version` / `version` field), or `$HYPERPANES_VERSION` in a pane as a fallback (it is fixed
